@@ -106,12 +106,22 @@ const Settings = () => {
             </button>
           </div>
 
-          {/* Focus Fine */}
-          <div className="cathedral-card">
+          {/* Focus Fine - Connected to Iron Shield */}
+          <div 
+            className={`cathedral-card transition-all duration-300 ${
+              shieldActive 
+                ? 'border-silver/20' 
+                : 'border-gold/50 shadow-[0_0_30px_hsl(45_100%_50%/0.2)]'
+            }`}
+          >
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-sm bg-secondary flex items-center justify-center">
-                  <DollarSign className="w-5 h-5 text-gold" />
+                <div 
+                  className={`w-10 h-10 rounded-sm flex items-center justify-center transition-all ${
+                    shieldActive ? 'bg-secondary' : 'bg-gold'
+                  }`}
+                >
+                  <DollarSign className={`w-5 h-5 ${shieldActive ? 'text-gold' : 'text-cathedral-midnight'}`} />
                 </div>
                 <div>
                   <h3 className="font-display text-sm tracking-wider">FOCUS FINE</h3>
@@ -119,14 +129,19 @@ const Settings = () => {
                 </div>
               </div>
               <div className="text-right">
-                <p className="font-display text-lg text-gold">$1.00</p>
+                <p className={`font-display text-lg ${shieldActive ? 'text-gold' : 'text-gold animate-pulse'}`}>$1.00</p>
                 <p className="text-xs text-muted-foreground">per fine</p>
               </div>
             </div>
             <div className="mt-4 pt-4 border-t border-border">
-              <div className="flex items-center gap-2 text-muted-foreground">
+              <div className={`flex items-center gap-2 ${shieldActive ? 'text-muted-foreground' : 'text-gold'}`}>
                 <AlertTriangle className="w-4 h-4" />
-                <span className="text-xs">Charged when Iron Shield is deactivated</span>
+                <span className="text-xs font-display tracking-wide">
+                  {shieldActive 
+                    ? 'Fine activated upon shield deactivation' 
+                    : 'SHIELD INACTIVE — FINE PENDING'
+                  }
+                </span>
               </div>
             </div>
           </div>

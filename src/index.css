@@ -6,58 +6,75 @@
 
 @layer base {
   :root {
-    /* Cathedral-Tech Color System */
-    --background: 210 50% 4%;
+    /* War Room Cathedral Color System */
+    --background: 220 60% 4%;
     --foreground: 0 0% 100%;
 
-    --card: 210 50% 8%;
+    --card: 220 50% 8%;
     --card-foreground: 0 0% 100%;
 
-    --popover: 210 50% 6%;
+    --popover: 220 50% 6%;
     --popover-foreground: 0 0% 100%;
 
-    --primary: 210 100% 20%;
+    --primary: 220 100% 15%;
     --primary-foreground: 0 0% 100%;
 
-    --secondary: 210 60% 12%;
+    --secondary: 220 40% 12%;
     --secondary-foreground: 0 0% 100%;
 
-    --muted: 210 40% 15%;
-    --muted-foreground: 210 20% 60%;
+    --muted: 220 30% 18%;
+    --muted-foreground: 220 15% 55%;
 
     --accent: 180 100% 50%;
-    --accent-foreground: 210 100% 10%;
+    --accent-foreground: 220 100% 8%;
 
     --destructive: 0 84% 60%;
     --destructive-foreground: 0 0% 100%;
 
-    --border: 210 40% 20%;
-    --input: 210 40% 15%;
+    --border: 220 30% 25%;
+    --input: 220 40% 12%;
     --ring: 180 100% 50%;
 
     --radius: 0.25rem;
 
-    /* Cathedral-Tech Custom Tokens */
-    --cathedral-deep: 210 100% 20%;
-    --cathedral-midnight: 210 50% 4%;
-    --cathedral-steel: 210 30% 25%;
+    /* War Room Cathedral Custom Tokens */
+    --cathedral-deep: 220 100% 12%;
+    --cathedral-midnight: 220 60% 4%;
+    --cathedral-steel: 220 20% 30%;
+    
+    /* Aqua Glow System */
     --aqua-glow: 180 100% 50%;
-    --aqua-dim: 180 70% 35%;
+    --aqua-dim: 180 60% 35%;
+    --aqua-bright: 180 100% 60%;
+    
+    /* Radiant Gold */
     --gold-accent: 45 100% 50%;
+    --gold-dim: 45 80% 40%;
+    --gold-bright: 45 100% 60%;
     
-    /* Gradients */
-    --gradient-cathedral: linear-gradient(180deg, hsl(210 50% 8%) 0%, hsl(210 50% 4%) 100%);
-    --gradient-aqua: linear-gradient(135deg, hsl(180 100% 50%) 0%, hsl(180 70% 35%) 100%);
-    --gradient-shield: linear-gradient(180deg, hsl(210 60% 25%) 0%, hsl(210 100% 15%) 100%);
+    /* Brushed Silver */
+    --silver: 220 10% 70%;
+    --silver-dim: 220 10% 50%;
+    --silver-bright: 220 5% 85%;
     
-    /* Shadows */
-    --shadow-glow: 0 0 20px hsl(180 100% 50% / 0.3);
-    --shadow-card: 0 4px 20px hsl(210 100% 5% / 0.5);
-    --shadow-aqua: 0 0 30px hsl(180 100% 50% / 0.4);
+    /* War Room Gradients */
+    --gradient-warroom: linear-gradient(180deg, hsl(220 60% 6%) 0%, hsl(220 70% 3%) 50%, hsl(220 60% 5%) 100%);
+    --gradient-marble: radial-gradient(ellipse at 30% 20%, hsl(220 50% 10%) 0%, hsl(220 60% 4%) 50%, hsl(220 70% 2%) 100%);
+    --gradient-aqua: linear-gradient(135deg, hsl(180 100% 50%) 0%, hsl(180 60% 35%) 100%);
+    --gradient-shield: linear-gradient(180deg, hsl(220 50% 20%) 0%, hsl(220 100% 10%) 100%);
+    --gradient-gold: linear-gradient(135deg, hsl(45 100% 55%) 0%, hsl(45 80% 40%) 100%);
+    --gradient-silver: linear-gradient(135deg, hsl(220 10% 75%) 0%, hsl(220 15% 55%) 100%);
+    
+    /* War Room Shadows */
+    --shadow-glow: 0 0 30px hsl(180 100% 50% / 0.4);
+    --shadow-card: 0 4px 30px hsl(220 100% 3% / 0.8);
+    --shadow-aqua: 0 0 40px hsl(180 100% 50% / 0.5);
+    --shadow-gold: 0 0 25px hsl(45 100% 50% / 0.4);
+    --shadow-silver: inset 0 1px 0 hsl(220 10% 80% / 0.1), 0 4px 20px hsl(220 100% 3% / 0.6);
   }
 
   .dark {
-    --background: 210 50% 4%;
+    --background: 220 60% 4%;
     --foreground: 0 0% 100%;
   }
 }
@@ -70,6 +87,8 @@
   body {
     @apply bg-background text-foreground font-sans antialiased;
     font-family: 'Inter', sans-serif;
+    background: var(--gradient-marble);
+    background-attachment: fixed;
   }
 
   h1, h2, h3, h4, h5, h6 {
@@ -80,17 +99,23 @@
 
 @layer components {
   .cathedral-card {
-    @apply bg-card border border-border rounded-sm p-4;
-    box-shadow: var(--shadow-card);
+    @apply bg-card border rounded-sm p-4;
+    border-color: hsl(220 10% 50% / 0.3);
+    box-shadow: var(--shadow-silver);
+    background: linear-gradient(135deg, hsl(220 50% 9%) 0%, hsl(220 50% 7%) 100%);
+  }
+
+  .silver-border {
+    border-color: hsl(220 10% 60% / 0.4);
   }
 
   .aqua-ring {
     background: conic-gradient(
       from 0deg,
       hsl(180 100% 50%) 0%,
-      hsl(180 70% 35%) 25%,
+      hsl(180 60% 35%) 25%,
       hsl(180 100% 50%) 50%,
-      hsl(180 70% 35%) 75%,
+      hsl(180 60% 35%) 75%,
       hsl(180 100% 50%) 100%
     );
   }
@@ -110,6 +135,59 @@
   .border-aqua {
     border-color: hsl(180 100% 50%);
   }
+
+  .text-gold {
+    color: hsl(45 100% 50%);
+  }
+
+  .bg-gold {
+    background: linear-gradient(135deg, hsl(45 100% 55%) 0%, hsl(45 80% 45%) 100%);
+  }
+
+  .text-silver {
+    color: hsl(220 10% 70%);
+  }
+
+  .border-silver {
+    border-color: hsl(220 10% 60% / 0.5);
+  }
+
+  .silver-tablet {
+    background: linear-gradient(145deg, hsl(220 15% 25%) 0%, hsl(220 20% 18%) 50%, hsl(220 15% 22%) 100%);
+    border: 1px solid hsl(220 10% 45% / 0.4);
+    box-shadow: 
+      inset 0 1px 0 hsl(220 10% 50% / 0.2),
+      inset 0 -1px 0 hsl(220 20% 10% / 0.3),
+      0 4px 20px hsl(220 100% 3% / 0.5);
+  }
+
+  .gold-button {
+    background: linear-gradient(135deg, hsl(45 100% 55%) 0%, hsl(45 80% 42%) 100%);
+    color: hsl(220 100% 8%);
+    box-shadow: 0 0 20px hsl(45 100% 50% / 0.3);
+    transition: all 0.2s ease;
+  }
+
+  .gold-button:hover {
+    box-shadow: 0 0 30px hsl(45 100% 50% / 0.5);
+    transform: translateY(-1px);
+  }
+
+  .warroom-bg {
+    background: var(--gradient-marble);
+    position: relative;
+  }
+
+  .warroom-bg::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: 
+      radial-gradient(ellipse 80% 50% at 50% 0%, hsl(180 100% 50% / 0.03) 0%, transparent 50%),
+      radial-gradient(circle at 20% 80%, hsl(220 60% 15% / 0.3) 0%, transparent 40%),
+      radial-gradient(circle at 80% 20%, hsl(220 50% 12% / 0.4) 0%, transparent 35%);
+    pointer-events: none;
+  }
 }
 
 @layer utilities {
@@ -119,10 +197,10 @@
 
   @keyframes pulse-glow {
     0%, 100% {
-      box-shadow: 0 0 20px hsl(180 100% 50% / 0.3);
+      box-shadow: 0 0 30px hsl(180 100% 50% / 0.3);
     }
     50% {
-      box-shadow: 0 0 40px hsl(180 100% 50% / 0.6);
+      box-shadow: 0 0 60px hsl(180 100% 50% / 0.6);
     }
   }
 
@@ -136,6 +214,19 @@
     }
     to {
       transform: rotate(360deg);
+    }
+  }
+
+  .animate-gold-pulse {
+    animation: gold-pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes gold-pulse {
+    0%, 100% {
+      box-shadow: 0 0 20px hsl(45 100% 50% / 0.3);
+    }
+    50% {
+      box-shadow: 0 0 40px hsl(45 100% 50% / 0.5);
     }
   }
 }
