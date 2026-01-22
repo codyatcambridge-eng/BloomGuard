@@ -59,8 +59,18 @@ export default {
         aqua: {
           DEFAULT: "hsl(var(--aqua-glow))",
           dim: "hsl(var(--aqua-dim))",
+          bright: "hsl(var(--aqua-bright))",
         },
-        gold: "hsl(var(--gold-accent))",
+        gold: {
+          DEFAULT: "hsl(var(--gold-accent))",
+          dim: "hsl(var(--gold-dim))",
+          bright: "hsl(var(--gold-bright))",
+        },
+        silver: {
+          DEFAULT: "hsl(var(--silver))",
+          dim: "hsl(var(--silver-dim))",
+          bright: "hsl(var(--silver-bright))",
+        },
       },
       borderRadius: {
         lg: "var(--radius)",
