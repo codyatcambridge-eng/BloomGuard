@@ -14,7 +14,99 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      blocked_sites: {
+        Row: {
+          category: string
+          created_at: string
+          domain: string
+          id: string
+          is_active: boolean
+        }
+        Insert: {
+          category?: string
+          created_at?: string
+          domain: string
+          id?: string
+          is_active?: boolean
+        }
+        Update: {
+          category?: string
+          created_at?: string
+          domain?: string
+          id?: string
+          is_active?: boolean
+        }
+        Relationships: []
+      }
+      content_moderation_logs: {
+        Row: {
+          action_taken: string
+          classification: string
+          confidence: number | null
+          content_type: string
+          created_at: string
+          device_id: string | null
+          id: string
+          url: string | null
+        }
+        Insert: {
+          action_taken: string
+          classification: string
+          confidence?: number | null
+          content_type: string
+          created_at?: string
+          device_id?: string | null
+          id?: string
+          url?: string | null
+        }
+        Update: {
+          action_taken?: string
+          classification?: string
+          confidence?: number | null
+          content_type?: string
+          created_at?: string
+          device_id?: string | null
+          id?: string
+          url?: string | null
+        }
+        Relationships: []
+      }
+      user_protection_settings: {
+        Row: {
+          block_ads: boolean
+          block_adult_sites: boolean
+          block_social_media: boolean
+          blur_sensitivity: string
+          created_at: string
+          device_id: string
+          id: string
+          shield_active: boolean
+          updated_at: string
+        }
+        Insert: {
+          block_ads?: boolean
+          block_adult_sites?: boolean
+          block_social_media?: boolean
+          blur_sensitivity?: string
+          created_at?: string
+          device_id: string
+          id?: string
+          shield_active?: boolean
+          updated_at?: string
+        }
+        Update: {
+          block_ads?: boolean
+          block_adult_sites?: boolean
+          block_social_media?: boolean
+          blur_sensitivity?: string
+          created_at?: string
+          device_id?: string
+          id?: string
+          shield_active?: boolean
+          updated_at?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never

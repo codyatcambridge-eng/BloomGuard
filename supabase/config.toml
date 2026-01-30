@@ -1,1 +1,7 @@
 project_id = "funrqbkfprdsgbnrcker"
+
+[functions.moderate-image]
+verify_jwt = false
+
+[functions.check-blocked-site]
+verify_jwt = false
