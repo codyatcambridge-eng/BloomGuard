@@ -1,10 +1,11 @@
 import { useLocation, useNavigate } from "react-router-dom";
-import { Shield, Headphones, MessageSquare, Settings } from "lucide-react";
+import { Shield, Headphones, MessageSquare, Eye, Settings } from "lucide-react";
 
 const navItems = [
   { path: "/", icon: Shield, label: "Shield" },
-  { path: "/war-room", icon: Headphones, label: "War Room" },
+  { path: "/war-room", icon: Headphones, label: "Audio" },
   { path: "/joshua", icon: MessageSquare, label: "Joshua" },
+  { path: "/content-guard", icon: Eye, label: "Guard" },
   { path: "/settings", icon: Settings, label: "Settings" },
 ];
 

@@ -8,6 +8,7 @@ import Dashboard from "./pages/Dashboard";
 import WarRoom from "./pages/WarRoom";
 import Joshua from "./pages/Joshua";
 import Settings from "./pages/Settings";
+import ContentGuard from "./pages/ContentGuard";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -23,6 +24,7 @@ const App = () => (
             <Route path="/" element={<Dashboard />} />
             <Route path="/war-room" element={<WarRoom />} />
             <Route path="/joshua" element={<Joshua />} />
+            <Route path="/content-guard" element={<ContentGuard />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
