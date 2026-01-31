@@ -5,3 +5,6 @@ verify_jwt = false
 
 [functions.check-blocked-site]
 verify_jwt = false
+
+[functions.accountability]
+verify_jwt = false
