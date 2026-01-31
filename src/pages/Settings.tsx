@@ -1,25 +1,67 @@
 import { useState } from "react";
-import { Shield, DollarSign, CreditCard, AlertTriangle } from "lucide-react";
+import { Shield, DollarSign, CreditCard, AlertTriangle, Eye, EyeOff } from "lucide-react";
 import { FrictionUnlockModal } from "@/components/settings/FrictionUnlockModal";
+import { useSettings, BlurLevel } from "@/hooks/useSettings";
+import { supabase } from "@/integrations/supabase/client";
+import { toast } from "sonner";
 
 const Settings = () => {
-  const [shieldActive, setShieldActive] = useState(true);
+  const { settings, updateSetting, isLoading, deviceId } = useSettings();
   const [showFrictionModal, setShowFrictionModal] = useState(false);
 
   const handleShieldToggle = () => {
-    if (shieldActive) {
+    if (settings.shield_active) {
       // Trying to turn OFF - show friction modal
       setShowFrictionModal(true);
     } else {
       // Turning ON - no friction
-      setShieldActive(true);
+      updateSetting('shield_active', true);
+      toast.success('Shield activated!');
     }
   };
 
-  const handleUnlock = () => {
-    setShieldActive(false);
+  const handleUnlock = async () => {
+    // Generate unlock token (15 minutes)
+    const expiresAt = new Date();
+    expiresAt.setMinutes(expiresAt.getMinutes() + 15);
+    
+    const token = crypto.randomUUID();
+    
+    await supabase.from('unlock_tokens').insert({
+      device_id: deviceId,
+      token: token,
+      expires_at: expiresAt.toISOString(),
+      reason: 'friction_gate_passed',
+    });
+
+    // Log the event
+    await supabase.from('content_moderation_logs').insert({
+      device_id: deviceId,
+      content_type: 'shield',
+      classification: 'unlocked',
+      action_taken: 'friction_gate_passed',
+      confidence: 1.0,
+    });
+
+    updateSetting('shield_active', false);
     setShowFrictionModal(false);
+    toast.success('Shield deactivated for 15 minutes');
   };
+
+  const blurLevels: BlurLevel[] = ['OFF', 'LOW', 'HIGH'];
+
+  const handleBlurChange = (level: BlurLevel) => {
+    updateSetting('blur_sensitivity', level);
+    toast.success(`Blur level set to ${level}`);
+  };
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <Shield className="w-12 h-12 text-aqua animate-pulse" />
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-background pb-24">
@@ -30,7 +72,7 @@ const Settings = () => {
           <div>
             <h1 className="font-display text-2xl tracking-wider">SETTINGS</h1>
             <p className="text-xs text-muted-foreground uppercase tracking-widest">
-              The Iron Shield Configuration
+              Iron Watch Configuration
             </p>
           </div>
         </div>
@@ -42,122 +84,183 @@ const Settings = () => {
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <div className={`w-10 h-10 rounded-sm flex items-center justify-center ${
-                shieldActive ? "bg-aqua" : "bg-secondary"
+                settings.shield_active ? "bg-aqua" : "bg-secondary"
               }`}>
-                <Shield className={`w-5 h-5 ${shieldActive ? "text-accent-foreground" : "text-muted-foreground"}`} />
+                <Shield className={`w-5 h-5 ${settings.shield_active ? "text-accent-foreground" : "text-muted-foreground"}`} />
               </div>
               <div>
                 <h3 className="font-display text-sm tracking-wider">THE IRON SHIELD</h3>
-                <p className="text-xs text-muted-foreground">App Blocker Protection</p>
+                <p className="text-xs text-muted-foreground">Master Protection Toggle</p>
               </div>
             </div>
             <button
               onClick={handleShieldToggle}
               className={`w-14 h-8 rounded-full transition-all duration-300 ${
-                shieldActive ? "bg-aqua" : "bg-secondary"
+                settings.shield_active ? "bg-aqua" : "bg-secondary"
               }`}
             >
               <div
                 className={`w-6 h-6 rounded-full bg-foreground transition-transform duration-300 ${
-                  shieldActive ? "translate-x-7" : "translate-x-1"
+                  settings.shield_active ? "translate-x-7" : "translate-x-1"
                 }`}
               />
             </button>
           </div>
           
-          {shieldActive && (
+          {settings.shield_active && (
             <div className="mt-4 pt-4 border-t border-border">
               <div className="flex items-center gap-2 text-aqua">
                 <div className="w-2 h-2 rounded-full bg-aqua animate-pulse" />
                 <span className="text-xs font-display tracking-wider">PROTECTION ACTIVE</span>
               </div>
-              <p className="text-xs text-muted-foreground mt-2">
-                Family Controls API: com.apple.developer.family-controls
-              </p>
             </div>
           )}
         </section>
 
-        {/* Guardian Economy */}
-        <section>
-          <h2 className="font-display text-sm tracking-widest text-muted-foreground mb-3">
-            GUARDIAN ECONOMY
-          </h2>
-          
-          {/* Subscription */}
-          <div className="cathedral-card mb-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-sm bg-secondary flex items-center justify-center">
-                  <CreditCard className="w-5 h-5 text-aqua" />
-                </div>
-                <div>
-                  <h3 className="font-display text-sm tracking-wider">GUARDIAN PRO</h3>
-                  <p className="text-xs text-muted-foreground">Monthly Subscription</p>
-                </div>
-              </div>
-              <div className="text-right">
-                <p className="font-display text-lg text-aqua">$4.99</p>
-                <p className="text-xs text-muted-foreground">/month</p>
-              </div>
+        {/* Blur Dial */}
+        <section className="cathedral-card">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="w-10 h-10 rounded-sm bg-secondary flex items-center justify-center">
+              <Eye className="w-5 h-5 text-gold" />
             </div>
-            <button className="w-full mt-4 py-3 text-sm font-display tracking-wider bg-aqua text-accent-foreground hover:bg-aqua/90 transition-colors">
-              SUBSCRIBE NOW
-            </button>
+            <div>
+              <h3 className="font-display text-sm tracking-wider">BLUR DIAL</h3>
+              <p className="text-xs text-muted-foreground">Image blur sensitivity</p>
+            </div>
           </div>
 
-          {/* Focus Fine - Connected to Iron Shield */}
-          <div 
-            className={`cathedral-card transition-all duration-300 ${
-              shieldActive 
-                ? 'border-silver/20' 
-                : 'border-gold/50 shadow-[0_0_30px_hsl(45_100%_50%/0.2)]'
-            }`}
-          >
+          <div className="flex gap-2">
+            {blurLevels.map((level) => (
+              <button
+                key={level}
+                onClick={() => handleBlurChange(level)}
+                className={`flex-1 py-4 flex flex-col items-center gap-2 transition-all ${
+                  settings.blur_sensitivity === level
+                    ? 'bg-gold text-cathedral-midnight'
+                    : 'border border-silver/30 text-silver hover:border-silver/60'
+                }`}
+              >
+                {level === 'OFF' ? (
+                  <EyeOff className="w-5 h-5" />
+                ) : (
+                  <Eye className="w-5 h-5" />
+                )}
+                <span className="font-display text-xs tracking-wider">{level}</span>
+              </button>
+            ))}
+          </div>
+
+          <div className="mt-4 text-xs text-muted-foreground">
+            {settings.blur_sensitivity === 'OFF' && 'No image blurring applied'}
+            {settings.blur_sensitivity === 'LOW' && 'Blurs explicit content only'}
+            {settings.blur_sensitivity === 'HIGH' && 'Blurs suggestive and explicit content'}
+          </div>
+        </section>
+
+        {/* Blocking Options */}
+        <section className="cathedral-card">
+          <h3 className="font-display text-xs tracking-widest text-muted-foreground mb-4">
+            BLOCKING OPTIONS
+          </h3>
+          
+          <div className="space-y-4">
             <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div 
-                  className={`w-10 h-10 rounded-sm flex items-center justify-center transition-all ${
-                    shieldActive ? 'bg-secondary' : 'bg-gold'
+              <div>
+                <p className="text-sm text-foreground">Block Adult Sites</p>
+                <p className="text-xs text-muted-foreground">Explicit content domains</p>
+              </div>
+              <button
+                onClick={() => updateSetting('block_adult_sites', !settings.block_adult_sites)}
+                className={`w-12 h-7 rounded-full transition-all duration-300 ${
+                  settings.block_adult_sites ? "bg-aqua" : "bg-secondary"
+                }`}
+              >
+                <div
+                  className={`w-5 h-5 rounded-full bg-foreground transition-transform duration-300 ${
+                    settings.block_adult_sites ? "translate-x-6" : "translate-x-1"
                   }`}
-                >
-                  <DollarSign className={`w-5 h-5 ${shieldActive ? 'text-gold' : 'text-cathedral-midnight'}`} />
-                </div>
-                <div>
-                  <h3 className="font-display text-sm tracking-wider">FOCUS FINE</h3>
-                  <p className="text-xs text-muted-foreground">Per shield bypass attempt</p>
-                </div>
-              </div>
-              <div className="text-right">
-                <p className={`font-display text-lg ${shieldActive ? 'text-gold' : 'text-gold animate-pulse'}`}>$1.00</p>
-                <p className="text-xs text-muted-foreground">per fine</p>
-              </div>
+                />
+              </button>
             </div>
-            <div className="mt-4 pt-4 border-t border-border">
-              <div className={`flex items-center gap-2 ${shieldActive ? 'text-muted-foreground' : 'text-gold'}`}>
-                <AlertTriangle className="w-4 h-4" />
-                <span className="text-xs font-display tracking-wide">
-                  {shieldActive 
-                    ? 'Fine activated upon shield deactivation' 
-                    : 'SHIELD INACTIVE — FINE PENDING'
-                  }
-                </span>
+
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm text-foreground">Block Social Media</p>
+                <p className="text-xs text-muted-foreground">Instagram, Twitter, etc.</p>
               </div>
+              <button
+                onClick={() => updateSetting('block_social_media', !settings.block_social_media)}
+                className={`w-12 h-7 rounded-full transition-all duration-300 ${
+                  settings.block_social_media ? "bg-aqua" : "bg-secondary"
+                }`}
+              >
+                <div
+                  className={`w-5 h-5 rounded-full bg-foreground transition-transform duration-300 ${
+                    settings.block_social_media ? "translate-x-6" : "translate-x-1"
+                  }`}
+                />
+              </button>
+            </div>
+
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm text-foreground">Block Ads</p>
+                <p className="text-xs text-muted-foreground">Ad networks</p>
+              </div>
+              <button
+                onClick={() => updateSetting('block_ads', !settings.block_ads)}
+                className={`w-12 h-7 rounded-full transition-all duration-300 ${
+                  settings.block_ads ? "bg-aqua" : "bg-secondary"
+                }`}
+              >
+                <div
+                  className={`w-5 h-5 rounded-full bg-foreground transition-transform duration-300 ${
+                    settings.block_ads ? "translate-x-6" : "translate-x-1"
+                  }`}
+                />
+              </button>
             </div>
           </div>
         </section>
 
-        {/* API Info */}
-        <section className="cathedral-card bg-secondary/30">
-          <h3 className="font-display text-xs tracking-widest text-muted-foreground mb-2">
-            TECHNICAL INTEGRATION
-          </h3>
-          <code className="text-xs text-aqua break-all">
-            com.apple.developer.family-controls
-          </code>
-          <p className="text-xs text-muted-foreground mt-2">
-            Screen Time API integration pending native bridge implementation.
-          </p>
+        {/* Focus Fine Warning */}
+        <section 
+          className={`cathedral-card transition-all duration-300 ${
+            settings.shield_active 
+              ? 'border-silver/20' 
+              : 'border-gold/50 shadow-[0_0_30px_hsl(45_100%_50%/0.2)]'
+          }`}
+        >
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div 
+                className={`w-10 h-10 rounded-sm flex items-center justify-center transition-all ${
+                  settings.shield_active ? 'bg-secondary' : 'bg-gold'
+                }`}
+              >
+                <DollarSign className={`w-5 h-5 ${settings.shield_active ? 'text-gold' : 'text-cathedral-midnight'}`} />
+              </div>
+              <div>
+                <h3 className="font-display text-sm tracking-wider">FOCUS FINE</h3>
+                <p className="text-xs text-muted-foreground">Per shield bypass attempt</p>
+              </div>
+            </div>
+            <div className="text-right">
+              <p className={`font-display text-lg ${settings.shield_active ? 'text-gold' : 'text-gold animate-pulse'}`}>$1.00</p>
+              <p className="text-xs text-muted-foreground">per fine</p>
+            </div>
+          </div>
+          <div className="mt-4 pt-4 border-t border-border">
+            <div className={`flex items-center gap-2 ${settings.shield_active ? 'text-muted-foreground' : 'text-gold'}`}>
+              <AlertTriangle className="w-4 h-4" />
+              <span className="text-xs font-display tracking-wide">
+                {settings.shield_active 
+                  ? 'Fine activated upon shield deactivation' 
+                  : 'SHIELD INACTIVE — FINE PENDING'
+                }
+              </span>
+            </div>
+          </div>
         </section>
       </main>
 

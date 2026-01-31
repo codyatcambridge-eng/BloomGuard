@@ -14,6 +14,39 @@ export type Database = {
   }
   public: {
     Tables: {
+      accountability_partners: {
+        Row: {
+          accepted_at: string | null
+          created_at: string
+          id: string
+          invite_code: string | null
+          partner_device_id: string | null
+          partner_email: string | null
+          status: string
+          user_device_id: string
+        }
+        Insert: {
+          accepted_at?: string | null
+          created_at?: string
+          id?: string
+          invite_code?: string | null
+          partner_device_id?: string | null
+          partner_email?: string | null
+          status?: string
+          user_device_id: string
+        }
+        Update: {
+          accepted_at?: string | null
+          created_at?: string
+          id?: string
+          invite_code?: string | null
+          partner_device_id?: string | null
+          partner_email?: string | null
+          status?: string
+          user_device_id?: string
+        }
+        Relationships: []
+      }
       blocked_sites: {
         Row: {
           category: string
@@ -68,6 +101,77 @@ export type Database = {
           device_id?: string | null
           id?: string
           url?: string | null
+        }
+        Relationships: []
+      }
+      override_requests: {
+        Row: {
+          created_at: string
+          expires_at: string | null
+          id: string
+          partner_id: string | null
+          reason: string | null
+          requester_device_id: string
+          responded_at: string | null
+          status: string
+        }
+        Insert: {
+          created_at?: string
+          expires_at?: string | null
+          id?: string
+          partner_id?: string | null
+          reason?: string | null
+          requester_device_id: string
+          responded_at?: string | null
+          status?: string
+        }
+        Update: {
+          created_at?: string
+          expires_at?: string | null
+          id?: string
+          partner_id?: string | null
+          reason?: string | null
+          requester_device_id?: string
+          responded_at?: string | null
+          status?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "override_requests_partner_id_fkey"
+            columns: ["partner_id"]
+            isOneToOne: false
+            referencedRelation: "accountability_partners"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      unlock_tokens: {
+        Row: {
+          created_at: string
+          device_id: string
+          expires_at: string
+          id: string
+          reason: string | null
+          token: string
+          used: boolean
+        }
+        Insert: {
+          created_at?: string
+          device_id: string
+          expires_at: string
+          id?: string
+          reason?: string | null
+          token: string
+          used?: boolean
+        }
+        Update: {
+          created_at?: string
+          device_id?: string
+          expires_at?: string
+          id?: string
+          reason?: string | null
+          token?: string
+          used?: boolean
         }
         Relationships: []
       }
