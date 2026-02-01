@@ -6,6 +6,7 @@ import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { BottomNav } from "@/components/layout/BottomNav";
 import Dashboard from "./pages/Dashboard";
 import SafeBrowser from "./pages/SafeBrowser";
+import LocalBrowserApp from "./pages/LocalBrowserApp";
 import Accountability from "./pages/Accountability";
 import Settings from "./pages/Settings";
 import Logs from "./pages/Logs";
@@ -23,6 +24,7 @@ const App = () => (
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/browser" element={<SafeBrowser />} />
+            <Route path="/local-browser" element={<LocalBrowserApp />} />
             <Route path="/accountability" element={<Accountability />} />
             <Route path="/logs" element={<Logs />} />
             <Route path="/settings" element={<Settings />} />

@@ -1,11 +1,11 @@
 import { useLocation, useNavigate } from "react-router-dom";
-import { Shield, Globe, Users, FileText, Settings } from "lucide-react";
+import { Shield, Globe, Users, FileText, Settings, Smartphone } from "lucide-react";
 
 const navItems = [
   { path: "/", icon: Shield, label: "Home" },
-  { path: "/browser", icon: Globe, label: "Browse" },
+  { path: "/browser", icon: Globe, label: "Cloud" },
+  { path: "/local-browser", icon: Smartphone, label: "Local" },
   { path: "/accountability", icon: Users, label: "Partners" },
-  { path: "/logs", icon: FileText, label: "Logs" },
   { path: "/settings", icon: Settings, label: "Settings" },
 ];
 
