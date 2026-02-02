@@ -2,17 +2,24 @@ import { registerPlugin } from '@capacitor/core';
 
 /**
  * Moderation categories for detailed content classification
+ * Maps to NSFWJS classes with granular subcategories
  */
 export type ModerationCategory = 
   | 'safe'
+  | 'neutral'
+  | 'drawing'
   | 'nudity'
   | 'partial_nudity'
   | 'shirtless_male'
   | 'swimwear'
+  | 'legs'
+  | 'torso'
   | 'suggestive'
   | 'sexy'
   | 'hentai'
-  | 'porn';
+  | 'porn'
+  | 'timeout'
+  | 'error';
 
 export interface ModerationScanResult {
   src: string;
@@ -58,7 +65,72 @@ export interface ModerationSettings {
 }
 
 /**
- * Maps NSFWJS classes to our moderation categories
+ * Maps NSFWJS prediction classes to our granular moderation categories
+ * Returns the most specific applicable category
+ */
+export function calculateCategory(predictions: Record<string, number>): ModerationCategory {
+  // Normalize prediction keys to lowercase
+  const norm: Record<string, number> = {};
+  Object.entries(predictions).forEach(([k, v]) => {
+    norm[k.toLowerCase()] = v;
+  });
+  
+  const porn = norm['porn'] || 0;
+  const hentai = norm['hentai'] || 0;
+  const sexy = norm['sexy'] || 0;
+  const neutral = norm['neutral'] || 0;
+  const drawing = norm['drawing'] || 0;
+  
+  // Explicit content - highest priority
+  if (porn > 0.5) return 'porn';
+  if (hentai > 0.5) return 'hentai';
+  
+  // Suggestive content - nuanced categories
+  if (sexy > 0.8) return 'sexy';
+  if (sexy > 0.6) return 'suggestive';
+  if (sexy > 0.4) return 'partial_nudity';
+  if (sexy > 0.25) return 'swimwear';
+  
+  // Safe content
+  if (neutral > 0.8) return 'neutral';
+  if (drawing > 0.7) return 'drawing';
+  
+  return 'safe';
+}
+
+/**
+ * Determine if content should be blurred based on category and sensitivity
+ */
+export function shouldBlurCategory(category: ModerationCategory, sensitivity: number): boolean {
+  // Sensitivity 0 = off
+  if (sensitivity === 0) return false;
+  
+  const categoryLevels: Record<ModerationCategory, number> = {
+    'safe': 999,
+    'neutral': 999,
+    'drawing': 999,
+    'timeout': 999,
+    'error': 999,
+    // These always blur at any sensitivity > 0
+    'porn': 0,
+    'hentai': 0,
+    'nudity': 0,
+    // These require higher sensitivity
+    'sexy': 1,
+    'suggestive': 2,
+    'partial_nudity': 2,
+    'shirtless_male': 3,
+    'swimwear': 3,
+    'legs': 4,
+    'torso': 4,
+  };
+  
+  const minSensitivity = categoryLevels[category] ?? 999;
+  return sensitivity >= minSensitivity;
+}
+
+/**
+ * Maps NSFWJS classes to our moderation categories (legacy helper)
  */
 export function mapToCategory(className: string, probability: number): ModerationCategory {
   const name = className.toLowerCase();
@@ -67,27 +139,7 @@ export function mapToCategory(className: string, probability: number): Moderatio
   if (name === 'hentai' && probability > 0.5) return 'hentai';
   if (name === 'sexy' && probability > 0.6) return 'sexy';
   if (name === 'sexy' && probability > 0.3) return 'suggestive';
-  
-  // More granular categories based on combined signals
   if (name === 'neutral' || name === 'drawing') return 'safe';
-  
-  return 'safe';
-}
-
-/**
- * Calculate detailed category from predictions
- */
-export function calculateCategory(predictions: Record<string, number>): ModerationCategory {
-  const porn = predictions['Porn'] || predictions['porn'] || 0;
-  const hentai = predictions['Hentai'] || predictions['hentai'] || 0;
-  const sexy = predictions['Sexy'] || predictions['sexy'] || 0;
-  const neutral = predictions['Neutral'] || predictions['neutral'] || 0;
-  
-  if (porn > 0.5) return 'porn';
-  if (hentai > 0.5) return 'hentai';
-  if (sexy > 0.7) return 'sexy';
-  if (sexy > 0.5) return 'suggestive';
-  if (sexy > 0.3) return 'partial_nudity';
   
   return 'safe';
 }
@@ -123,6 +175,30 @@ export function getBlurStrengthForLevel(level: number): number {
     case 4: return 40;
     default: return 16;
   }
+}
+
+/**
+ * Get human-readable label for a category
+ */
+export function getCategoryLabel(category: ModerationCategory): string {
+  const labels: Record<ModerationCategory, string> = {
+    'safe': 'Safe',
+    'neutral': 'Neutral',
+    'drawing': 'Drawing',
+    'nudity': 'Nudity',
+    'partial_nudity': 'Partial Nudity',
+    'shirtless_male': 'Shirtless',
+    'swimwear': 'Swimwear',
+    'legs': 'Legs',
+    'torso': 'Torso',
+    'suggestive': 'Suggestive',
+    'sexy': 'Sexy',
+    'hentai': 'Hentai',
+    'porn': 'Explicit',
+    'timeout': 'Timeout',
+    'error': 'Error',
+  };
+  return labels[category] || category;
 }
 
 // The plugin will be implemented via message passing in the WebView

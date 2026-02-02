@@ -199,6 +199,68 @@ export const NativeWebViewBrowser = () => {
     return true;
   }, [settings, checkBlockedSite, deviceId, navigate, logEvent]);
 
+  // Inject moderation script into WebView
+  const injectModerationScript = useCallback(async (scriptExecutor: (script: string) => Promise<string | null>) => {
+    if (!isModerationEnabled()) {
+      console.log('[Browser] Moderation disabled, skipping injection');
+      return;
+    }
+    
+    const config = getModerationConfig();
+    console.log('[Browser] Injecting moderation script with config:', config);
+    
+    // First inject CSS styles
+    const cssInjection = `
+      (function() {
+        if (document.getElementById('gc-moderation-styles')) return;
+        const style = document.createElement('style');
+        style.id = 'gc-moderation-styles';
+        style.textContent = \`
+          .gc-reveal-overlay {
+            position: absolute !important;
+            inset: 0 !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            background: rgba(0, 0, 0, 0.25) !important;
+            z-index: 9998 !important;
+          }
+          .gc-reveal-btn {
+            background: rgba(0, 0, 0, 0.9) !important;
+            color: white !important;
+            border: 2px solid rgba(255, 255, 255, 0.4) !important;
+            padding: 10px 20px !important;
+            border-radius: 8px !important;
+            cursor: pointer !important;
+            font-size: 14px !important;
+            font-weight: bold !important;
+          }
+          [data-gc-moderated="blurred"] { transition: filter 0.3s ease !important; }
+          ytd-thumbnail, ytd-rich-item-renderer, yt-img-shadow, #shorts-player { position: relative !important; }
+        \`;
+        document.head.appendChild(style);
+        console.log('[GC:inject] CSS styles injected');
+      })();
+    `;
+    
+    try {
+      await scriptExecutor(cssInjection);
+      console.log('[Browser] CSS styles injected');
+    } catch (e) {
+      console.warn('[Browser] CSS injection failed:', e);
+    }
+    
+    // Then inject main moderation script
+    const mainScript = generateModerationScript(config);
+    try {
+      await scriptExecutor(mainScript);
+      injectionDoneRef.current = true;
+      console.log('[Browser] Main moderation script injected successfully');
+    } catch (error) {
+      console.error('[Browser] Moderation script injection failed:', error);
+    }
+  }, [isModerationEnabled, getModerationConfig]);
+
   const {
     state: webViewState,
     open: openWebView,
@@ -209,73 +271,141 @@ export const NativeWebViewBrowser = () => {
     executeScript,
   } = useNativeWebView({
     onLoadStart: (url) => {
-      console.log('[Browser] Load start:', url);
+      console.log('[Browser] ======= LOAD START =======');
+      console.log('[Browser] URL:', url);
       setIsLoading(true);
       injectionDoneRef.current = false;
     },
     onLoadEnd: async (url) => {
-      console.log('[Browser] Load end:', url);
+      console.log('[Browser] ======= LOAD END =======');
+      console.log('[Browser] URL:', url);
       setIsLoading(false);
       
-      // Inject moderation script after page loads
-      if (isModerationEnabled() && !injectionDoneRef.current) {
-        const config = getModerationConfig();
-        const script = generateModerationScript(config);
-        try {
-          await executeScript(script);
-          injectionDoneRef.current = true;
-          console.log('[Browser] Moderation script injected');
-        } catch (error) {
-          console.error('[Browser] Failed to inject moderation script:', error);
-        }
+      // Inject moderation script after page fully loads
+      if (!injectionDoneRef.current) {
+        // Small delay to ensure DOM is ready
+        setTimeout(async () => {
+          await injectModerationScript(executeScript);
+        }, 500);
       }
     },
     onLoadError: (url, error) => {
-      console.error('[Browser] Load error:', url, error);
+      console.error('[Browser] ======= LOAD ERROR =======');
+      console.error('[Browser] URL:', url);
+      console.error('[Browser] Error:', error);
       setIsLoading(false);
       injectionDoneRef.current = false;
-      // On error, offer fallback modes
       setFallbackUrl(url);
       navigate('fallback', '', url);
     },
     onUrlChange: (url) => {
-      console.log('[Browser] URL change:', url);
+      console.log('[Browser] ======= URL CHANGE =======');
+      console.log('[Browser] New URL:', url);
       setUrlInput(url);
       navigate('browse', url, url);
-      // Reset injection flag for new page
+      // Reset injection for new page navigation
       injectionDoneRef.current = false;
     },
     onNavigationRequest: handleNavigationRequest,
     onClose: () => {
-      console.log('[Browser] WebView closed');
+      console.log('[Browser] ======= WEBVIEW CLOSED =======');
       moderationBridge.clearCache();
       injectionDoneRef.current = false;
       navigate('home', '', '');
     },
   });
 
-  // Listen for moderation messages from injected script
+  // Poll for moderation requests from WebView
+  // InAppBrowser doesn't support direct postMessage, so we use polling
+  const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  
   useEffect(() => {
-    if (!isNative) return;
+    if (!isNative || !webViewState.isOpen || !isModerationEnabled()) {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+        pollIntervalRef.current = null;
+      }
+      return;
+    }
 
+    console.log('[Browser] Starting moderation request polling...');
+
+    // Poll for pending scan requests from the injected script
+    const pollForRequests = async () => {
+      if (!executeScript) return;
+      
+      try {
+        // Get pending requests from WebView
+        const getPendingScript = `
+          (function() {
+            if (!window.__GC_MODERATION__) return JSON.stringify({ pending: [] });
+            
+            const state = window.__GC_MODERATION__.state;
+            const pending = [];
+            
+            // Get pending items that haven't been sent yet
+            state.pendingScans.forEach((item, msgId) => {
+              pending.push({ messageId: msgId, src: item.src, sourceType: item.sourceType });
+            });
+            
+            return JSON.stringify({ pending: pending.slice(0, 5) }); // Batch of 5
+          })();
+        `;
+        
+        await executeScript(getPendingScript);
+        // Note: InAppBrowser executeScript doesn't return values
+        // We need a different approach - modify the injection to use direct callbacks
+        
+      } catch (e) {
+        // Polling errors are expected and ignored
+      }
+    };
+
+    // Start polling at 200ms intervals
+    pollIntervalRef.current = setInterval(pollForRequests, 500);
+
+    return () => {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+        pollIntervalRef.current = null;
+      }
+    };
+  }, [isNative, webViewState.isOpen, isModerationEnabled, executeScript]);
+
+  // Also listen for messages via window.postMessage (works in some WebView contexts)
+  useEffect(() => {
     const handleMessage = async (event: MessageEvent) => {
       if (event.data?.type === 'gc-moderation-request' && event.data?.action === 'scan') {
+        console.log('[Browser] Received moderation request via postMessage');
         const result = await moderationBridge.handleWebViewMessage(event.data);
         
         if (result && executeScript) {
-          // Send result back to WebView
           const escapedSrc = result.src.replace(/'/g, "\\'").replace(/"/g, '\\"');
+          const messageId = (result as any).messageId || 0;
           const responseScript = `
-            window.postMessage({
-              type: 'gc-moderation-result',
-              src: '${escapedSrc}',
-              shouldBlur: ${result.shouldBlur},
-              category: '${result.category}',
-              confidence: ${result.confidence}
-            }, '*');
+            (function() {
+              if (window.__GC_MODERATION_RESULT__) {
+                window.__GC_MODERATION_RESULT__({
+                  messageId: ${messageId},
+                  src: '${escapedSrc}',
+                  shouldBlur: ${result.shouldBlur},
+                  category: '${result.category}',
+                  confidence: ${result.confidence}
+                });
+              }
+              window.postMessage({
+                type: 'gc-moderation-result',
+                messageId: ${messageId},
+                src: '${escapedSrc}',
+                shouldBlur: ${result.shouldBlur},
+                category: '${result.category}',
+                confidence: ${result.confidence}
+              }, '*');
+            })();
           `;
           try {
             await executeScript(responseScript);
+            console.log('[Browser] Sent moderation result for:', escapedSrc.substring(0, 50));
           } catch (error) {
             console.debug('[Browser] Failed to send moderation result:', error);
           }
@@ -285,7 +415,7 @@ export const NativeWebViewBrowser = () => {
 
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
-  }, [isNative, moderationBridge, executeScript]);
+  }, [moderationBridge, executeScript]);
 
   // Search handler
   const handleSearch = useCallback(async (query: string) => {
