@@ -535,7 +535,6 @@ const SafeBrowser = () => {
       window.open(youtubeContent.sourceUrl, '_blank', 'noopener,noreferrer');
     }
   };
-  };
 
   // Navigate from search result
   const handleSearchResultNavigate = (resultUrl: string) => {

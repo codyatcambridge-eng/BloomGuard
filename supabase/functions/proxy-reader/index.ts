@@ -396,91 +396,274 @@ interface YouTubeMetadata {
   channelName: string;
   description: string;
   thumbnailUrl: string;
+  error?: string;
 }
 
+const MAX_RESPONSE_SIZE = 500 * 1024; // 500KB limit
+const YOUTUBE_TIMEOUT = 10000; // 10 second timeout
+
 async function fetchYouTubeMetadata(videoId: string, url: string): Promise<YouTubeMetadata> {
-  console.log('[proxy-reader] Fetching YouTube metadata for:', videoId);
+  console.log('[proxy-reader] Fetching YouTube metadata for videoId:', videoId, 'url:', url);
   
+  // Use hqdefault as fallback (always available), maxresdefault may not exist
   const defaultMeta: YouTubeMetadata = {
     videoId,
     title: 'YouTube Video',
     channelName: 'Unknown Channel',
     description: '',
-    thumbnailUrl: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+    thumbnailUrl: `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
   };
   
   try {
-    // Fetch the YouTube page to extract metadata
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+    const timeoutId = setTimeout(() => {
+      console.log('[proxy-reader] YouTube fetch timeout triggered');
+      controller.abort();
+    }, YOUTUBE_TIMEOUT);
+    
+    // Use oembed API first - more reliable and doesn't get blocked
+    const oembedUrl = `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`;
+    console.log('[proxy-reader] Trying oEmbed API:', oembedUrl);
+    
+    try {
+      const oembedResponse = await fetch(oembedUrl, {
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (compatible; SafeBrowser/1.0)',
+        },
+        signal: controller.signal,
+      });
+      
+      if (oembedResponse.ok) {
+        const oembedData = await oembedResponse.json();
+        console.log('[proxy-reader] oEmbed success:', {
+          title: oembedData.title?.substring(0, 50),
+          author: oembedData.author_name,
+        });
+        
+        clearTimeout(timeoutId);
+        
+        return {
+          videoId,
+          title: oembedData.title || defaultMeta.title,
+          channelName: oembedData.author_name || defaultMeta.channelName,
+          description: '', // oEmbed doesn't include description
+          thumbnailUrl: oembedData.thumbnail_url || defaultMeta.thumbnailUrl,
+        };
+      } else {
+        console.warn('[proxy-reader] oEmbed failed:', oembedResponse.status);
+      }
+    } catch (oembedError) {
+      console.warn('[proxy-reader] oEmbed error:', oembedError);
+    }
+    
+    // Fallback: fetch the actual page for description
+    console.log('[proxy-reader] Falling back to page fetch for description');
     
     const response = await fetch(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
+        'Cache-Control': 'no-cache',
       },
       signal: controller.signal,
     });
     
     clearTimeout(timeoutId);
     
+    // Log response details for debugging
+    console.log('[proxy-reader] YouTube page response:', {
+      status: response.status,
+      statusText: response.statusText,
+      contentType: response.headers.get('content-type'),
+      contentLength: response.headers.get('content-length'),
+    });
+    
+    // Handle bot walls and blocks
+    if (response.status === 403 || response.status === 429) {
+      console.error('[proxy-reader] YouTube blocked request:', response.status);
+      return {
+        ...defaultMeta,
+        error: 'youtube_metadata_blocked',
+      };
+    }
+    
     if (!response.ok) {
-      console.warn('[proxy-reader] Failed to fetch YouTube page:', response.status);
+      console.warn('[proxy-reader] YouTube page fetch failed:', response.status);
+      return {
+        ...defaultMeta,
+        error: `youtube_fetch_error_${response.status}`,
+      };
+    }
+    
+    // Check for redirect to consent page
+    const finalUrl = response.url;
+    if (finalUrl.includes('consent.youtube') || finalUrl.includes('consent.google')) {
+      console.warn('[proxy-reader] YouTube consent wall detected');
+      return {
+        ...defaultMeta,
+        error: 'youtube_consent_required',
+      };
+    }
+    
+    // Limit response size
+    const contentLength = response.headers.get('content-length');
+    if (contentLength && parseInt(contentLength) > MAX_RESPONSE_SIZE) {
+      console.warn('[proxy-reader] YouTube response too large:', contentLength);
+    }
+    
+    // Read response with size limit
+    const reader = response.body?.getReader();
+    if (!reader) {
       return defaultMeta;
     }
     
-    const html = await response.text();
+    let html = '';
+    let totalSize = 0;
+    const decoder = new TextDecoder();
     
-    // Extract title from og:title or title tag
-    const ogTitleMatch = html.match(/<meta[^>]*property\s*=\s*["']og:title["'][^>]*content\s*=\s*["']([^"']+)["']/i)
-      || html.match(/<meta[^>]*content\s*=\s*["']([^"']+)["'][^>]*property\s*=\s*["']og:title["']/i);
-    if (ogTitleMatch) {
-      defaultMeta.title = decodeHtmlEntities(ogTitleMatch[1].trim());
-    } else {
-      const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
-      if (titleMatch) {
-        defaultMeta.title = decodeHtmlEntities(titleMatch[1].replace(' - YouTube', '').trim());
+    while (totalSize < MAX_RESPONSE_SIZE) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      
+      totalSize += value.length;
+      html += decoder.decode(value, { stream: true });
+      
+      // Early exit if we have enough content (meta tags are in head)
+      if (html.includes('</head>') && totalSize > 50000) {
+        console.log('[proxy-reader] Got head section, stopping early');
+        break;
       }
     }
     
-    // Extract channel name from link or JSON data
-    const channelMatch = html.match(/"ownerChannelName"\s*:\s*"([^"]+)"/i)
-      || html.match(/"author"\s*:\s*"([^"]+)"/i)
-      || html.match(/itemprop\s*=\s*["']author["'][^>]*content\s*=\s*["']([^"']+)["']/i);
-    if (channelMatch) {
-      defaultMeta.channelName = decodeHtmlEntities(channelMatch[1].trim());
-    }
+    reader.cancel();
+    console.log('[proxy-reader] Read', totalSize, 'bytes from YouTube page');
     
-    // Extract description from og:description or meta description
-    const ogDescMatch = html.match(/<meta[^>]*property\s*=\s*["']og:description["'][^>]*content\s*=\s*["']([^"']+)["']/i)
-      || html.match(/<meta[^>]*content\s*=\s*["']([^"']+)["'][^>]*property\s*=\s*["']og:description["']/i);
-    if (ogDescMatch) {
-      defaultMeta.description = decodeHtmlEntities(ogDescMatch[1].trim());
-    } else {
-      const descMatch = html.match(/<meta[^>]*name\s*=\s*["']description["'][^>]*content\s*=\s*["']([^"']+)["']/i);
-      if (descMatch) {
-        defaultMeta.description = decodeHtmlEntities(descMatch[1].trim());
+    // Try JSON-LD extraction first (most reliable)
+    const jsonLdMatch = html.match(/<script[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/i);
+    if (jsonLdMatch) {
+      try {
+        const jsonLd = JSON.parse(jsonLdMatch[1]);
+        console.log('[proxy-reader] Found JSON-LD data');
+        
+        if (jsonLd['@type'] === 'VideoObject' || jsonLd.name) {
+          defaultMeta.title = jsonLd.name || defaultMeta.title;
+          defaultMeta.description = jsonLd.description || defaultMeta.description;
+          defaultMeta.thumbnailUrl = jsonLd.thumbnailUrl?.[0] || jsonLd.thumbnail?.url || defaultMeta.thumbnailUrl;
+          
+          if (jsonLd.author?.name) {
+            defaultMeta.channelName = jsonLd.author.name;
+          }
+        }
+      } catch (e) {
+        console.warn('[proxy-reader] JSON-LD parse failed:', e);
       }
     }
     
-    // Extract better thumbnail from og:image
-    const ogImageMatch = html.match(/<meta[^>]*property\s*=\s*["']og:image["'][^>]*content\s*=\s*["']([^"']+)["']/i)
-      || html.match(/<meta[^>]*content\s*=\s*["']([^"']+)["'][^>]*property\s*=\s*["']og:image["']/i);
-    if (ogImageMatch) {
-      defaultMeta.thumbnailUrl = ogImageMatch[1];
+    // Try ytInitialPlayerResponse for more data
+    const playerResponseMatch = html.match(/var\s+ytInitialPlayerResponse\s*=\s*({[\s\S]*?});/);
+    if (playerResponseMatch) {
+      try {
+        const playerData = JSON.parse(playerResponseMatch[1]);
+        const videoDetails = playerData?.videoDetails;
+        
+        if (videoDetails) {
+          console.log('[proxy-reader] Found ytInitialPlayerResponse');
+          defaultMeta.title = videoDetails.title || defaultMeta.title;
+          defaultMeta.channelName = videoDetails.author || defaultMeta.channelName;
+          defaultMeta.description = videoDetails.shortDescription || defaultMeta.description;
+          
+          // Get best thumbnail
+          const thumbnails = videoDetails.thumbnail?.thumbnails;
+          if (thumbnails && thumbnails.length > 0) {
+            // Get highest quality thumbnail
+            const bestThumb = thumbnails.reduce((best: any, curr: any) => 
+              (curr.width > (best.width || 0)) ? curr : best, {});
+            if (bestThumb.url) {
+              defaultMeta.thumbnailUrl = bestThumb.url;
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('[proxy-reader] ytInitialPlayerResponse parse failed:', e);
+      }
     }
     
-    console.log('[proxy-reader] YouTube metadata extracted:', {
+    // Fallback to meta tags if still missing data
+    if (defaultMeta.title === 'YouTube Video') {
+      const ogTitleMatch = html.match(/<meta[^>]*property\s*=\s*["']og:title["'][^>]*content\s*=\s*["']([^"']+)["']/i)
+        || html.match(/<meta[^>]*content\s*=\s*["']([^"']+)["'][^>]*property\s*=\s*["']og:title["']/i);
+      if (ogTitleMatch) {
+        defaultMeta.title = decodeHtmlEntities(ogTitleMatch[1].trim());
+      } else {
+        const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+        if (titleMatch) {
+          defaultMeta.title = decodeHtmlEntities(titleMatch[1].replace(' - YouTube', '').trim());
+        }
+      }
+    }
+    
+    if (defaultMeta.channelName === 'Unknown Channel') {
+      // Try multiple patterns for channel name
+      const channelPatterns = [
+        /"ownerChannelName"\s*:\s*"([^"]+)"/,
+        /"author"\s*:\s*"([^"]+)"/,
+        /itemprop\s*=\s*["']author["'][^>]*content\s*=\s*["']([^"']+)["']/i,
+        /<link[^>]*itemprop\s*=\s*["']name["'][^>]*content\s*=\s*["']([^"']+)["']/i,
+        /"channelName"\s*:\s*"([^"]+)"/,
+      ];
+      
+      for (const pattern of channelPatterns) {
+        const match = html.match(pattern);
+        if (match) {
+          defaultMeta.channelName = decodeHtmlEntities(match[1].trim());
+          break;
+        }
+      }
+    }
+    
+    if (!defaultMeta.description) {
+      const ogDescMatch = html.match(/<meta[^>]*property\s*=\s*["']og:description["'][^>]*content\s*=\s*["']([^"']+)["']/i)
+        || html.match(/<meta[^>]*content\s*=\s*["']([^"']+)["'][^>]*property\s*=\s*["']og:description["']/i);
+      if (ogDescMatch) {
+        defaultMeta.description = decodeHtmlEntities(ogDescMatch[1].trim());
+      }
+    }
+    
+    // Get og:image if thumbnail still default
+    if (defaultMeta.thumbnailUrl.includes('hqdefault.jpg')) {
+      const ogImageMatch = html.match(/<meta[^>]*property\s*=\s*["']og:image["'][^>]*content\s*=\s*["']([^"']+)["']/i)
+        || html.match(/<meta[^>]*content\s*=\s*["']([^"']+)["'][^>]*property\s*=\s*["']og:image["']/i);
+      if (ogImageMatch) {
+        defaultMeta.thumbnailUrl = ogImageMatch[1];
+      }
+    }
+    
+    console.log('[proxy-reader] YouTube metadata extraction complete:', {
+      videoId,
       title: defaultMeta.title.substring(0, 50),
       channelName: defaultMeta.channelName,
       hasDescription: defaultMeta.description.length > 0,
+      thumbnailUrl: defaultMeta.thumbnailUrl.substring(0, 60),
     });
     
     return defaultMeta;
   } catch (error) {
-    console.error('[proxy-reader] Error fetching YouTube metadata:', error);
-    return defaultMeta;
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+    console.error('[proxy-reader] YouTube metadata fetch error:', errorMsg);
+    
+    if (errorMsg.includes('abort')) {
+      return {
+        ...defaultMeta,
+        error: 'youtube_timeout',
+      };
+    }
+    
+    return {
+      ...defaultMeta,
+      error: 'youtube_fetch_failed',
+    };
   }
 }
 
