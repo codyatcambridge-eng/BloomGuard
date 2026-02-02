@@ -65,7 +65,15 @@ const JUNK_IMAGE_PATTERNS = [
   /data:image\/gif;base64,R0lGOD/i, // 1x1 transparent GIF
 ];
 
-function cleanHtml(html: string, baseUrl: string): { content: string; images: string[]; title: string; description: string } {
+interface CleanResult {
+  content: string;
+  images: string[];
+  title: string;
+  description: string;
+  previewHtml?: string; // Sanitized full HTML for Preview Mode
+}
+
+function cleanHtml(html: string, baseUrl: string): CleanResult {
   const images: string[] = [];
   let title = '';
   let description = '';
@@ -84,6 +92,14 @@ function cleanHtml(html: string, baseUrl: string): { content: string; images: st
     description = decodeHtmlEntities(descMatch[1].trim());
   }
 
+  // Also try og:description
+  if (!description) {
+    const ogDescMatch = html.match(/<meta[^>]*property\s*=\s*["']og:description["'][^>]*content\s*=\s*["']([^"']+)["']/i);
+    if (ogDescMatch) {
+      description = decodeHtmlEntities(ogDescMatch[1].trim());
+    }
+  }
+
   // Remove comments first
   let cleaned = html.replace(/<!--[\s\S]*?-->/g, '');
 
@@ -92,7 +108,6 @@ function cleanHtml(html: string, baseUrl: string): { content: string; images: st
 
   // Remove tags with their content
   for (const tag of REMOVE_TAGS) {
-    // Match both regular and self-closing tags with content
     const regex = new RegExp(`<${tag}[^>]*>(?:[\\s\\S]*?<\\/${tag}>)?`, 'gi');
     cleaned = cleaned.replace(regex, '');
   }
@@ -129,7 +144,7 @@ function cleanHtml(html: string, baseUrl: string): { content: string; images: st
     // Skip tracking pixels and junk images
     if (TRACKING_PATTERNS.some(p => p.test(imgSrc))) continue;
     if (JUNK_IMAGE_PATTERNS.some(p => p.test(imgSrc))) continue;
-    if (imgSrc.length < 10) continue; // Skip very short URLs
+    if (imgSrc.length < 10) continue;
     
     // Convert relative URLs to absolute
     imgSrc = resolveUrl(imgSrc, baseUrl);
@@ -145,7 +160,6 @@ function cleanHtml(html: string, baseUrl: string): { content: string; images: st
   cleaned = cleaned.replace(
     /<img([^>]*)src\s*=\s*["']([^"']+)["']([^>]*)>/gi,
     (match, before, src, after) => {
-      // Skip tracking/junk images entirely
       if (TRACKING_PATTERNS.some(p => p.test(src)) || JUNK_IMAGE_PATTERNS.some(p => p.test(src))) {
         return '';
       }
@@ -166,7 +180,10 @@ function cleanHtml(html: string, baseUrl: string): { content: string; images: st
     }
   );
 
-  // Try to extract main content
+  // Create sanitized Preview HTML (full page structure for Preview Mode)
+  const previewHtml = createPreviewHtml(cleaned, title, description, images.slice(0, 10));
+
+  // Try to extract main content for Reader Mode
   let mainContent = extractMainContent(cleaned);
 
   // Clean up whitespace aggressively
@@ -200,14 +217,52 @@ function cleanHtml(html: string, baseUrl: string): { content: string; images: st
 
   return {
     content: mainContent,
-    images: images.slice(0, 50), // Limit to 50 images max
+    images: images.slice(0, 50),
     title,
     description,
+    previewHtml,
   };
 }
 
+function createPreviewHtml(html: string, title: string, description: string, topImages: string[]): string {
+  // Extract body content
+  const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+  let bodyContent = bodyMatch ? bodyMatch[1] : html;
+  
+  // Limit content length for preview
+  if (bodyContent.length > 100000) {
+    bodyContent = bodyContent.substring(0, 100000) + '...';
+  }
+  
+  // Build a minimal preview structure
+  const previewContent = `
+    <div class="preview-container" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #e0e0e0; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 16px;">
+      ${title ? `<h1 style="font-size: 1.5rem; font-weight: bold; margin-bottom: 8px; color: #fff;">${escapeHtml(title)}</h1>` : ''}
+      ${description ? `<p style="color: #888; font-size: 0.9rem; margin-bottom: 16px; font-style: italic;">${escapeHtml(description)}</p>` : ''}
+      ${topImages.length > 0 ? `
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin-bottom: 16px;">
+          ${topImages.map(img => `<img src="${img}" style="width: 100%; height: auto; border-radius: 8px; object-fit: cover;" loading="lazy" onerror="this.style.display='none'" />`).join('')}
+        </div>
+      ` : ''}
+      <div class="preview-body" style="opacity: 0.9;">
+        ${bodyContent}
+      </div>
+    </div>
+  `;
+  
+  return previewContent;
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function extractMainContent(html: string): string {
-  // Priority order for content extraction
   const contentSelectors = [
     /<article[^>]*>([\s\S]*?)<\/article>/i,
     /<main[^>]*>([\s\S]*?)<\/main>/i,
@@ -224,12 +279,10 @@ function extractMainContent(html: string): string {
     }
   }
 
-  // Fallback: get body content
   const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
   if (bodyMatch) {
     let body = bodyMatch[1];
     
-    // Remove common non-content sections
     const removePatterns = [
       /<header[^>]*>[\s\S]*?<\/header>/gi,
       /<footer[^>]*>[\s\S]*?<\/footer>/gi,
@@ -253,7 +306,6 @@ function extractMainContent(html: string): string {
 function resolveUrl(url: string, baseUrl: string): string {
   if (!url || url.startsWith('data:')) return url;
   
-  // Already absolute
   if (url.startsWith('http://') || url.startsWith('https://')) {
     return url;
   }
@@ -292,8 +344,13 @@ function decodeHtmlEntities(text: string): string {
     .replace(/&#x([a-fA-F0-9]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
 }
 
+function isPdfUrl(url: string): boolean {
+  const lowerUrl = url.toLowerCase();
+  return lowerUrl.endsWith('.pdf') || lowerUrl.includes('.pdf?') || lowerUrl.includes('.pdf#');
+}
+
 const MIN_CONTENT_LENGTH = 100;
-const REQUEST_TIMEOUT = 10000; // 10 seconds
+const REQUEST_TIMEOUT = 10000;
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -333,9 +390,25 @@ Deno.serve(async (req) => {
       );
     }
 
+    // Check if URL is a PDF
+    if (isPdfUrl(url)) {
+      console.log('[proxy-reader] PDF detected:', url);
+      return new Response(
+        JSON.stringify({
+          success: true,
+          isPdf: true,
+          data: {
+            pdfUrl: url,
+            title: url.split('/').pop()?.replace('.pdf', '') || 'PDF Document',
+            sourceUrl: url,
+          }
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
     console.log('[proxy-reader] Fetching URL:', url);
 
-    // Fetch the page with strict timeout
     const controller = new AbortController();
     const timeoutId = setTimeout(() => {
       console.log('[proxy-reader] Request timeout triggered');
@@ -347,7 +420,7 @@ Deno.serve(async (req) => {
       response = await fetch(url, {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,application/pdf,*/*;q=0.8',
           'Accept-Language': 'en-US,en;q=0.9',
           'Accept-Encoding': 'gzip, deflate',
           'Connection': 'keep-alive',
@@ -374,12 +447,31 @@ Deno.serve(async (req) => {
 
     // Check content type
     const contentType = response.headers.get('content-type') || '';
+    
+    // Handle PDF content type
+    if (contentType.includes('application/pdf')) {
+      console.log('[proxy-reader] PDF content type detected');
+      return new Response(
+        JSON.stringify({
+          success: true,
+          isPdf: true,
+          data: {
+            pdfUrl: url,
+            title: url.split('/').pop()?.replace('.pdf', '') || 'PDF Document',
+            sourceUrl: url,
+          }
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    
     if (!contentType.includes('text/html') && !contentType.includes('application/xhtml')) {
       console.warn('[proxy-reader] Non-HTML content type:', contentType);
       return new Response(
         JSON.stringify({ 
           success: false, 
-          error: 'This page is not HTML content and cannot be displayed in Reader Mode.' 
+          error: `This page type (${contentType.split(';')[0]}) cannot be displayed in Reader Mode.`,
+          contentType: contentType.split(';')[0],
         }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
@@ -409,7 +501,7 @@ Deno.serve(async (req) => {
     }
 
     // Clean and extract content
-    let result: { content: string; images: string[]; title: string; description: string };
+    let result: CleanResult;
     try {
       result = cleanHtml(html, url);
     } catch (e) {
@@ -420,18 +512,29 @@ Deno.serve(async (req) => {
       );
     }
 
-    const { content, images, title, description } = result;
+    const { content, images, title, description, previewHtml } = result;
 
-    // Check minimum content length
+    // Check minimum content length for Reader Mode
     const textContent = content.replace(/<[^>]+>/g, '').trim();
-    if (textContent.length < MIN_CONTENT_LENGTH) {
-      console.warn('[proxy-reader] Content too short:', textContent.length);
+    const hasReadableContent = textContent.length >= MIN_CONTENT_LENGTH;
+    
+    if (!hasReadableContent) {
+      console.warn('[proxy-reader] Content too short for Reader Mode:', textContent.length);
+      // Still return success but indicate Preview Mode should be used
       return new Response(
         JSON.stringify({ 
-          success: false, 
-          error: 'Reader Mode failed. No readable content found on this page.' 
+          success: true,
+          readerModeFailed: true,
+          data: {
+            content: '',
+            previewHtml: previewHtml || '',
+            images,
+            title: title || new URL(url).hostname,
+            description,
+            sourceUrl: url,
+          }
         }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
@@ -449,6 +552,7 @@ Deno.serve(async (req) => {
         success: true,
         data: {
           content,
+          previewHtml,
           images,
           title: title || new URL(url).hostname,
           description,
