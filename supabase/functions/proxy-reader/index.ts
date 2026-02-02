@@ -349,15 +349,50 @@ function isPdfUrl(url: string): boolean {
   return lowerUrl.endsWith('.pdf') || lowerUrl.includes('.pdf?') || lowerUrl.includes('.pdf#');
 }
 
-// YouTube URL detection and video ID extraction
-function isYouTubeUrl(url: string): boolean {
+// Social platform types
+type SocialPlatform = 'youtube' | 'instagram' | 'tiktok' | 'facebook' | 'twitter';
+
+interface SocialMetadata {
+  platform: SocialPlatform;
+  contentId: string;
+  title: string;
+  author: string;
+  description: string;
+  thumbnailUrl: string;
+  sourceUrl: string;
+  error?: string;
+}
+
+// Platform URL detection
+function detectSocialPlatform(url: string): SocialPlatform | null {
   try {
     const urlObj = new URL(url);
     const hostname = urlObj.hostname.toLowerCase();
-    return hostname.includes('youtube.com') || hostname.includes('youtu.be');
+    
+    if (hostname.includes('youtube.com') || hostname.includes('youtu.be')) {
+      return 'youtube';
+    }
+    if (hostname.includes('instagram.com')) {
+      return 'instagram';
+    }
+    if (hostname.includes('tiktok.com')) {
+      return 'tiktok';
+    }
+    if (hostname.includes('facebook.com') || hostname.includes('fb.com') || hostname.includes('fb.watch')) {
+      return 'facebook';
+    }
+    if (hostname.includes('twitter.com') || hostname.includes('x.com')) {
+      return 'twitter';
+    }
+    return null;
   } catch {
-    return false;
+    return null;
   }
+}
+
+// YouTube URL detection and video ID extraction
+function isYouTubeUrl(url: string): boolean {
+  return detectSocialPlatform(url) === 'youtube';
 }
 
 function extractYouTubeVideoId(url: string): string | null {
@@ -390,6 +425,85 @@ function extractYouTubeVideoId(url: string): string | null {
   }
 }
 
+// Extract content IDs from social platforms
+function extractInstagramId(url: string): string | null {
+  try {
+    const urlObj = new URL(url);
+    // /p/POST_ID, /reel/REEL_ID, /stories/USER/STORY_ID
+    const postMatch = urlObj.pathname.match(/\/(p|reel|reels)\/([^/?]+)/);
+    if (postMatch) return postMatch[2];
+    
+    // Profile: /@username or /username
+    const profileMatch = urlObj.pathname.match(/^\/@?([^/?]+)\/?$/);
+    if (profileMatch && !['p', 'reel', 'reels', 'stories', 'explore'].includes(profileMatch[1])) {
+      return `@${profileMatch[1]}`;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function extractTikTokId(url: string): string | null {
+  try {
+    const urlObj = new URL(url);
+    // /@user/video/VIDEO_ID
+    const videoMatch = urlObj.pathname.match(/\/video\/(\d+)/);
+    if (videoMatch) return videoMatch[1];
+    
+    // /@username
+    const userMatch = urlObj.pathname.match(/^\/@([^/?]+)\/?$/);
+    if (userMatch) return `@${userMatch[1]}`;
+    
+    return urlObj.pathname.replace(/^\//, '').replace(/\/$/, '') || null;
+  } catch {
+    return null;
+  }
+}
+
+function extractFacebookId(url: string): string | null {
+  try {
+    const urlObj = new URL(url);
+    // /watch?v=ID, /videos/ID, /posts/ID, /photo.php?fbid=ID
+    const watchParam = urlObj.searchParams.get('v');
+    if (watchParam) return watchParam;
+    
+    const fbidParam = urlObj.searchParams.get('fbid');
+    if (fbidParam) return fbidParam;
+    
+    const pathMatch = urlObj.pathname.match(/\/(videos|posts|photos|watch)\/(\d+)/);
+    if (pathMatch) return pathMatch[2];
+    
+    // Profile/page: /username
+    const profileMatch = urlObj.pathname.match(/^\/([^/?]+)\/?$/);
+    if (profileMatch && !['watch', 'groups', 'events', 'marketplace'].includes(profileMatch[1])) {
+      return profileMatch[1];
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function extractTwitterId(url: string): string | null {
+  try {
+    const urlObj = new URL(url);
+    // /user/status/TWEET_ID
+    const statusMatch = urlObj.pathname.match(/\/status\/(\d+)/);
+    if (statusMatch) return statusMatch[1];
+    
+    // /@username or /username
+    const userMatch = urlObj.pathname.match(/^\/@?([^/?]+)\/?$/);
+    if (userMatch && !['home', 'explore', 'search', 'notifications', 'messages', 'i'].includes(userMatch[1])) {
+      return `@${userMatch[1]}`;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// Legacy interface for backward compatibility
 interface YouTubeMetadata {
   videoId: string;
   title: string;
@@ -667,6 +781,189 @@ async function fetchYouTubeMetadata(videoId: string, url: string): Promise<YouTu
   }
 }
 
+// Fetch metadata for non-YouTube social platforms
+const SOCIAL_TIMEOUT = 10000;
+
+async function fetchSocialMetadata(platform: SocialPlatform, url: string): Promise<SocialMetadata> {
+  console.log(`[proxy-reader] Fetching ${platform} metadata for:`, url);
+  
+  let contentId = '';
+  switch (platform) {
+    case 'instagram':
+      contentId = extractInstagramId(url) || '';
+      break;
+    case 'tiktok':
+      contentId = extractTikTokId(url) || '';
+      break;
+    case 'facebook':
+      contentId = extractFacebookId(url) || '';
+      break;
+    case 'twitter':
+      contentId = extractTwitterId(url) || '';
+      break;
+    default:
+      contentId = '';
+  }
+  
+  const defaultMeta: SocialMetadata = {
+    platform,
+    contentId,
+    title: `${platform.charAt(0).toUpperCase() + platform.slice(1)} Content`,
+    author: '',
+    description: '',
+    thumbnailUrl: '',
+    sourceUrl: url,
+  };
+  
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      console.log(`[proxy-reader] ${platform} fetch timeout triggered`);
+      controller.abort();
+    }, SOCIAL_TIMEOUT);
+    
+    // Fetch the page with bot-like headers to get og: meta tags
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Cache-Control': 'no-cache',
+      },
+      signal: controller.signal,
+    });
+    
+    clearTimeout(timeoutId);
+    
+    console.log(`[proxy-reader] ${platform} response:`, {
+      status: response.status,
+      contentType: response.headers.get('content-type'),
+    });
+    
+    // Handle bot walls
+    if (response.status === 403 || response.status === 429) {
+      console.error(`[proxy-reader] ${platform} blocked request:`, response.status);
+      return {
+        ...defaultMeta,
+        error: `${platform}_metadata_blocked`,
+      };
+    }
+    
+    // Check for consent/login redirects
+    const finalUrl = response.url;
+    if (finalUrl.includes('login') || finalUrl.includes('consent') || finalUrl.includes('checkpoint')) {
+      console.warn(`[proxy-reader] ${platform} requires login/consent`);
+      return {
+        ...defaultMeta,
+        error: `${platform}_login_required`,
+      };
+    }
+    
+    if (!response.ok) {
+      return {
+        ...defaultMeta,
+        error: `${platform}_fetch_error_${response.status}`,
+      };
+    }
+    
+    // Read response with size limit
+    const reader = response.body?.getReader();
+    if (!reader) {
+      return defaultMeta;
+    }
+    
+    let html = '';
+    let totalSize = 0;
+    const decoder = new TextDecoder();
+    
+    while (totalSize < MAX_RESPONSE_SIZE) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      
+      totalSize += value.length;
+      html += decoder.decode(value, { stream: true });
+      
+      // Early exit once we have head section
+      if (html.includes('</head>') && totalSize > 30000) {
+        break;
+      }
+    }
+    
+    reader.cancel();
+    console.log(`[proxy-reader] Read ${totalSize} bytes from ${platform} page`);
+    
+    // Extract Open Graph metadata
+    const ogTitle = html.match(/<meta[^>]*property\s*=\s*["']og:title["'][^>]*content\s*=\s*["']([^"']+)["']/i)
+      || html.match(/<meta[^>]*content\s*=\s*["']([^"']+)["'][^>]*property\s*=\s*["']og:title["']/i);
+    
+    const ogDescription = html.match(/<meta[^>]*property\s*=\s*["']og:description["'][^>]*content\s*=\s*["']([^"']+)["']/i)
+      || html.match(/<meta[^>]*content\s*=\s*["']([^"']+)["'][^>]*property\s*=\s*["']og:description["']/i);
+    
+    const ogImage = html.match(/<meta[^>]*property\s*=\s*["']og:image["'][^>]*content\s*=\s*["']([^"']+)["']/i)
+      || html.match(/<meta[^>]*content\s*=\s*["']([^"']+)["'][^>]*property\s*=\s*["']og:image["']/i);
+    
+    // Try to extract author/username
+    const authorPatterns = [
+      /<meta[^>]*property\s*=\s*["']og:site_name["'][^>]*content\s*=\s*["']([^"']+)["']/i,
+      /<meta[^>]*name\s*=\s*["']author["'][^>]*content\s*=\s*["']([^"']+)["']/i,
+      /<meta[^>]*property\s*=\s*["']article:author["'][^>]*content\s*=\s*["']([^"']+)["']/i,
+      /"author"\s*:\s*"([^"]+)"/,
+      /"creator"\s*:\s*"([^"]+)"/,
+      /@([a-zA-Z0-9_]+)/,
+    ];
+    
+    let author = '';
+    for (const pattern of authorPatterns) {
+      const match = html.match(pattern);
+      if (match && match[1]) {
+        author = decodeHtmlEntities(match[1].trim());
+        // Skip if it's just the platform name
+        if (author.toLowerCase() !== platform) {
+          break;
+        }
+        author = '';
+      }
+    }
+    
+    // Fallback: try title tag
+    const titleTag = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+    
+    const result: SocialMetadata = {
+      platform,
+      contentId,
+      title: ogTitle ? decodeHtmlEntities(ogTitle[1].trim()) : (titleTag ? decodeHtmlEntities(titleTag[1].trim()) : defaultMeta.title),
+      author: author || (contentId.startsWith('@') ? contentId : ''),
+      description: ogDescription ? decodeHtmlEntities(ogDescription[1].trim()) : '',
+      thumbnailUrl: ogImage ? ogImage[1] : '',
+      sourceUrl: url,
+    };
+    
+    console.log(`[proxy-reader] ${platform} metadata extraction complete:`, {
+      contentId,
+      title: result.title.substring(0, 50),
+      author: result.author,
+      hasThumbnail: !!result.thumbnailUrl,
+    });
+    
+    return result;
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+    console.error(`[proxy-reader] ${platform} metadata fetch error:`, errorMsg);
+    
+    if (errorMsg.includes('abort')) {
+      return {
+        ...defaultMeta,
+        error: `${platform}_timeout`,
+      };
+    }
+    
+    return {
+      ...defaultMeta,
+      error: `${platform}_fetch_failed`,
+    };
+  }
+}
+
 const MIN_CONTENT_LENGTH = 100;
 const REQUEST_TIMEOUT = 10000;
 
@@ -725,29 +1022,62 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Check if URL is YouTube - handle specially
-    if (isYouTubeUrl(url)) {
-      const videoId = extractYouTubeVideoId(url);
-      console.log('[proxy-reader] YouTube detected, videoId:', videoId);
+    // Check for social platforms - handle specially
+    const socialPlatform = detectSocialPlatform(url);
+    
+    if (socialPlatform) {
+      console.log('[proxy-reader] Social platform detected:', socialPlatform);
       
-      if (videoId) {
-        const metadata = await fetchYouTubeMetadata(videoId, url);
-        return new Response(
-          JSON.stringify({
-            success: true,
-            isYouTube: true,
-            data: {
-              videoId: metadata.videoId,
-              title: metadata.title,
-              channelName: metadata.channelName,
-              description: metadata.description,
-              thumbnailUrl: metadata.thumbnailUrl,
-              sourceUrl: url,
-            }
-          }),
-          { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-        );
+      // YouTube has special handling with video ID
+      if (socialPlatform === 'youtube') {
+        const videoId = extractYouTubeVideoId(url);
+        console.log('[proxy-reader] YouTube videoId:', videoId);
+        
+        if (videoId) {
+          const metadata = await fetchYouTubeMetadata(videoId, url);
+          return new Response(
+            JSON.stringify({
+              success: true,
+              isSocialPlatform: true,
+              isYouTube: true,
+              platform: 'youtube',
+              data: {
+                platform: 'youtube',
+                contentId: metadata.videoId,
+                videoId: metadata.videoId,
+                title: metadata.title,
+                author: metadata.channelName,
+                channelName: metadata.channelName,
+                description: metadata.description,
+                thumbnailUrl: metadata.thumbnailUrl,
+                sourceUrl: url,
+              }
+            }),
+            { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+          );
+        }
       }
+      
+      // Handle other social platforms (Instagram, TikTok, Facebook, Twitter)
+      const metadata = await fetchSocialMetadata(socialPlatform, url);
+      return new Response(
+        JSON.stringify({
+          success: true,
+          isSocialPlatform: true,
+          platform: socialPlatform,
+          data: {
+            platform: metadata.platform,
+            contentId: metadata.contentId,
+            title: metadata.title,
+            author: metadata.author,
+            description: metadata.description,
+            thumbnailUrl: metadata.thumbnailUrl,
+            sourceUrl: url,
+            error: metadata.error,
+          }
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
     }
 
     console.log('[proxy-reader] Fetching URL:', url);
