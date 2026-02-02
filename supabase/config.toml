@@ -8,3 +8,9 @@ verify_jwt = false
 
 [functions.accountability]
 verify_jwt = false
+
+[functions.proxy-reader]
+verify_jwt = false
+
+[functions.web-search]
+verify_jwt = false
