@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { generateNonce } from '@/lib/moderation-request-utils';
+import { generateNonce, TriggerConfig } from '@/lib/moderation-request-utils';
 
 export type BlurLevel = 'OFF' | 'LOW' | 'MEDIUM' | 'HIGH';
 export type AISensitivity = 'relaxed' | 'moderate' | 'strict';
@@ -14,6 +14,13 @@ export type AISensitivity = 'relaxed' | 'moderate' | 'strict';
  */
 export type BlurDialLevel = 0 | 1 | 2 | 3 | 4;
 
+/**
+ * MVP Blocking mode
+ * 'mvp' = Only shirtless and swimwear trigger auto-blur
+ * 'full' = All categories can trigger based on sensitivity
+ */
+export type BlockingMode = 'mvp' | 'full';
+
 export interface LocalProtectionSettings {
   shield_active: boolean;
   blur_level: BlurLevel;
@@ -27,6 +34,9 @@ export interface LocalProtectionSettings {
   blur_strength_px: number; // 0-50px
   fail_closed: boolean; // Blur on timeout/error
   debug_mode: boolean;
+  // MVP settings
+  blocking_mode: BlockingMode;
+  prototype_mode: boolean; // Show labeling UI on reveal
 }
 
 const SETTINGS_KEY = 'iron_watch_local_settings';
@@ -43,6 +53,9 @@ const DEFAULT_SETTINGS: LocalProtectionSettings = {
   blur_strength_px: 24,
   fail_closed: true, // Fail-closed by default for safety
   debug_mode: false,
+  // MVP: Only block shirtless and swimwear
+  blocking_mode: 'mvp',
+  prototype_mode: false,
 };
 
 export const useLocalSettings = () => {
@@ -140,8 +153,8 @@ export const useLocalSettings = () => {
     return sessionNonceRef.current;
   }, []);
 
-  // Get moderation config for WebView injection (with nonce)
-  const getModerationConfig = useCallback(() => {
+  // Get moderation config for WebView injection (with nonce and triggers)
+  const getModerationConfig = useCallback((triggers?: TriggerConfig) => {
     return {
       sensitivity: settings.blur_dial,
       blurStrength: settings.blur_strength_px,
@@ -150,8 +163,25 @@ export const useLocalSettings = () => {
       failClosed: settings.fail_closed,
       debug: settings.debug_mode,
       nonce: sessionNonceRef.current,
+      blockingMode: settings.blocking_mode,
+      prototypeMode: settings.prototype_mode,
+      triggers: triggers || {},
     };
-  }, [settings.shield_active, settings.blur_dial, settings.blur_strength_px, settings.fail_closed, settings.debug_mode]);
+  }, [settings.shield_active, settings.blur_dial, settings.blur_strength_px, settings.fail_closed, settings.debug_mode, settings.blocking_mode, settings.prototype_mode]);
+
+  // Check if a category should be blocked based on MVP mode
+  const shouldBlockCategory = useCallback((category: string): boolean => {
+    if (!settings.shield_active || settings.blur_dial === 0) return false;
+    
+    // In MVP mode, only block shirtless and swimwear
+    if (settings.blocking_mode === 'mvp') {
+      const mvpCategories = ['shirtless', 'swimwear', 'shirtless_male', 'bikini', 'swim_trunks'];
+      return mvpCategories.some(c => category.toLowerCase().includes(c));
+    }
+    
+    // Full mode - block based on sensitivity
+    return true;
+  }, [settings.shield_active, settings.blur_dial, settings.blocking_mode]);
 
   return {
     settings,
@@ -166,5 +196,6 @@ export const useLocalSettings = () => {
     isModerationEnabled,
     getModerationConfig,
     getNonce,
+    shouldBlockCategory,
   };
 };
