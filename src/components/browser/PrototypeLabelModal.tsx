@@ -5,221 +5,146 @@
  * Collects user labels for training data.
  */
 
-import { useState } from 'react';
-import { X, Send, Camera, AlertTriangle } from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { Checkbox } from '@/components/ui/checkbox';
-import { Textarea } from '@/components/ui/textarea';
-import { Label } from '@/components/ui/label';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
-import { addLabelToQueue, UserLabel } from '@/lib/label-queue';
-import { useTriggerSettings } from '@/hooks/useTriggerSettings';
-import { toast } from 'sonner';
+import React, { useState } from 'react';
+import { enqueueLabel } from '@/lib/label-queue';
 
-interface PrototypeLabelModalProps {
+export type UserLabel = 'shirtless' | 'swimwear' | 'other' | 'unsure';
+
+export interface PrototypeLabelModalProps {
   open: boolean;
-  onOpenChange: (open: boolean) => void;
-  onReveal: () => void;
-  imageSrc: string;
-  modelPrediction: string;
-  modelConfidence: number;
-  requestId: string;
-  itemId: string;
-  pageUrl: string;
-  platform: string;
+  onClose: () => void;
+  context: {
+    requestId?: string;
+    itemId?: string;
+    src?: string;
+    pageUrl?: string;
+    platform?: string;
+    modelPrediction?: { category?: string; confidence?: number };
+  } | null;
 }
 
-const LABEL_OPTIONS: { value: UserLabel; label: string; icon: string; description: string }[] = [
-  { value: 'shirtless', label: 'Shirtless', icon: '👕', description: 'Person without a shirt' },
-  { value: 'swimwear', label: 'Swimwear', icon: '👙', description: 'Person in swimsuit/bikini' },
-  { value: 'other', label: 'Not Problematic', icon: '✅', description: 'Safe content, false positive' },
-  { value: 'unsure', label: 'Unsure', icon: '🤔', description: 'Not sure how to classify' },
-];
+/**
+ * Simple modal UI for prototype labeling (beginner-friendly).
+ * - Calls enqueueLabel() which persists to local queue and uploads when allowed.
+ */
+export const PrototypeLabelModal: React.FC<PrototypeLabelModalProps> = ({ open, onClose, context }) => {
+  const [consentImage, setConsentImage] = useState<boolean>(false);
+  const [comment, setComment] = useState<string>('');
+  const [submitting, setSubmitting] = useState<boolean>(false);
 
-export const PrototypeLabelModal = ({
-  open,
-  onOpenChange,
-  onReveal,
-  imageSrc,
-  modelPrediction,
-  modelConfidence,
-  requestId,
-  itemId,
-  pageUrl,
-  platform,
-}: PrototypeLabelModalProps) => {
-  const { prototypeConsent, setPrototypeConsent } = useTriggerSettings();
-  const [selectedLabel, setSelectedLabel] = useState<UserLabel | null>(null);
-  const [comment, setComment] = useState('');
-  const [consentImage, setConsentImage] = useState(prototypeConsent);
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  if (!open || !context) return null;
 
-  const handleSubmit = async () => {
-    if (!selectedLabel) {
-      toast.error('Please select a label');
-      return;
-    }
-
-    setIsSubmitting(true);
-
+  const handleLabel = async (userLabel: UserLabel) => {
+    if (submitting) return;
+    setSubmitting(true);
     try {
-      // Fetch image as base64 if consent given
-      let imageBase64: string | undefined;
-      if (consentImage && imageSrc) {
-        try {
-          const response = await fetch(imageSrc);
-          const blob = await response.blob();
-          imageBase64 = await new Promise<string>((resolve) => {
-            const reader = new FileReader();
-            reader.onloadend = () => resolve(reader.result as string);
-            reader.readAsDataURL(blob);
-          });
-        } catch (e) {
-          console.warn('[LabelModal] Could not fetch image for upload:', e);
-        }
-      }
-
-      // Add to queue
-      addLabelToQueue({
-        requestId,
-        itemId,
-        src: imageSrc,
-        pageUrl,
-        platform,
-        modelPrediction,
-        modelConfidence,
-        userLabel: selectedLabel,
-        userComment: comment || undefined,
+      // Minimal label payload
+      await enqueueLabel({
+        requestId: context.requestId || '',
+        itemId: context.itemId || '',
+        src: context.src || '',
+        pageUrl: context.pageUrl || '',
+        platform: context.platform || '',
+        modelPrediction: context.modelPrediction || undefined,
+        userLabel,
+        userComment: comment || '',
         consentImage,
-        imageBase64,
+        timestamp: Date.now(),
       });
-
-      // Update global consent preference
-      if (consentImage !== prototypeConsent) {
-        setPrototypeConsent(consentImage);
-      }
-
-      toast.success('Label saved! Thank you for helping improve detection.');
-      
-      // Close modal and reveal image
-      onOpenChange(false);
-      onReveal();
+      // optimistic UI - close modal
+      onClose();
     } catch (e) {
-      console.error('[LabelModal] Submit error:', e);
-      toast.error('Failed to save label. Please try again.');
+      console.error('[PrototypeLabelModal] enqueue failed', e);
+      alert('Failed to save label locally. Please try again.');
     } finally {
-      setIsSubmitting(false);
+      setSubmitting(false);
     }
-  };
-
-  const handleSkip = () => {
-    // Just reveal without labeling
-    onOpenChange(false);
-    onReveal();
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <Camera className="w-5 h-5 text-aqua" />
-            Help Improve Detection
-          </DialogTitle>
-          <DialogDescription>
-            What type of content is this? Your feedback helps train better AI.
-          </DialogDescription>
-        </DialogHeader>
+    <div style={{
+      position: 'fixed',
+      inset: 0,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      zIndex: 100000,
+      background: 'rgba(0,0,0,0.45)'
+    }}>
+      <div style={{
+        width: 360,
+        background: '#fff',
+        borderRadius: 10,
+        padding: 18,
+        boxShadow: '0 8px 30px rgba(0,0,0,0.25)',
+      }}>
+        <h3 style={{ margin: 0, marginBottom: 8 }}>Was this content shirtless or swimwear?</h3>
+        <p style={{ marginTop: 0, marginBottom: 12, color: '#444' }}>
+          Choose the category that best matches. Your feedback helps improve detection.
+        </p>
 
-        <div className="space-y-4 py-4">
-          {/* Model prediction info */}
-          <div className="p-3 bg-muted/50 rounded-lg text-xs">
-            <div className="flex items-center justify-between">
-              <span className="text-muted-foreground">AI Prediction:</span>
-              <span className="font-medium capitalize">{modelPrediction}</span>
-            </div>
-            <div className="flex items-center justify-between mt-1">
-              <span className="text-muted-foreground">Confidence:</span>
-              <span className="font-medium">{(modelConfidence * 100).toFixed(1)}%</span>
-            </div>
-          </div>
+        <div style={{ display: 'grid', gap: 8 }}>
+          <button
+            onClick={() => handleLabel('shirtless')}
+            style={{ padding: 12, background: '#ef4444', color: 'white', border: 'none', borderRadius: 6, fontWeight: 'bold' }}
+            disabled={submitting}
+          >
+            Shirtless
+          </button>
 
-          {/* Label buttons */}
-          <div className="grid grid-cols-2 gap-2">
-            {LABEL_OPTIONS.map(option => (
-              <Button
-                key={option.value}
-                variant={selectedLabel === option.value ? 'default' : 'outline'}
-                className={`h-auto py-3 flex flex-col items-center gap-1 ${
-                  selectedLabel === option.value ? 'ring-2 ring-aqua' : ''
-                }`}
-                onClick={() => setSelectedLabel(option.value)}
-              >
-                <span className="text-xl">{option.icon}</span>
-                <span className="text-sm font-medium">{option.label}</span>
-                <span className="text-[10px] text-muted-foreground">{option.description}</span>
-              </Button>
-            ))}
-          </div>
+          <button
+            onClick={() => handleLabel('swimwear')}
+            style={{ padding: 12, background: '#1d4ed8', color: 'white', border: 'none', borderRadius: 6, fontWeight: 'bold' }}
+            disabled={submitting}
+          >
+            Swimwear
+          </button>
 
-          {/* Optional comment */}
-          <div className="space-y-2">
-            <Label className="text-xs text-muted-foreground">
-              Additional notes (optional)
-            </Label>
-            <Textarea
-              placeholder="Any additional context..."
-              value={comment}
-              onChange={e => setComment(e.target.value)}
-              className="h-16 text-sm"
-            />
-          </div>
+          <button
+            onClick={() => handleLabel('other')}
+            style={{ padding: 12, background: '#10b981', color: 'white', border: 'none', borderRadius: 6, fontWeight: 'bold' }}
+            disabled={submitting}
+          >
+            Not Problematic
+          </button>
 
-          {/* Consent checkbox */}
-          <div className="flex items-start gap-3 p-3 bg-yellow-500/10 border border-yellow-500/20 rounded-lg">
-            <Checkbox
-              id="consent"
-              checked={consentImage}
-              onCheckedChange={(checked) => setConsentImage(checked === true)}
-            />
-            <div className="space-y-1">
-              <Label htmlFor="consent" className="text-sm font-medium cursor-pointer">
-                Upload image to help improve AI
-              </Label>
-              <p className="text-xs text-muted-foreground">
-                I consent to having this image stored securely for training purposes.
-                Images are encrypted and never shared.
-              </p>
-            </div>
-          </div>
-
-          {/* Privacy notice */}
-          <div className="flex items-start gap-2 text-xs text-muted-foreground">
-            <AlertTriangle className="w-3 h-3 mt-0.5 flex-shrink-0" />
-            <p>
-              Labels are used to improve content detection. 
-              {consentImage ? ' Image will be uploaded.' : ' Image will NOT be uploaded.'}
-            </p>
-          </div>
+          <button
+            onClick={() => handleLabel('unsure')}
+            style={{ padding: 12, background: '#6b7280', color: 'white', border: 'none', borderRadius: 6 }}
+            disabled={submitting}
+          >
+            Unsure
+          </button>
         </div>
 
-        {/* Actions */}
-        <div className="flex justify-between gap-2">
-          <Button variant="ghost" onClick={handleSkip} disabled={isSubmitting}>
-            Skip & Reveal
-          </Button>
-          <Button onClick={handleSubmit} disabled={!selectedLabel || isSubmitting}>
-            <Send className="w-4 h-4 mr-2" />
-            {isSubmitting ? 'Saving...' : 'Submit & Reveal'}
-          </Button>
+        <div style={{ marginTop: 12 }}>
+          <textarea
+            placeholder="Optional comment (why you chose this)"
+            value={comment}
+            onChange={(e) => setComment(e.target.value)}
+            style={{ width: '100%', minHeight: 80, padding: 8, borderRadius: 6, border: '1px solid #e5e7eb' }}
+          />
         </div>
-      </DialogContent>
-    </Dialog>
+
+        <div style={{ marginTop: 10, display: 'flex', alignItems: 'center' }}>
+          <input
+            id="mw-consent-image"
+            type="checkbox"
+            checked={consentImage}
+            onChange={(e) => setConsentImage(e.target.checked)}
+          />
+          <label htmlFor="mw-consent-image" style={{ marginLeft: 8, fontSize: 13 }}>
+            Upload image bytes to improve model (explicit consent)
+          </label>
+        </div>
+
+        <div style={{ marginTop: 12, display: 'flex', justifyContent: 'space-between' }}>
+          <button onClick={onClose} style={{ padding: '10px 14px', borderRadius: 6, background: '#f3f4f6', border: 'none' }}>Cancel</button>
+          <div style={{ opacity: 0.8, fontSize: 12, color: '#6b7280', alignSelf: 'center' }}>{context.platform || ''}</div>
+        </div>
+      </div>
+    </div>
   );
 };
+
+export default PrototypeLabelModal;
