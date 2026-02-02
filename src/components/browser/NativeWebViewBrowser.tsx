@@ -1,22 +1,21 @@
-import { useState, useRef, useEffect, useCallback } from "react";
-import { AlertTriangle, Shield, Loader2 } from "lucide-react";
-import { Capacitor } from "@capacitor/core";
-import { useContentProtection } from "@/hooks/useContentProtection";
-import { useSettings } from "@/hooks/useSettings";
-import { useDeviceId } from "@/hooks/useDeviceId";
-import { useBrowserNavigation } from "@/hooks/useBrowserNavigation";
-import { supabase } from "@/integrations/supabase/client";
-import { FallbackModeUI } from "@/components/browser/FallbackModeUI";
-import { ReaderModeView } from "@/components/browser/ReaderModeView";
-import { SafeBrowserHomepage } from "@/components/browser/SafeBrowserHomepage";
-import { SearchResultsView } from "@/components/browser/SearchResultsView";
-import { PDFViewer } from "@/components/browser/PDFViewer";
-import { PreviewModeView } from "@/components/browser/PreviewModeView";
-import { FullFailureView } from "@/components/browser/FullFailureView";
-import { YouTubePreviewView } from "@/components/browser/YouTubePreviewView";
-import { SocialPreviewView, SocialPlatform } from "@/components/browser/SocialPreviewView";
-import { BrowserHeader } from "@/components/browser/BrowserHeader";
-import { NativeWebViewBrowser } from "@/components/browser/NativeWebViewBrowser";
+import { useState, useCallback, useEffect } from 'react';
+import { Shield, AlertTriangle, Loader2 } from 'lucide-react';
+import { useNativeWebView } from '@/hooks/useNativeWebView';
+import { useContentProtection } from '@/hooks/useContentProtection';
+import { useSettings } from '@/hooks/useSettings';
+import { useDeviceId } from '@/hooks/useDeviceId';
+import { useBrowserNavigation, BrowserView } from '@/hooks/useBrowserNavigation';
+import { supabase } from '@/integrations/supabase/client';
+import { BrowserHeader } from './BrowserHeader';
+import { SafeBrowserHomepage } from './SafeBrowserHomepage';
+import { SearchResultsView } from './SearchResultsView';
+import { FallbackModeUI } from './FallbackModeUI';
+import { ReaderModeView } from './ReaderModeView';
+import { PreviewModeView } from './PreviewModeView';
+import { FullFailureView } from './FullFailureView';
+import { PDFViewer } from './PDFViewer';
+import { YouTubePreviewView } from './YouTubePreviewView';
+import { SocialPreviewView, SocialPlatform } from './SocialPreviewView';
 
 interface SearchResult {
   title: string;
@@ -25,15 +24,7 @@ interface SearchResult {
   thumbnail?: string;
 }
 
-// Sites known to block iframes
-const KNOWN_IFRAME_BLOCKERS = [
-  'google.com', 'youtube.com', 'facebook.com', 'twitter.com', 'x.com',
-  'instagram.com', 'linkedin.com', 'github.com', 'amazon.com', 'ebay.com',
-  'reddit.com', 'netflix.com', 'spotify.com', 'apple.com', 'microsoft.com',
-  'tiktok.com', 'pinterest.com', 'tumblr.com', 'snapchat.com',
-];
-
-// Social platforms that get special preview treatment
+// Sites that should use fallback/preview modes instead of WebView
 const SOCIAL_PLATFORMS = [
   'youtube.com', 'youtu.be', 'instagram.com', 'tiktok.com',
   'facebook.com', 'fb.com', 'twitter.com', 'x.com',
@@ -73,74 +64,47 @@ interface SocialContent {
   sourceUrl: string;
 }
 
-// Check if running on native platform (evaluated once at module load)
-const isNativePlatform = Capacitor.isNativePlatform();
-
-/**
- * SafeBrowser - The main browser component
- * On native platforms (iOS/Android), renders NativeWebViewBrowser
- * On web platforms, renders the iframe-based browser with fallback modes
- */
-const SafeBrowser = () => {
-  // If native, render the native WebView browser
-  if (isNativePlatform) {
-    return <NativeWebViewBrowser />;
-  }
-
-  // Web-based iframe browser
-  return <WebBrowser />;
-};
-
-/**
- * WebBrowser - Iframe-based browser for web platforms
- */
-const WebBrowser = () => {
-  // URL input state (separate from navigation state)
-  const [urlInput, setUrlInput] = useState("");
-  
-  // Navigation state
-  const {
-    currentView,
-    currentUrl,
-    displayUrl,
-    navigate,
-    goBack,
-    goForward,
-    goHome,
-    canGoBack,
-    canGoForward,
-    getModeLabel,
-    getModeColor,
-  } = useBrowserNavigation();
-  
-  // Loading states
+export const NativeWebViewBrowser = () => {
+  const [urlInput, setUrlInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isLoadingReader, setIsLoadingReader] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
   
   // Content states
-  const [fallbackUrl, setFallbackUrl] = useState("");
+  const [fallbackUrl, setFallbackUrl] = useState('');
   const [readerContent, setReaderContent] = useState<ReaderContent | null>(null);
   const [readerError, setReaderError] = useState<string | null>(null);
   const [pdfContent, setPdfContent] = useState<PDFContent | null>(null);
   const [youtubeContent, setYoutubeContent] = useState<YouTubeContent | null>(null);
   const [socialContent, setSocialContent] = useState<SocialContent | null>(null);
   const [failureError, setFailureError] = useState<string | null>(null);
-  const [blockedReason, setBlockedReason] = useState("");
-  const [blockedCategory, setBlockedCategory] = useState("");
+  const [blockedReason, setBlockedReason] = useState('');
+  const [blockedCategory, setBlockedCategory] = useState('');
   
   // Search state
-  const [searchQuery, setSearchQuery] = useState("");
+  const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   
-  // Refs and hooks
+  // Hooks
   const { checkBlockedSite, isChecking } = useContentProtection();
   const { settings } = useSettings();
   const deviceId = useDeviceId();
-  const iframeRef = useRef<HTMLIFrameElement>(null);
-  const loadTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  
+  const {
+    currentView,
+    currentUrl,
+    displayUrl,
+    navigate,
+    goBack: navGoBack,
+    goForward: navGoForward,
+    goHome,
+    canGoBack: navCanGoBack,
+    canGoForward: navCanGoForward,
+    getModeLabel,
+    getModeColor,
+  } = useBrowserNavigation();
 
   // Utility functions
   const normalizeUrl = (input: string): string => {
@@ -158,13 +122,6 @@ const WebBrowser = () => {
     } catch {
       return urlString.replace(/^(https?:\/\/)?(www\.)?/, '').split('/')[0];
     }
-  };
-
-  const isKnownBlocker = (urlString: string): boolean => {
-    const domain = extractDomain(urlString);
-    return KNOWN_IFRAME_BLOCKERS.some(blocker => 
-      domain === blocker || domain.endsWith('.' + blocker)
-    );
   };
 
   const isSocialPlatform = (urlString: string): boolean => {
@@ -196,22 +153,77 @@ const WebBrowser = () => {
         confidence: 1.0,
       });
     } catch (error) {
-      console.error('[SafeBrowser] Failed to log event:', error);
+      console.error('[NativeWebView] Failed to log event:', error);
     }
   }, [deviceId]);
 
-  // Cleanup timeout on unmount
-  useEffect(() => {
-    return () => {
-      if (loadTimeoutRef.current) {
-        clearTimeout(loadTimeoutRef.current);
+  // Native WebView handlers
+  const handleNavigationRequest = useCallback(async (url: string): Promise<boolean> => {
+    const domain = extractDomain(url);
+    
+    // Check blocklist
+    if (settings.block_adult_sites) {
+      const result = await checkBlockedSite(url, deviceId);
+      if (result?.isBlocked) {
+        setBlockedReason(result.reason);
+        setBlockedCategory(result.category || 'blocked');
+        navigate('blocked', '', url);
+        await logEvent('blocked', domain, 'blocked');
+        return false;
       }
-    };
-  }, []);
+    }
+    
+    // Social platforms should use preview mode
+    if (isSocialPlatform(url)) {
+      setFallbackUrl(url);
+      navigate('fallback', '', url);
+      await logEvent('social_redirect', domain, 'preview-mode');
+      return false;
+    }
+    
+    return true;
+  }, [settings, checkBlockedSite, deviceId, navigate, logEvent]);
+
+  const {
+    isNative,
+    state: webViewState,
+    open: openWebView,
+    close: closeWebView,
+    goBack: webViewGoBack,
+    goForward: webViewGoForward,
+    reload: webViewReload,
+  } = useNativeWebView({
+    onLoadStart: (url) => {
+      console.log('[NativeWebView] Load start:', url);
+      setIsLoading(true);
+    },
+    onLoadEnd: (url) => {
+      console.log('[NativeWebView] Load end:', url);
+      setIsLoading(false);
+    },
+    onLoadError: (url, error) => {
+      console.error('[NativeWebView] Load error:', url, error);
+      setIsLoading(false);
+      setFallbackUrl(url);
+      navigate('fallback', '', url);
+    },
+    onUrlChange: (url) => {
+      console.log('[NativeWebView] URL change:', url);
+      setUrlInput(url);
+      navigate('browse', url, url);
+    },
+    onNavigationRequest: async (url) => {
+      return handleNavigationRequest(url);
+    },
+    onClose: () => {
+      console.log('[NativeWebView] Closed');
+      navigate('home', '', '');
+    },
+  });
 
   // Search handler
   const handleSearch = useCallback(async (query: string) => {
-    console.log('[SafeBrowser] Starting search:', query);
+    console.log('[NativeWebView] Starting search:', query);
     setSearchQuery(query);
     setIsSearching(true);
     setSearchError(null);
@@ -234,7 +246,7 @@ const WebBrowser = () => {
       }
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : 'Search failed';
-      console.error('[SafeBrowser] Search exception:', error);
+      console.error('[NativeWebView] Search exception:', error);
       setSearchError(errorMsg);
     } finally {
       setIsSearching(false);
@@ -266,20 +278,13 @@ const WebBrowser = () => {
     setSocialContent(null);
     setFailureError(null);
     
-    if (loadTimeoutRef.current) {
-      clearTimeout(loadTimeoutRef.current);
-    }
-    
     const normalizedUrl = normalizeUrl(urlToNavigate);
     const domain = extractDomain(urlToNavigate);
-
-    // Update URL bar
     setUrlInput(normalizedUrl);
 
-    // Check if the site is blocked
+    // Check blocklist
     if (settings.block_adult_sites) {
       const result = await checkBlockedSite(normalizedUrl, deviceId);
-      
       if (result?.isBlocked) {
         setBlockedReason(result.reason);
         setBlockedCategory(result.category || 'blocked');
@@ -290,92 +295,43 @@ const WebBrowser = () => {
       }
     }
 
-    // Check if site is known to block iframes
-    if (isKnownBlocker(normalizedUrl)) {
-      console.log('[SafeBrowser] Known iframe blocker detected:', domain);
+    // Social platforms use preview mode
+    if (isSocialPlatform(normalizedUrl)) {
       setFallbackUrl(normalizedUrl);
       navigate('fallback', '', normalizedUrl);
-      await logEvent('fallback', domain, 'iframe-blocked');
+      await logEvent('social_redirect', domain, 'preview-mode');
       setIsLoading(false);
       return;
     }
 
-    // Try to load in iframe
-    navigate('browse', normalizedUrl, normalizedUrl);
-    await logEvent('allowed', domain, 'allowed');
-    
-    // Timeout to detect load failures
-    loadTimeoutRef.current = setTimeout(async () => {
-      if (iframeRef.current) {
-        try {
-          const doc = iframeRef.current.contentDocument;
-          const win = iframeRef.current.contentWindow;
-          const isEmpty = !doc || !doc.body || doc.body.innerHTML.trim() === '';
-          const isAboutBlank = win?.location?.href === 'about:blank';
-          const hasNoContent = doc?.body?.children?.length === 0;
-          
-          if (isEmpty || isAboutBlank || hasNoContent) {
-            console.log('[SafeBrowser] Iframe empty after timeout, switching to fallback');
-            await logEvent('fallback_timeout', domain, 'iframe-empty');
-            setFallbackUrl(normalizedUrl);
-            navigate('fallback', '', normalizedUrl);
-          }
-        } catch {
-          console.log('[SafeBrowser] Cross-origin frame - content loaded successfully');
-        }
+    // Open in native WebView
+    if (isNative) {
+      const success = await openWebView(normalizedUrl, true);
+      if (success) {
+        navigate('browse', normalizedUrl, normalizedUrl);
+        await logEvent('allowed', domain, 'native-webview');
+      } else {
+        setFallbackUrl(normalizedUrl);
+        navigate('fallback', '', normalizedUrl);
+        await logEvent('fallback', domain, 'webview-failed');
       }
-      setIsLoading(false);
-    }, 10000);
+    } else {
+      // Web fallback - use iframe behavior
+      navigate('browse', normalizedUrl, normalizedUrl);
+      await logEvent('allowed', domain, 'iframe');
+    }
     
     setIsLoading(false);
-  }, [urlInput, settings, checkBlockedSite, deviceId, handleSearch, navigate, logEvent]);
-
-  // Iframe event handlers
-  const handleIframeError = useCallback(async () => {
-    console.log('[SafeBrowser] Iframe load error');
-    if (currentUrl) {
-      const domain = extractDomain(currentUrl);
-      await logEvent('iframe_error', domain, 'load-failed');
-      setFallbackUrl(currentUrl);
-      navigate('fallback', '', currentUrl);
-    }
-  }, [currentUrl, navigate, logEvent]);
-
-  const handleIframeLoad = useCallback(async () => {
-    if (loadTimeoutRef.current) {
-      clearTimeout(loadTimeoutRef.current);
-    }
-    
-    setTimeout(async () => {
-      if (iframeRef.current && currentUrl) {
-        try {
-          const doc = iframeRef.current.contentDocument;
-          const win = iframeRef.current.contentWindow;
-          const isEmpty = doc && (!doc.body || doc.body.innerHTML.trim() === '');
-          const isAboutBlank = win?.location?.href === 'about:blank';
-          
-          if (isEmpty || isAboutBlank) {
-            console.log('[SafeBrowser] Iframe blocked/empty');
-            const domain = extractDomain(currentUrl);
-            await logEvent('iframe_blocked', domain, 'csp-violation');
-            setFallbackUrl(currentUrl);
-            navigate('fallback', '', currentUrl);
-          }
-        } catch {
-          console.log('[SafeBrowser] Cross-origin frame - loaded successfully');
-        }
-      }
-    }, 1500);
-  }, [currentUrl, navigate, logEvent]);
+  }, [urlInput, settings, checkBlockedSite, deviceId, isNative, openWebView, handleSearch, navigate, logEvent]);
 
   // Reader Mode handler
   const handleReaderMode = useCallback(async () => {
     if (!fallbackUrl) {
-      console.error('[SafeBrowser] No fallback URL');
+      console.error('[NativeWebView] No fallback URL');
       return;
     }
 
-    console.log('[SafeBrowser] Opening Reader Mode for:', fallbackUrl);
+    console.log('[NativeWebView] Opening Reader Mode for:', fallbackUrl);
     setIsLoadingReader(true);
     setReaderError(null);
     setPdfContent(null);
@@ -455,7 +411,6 @@ const WebBrowser = () => {
       if (data?.success && data?.data) {
         const contentData = data.data;
         
-        // Reader Mode failed but Preview available
         if (data.readerModeFailed) {
           if (contentData.previewHtml && contentData.previewHtml.length > 100) {
             setReaderContent({
@@ -477,7 +432,6 @@ const WebBrowser = () => {
           return;
         }
         
-        // Check content length
         if (!contentData.content || contentData.content.trim().length < 50) {
           if (contentData.previewHtml && contentData.previewHtml.length > 100) {
             setReaderContent({
@@ -499,7 +453,6 @@ const WebBrowser = () => {
           return;
         }
 
-        // Success - Reader Mode
         setReaderContent({
           content: contentData.content,
           previewHtml: contentData.previewHtml,
@@ -517,7 +470,7 @@ const WebBrowser = () => {
       }
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : 'Reader Mode failed';
-      console.error('[SafeBrowser] Reader mode exception:', error);
+      console.error('[NativeWebView] Reader mode exception:', error);
       setFailureError(errorMsg);
       navigate('failure', '', fallbackUrl);
       await logEvent('reader_mode_error', extractDomain(fallbackUrl), 'failed');
@@ -527,8 +480,7 @@ const WebBrowser = () => {
   }, [fallbackUrl, navigate, logEvent]);
 
   // Navigation handlers
-  const handleGoBack = useCallback(() => {
-    // Special handling for content views
+  const handleGoBack = useCallback(async () => {
     if (['reader', 'preview', 'youtube', 'social', 'pdf', 'failure'].includes(currentView)) {
       setReaderContent(null);
       setPdfContent(null);
@@ -546,19 +498,30 @@ const WebBrowser = () => {
       setUrlInput('');
       return;
     }
+
+    if (currentView === 'browse' && isNative && webViewState.isOpen) {
+      const success = await webViewGoBack();
+      if (!success) {
+        await closeWebView();
+        goHome();
+      }
+      return;
+    }
     
-    if (!goBack() && iframeRef.current?.contentWindow) {
-      iframeRef.current.contentWindow.history.back();
+    if (!navGoBack()) {
+      goHome();
     }
-  }, [currentView, fallbackUrl, navigate, goBack, goHome]);
+  }, [currentView, fallbackUrl, isNative, webViewState.isOpen, navigate, navGoBack, goHome, webViewGoBack, closeWebView]);
 
-  const handleGoForward = useCallback(() => {
-    if (!goForward() && iframeRef.current?.contentWindow) {
-      iframeRef.current.contentWindow.history.forward();
+  const handleGoForward = useCallback(async () => {
+    if (currentView === 'browse' && isNative && webViewState.isOpen) {
+      await webViewGoForward();
+      return;
     }
-  }, [goForward]);
+    navGoForward();
+  }, [currentView, isNative, webViewState.isOpen, navGoForward, webViewGoForward]);
 
-  const handleRefresh = useCallback(() => {
+  const handleRefresh = useCallback(async () => {
     if (readerContent) {
       handleReaderMode();
       return;
@@ -567,12 +530,16 @@ const WebBrowser = () => {
       handleSearch(searchQuery);
       return;
     }
-    if (iframeRef.current?.contentWindow) {
-      iframeRef.current.contentWindow.location.reload();
+    if (currentView === 'browse' && isNative && webViewState.isOpen) {
+      await webViewReload();
+      return;
     }
-  }, [readerContent, currentView, searchQuery, handleReaderMode, handleSearch]);
+  }, [readerContent, currentView, searchQuery, isNative, webViewState.isOpen, handleReaderMode, handleSearch, webViewReload]);
 
-  const handleHome = useCallback(() => {
+  const handleHome = useCallback(async () => {
+    if (isNative && webViewState.isOpen) {
+      await closeWebView();
+    }
     setReaderContent(null);
     setPdfContent(null);
     setYoutubeContent(null);
@@ -583,7 +550,7 @@ const WebBrowser = () => {
     setUrlInput('');
     setFallbackUrl('');
     goHome();
-  }, [goHome]);
+  }, [isNative, webViewState.isOpen, closeWebView, goHome]);
 
   const handleScanPage = useCallback(() => {
     setIsScanning(true);
@@ -646,7 +613,7 @@ const WebBrowser = () => {
           onRefresh={handleRefresh}
           onHome={handleHome}
           canGoBack={true}
-          canGoForward={canGoForward}
+          canGoForward={navCanGoForward}
           isLoading={isLoading}
           isProtected={settings.shield_active}
           modeLabel="PDF Viewer"
@@ -731,9 +698,9 @@ const WebBrowser = () => {
         onRefresh={handleRefresh}
         onHome={handleHome}
         onScan={handleScanPage}
-        canGoBack={canGoBack || currentView !== 'home'}
-        canGoForward={canGoForward}
-        isLoading={isLoading || isChecking}
+        canGoBack={navCanGoBack || currentView !== 'home'}
+        canGoForward={navCanGoForward}
+        isLoading={isLoading || isChecking || webViewState.isLoading}
         isScanning={isScanning}
         isProtected={settings.shield_active}
         modeLabel={getModeLabel()}
@@ -775,28 +742,44 @@ const WebBrowser = () => {
             isSocialPlatform={isSocialPlatform(fallbackUrl)}
             platformName={getSocialPlatformName(fallbackUrl)}
           />
-        ) : currentView === 'browse' && currentUrl ? (
-          <div className="absolute inset-0 pb-16">
-            <iframe
-              ref={iframeRef}
-              src={currentUrl}
-              className="w-full h-full border-0"
-              title="Safe Browser Content"
-              allow="geolocation; microphone; camera; autoplay; encrypted-media; clipboard-read; clipboard-write; fullscreen; payment"
-              sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-presentation allow-modals allow-downloads allow-storage-access-by-user-activation"
-              referrerPolicy="no-referrer-when-downgrade"
-              onError={handleIframeError}
-              onLoad={handleIframeLoad}
-            />
-            {isScanning && (
-              <div className="absolute inset-0 bg-background/50 flex items-center justify-center pointer-events-none">
-                <div className="bg-card p-4 rounded-lg border border-aqua/30 flex items-center gap-3">
-                  <Loader2 className="w-5 h-5 text-aqua animate-spin" />
-                  <span className="text-sm font-display">SCANNING IMAGES...</span>
-                </div>
+        ) : currentView === 'browse' ? (
+          // Native WebView is handled externally - show placeholder when WebView is open
+          isNative && webViewState.isOpen ? (
+            <div className="absolute inset-0 flex items-center justify-center bg-background">
+              <div className="text-center">
+                <Loader2 className="w-8 h-8 mx-auto mb-3 text-aqua animate-spin" />
+                <p className="text-sm text-muted-foreground font-display tracking-wider">
+                  BROWSING IN NATIVE WEBVIEW
+                </p>
+                <p className="text-xs text-silver mt-2">
+                  {webViewState.currentUrl}
+                </p>
               </div>
-            )}
-          </div>
+            </div>
+          ) : (
+            // Web fallback message
+            <div className="absolute inset-0 flex items-center justify-center p-6 bg-background">
+              <div className="text-center max-w-md">
+                <Shield className="w-16 h-16 mx-auto mb-4 text-aqua" />
+                <h2 className="font-display text-xl tracking-wider mb-3">
+                  NATIVE WEBVIEW REQUIRED
+                </h2>
+                <p className="text-sm text-muted-foreground mb-6">
+                  Full browser functionality requires the native mobile app. 
+                  Install the app on iOS or Android for the complete experience.
+                </p>
+                <button
+                  onClick={() => {
+                    setFallbackUrl(currentUrl);
+                    navigate('fallback', '', currentUrl);
+                  }}
+                  className="px-6 py-3 bg-aqua text-accent-foreground font-display text-sm tracking-wider hover:bg-aqua/90 transition-colors"
+                >
+                  USE READER MODE INSTEAD
+                </button>
+              </div>
+            </div>
+          )
         ) : (
           <SafeBrowserHomepage onSearch={handleSearch} isSearching={isSearching} />
         )}
@@ -813,5 +796,3 @@ const WebBrowser = () => {
     </div>
   );
 };
-
-export default SafeBrowser;
