@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { generateNonce } from '@/lib/moderation-request-utils';
 
 export type BlurLevel = 'OFF' | 'LOW' | 'MEDIUM' | 'HIGH';
 export type AISensitivity = 'relaxed' | 'moderate' | 'strict';
@@ -21,9 +22,11 @@ export interface LocalProtectionSettings {
   block_social_media: boolean;
   auto_scan_images: boolean;
   show_scan_notifications: boolean;
-  // New granular controls
+  // Granular controls
   blur_dial: BlurDialLevel;
   blur_strength_px: number; // 0-50px
+  fail_closed: boolean; // Blur on timeout/error
+  debug_mode: boolean;
 }
 
 const SETTINGS_KEY = 'iron_watch_local_settings';
@@ -38,11 +41,16 @@ const DEFAULT_SETTINGS: LocalProtectionSettings = {
   show_scan_notifications: true,
   blur_dial: 3,
   blur_strength_px: 24,
+  fail_closed: true, // Fail-closed by default for safety
+  debug_mode: false,
 };
 
 export const useLocalSettings = () => {
   const [settings, setSettings] = useState<LocalProtectionSettings>(DEFAULT_SETTINGS);
   const [isLoaded, setIsLoaded] = useState(false);
+  
+  // Per-session nonce for security - generated once per app session
+  const sessionNonceRef = useRef<string>(generateNonce());
 
   // Load settings from localStorage on mount
   useEffect(() => {
@@ -127,14 +135,23 @@ export const useLocalSettings = () => {
     return settings.shield_active && settings.blur_dial > 0;
   }, [settings.shield_active, settings.blur_dial]);
 
-  // Get moderation config for WebView injection
+  // Get the current session nonce
+  const getNonce = useCallback((): string => {
+    return sessionNonceRef.current;
+  }, []);
+
+  // Get moderation config for WebView injection (with nonce)
   const getModerationConfig = useCallback(() => {
     return {
       sensitivity: settings.blur_dial,
       blurStrength: settings.blur_strength_px,
       enabled: settings.shield_active && settings.blur_dial > 0,
+      forcedBlur: false,
+      failClosed: settings.fail_closed,
+      debug: settings.debug_mode,
+      nonce: sessionNonceRef.current,
     };
-  }, [settings.shield_active, settings.blur_dial, settings.blur_strength_px]);
+  }, [settings.shield_active, settings.blur_dial, settings.blur_strength_px, settings.fail_closed, settings.debug_mode]);
 
   return {
     settings,
@@ -148,5 +165,6 @@ export const useLocalSettings = () => {
     getDialThresholds,
     isModerationEnabled,
     getModerationConfig,
+    getNonce,
   };
 };
