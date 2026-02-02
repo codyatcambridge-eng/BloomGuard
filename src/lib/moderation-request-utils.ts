@@ -65,6 +65,14 @@ export interface ModerationRequestItem {
 }
 
 /**
+ * Trigger configuration passed in requests
+ * Maps trigger IDs to enabled state
+ */
+export interface TriggerConfig {
+  [triggerId: string]: boolean;
+}
+
+/**
  * Request message sent from WebView to Host
  * 
  * Security: The nonce field is generated once per injection and must be included
@@ -79,6 +87,8 @@ export interface ModerationRequestMessage {
     sexy: number;
     hentai: number;
   };
+  triggers?: TriggerConfig;
+  platform?: string;
   nonce: string;
   timestamp: number;
 }
@@ -92,6 +102,8 @@ export interface ModerationResultItem {
   shouldBlur: boolean;
   category: string;
   confidence: number;
+  /** Which triggers matched (for debugging) */
+  matchedTriggers?: string[];
 }
 
 /**
