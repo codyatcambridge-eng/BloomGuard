@@ -3,6 +3,16 @@ import { useState, useEffect, useCallback } from 'react';
 export type BlurLevel = 'OFF' | 'LOW' | 'MEDIUM' | 'HIGH';
 export type AISensitivity = 'relaxed' | 'moderate' | 'strict';
 
+/**
+ * Blur dial levels (0-4)
+ * 0 = Off (no moderation)
+ * 1 = Relaxed (only explicit)
+ * 2 = Moderate (explicit + suggestive)
+ * 3 = Strict (all questionable)
+ * 4 = Maximum (aggressive filtering)
+ */
+export type BlurDialLevel = 0 | 1 | 2 | 3 | 4;
+
 export interface LocalProtectionSettings {
   shield_active: boolean;
   blur_level: BlurLevel;
@@ -11,6 +21,9 @@ export interface LocalProtectionSettings {
   block_social_media: boolean;
   auto_scan_images: boolean;
   show_scan_notifications: boolean;
+  // New granular controls
+  blur_dial: BlurDialLevel;
+  blur_strength_px: number; // 0-50px
 }
 
 const SETTINGS_KEY = 'iron_watch_local_settings';
@@ -23,6 +36,8 @@ const DEFAULT_SETTINGS: LocalProtectionSettings = {
   block_social_media: false,
   auto_scan_images: true,
   show_scan_notifications: true,
+  blur_dial: 3,
+  blur_strength_px: 24,
 };
 
 export const useLocalSettings = () => {
@@ -80,7 +95,7 @@ export const useLocalSettings = () => {
     }
   }, [settings.ai_sensitivity]);
 
-  // Get blur amount in pixels based on level
+  // Get blur amount in pixels based on level (legacy)
   const getBlurAmount = useCallback(() => {
     switch (settings.blur_level) {
       case 'OFF': return 0;
@@ -90,6 +105,37 @@ export const useLocalSettings = () => {
     }
   }, [settings.blur_level]);
 
+  // Get blur strength from new dial setting
+  const getBlurStrength = useCallback(() => {
+    return settings.blur_strength_px;
+  }, [settings.blur_strength_px]);
+
+  // Get sensitivity thresholds from blur dial (0-4)
+  const getDialThresholds = useCallback(() => {
+    switch (settings.blur_dial) {
+      case 0: return { porn: 1.1, sexy: 1.1, hentai: 1.1 }; // Off
+      case 1: return { porn: 0.7, sexy: 0.85, hentai: 0.7 }; // Relaxed
+      case 2: return { porn: 0.5, sexy: 0.65, hentai: 0.5 }; // Moderate
+      case 3: return { porn: 0.3, sexy: 0.45, hentai: 0.3 }; // Strict
+      case 4: return { porn: 0.15, sexy: 0.25, hentai: 0.15 }; // Maximum
+      default: return { porn: 0.3, sexy: 0.45, hentai: 0.3 };
+    }
+  }, [settings.blur_dial]);
+
+  // Check if moderation is enabled
+  const isModerationEnabled = useCallback(() => {
+    return settings.shield_active && settings.blur_dial > 0;
+  }, [settings.shield_active, settings.blur_dial]);
+
+  // Get moderation config for WebView injection
+  const getModerationConfig = useCallback(() => {
+    return {
+      sensitivity: settings.blur_dial,
+      blurStrength: settings.blur_strength_px,
+      enabled: settings.shield_active && settings.blur_dial > 0,
+    };
+  }, [settings.shield_active, settings.blur_dial, settings.blur_strength_px]);
+
   return {
     settings,
     isLoaded,
@@ -98,5 +144,9 @@ export const useLocalSettings = () => {
     resetSettings,
     getAIThresholds,
     getBlurAmount,
+    getBlurStrength,
+    getDialThresholds,
+    isModerationEnabled,
+    getModerationConfig,
   };
 };
