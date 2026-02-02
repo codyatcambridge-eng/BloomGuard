@@ -57,14 +57,27 @@ export const useOnDeviceModeration = () => {
   const [error, setError] = useState<string | null>(null);
   const modelRef = useRef<nsfwjs.NSFWJS | null>(null);
   const imageCache = useRef<Map<string, ModerationResult>>(new Map());
+  const initAttempted = useRef(false);
 
-  // Load model on mount
+  // Load model on mount with graceful error handling
   useEffect(() => {
     let mounted = true;
 
     const init = async () => {
+      // Prevent multiple init attempts
+      if (initAttempted.current) return;
+      initAttempted.current = true;
+      
       setModelState('loading');
+      
       try {
+        // Check if WebGL is available
+        const canvas = document.createElement('canvas');
+        const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+        if (!gl) {
+          throw new Error('WebGL not supported');
+        }
+        
         const model = await loadModel();
         if (mounted) {
           modelRef.current = model;
@@ -73,9 +86,17 @@ export const useOnDeviceModeration = () => {
         }
       } catch (err) {
         if (mounted) {
-          setError(err instanceof Error ? err.message : 'Failed to load AI model');
+          const errorMsg = err instanceof Error ? err.message : 'Failed to load AI model';
+          setError(errorMsg);
           setModelState('error');
           console.error('[OnDeviceAI] Failed to load model:', err);
+          
+          // Log specific failure reason
+          if (errorMsg.includes('WebGL')) {
+            console.warn('[OnDeviceAI] WebGL not available - image moderation disabled');
+          } else if (errorMsg.includes('fetch')) {
+            console.warn('[OnDeviceAI] Could not fetch model - image moderation disabled');
+          }
         }
       }
     };
@@ -84,17 +105,24 @@ export const useOnDeviceModeration = () => {
     return () => { mounted = false; };
   }, []);
 
-  // Classify a single image
+  // Classify a single image with timeout and error handling
   const classifyImage = useCallback(async (
     imageSource: HTMLImageElement | HTMLCanvasElement | string,
     thresholds: AIThresholds = { porn: 0.3, sexy: 0.4, hentai: 0.3 }
   ): Promise<ModerationResult | null> => {
+    // Return null gracefully if model isn't ready
     if (modelState !== 'ready' || !modelRef.current) {
-      console.warn('[OnDeviceAI] Model not ready');
+      if (modelState === 'error') {
+        console.debug('[OnDeviceAI] Model unavailable, skipping classification');
+      } else {
+        console.warn('[OnDeviceAI] Model not ready, state:', modelState);
+      }
       return null;
     }
 
     const startTime = performance.now();
+    const LOAD_TIMEOUT = 8000; // 8 second timeout for image loading
+    const CLASSIFY_TIMEOUT = 5000; // 5 second timeout for classification
 
     try {
       let image: HTMLImageElement | HTMLCanvasElement;
@@ -109,20 +137,44 @@ export const useOnDeviceModeration = () => {
           return imageCache.current.get(cacheKey)!;
         }
 
-        // Load image from URL
+        // Load image from URL with timeout
         image = await new Promise<HTMLImageElement>((resolve, reject) => {
           const img = new Image();
           img.crossOrigin = 'anonymous';
-          img.onload = () => resolve(img);
-          img.onerror = () => reject(new Error('Failed to load image'));
+          
+          const timeout = setTimeout(() => {
+            img.src = ''; // Cancel load
+            reject(new Error('Image load timeout'));
+          }, LOAD_TIMEOUT);
+          
+          img.onload = () => {
+            clearTimeout(timeout);
+            // Validate image dimensions
+            if (img.width < 10 || img.height < 10) {
+              reject(new Error('Image too small'));
+              return;
+            }
+            resolve(img);
+          };
+          
+          img.onerror = () => {
+            clearTimeout(timeout);
+            reject(new Error('Failed to load image'));
+          };
+          
           img.src = imageSource;
         });
       } else {
         image = imageSource;
       }
 
-      // Run classification
-      const predictions = await modelRef.current.classify(image);
+      // Run classification with timeout
+      const classifyPromise = modelRef.current.classify(image);
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('Classification timeout')), CLASSIFY_TIMEOUT);
+      });
+      
+      const predictions = await Promise.race([classifyPromise, timeoutPromise]);
       const inferenceTime = performance.now() - startTime;
 
       // Find dominant class and check thresholds
@@ -167,7 +219,13 @@ export const useOnDeviceModeration = () => {
 
       return result;
     } catch (err) {
-      console.error('[OnDeviceAI] Classification error:', err);
+      const errorMsg = err instanceof Error ? err.message : 'Unknown error';
+      // Only log unexpected errors, not common ones like load failures
+      if (!errorMsg.includes('load') && !errorMsg.includes('timeout') && !errorMsg.includes('small')) {
+        console.error('[OnDeviceAI] Classification error:', errorMsg);
+      } else {
+        console.debug('[OnDeviceAI] Skipped image:', errorMsg);
+      }
       return null;
     }
   }, [modelState]);

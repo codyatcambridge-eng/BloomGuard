@@ -255,9 +255,15 @@ export const ReaderModeView = ({ content, images, title, sourceUrl, onBack }: Re
               </span>
             )}
             {modelState === 'error' && (
-              <span className="flex items-center gap-1 text-destructive">
+              <span className="flex items-center gap-1 text-amber-500">
                 <AlertTriangle className="w-3 h-3" />
-                AI Error
+                Image moderation unavailable
+              </span>
+            )}
+            {modelState === 'idle' && (
+              <span className="flex items-center gap-1 text-muted-foreground">
+                <Shield className="w-3 h-3" />
+                AI Initializing...
               </span>
             )}
           </div>
@@ -269,6 +275,10 @@ export const ReaderModeView = ({ content, images, title, sourceUrl, onBack }: Re
                 <span className="flex items-center gap-1 text-aqua">
                   <Loader2 className="w-3 h-3 animate-spin" />
                   Scanning {scannedCount}/{stats.total}
+                </span>
+              ) : modelState === 'error' ? (
+                <span className="text-muted-foreground">
+                  {stats.total} image(s) not scanned
                 </span>
               ) : (
                 <>
@@ -302,6 +312,12 @@ export const ReaderModeView = ({ content, images, title, sourceUrl, onBack }: Re
         
         {scanError && (
           <p className="text-xs text-amber-600 mt-1">{scanError}</p>
+        )}
+        
+        {modelState === 'error' && stats.total > 0 && (
+          <p className="text-xs text-muted-foreground mt-1">
+            Images will be shown without moderation. Please browse carefully.
+          </p>
         )}
       </div>
 
