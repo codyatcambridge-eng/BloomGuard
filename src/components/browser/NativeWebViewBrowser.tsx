@@ -1,10 +1,11 @@
 import { useState, useCallback, useEffect } from 'react';
-import { Shield, AlertTriangle, Loader2 } from 'lucide-react';
+import { Shield, AlertTriangle, Loader2, Globe } from 'lucide-react';
 import { useNativeWebView } from '@/hooks/useNativeWebView';
 import { useContentProtection } from '@/hooks/useContentProtection';
 import { useSettings } from '@/hooks/useSettings';
 import { useDeviceId } from '@/hooks/useDeviceId';
 import { useBrowserNavigation, BrowserView } from '@/hooks/useBrowserNavigation';
+import { useCapacitor } from '@/hooks/useCapacitor';
 import { supabase } from '@/integrations/supabase/client';
 import { BrowserHeader } from './BrowserHeader';
 import { SafeBrowserHomepage } from './SafeBrowserHomepage';
@@ -16,6 +17,7 @@ import { FullFailureView } from './FullFailureView';
 import { PDFViewer } from './PDFViewer';
 import { YouTubePreviewView } from './YouTubePreviewView';
 import { SocialPreviewView, SocialPlatform } from './SocialPreviewView';
+import { ExternalLinkWarning } from './ExternalLinkWarning';
 
 interface SearchResult {
   title: string;
@@ -23,12 +25,6 @@ interface SearchResult {
   snippet: string;
   thumbnail?: string;
 }
-
-// Sites that should use fallback/preview modes instead of WebView
-const SOCIAL_PLATFORMS = [
-  'youtube.com', 'youtu.be', 'instagram.com', 'tiktok.com',
-  'facebook.com', 'fb.com', 'twitter.com', 'x.com',
-];
 
 interface ReaderContent {
   content: string;
@@ -64,7 +60,14 @@ interface SocialContent {
   sourceUrl: string;
 }
 
+/**
+ * NativeWebViewBrowser - Unified browser component
+ * Uses native WebView on mobile, fallback modes on web
+ * Social platforms load fully in WebView (not preview mode)
+ */
 export const NativeWebViewBrowser = () => {
+  const { isNative, platform } = useCapacitor();
+  
   const [urlInput, setUrlInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isLoadingReader, setIsLoadingReader] = useState(false);
@@ -86,6 +89,9 @@ export const NativeWebViewBrowser = () => {
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+  
+  // External link warning
+  const [externalWarningUrl, setExternalWarningUrl] = useState<string | null>(null);
   
   // Hooks
   const { checkBlockedSite, isChecking } = useContentProtection();
@@ -124,21 +130,8 @@ export const NativeWebViewBrowser = () => {
     }
   };
 
-  const isSocialPlatform = (urlString: string): boolean => {
-    const domain = extractDomain(urlString);
-    return SOCIAL_PLATFORMS.some(platform => 
-      domain === platform || domain.endsWith('.' + platform)
-    );
-  };
-
-  const getSocialPlatformName = (urlString: string): string | undefined => {
-    const domain = extractDomain(urlString);
-    if (domain.includes('youtube') || domain.includes('youtu.be')) return 'YouTube';
-    if (domain.includes('instagram')) return 'Instagram';
-    if (domain.includes('tiktok')) return 'TikTok';
-    if (domain.includes('facebook') || domain.includes('fb.')) return 'Facebook';
-    if (domain.includes('twitter') || domain.includes('x.com')) return 'X (Twitter)';
-    return undefined;
+  const isPdfUrl = (urlString: string): boolean => {
+    return urlString.toLowerCase().endsWith('.pdf');
   };
 
   const logEvent = useCallback(async (eventType: string, domain: string, action: string) => {
@@ -153,7 +146,7 @@ export const NativeWebViewBrowser = () => {
         confidence: 1.0,
       });
     } catch (error) {
-      console.error('[NativeWebView] Failed to log event:', error);
+      console.error('[Browser] Failed to log event:', error);
     }
   }, [deviceId]);
 
@@ -173,19 +166,11 @@ export const NativeWebViewBrowser = () => {
       }
     }
     
-    // Social platforms should use preview mode
-    if (isSocialPlatform(url)) {
-      setFallbackUrl(url);
-      navigate('fallback', '', url);
-      await logEvent('social_redirect', domain, 'preview-mode');
-      return false;
-    }
-    
+    // All navigation allowed in native WebView (including social platforms)
     return true;
   }, [settings, checkBlockedSite, deviceId, navigate, logEvent]);
 
   const {
-    isNative,
     state: webViewState,
     open: openWebView,
     close: closeWebView,
@@ -194,36 +179,35 @@ export const NativeWebViewBrowser = () => {
     reload: webViewReload,
   } = useNativeWebView({
     onLoadStart: (url) => {
-      console.log('[NativeWebView] Load start:', url);
+      console.log('[Browser] Load start:', url);
       setIsLoading(true);
     },
     onLoadEnd: (url) => {
-      console.log('[NativeWebView] Load end:', url);
+      console.log('[Browser] Load end:', url);
       setIsLoading(false);
     },
     onLoadError: (url, error) => {
-      console.error('[NativeWebView] Load error:', url, error);
+      console.error('[Browser] Load error:', url, error);
       setIsLoading(false);
+      // On error, offer fallback modes
       setFallbackUrl(url);
       navigate('fallback', '', url);
     },
     onUrlChange: (url) => {
-      console.log('[NativeWebView] URL change:', url);
+      console.log('[Browser] URL change:', url);
       setUrlInput(url);
       navigate('browse', url, url);
     },
-    onNavigationRequest: async (url) => {
-      return handleNavigationRequest(url);
-    },
+    onNavigationRequest: handleNavigationRequest,
     onClose: () => {
-      console.log('[NativeWebView] Closed');
+      console.log('[Browser] WebView closed');
       navigate('home', '', '');
     },
   });
 
   // Search handler
   const handleSearch = useCallback(async (query: string) => {
-    console.log('[NativeWebView] Starting search:', query);
+    console.log('[Browser] Starting search:', query);
     setSearchQuery(query);
     setIsSearching(true);
     setSearchError(null);
@@ -246,7 +230,7 @@ export const NativeWebViewBrowser = () => {
       }
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : 'Search failed';
-      console.error('[NativeWebView] Search exception:', error);
+      console.error('[Browser] Search exception:', error);
       setSearchError(errorMsg);
     } finally {
       setIsSearching(false);
@@ -295,30 +279,32 @@ export const NativeWebViewBrowser = () => {
       }
     }
 
-    // Social platforms use preview mode
-    if (isSocialPlatform(normalizedUrl)) {
+    // Handle PDFs
+    if (isPdfUrl(normalizedUrl)) {
       setFallbackUrl(normalizedUrl);
       navigate('fallback', '', normalizedUrl);
-      await logEvent('social_redirect', domain, 'preview-mode');
+      await logEvent('pdf_detected', domain, 'pdf');
       setIsLoading(false);
       return;
     }
 
-    // Open in native WebView
+    // Open in native WebView (for all sites including social platforms)
     if (isNative) {
       const success = await openWebView(normalizedUrl, true);
       if (success) {
         navigate('browse', normalizedUrl, normalizedUrl);
         await logEvent('allowed', domain, 'native-webview');
       } else {
+        // WebView failed, offer fallback modes
         setFallbackUrl(normalizedUrl);
         navigate('fallback', '', normalizedUrl);
         await logEvent('fallback', domain, 'webview-failed');
       }
     } else {
-      // Web fallback - use iframe behavior
-      navigate('browse', normalizedUrl, normalizedUrl);
-      await logEvent('allowed', domain, 'iframe');
+      // On web, use fallback modes for all navigation
+      setFallbackUrl(normalizedUrl);
+      navigate('fallback', '', normalizedUrl);
+      await logEvent('fallback', domain, 'web-platform');
     }
     
     setIsLoading(false);
@@ -327,11 +313,11 @@ export const NativeWebViewBrowser = () => {
   // Reader Mode handler
   const handleReaderMode = useCallback(async () => {
     if (!fallbackUrl) {
-      console.error('[NativeWebView] No fallback URL');
+      console.error('[Browser] No fallback URL');
       return;
     }
 
-    console.log('[NativeWebView] Opening Reader Mode for:', fallbackUrl);
+    console.log('[Browser] Opening Reader Mode for:', fallbackUrl);
     setIsLoadingReader(true);
     setReaderError(null);
     setPdfContent(null);
@@ -360,7 +346,7 @@ export const NativeWebViewBrowser = () => {
         return;
       }
 
-      // Handle social platform
+      // Handle social platform metadata
       if (data?.isSocialPlatform && data?.data) {
         const platformData = data.data;
         
@@ -470,7 +456,7 @@ export const NativeWebViewBrowser = () => {
       }
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : 'Reader Mode failed';
-      console.error('[NativeWebView] Reader mode exception:', error);
+      console.error('[Browser] Reader mode exception:', error);
       setFailureError(errorMsg);
       navigate('failure', '', fallbackUrl);
       await logEvent('reader_mode_error', extractDomain(fallbackUrl), 'failed');
@@ -554,6 +540,7 @@ export const NativeWebViewBrowser = () => {
 
   const handleScanPage = useCallback(() => {
     setIsScanning(true);
+    // Placeholder for WebView image scanning
     setTimeout(() => setIsScanning(false), 1500);
   }, []);
 
@@ -563,39 +550,78 @@ export const NativeWebViewBrowser = () => {
   };
 
   const handleOpenExternal = useCallback((url: string, eventType: string = 'external_click') => {
-    logEvent(eventType, extractDomain(url), 'opened');
+    // Show warning before opening external links
+    setExternalWarningUrl(url);
+  }, []);
+
+  const confirmExternalOpen = useCallback((url: string) => {
+    logEvent('external_click', extractDomain(url), 'opened');
     window.open(url, '_blank', 'noopener,noreferrer');
+    setExternalWarningUrl(null);
   }, [logEvent]);
+
+  const handleOpenInWebView = useCallback(async (url: string) => {
+    if (isNative) {
+      await openWebView(url, true);
+      navigate('browse', url, url);
+      await logEvent('webview_open', extractDomain(url), 'opened');
+    } else {
+      // On web, open externally with warning
+      setExternalWarningUrl(url);
+    }
+  }, [isNative, openWebView, navigate, logEvent]);
 
   // Render special views
   if (currentView === 'youtube' && youtubeContent) {
     return (
-      <YouTubePreviewView
-        videoId={youtubeContent.videoId}
-        title={youtubeContent.title}
-        channelName={youtubeContent.channelName}
-        description={youtubeContent.description}
-        thumbnailUrl={youtubeContent.thumbnailUrl}
-        sourceUrl={youtubeContent.sourceUrl}
-        onBack={handleGoBack}
-        onOpenExternal={() => handleOpenExternal(youtubeContent.sourceUrl, 'youtube_external_click')}
-      />
+      <>
+        <YouTubePreviewView
+          videoId={youtubeContent.videoId}
+          title={youtubeContent.title}
+          channelName={youtubeContent.channelName}
+          description={youtubeContent.description}
+          thumbnailUrl={youtubeContent.thumbnailUrl}
+          sourceUrl={youtubeContent.sourceUrl}
+          onBack={handleGoBack}
+          onOpenExternal={() => isNative 
+            ? handleOpenInWebView(youtubeContent.sourceUrl)
+            : handleOpenExternal(youtubeContent.sourceUrl, 'youtube_external_click')
+          }
+        />
+        <ExternalLinkWarning
+          isOpen={!!externalWarningUrl}
+          url={externalWarningUrl || ''}
+          onConfirm={() => externalWarningUrl && confirmExternalOpen(externalWarningUrl)}
+          onClose={() => setExternalWarningUrl(null)}
+        />
+      </>
     );
   }
 
   if (currentView === 'social' && socialContent) {
     return (
-      <SocialPreviewView
-        platform={socialContent.platform}
-        title={socialContent.title}
-        author={socialContent.author}
-        description={socialContent.description}
-        thumbnailUrl={socialContent.thumbnailUrl}
-        sourceUrl={socialContent.sourceUrl}
-        contentId={socialContent.contentId}
-        onBack={handleGoBack}
-        onOpenExternal={() => handleOpenExternal(socialContent.sourceUrl, `${socialContent.platform}_external_click`)}
-      />
+      <>
+        <SocialPreviewView
+          platform={socialContent.platform}
+          title={socialContent.title}
+          author={socialContent.author}
+          description={socialContent.description}
+          thumbnailUrl={socialContent.thumbnailUrl}
+          sourceUrl={socialContent.sourceUrl}
+          contentId={socialContent.contentId}
+          onBack={handleGoBack}
+          onOpenExternal={() => isNative
+            ? handleOpenInWebView(socialContent.sourceUrl)
+            : handleOpenExternal(socialContent.sourceUrl, `${socialContent.platform}_external_click`)
+          }
+        />
+        <ExternalLinkWarning
+          isOpen={!!externalWarningUrl}
+          url={externalWarningUrl || ''}
+          onConfirm={() => externalWarningUrl && confirmExternalOpen(externalWarningUrl)}
+          onClose={() => setExternalWarningUrl(null)}
+        />
+      </>
     );
   }
 
@@ -697,7 +723,7 @@ export const NativeWebViewBrowser = () => {
         onForward={handleGoForward}
         onRefresh={handleRefresh}
         onHome={handleHome}
-        onScan={handleScanPage}
+        onScan={currentView === 'browse' ? handleScanPage : undefined}
         canGoBack={navCanGoBack || currentView !== 'home'}
         canGoForward={navCanGoForward}
         isLoading={isLoading || isChecking || webViewState.isLoading}
@@ -739,8 +765,6 @@ export const NativeWebViewBrowser = () => {
             onHome={handleHome}
             isLoading={isLoadingReader}
             error={readerError}
-            isSocialPlatform={isSocialPlatform(fallbackUrl)}
-            platformName={getSocialPlatformName(fallbackUrl)}
           />
         ) : currentView === 'browse' ? (
           // Native WebView is handled externally - show placeholder when WebView is open
@@ -749,9 +773,9 @@ export const NativeWebViewBrowser = () => {
               <div className="text-center">
                 <Loader2 className="w-8 h-8 mx-auto mb-3 text-aqua animate-spin" />
                 <p className="text-sm text-muted-foreground font-display tracking-wider">
-                  BROWSING IN NATIVE WEBVIEW
+                  BROWSING IN WEBVIEW
                 </p>
-                <p className="text-xs text-silver mt-2">
+                <p className="text-xs text-silver mt-2 max-w-xs mx-auto truncate px-4">
                   {webViewState.currentUrl}
                 </p>
               </div>
@@ -760,13 +784,13 @@ export const NativeWebViewBrowser = () => {
             // Web fallback message
             <div className="absolute inset-0 flex items-center justify-center p-6 bg-background">
               <div className="text-center max-w-md">
-                <Shield className="w-16 h-16 mx-auto mb-4 text-aqua" />
+                <Globe className="w-16 h-16 mx-auto mb-4 text-aqua" />
                 <h2 className="font-display text-xl tracking-wider mb-3">
                   NATIVE WEBVIEW REQUIRED
                 </h2>
                 <p className="text-sm text-muted-foreground mb-6">
                   Full browser functionality requires the native mobile app. 
-                  Install the app on iOS or Android for the complete experience.
+                  Use Reader Mode to view content on web.
                 </p>
                 <button
                   onClick={() => {
@@ -775,7 +799,7 @@ export const NativeWebViewBrowser = () => {
                   }}
                   className="px-6 py-3 bg-aqua text-accent-foreground font-display text-sm tracking-wider hover:bg-aqua/90 transition-colors"
                 >
-                  USE READER MODE INSTEAD
+                  USE READER MODE
                 </button>
               </div>
             </div>
@@ -793,6 +817,14 @@ export const NativeWebViewBrowser = () => {
           </div>
         )}
       </main>
+
+      {/* External link warning modal */}
+      <ExternalLinkWarning
+        isOpen={!!externalWarningUrl}
+        url={externalWarningUrl || ''}
+        onConfirm={() => externalWarningUrl && confirmExternalOpen(externalWarningUrl)}
+        onClose={() => setExternalWarningUrl(null)}
+      />
     </div>
   );
 };
