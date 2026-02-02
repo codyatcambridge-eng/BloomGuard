@@ -208,62 +208,88 @@ const SafeBrowser = () => {
     setCurrentView('browse');
     await logEvent('allowed', domain, 'allowed');
     
-    // Set a timeout to detect load failures
-    loadTimeoutRef.current = setTimeout(() => {
+    // Set a timeout to detect load failures (10 seconds max)
+    loadTimeoutRef.current = setTimeout(async () => {
       if (iframeRef.current) {
         try {
           const doc = iframeRef.current.contentDocument;
-          if (!doc || !doc.body || doc.body.innerHTML === '') {
-            console.log('[SafeBrowser] Iframe appears empty, switching to fallback');
+          const win = iframeRef.current.contentWindow;
+          
+          // Check multiple failure indicators
+          const isEmpty = !doc || !doc.body || doc.body.innerHTML.trim() === '';
+          const isAboutBlank = win?.location?.href === 'about:blank';
+          const hasNoContent = doc?.body?.children?.length === 0;
+          
+          if (isEmpty || isAboutBlank || hasNoContent) {
+            console.log('[SafeBrowser] Iframe appears empty after timeout, switching to fallback', {
+              isEmpty,
+              isAboutBlank,
+              hasNoContent,
+            });
+            await logEvent('fallback_timeout', domain, 'iframe-empty');
             setFallbackUrl(normalizedUrl);
             setCurrentView('fallback');
             setCurrentUrl('');
           }
         } catch (error) {
-          console.log('[SafeBrowser] Cross-origin frame detected - content loaded');
+          // Cross-origin frame - content likely loaded successfully
+          console.log('[SafeBrowser] Cross-origin frame detected - assuming content loaded');
         }
       }
       setIsLoading(false);
-    }, 8000);
+    }, 10000); // 10 second timeout
     
     setIsLoading(false);
   }, [url, settings, checkBlockedSite, deviceId, handleSearch]);
 
   // Detect iframe load errors
-  const handleIframeError = useCallback(() => {
+  const handleIframeError = useCallback(async () => {
     console.log('[SafeBrowser] Iframe load error detected');
     
     if (currentUrl) {
+      const domain = extractDomain(currentUrl);
+      await logEvent('iframe_error', domain, 'load-failed');
       setFallbackUrl(currentUrl);
       setCurrentView('fallback');
       setCurrentUrl('');
     }
-  }, [currentUrl]);
+  }, [currentUrl, deviceId]);
 
-  // Handle iframe load success
-  const handleIframeLoad = useCallback(() => {
+  // Handle iframe load success - verify content actually loaded
+  const handleIframeLoad = useCallback(async () => {
     if (loadTimeoutRef.current) {
       clearTimeout(loadTimeoutRef.current);
     }
     
-    setTimeout(() => {
-      if (iframeRef.current) {
+    // Give the page a moment to render, then check content
+    setTimeout(async () => {
+      if (iframeRef.current && currentUrl) {
         try {
           const doc = iframeRef.current.contentDocument;
-          if (doc && (!doc.body || doc.body.innerHTML.trim() === '')) {
-            console.log('[SafeBrowser] Iframe loaded but empty');
-            if (currentUrl) {
-              setFallbackUrl(currentUrl);
-              setCurrentView('fallback');
-              setCurrentUrl('');
-            }
+          const win = iframeRef.current.contentWindow;
+          
+          // Check if the iframe loaded but is empty (CSP violation or X-Frame-Options)
+          const isEmpty = doc && (!doc.body || doc.body.innerHTML.trim() === '');
+          const isAboutBlank = win?.location?.href === 'about:blank';
+          const isBlocked = isEmpty || isAboutBlank;
+          
+          if (isBlocked) {
+            console.log('[SafeBrowser] Iframe loaded but blocked/empty', { isEmpty, isAboutBlank });
+            const domain = extractDomain(currentUrl);
+            await logEvent('iframe_blocked', domain, 'csp-violation');
+            setFallbackUrl(currentUrl);
+            setCurrentView('fallback');
+            setCurrentUrl('');
+          } else {
+            console.log('[SafeBrowser] Iframe loaded successfully');
           }
         } catch (error) {
+          // Cross-origin frame - this is expected for successful loads
           console.log('[SafeBrowser] Cross-origin frame - content loaded successfully');
         }
       }
-    }, 1000);
-  }, [currentUrl]);
+    }, 1500); // Wait 1.5s for content to render
+  }, [currentUrl, deviceId]);
 
   // Cleanup timeout on unmount
   useEffect(() => {
