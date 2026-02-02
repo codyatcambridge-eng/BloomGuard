@@ -12,8 +12,9 @@ import { PDFViewer } from "@/components/browser/PDFViewer";
 import { PreviewModeView } from "@/components/browser/PreviewModeView";
 import { FullFailureView } from "@/components/browser/FullFailureView";
 import { YouTubePreviewView } from "@/components/browser/YouTubePreviewView";
+import { SocialPreviewView, SocialPlatform } from "@/components/browser/SocialPreviewView";
 
-type BrowserView = 'home' | 'search' | 'browse' | 'blocked' | 'fallback' | 'reader' | 'pdf' | 'preview' | 'failure' | 'youtube';
+type BrowserView = 'home' | 'search' | 'browse' | 'blocked' | 'fallback' | 'reader' | 'pdf' | 'preview' | 'failure' | 'youtube' | 'social';
 
 interface SearchResult {
   title: string;
@@ -65,6 +66,16 @@ interface YouTubeContent {
   sourceUrl: string;
 }
 
+interface SocialContent {
+  platform: SocialPlatform;
+  contentId: string;
+  title: string;
+  author: string;
+  description: string;
+  thumbnailUrl: string;
+  sourceUrl: string;
+}
+
 const SafeBrowser = () => {
   const [url, setUrl] = useState("");
   const [displayUrl, setDisplayUrl] = useState("");
@@ -82,6 +93,7 @@ const SafeBrowser = () => {
   const [readerError, setReaderError] = useState<string | null>(null);
   const [pdfContent, setPdfContent] = useState<PDFContent | null>(null);
   const [youtubeContent, setYoutubeContent] = useState<YouTubeContent | null>(null);
+  const [socialContent, setSocialContent] = useState<SocialContent | null>(null);
   const [failureError, setFailureError] = useState<string | null>(null);
   
   // Search state
@@ -395,6 +407,7 @@ const SafeBrowser = () => {
     setReaderError(null);
     setPdfContent(null);
     setYoutubeContent(null);
+    setSocialContent(null);
     setFailureError(null);
     
     try {
@@ -420,9 +433,44 @@ const SafeBrowser = () => {
         return;
       }
 
-      // Handle YouTube response
+      // Handle social platform response (includes YouTube)
+      if (data?.isSocialPlatform && data?.data) {
+        const platformData = data.data;
+        console.log('[SafeBrowser] Social platform detected:', platformData.platform);
+        
+        // YouTube still uses the dedicated view for backward compatibility
+        if (data.isYouTube || platformData.platform === 'youtube') {
+          setYoutubeContent({
+            videoId: platformData.videoId || platformData.contentId,
+            title: platformData.title,
+            channelName: platformData.channelName || platformData.author,
+            description: platformData.description,
+            thumbnailUrl: platformData.thumbnailUrl,
+            sourceUrl: fallbackUrl,
+          });
+          setCurrentView('youtube');
+          await logEvent('youtube_preview', extractDomain(fallbackUrl), `video:${platformData.videoId || platformData.contentId}`);
+          return;
+        }
+        
+        // Other social platforms use the unified view
+        setSocialContent({
+          platform: platformData.platform as SocialPlatform,
+          contentId: platformData.contentId,
+          title: platformData.title,
+          author: platformData.author,
+          description: platformData.description,
+          thumbnailUrl: platformData.thumbnailUrl,
+          sourceUrl: fallbackUrl,
+        });
+        setCurrentView('social');
+        await logEvent(`${platformData.platform}_preview`, extractDomain(fallbackUrl), `content:${platformData.contentId}`);
+        return;
+      }
+
+      // Legacy YouTube response handling (backward compatibility)
       if (data?.isYouTube && data?.data) {
-        console.log('[SafeBrowser] YouTube detected, videoId:', data.data.videoId);
+        console.log('[SafeBrowser] YouTube detected (legacy), videoId:', data.data.videoId);
         setYoutubeContent({
           videoId: data.data.videoId,
           title: data.data.title,
@@ -520,6 +568,7 @@ const SafeBrowser = () => {
     setReaderContent(null);
     setPdfContent(null);
     setYoutubeContent(null);
+    setSocialContent(null);
     setFailureError(null);
     setCurrentView('fallback');
   };
@@ -533,6 +582,14 @@ const SafeBrowser = () => {
       // Log external click event
       logEvent('youtube_external_click', extractDomain(fallbackUrl), `video:${youtubeContent.videoId}`);
       window.open(youtubeContent.sourceUrl, '_blank', 'noopener,noreferrer');
+    }
+  };
+
+  const handleSocialExternalClick = () => {
+    if (socialContent) {
+      // Log external click event
+      logEvent(`${socialContent.platform}_external_click`, extractDomain(fallbackUrl), `content:${socialContent.contentId}`);
+      window.open(socialContent.sourceUrl, '_blank', 'noopener,noreferrer');
     }
   };
 
@@ -558,7 +615,22 @@ const SafeBrowser = () => {
     );
   }
 
-  // Show PDF view
+  // Show Social Platform Preview view
+  if (currentView === 'social' && socialContent) {
+    return (
+      <SocialPreviewView
+        platform={socialContent.platform}
+        title={socialContent.title}
+        author={socialContent.author}
+        description={socialContent.description}
+        thumbnailUrl={socialContent.thumbnailUrl}
+        sourceUrl={socialContent.sourceUrl}
+        contentId={socialContent.contentId}
+        onBack={handleReaderBack}
+        onOpenExternal={handleSocialExternalClick}
+      />
+    );
+  }
   if (currentView === 'pdf' && pdfContent) {
     return (
       <div className="min-h-screen bg-background flex flex-col">
