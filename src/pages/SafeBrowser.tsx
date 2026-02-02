@@ -1,13 +1,22 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Globe, ArrowLeft, ArrowRight, RotateCcw, Shield, AlertTriangle, Lock, Home, Scan, Loader2 } from "lucide-react";
+import { Globe, ArrowLeft, ArrowRight, RotateCcw, Shield, AlertTriangle, Lock, Home, Scan, Loader2, Search } from "lucide-react";
 import { useContentProtection } from "@/hooks/useContentProtection";
 import { useSettings } from "@/hooks/useSettings";
 import { useDeviceId } from "@/hooks/useDeviceId";
 import { supabase } from "@/integrations/supabase/client";
 import { FallbackModeUI } from "@/components/browser/FallbackModeUI";
 import { ReaderModeView } from "@/components/browser/ReaderModeView";
+import { SafeBrowserHomepage } from "@/components/browser/SafeBrowserHomepage";
+import { SearchResultsView } from "@/components/browser/SearchResultsView";
 
-const HOMEPAGE = "https://www.google.com";
+type BrowserView = 'home' | 'search' | 'browse' | 'blocked' | 'fallback' | 'reader';
+
+interface SearchResult {
+  title: string;
+  url: string;
+  snippet: string;
+  thumbnail?: string;
+}
 
 // Sites known to block iframes
 const KNOWN_IFRAME_BLOCKERS = [
@@ -36,23 +45,26 @@ interface ReaderContent {
 }
 
 const SafeBrowser = () => {
-  const [url, setUrl] = useState(HOMEPAGE);
-  const [displayUrl, setDisplayUrl] = useState(HOMEPAGE);
+  const [url, setUrl] = useState("");
+  const [displayUrl, setDisplayUrl] = useState("");
   const [currentUrl, setCurrentUrl] = useState("");
-  const [isBlocked, setIsBlocked] = useState(false);
+  const [currentView, setCurrentView] = useState<BrowserView>('home');
   const [blockedReason, setBlockedReason] = useState("");
   const [blockedCategory, setBlockedCategory] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
-  const [hasNavigated, setHasNavigated] = useState(false);
   
   // Fallback mode state
-  const [isFallbackMode, setIsFallbackMode] = useState(false);
   const [fallbackUrl, setFallbackUrl] = useState("");
   const [isLoadingReader, setIsLoadingReader] = useState(false);
   const [readerContent, setReaderContent] = useState<ReaderContent | null>(null);
   const [readerError, setReaderError] = useState<string | null>(null);
-  const [iframeLoadFailed, setIframeLoadFailed] = useState(false);
+  
+  // Search state
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
   
   const { checkBlockedSite, isChecking } = useContentProtection();
   const { settings } = useSettings();
@@ -96,19 +108,62 @@ const SafeBrowser = () => {
     });
   };
 
+  // Search handler
+  const handleSearch = useCallback(async (query: string) => {
+    console.log('[SafeBrowser] Starting search:', query);
+    setSearchQuery(query);
+    setIsSearching(true);
+    setSearchError(null);
+    setSearchResults([]);
+    setCurrentView('search');
+    
+    // Log search event
+    await logEvent('search', query, 'search_query');
+    
+    try {
+      const { data, error } = await supabase.functions.invoke('web-search', {
+        body: { query }
+      });
+      
+      if (error) {
+        console.error('[SafeBrowser] Search error:', error);
+        throw new Error(error.message || 'Search failed');
+      }
+      
+      if (data?.success && data?.results) {
+        console.log('[SafeBrowser] Search results:', data.results.length);
+        setSearchResults(data.results);
+      } else {
+        setSearchError(data?.error || 'No results found');
+      }
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Search failed';
+      console.error('[SafeBrowser] Search exception:', error);
+      setSearchError(errorMsg);
+    } finally {
+      setIsSearching(false);
+    }
+  }, [deviceId]);
+
   const handleNavigate = useCallback(async (targetUrl?: string, e?: React.FormEvent) => {
     e?.preventDefault();
     
     const urlToNavigate = targetUrl || url;
     if (!urlToNavigate.trim()) return;
 
+    // Check if it's a search query (no dots or spaces with no protocol)
+    const isSearchQuery = !urlToNavigate.includes('.') || 
+      (urlToNavigate.includes(' ') && !urlToNavigate.startsWith('http'));
+    
+    if (isSearchQuery) {
+      handleSearch(urlToNavigate);
+      return;
+    }
+
     // Reset states
     setIsLoading(true);
-    setIsBlocked(false);
-    setIsFallbackMode(false);
     setReaderContent(null);
     setReaderError(null);
-    setIframeLoadFailed(false);
     
     // Clear any pending timeout
     if (loadTimeoutRef.current) {
@@ -127,10 +182,10 @@ const SafeBrowser = () => {
       const result = await checkBlockedSite(normalizedUrl, deviceId);
       
       if (result?.isBlocked) {
-        setIsBlocked(true);
         setBlockedReason(result.reason);
         setBlockedCategory(result.category || 'blocked');
         setCurrentUrl('');
+        setCurrentView('blocked');
         await logEvent('blocked', domain, 'blocked');
         setIsLoading(false);
         return;
@@ -141,8 +196,8 @@ const SafeBrowser = () => {
     if (isKnownBlocker(normalizedUrl)) {
       console.log('[SafeBrowser] Known iframe blocker detected:', domain);
       setFallbackUrl(normalizedUrl);
-      setIsFallbackMode(true);
       setCurrentUrl('');
+      setCurrentView('fallback');
       await logEvent('fallback', domain, 'iframe-blocked');
       setIsLoading(false);
       return;
@@ -150,24 +205,21 @@ const SafeBrowser = () => {
 
     // Site is allowed - try to navigate
     setCurrentUrl(normalizedUrl);
-    setHasNavigated(true);
+    setCurrentView('browse');
     await logEvent('allowed', domain, 'allowed');
     
     // Set a timeout to detect load failures
     loadTimeoutRef.current = setTimeout(() => {
-      // If still loading after 8 seconds, might be blocked
       if (iframeRef.current) {
         try {
-          // Try to access iframe content - will fail if blocked
           const doc = iframeRef.current.contentDocument;
           if (!doc || !doc.body || doc.body.innerHTML === '') {
             console.log('[SafeBrowser] Iframe appears empty, switching to fallback');
             setFallbackUrl(normalizedUrl);
-            setIsFallbackMode(true);
+            setCurrentView('fallback');
             setCurrentUrl('');
           }
         } catch (error) {
-          // Cross-origin error means it loaded something
           console.log('[SafeBrowser] Cross-origin frame detected - content loaded');
         }
       }
@@ -175,16 +227,15 @@ const SafeBrowser = () => {
     }, 8000);
     
     setIsLoading(false);
-  }, [url, settings, checkBlockedSite, deviceId]);
+  }, [url, settings, checkBlockedSite, deviceId, handleSearch]);
 
   // Detect iframe load errors
   const handleIframeError = useCallback(() => {
     console.log('[SafeBrowser] Iframe load error detected');
-    setIframeLoadFailed(true);
     
     if (currentUrl) {
       setFallbackUrl(currentUrl);
-      setIsFallbackMode(true);
+      setCurrentView('fallback');
       setCurrentUrl('');
     }
   }, [currentUrl]);
@@ -195,34 +246,24 @@ const SafeBrowser = () => {
       clearTimeout(loadTimeoutRef.current);
     }
     
-    // Check if the iframe actually loaded content
     setTimeout(() => {
       if (iframeRef.current) {
         try {
           const doc = iframeRef.current.contentDocument;
-          // If we can access the document and it's empty, switch to fallback
           if (doc && (!doc.body || doc.body.innerHTML.trim() === '')) {
             console.log('[SafeBrowser] Iframe loaded but empty');
             if (currentUrl) {
               setFallbackUrl(currentUrl);
-              setIsFallbackMode(true);
+              setCurrentView('fallback');
               setCurrentUrl('');
             }
           }
         } catch (error) {
-          // Cross-origin error is expected for sites that load properly
           console.log('[SafeBrowser] Cross-origin frame - content loaded successfully');
         }
       }
     }, 1000);
   }, [currentUrl]);
-
-  // Auto-navigate to homepage on mount
-  useEffect(() => {
-    if (!hasNavigated) {
-      handleNavigate(HOMEPAGE);
-    }
-  }, [hasNavigated, handleNavigate]);
 
   // Cleanup timeout on unmount
   useEffect(() => {
@@ -236,7 +277,13 @@ const SafeBrowser = () => {
   const handleGoBack = () => {
     if (readerContent) {
       setReaderContent(null);
-      setIsFallbackMode(true);
+      setCurrentView('fallback');
+      return;
+    }
+    if (currentView === 'search') {
+      setCurrentView('home');
+      setSearchResults([]);
+      setSearchQuery('');
       return;
     }
     if (iframeRef.current?.contentWindow) {
@@ -255,6 +302,10 @@ const SafeBrowser = () => {
       handleReaderMode();
       return;
     }
+    if (currentView === 'search' && searchQuery) {
+      handleSearch(searchQuery);
+      return;
+    }
     if (iframeRef.current?.contentWindow) {
       iframeRef.current.contentWindow.location.reload();
     }
@@ -262,10 +313,12 @@ const SafeBrowser = () => {
 
   const handleHome = () => {
     setReaderContent(null);
-    setIsFallbackMode(false);
-    setUrl(HOMEPAGE);
-    setDisplayUrl(HOMEPAGE);
-    handleNavigate(HOMEPAGE);
+    setCurrentView('home');
+    setUrl('');
+    setDisplayUrl('');
+    setCurrentUrl('');
+    setSearchResults([]);
+    setSearchQuery('');
   };
 
   const handleScanPage = () => {
@@ -292,7 +345,6 @@ const SafeBrowser = () => {
     setReaderError(null);
     
     try {
-      console.log('[SafeBrowser] Calling proxy-reader edge function...');
       const { data, error } = await supabase.functions.invoke('proxy-reader', {
         body: { url: fallbackUrl }
       });
@@ -302,20 +354,11 @@ const SafeBrowser = () => {
         throw new Error(error.message || 'Failed to connect to reader service');
       }
 
-      console.log('[SafeBrowser] Edge function response:', { 
-        success: data?.success, 
-        hasData: !!data?.data,
-        contentLength: data?.data?.content?.length,
-        imageCount: data?.data?.images?.length,
-        title: data?.data?.title
-      });
-
       if (data?.success && data?.data) {
         const contentData = data.data;
         
-        // Check if we got actual content
         if (!contentData.content || contentData.content.trim().length < 50) {
-          console.warn('[SafeBrowser] No readable content found in response');
+          console.warn('[SafeBrowser] No readable content found');
           setReaderError('No readable content found on this page.');
           setIsLoadingReader(false);
           return;
@@ -327,26 +370,16 @@ const SafeBrowser = () => {
           title: contentData.title || extractDomain(fallbackUrl),
           sourceUrl: fallbackUrl,
         });
+        setCurrentView('reader');
         
-        console.log('[SafeBrowser] Reader content set successfully:', {
-          contentLength: contentData.content.length,
-          imageCount: contentData.images?.length || 0,
-          title: contentData.title
-        });
-        
-        // Log reader mode usage
         await logEvent('reader_mode', extractDomain(fallbackUrl), 'opened');
       } else {
-        const errorMsg = data?.error || 'Failed to load content from this page';
-        console.error('[SafeBrowser] Reader mode failed:', errorMsg);
-        setReaderError(errorMsg);
+        setReaderError(data?.error || 'Failed to load content');
       }
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : 'Reader Mode failed to load this site.';
+      const errorMsg = error instanceof Error ? error.message : 'Reader Mode failed';
       console.error('[SafeBrowser] Reader mode exception:', error);
       setReaderError(errorMsg);
-      
-      // Log failure
       await logEvent('reader_mode_error', extractDomain(fallbackUrl), 'failed');
     } finally {
       setIsLoadingReader(false);
@@ -355,11 +388,17 @@ const SafeBrowser = () => {
 
   const handleReaderBack = () => {
     setReaderContent(null);
-    setIsFallbackMode(true);
+    setCurrentView('fallback');
+  };
+
+  // Navigate from search result
+  const handleSearchResultNavigate = (resultUrl: string) => {
+    setUrl(resultUrl);
+    handleNavigate(resultUrl);
   };
 
   // Show Reader Mode view
-  if (readerContent) {
+  if (currentView === 'reader' && readerContent) {
     return (
       <ReaderModeView
         content={readerContent.content}
@@ -367,6 +406,21 @@ const SafeBrowser = () => {
         title={readerContent.title}
         sourceUrl={readerContent.sourceUrl}
         onBack={handleReaderBack}
+      />
+    );
+  }
+
+  // Show Search Results view
+  if (currentView === 'search') {
+    return (
+      <SearchResultsView
+        query={searchQuery}
+        results={searchResults}
+        isLoading={isSearching}
+        error={searchError}
+        onBack={handleHome}
+        onNavigate={handleSearchResultNavigate}
+        onNewSearch={handleSearch}
       />
     );
   }
@@ -388,12 +442,16 @@ const SafeBrowser = () => {
         
         <form onSubmit={handleFormSubmit} className="flex gap-2">
           <div className="flex-1 relative">
-            <Globe className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+            {currentView === 'home' ? (
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+            ) : (
+              <Globe className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+            )}
             <input
               type="text"
               value={url}
               onChange={(e) => setUrl(e.target.value)}
-              placeholder="Enter URL or search..."
+              placeholder={currentView === 'home' ? "Search or enter URL..." : "Enter URL..."}
               className="w-full bg-input border border-silver/30 rounded-sm pl-10 pr-4 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-aqua transition-colors"
             />
           </div>
@@ -410,7 +468,7 @@ const SafeBrowser = () => {
         <div className="flex gap-2 mt-2">
           <button
             onClick={handleGoBack}
-            disabled={!currentUrl && !readerContent}
+            disabled={currentView === 'home'}
             className="p-2 text-silver hover:text-foreground transition-colors border border-silver/20 disabled:opacity-50"
             title="Back"
           >
@@ -418,7 +476,7 @@ const SafeBrowser = () => {
           </button>
           <button
             onClick={handleGoForward}
-            disabled={!currentUrl}
+            disabled={currentView !== 'browse'}
             className="p-2 text-silver hover:text-foreground transition-colors border border-silver/20 disabled:opacity-50"
             title="Forward"
           >
@@ -426,7 +484,7 @@ const SafeBrowser = () => {
           </button>
           <button
             onClick={handleRefresh}
-            disabled={!currentUrl && !readerContent}
+            disabled={currentView === 'home'}
             className="p-2 text-silver hover:text-foreground transition-colors border border-silver/20 disabled:opacity-50"
             title="Refresh"
           >
@@ -435,13 +493,13 @@ const SafeBrowser = () => {
           <button
             onClick={handleHome}
             className="p-2 text-silver hover:text-foreground transition-colors border border-silver/20"
-            title="Home (Google)"
+            title="Home"
           >
             <Home className="w-4 h-4" />
           </button>
           <button
             onClick={handleScanPage}
-            disabled={!currentUrl || isScanning}
+            disabled={currentView !== 'browse' || isScanning}
             className="p-2 text-silver hover:text-foreground transition-colors border border-silver/20 disabled:opacity-50 flex items-center gap-1"
             title="Scan page for inappropriate images"
           >
@@ -455,10 +513,10 @@ const SafeBrowser = () => {
         </div>
         
         {/* Current URL display */}
-        {(currentUrl || fallbackUrl) && (
+        {(currentUrl || fallbackUrl) && currentView !== 'home' && (
           <div className="mt-2 px-3 py-1.5 bg-muted/50 rounded-sm text-xs text-muted-foreground truncate flex items-center gap-1">
             <span className="text-aqua">🔒</span>
-            {isFallbackMode && <span className="text-amber-500">[Reader Available]</span>}
+            {currentView === 'fallback' && <span className="text-amber-500">[Reader Available]</span>}
             {displayUrl}
           </div>
         )}
@@ -466,7 +524,7 @@ const SafeBrowser = () => {
 
       {/* Content Area */}
       <main className="flex-1 relative pb-16">
-        {isBlocked ? (
+        {currentView === 'blocked' ? (
           // Blocked Screen
           <div className="absolute inset-0 flex items-center justify-center p-6 bg-gradient-to-b from-destructive/10 to-background">
             <div className="text-center max-w-sm">
@@ -495,7 +553,7 @@ const SafeBrowser = () => {
               </button>
             </div>
           </div>
-        ) : isFallbackMode ? (
+        ) : currentView === 'fallback' ? (
           // Fallback Mode - Site can't load in iframe
           <FallbackModeUI
             url={fallbackUrl}
@@ -504,8 +562,8 @@ const SafeBrowser = () => {
             isLoading={isLoadingReader}
             error={readerError}
           />
-        ) : currentUrl ? (
-          // Iframe for allowed sites - with full browser permissions
+        ) : currentView === 'browse' && currentUrl ? (
+          // Iframe for allowed sites
           <div className="absolute inset-0 pb-16">
             <iframe
               ref={iframeRef}
@@ -529,18 +587,11 @@ const SafeBrowser = () => {
             )}
           </div>
         ) : (
-          // Empty state / Loading homepage
-          <div className="absolute inset-0 flex items-center justify-center p-6">
-            <div className="text-center">
-              <Globe className="w-16 h-16 mx-auto mb-4 text-silver/30" />
-              <p className="text-sm text-muted-foreground">
-                Loading...
-              </p>
-              <p className="text-xs text-silver mt-2">
-                All sites are checked against the blocklist
-              </p>
-            </div>
-          </div>
+          // Homepage
+          <SafeBrowserHomepage
+            onSearch={handleSearch}
+            isSearching={isSearching}
+          />
         )}
 
         {/* Loading overlay */}
