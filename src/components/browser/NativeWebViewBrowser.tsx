@@ -10,6 +10,12 @@ import { useCapacitor } from '@/hooks/useCapacitor';
 import { useModerationBridge } from '@/hooks/useModerationBridge';
 import { supabase } from '@/integrations/supabase/client';
 import { generateModerationScript } from '@/lib/webview-injection-script';
+import { 
+  isValidModerationRequest, 
+  createResultMessage,
+  escapeForJs,
+  type ModerationRequestMessage,
+} from '@/lib/moderation-request-utils';
 import { BrowserHeader } from './BrowserHeader';
 import { SafeBrowserHomepage } from './SafeBrowserHomepage';
 import { SearchResultsView } from './SearchResultsView';
@@ -274,120 +280,170 @@ export const NativeWebViewBrowser = () => {
     },
   });
 
-  // Poll for moderation requests from WebView and push results back
-  // InAppBrowser doesn't support direct postMessage, so we use polling + global variables
+  // ==================== MODERATION MESSAGE HANDLING ====================
+  // 
+  // We use a hybrid approach for WebView <-> Host communication:
+  // 1. Primary: window.postMessage from WebView -> window.addEventListener('message') in host
+  // 2. Fallback: Polling global queues via executeScript (for browsers that don't support postMessage)
+  //
+  // Host -> WebView: executeScript to call window.postMessage inside the page
+  // ==================== 
+
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const pendingRequestsRef = useRef<Set<string>>(new Set());
   
-  useEffect(() => {
-    if (!isNative || !webViewState.isOpen || !isModerationEnabled()) {
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
-        pollIntervalRef.current = null;
-      }
+  /**
+   * Process a moderation request from the WebView
+   * Uses the new postMessage protocol with requestId/itemId tracking
+   */
+  const processModerationRequest = useCallback(async (request: ModerationRequestMessage) => {
+    const { requestId, items, thresholds } = request;
+    
+    if (pendingRequestsRef.current.has(requestId)) {
+      console.log('[MW-Host] Duplicate request ignored:', requestId);
       return;
     }
-
-    console.log('[MW-Bridge] Starting moderation request polling...');
-
-    // Poll for pending scan requests from the injected script
-    const pollForRequests = async () => {
-      if (!executeScript) return;
-      
+    pendingRequestsRef.current.add(requestId);
+    
+    const startTime = performance.now();
+    console.log('[MW-Host] request received', requestId, 'items=' + items.length);
+    items.forEach(item => {
+      console.log('[MW-Host]   -', item.itemId, '[' + item.sourceType + ']:', item.src.substring(0, 60));
+    });
+    
+    console.log('[MW-Host] calling scanBatch', requestId, 'itemCount=' + items.length);
+    
+    const results: Array<{
+      itemId: string;
+      src: string;
+      shouldBlur: boolean;
+      category: string;
+      confidence: number;
+    }> = [];
+    
+    // Process each item using the moderation bridge
+    for (const item of items) {
       try {
-        // Get and clear pending requests from WebView's global queue
-        const getQueueScript = `
+        const scanResult = await moderationBridge.scanImage(item.src, thresholds);
+        
+        if (scanResult) {
+          results.push({
+            itemId: item.itemId,
+            src: item.src,
+            shouldBlur: scanResult.shouldBlur,
+            category: scanResult.category,
+            confidence: scanResult.confidence,
+          });
+          console.log('[MW-Host] scan result', item.itemId, ':', scanResult.category, 'blur=' + scanResult.shouldBlur);
+        } else {
+          results.push({
+            itemId: item.itemId,
+            src: item.src,
+            shouldBlur: false,
+            category: 'error',
+            confidence: 0,
+          });
+          console.log('[MW-Host] scan result', item.itemId, ': error (no result)');
+        }
+      } catch (error) {
+        console.log('[MW-Host] scan error', item.itemId, ':', error);
+        results.push({
+          itemId: item.itemId,
+          src: item.src,
+          shouldBlur: false,
+          category: 'error',
+          confidence: 0,
+        });
+      }
+    }
+    
+    const elapsedMs = performance.now() - startTime;
+    console.log('[MW-Host] scan complete', requestId, 'elapsed=' + elapsedMs.toFixed(0) + 'ms');
+    
+    // Post results back to the WebView
+    console.log('[MW-Host] posting results back', requestId, 'count=' + results.length);
+    
+    if (executeScript) {
+      try {
+        const resultMessage = createResultMessage(requestId, results);
+        const messageJson = JSON.stringify(resultMessage);
+        // Escape for safe injection
+        const escapedJson = messageJson
+          .replace(/\\/g, '\\\\')
+          .replace(/'/g, "\\'")
+          .replace(/</g, '\\u003c')
+          .replace(/>/g, '\\u003e');
+        
+        const postResultScript = `
           (function() {
-            if (!window.__GC_SCAN_QUEUE__ || window.__GC_SCAN_QUEUE__.length === 0) {
-              return 'EMPTY';
+            try {
+              var msg = JSON.parse('${escapedJson}');
+              window.postMessage(msg, '*');
+              console.log('[MW] Host posted result:', '${requestId}');
+              return 'OK';
+            } catch (e) {
+              console.error('[MW] Failed to parse result:', e);
+              return 'ERROR: ' + e.message;
             }
-            const items = window.__GC_SCAN_QUEUE__.splice(0, 5);
-            return JSON.stringify(items);
           })();
         `;
         
-        const result = await executeScript(getQueueScript);
+        await executeScript(postResultScript);
+        console.log('[MW-Host] Results posted successfully for', requestId);
+      } catch (error) {
+        console.log('[MW-Host] Failed to post results:', error);
         
-        if (!result || result === 'EMPTY' || result === 'null') {
-          return;
-        }
-        
-        let items;
+        // Fallback: Push to legacy results queue
         try {
-          items = JSON.parse(result);
-        } catch (e) {
-          return;
-        }
-        
-        if (!Array.isArray(items) || items.length === 0) {
-          return;
-        }
-        
-        console.log('[MW-Bridge] scan received', items.length, 'items');
-        
-        // Process each scan request
-        for (const item of items) {
-          const { src, thresholds } = item;
-          
-          if (!src) continue;
-          
-          console.log('[MW-Bridge] Processing:', src.substring(0, 60));
-          
-          // Use the moderation bridge to scan
-          const scanResult = await moderationBridge.scanImage(src, thresholds);
-          
-          if (scanResult) {
-            console.log('[MW-Bridge] scan result:', scanResult.shouldBlur, scanResult.category);
-            
-            // Push result back to WebView's results queue
-            const escapedSrc = src.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-            const pushResultScript = `
+          for (const result of results) {
+            const escapedSrc = escapeForJs(result.src);
+            const pushLegacyScript = `
               (function() {
                 if (!window.__GC_SCAN_RESULTS__) window.__GC_SCAN_RESULTS__ = [];
                 window.__GC_SCAN_RESULTS__.push({
                   src: '${escapedSrc}',
-                  shouldBlur: ${scanResult.shouldBlur},
-                  category: '${scanResult.category}',
-                  confidence: ${scanResult.confidence},
+                  shouldBlur: ${result.shouldBlur},
+                  category: '${result.category}',
+                  confidence: ${result.confidence},
                   blurStrengthPx: ${localSettings.blur_strength_px || 16}
                 });
                 return 'OK';
               })();
             `;
-            
-            try {
-              await executeScript(pushResultScript);
-              console.log('[MW-Bridge] Result pushed for:', src.substring(0, 50));
-            } catch (e) {
-              console.debug('[MW-Bridge] Failed to push result:', e);
-            }
+            await executeScript(pushLegacyScript);
           }
+          console.log('[MW-Host] Results pushed to legacy queue for', requestId);
+        } catch (legacyError) {
+          console.log('[MW-Host] Legacy fallback also failed:', legacyError);
         }
-      } catch (e) {
-        // Polling errors are expected and ignored in some cases
-        console.debug('[MW-Bridge] Poll error:', e);
       }
-    };
+    }
+    
+    pendingRequestsRef.current.delete(requestId);
+  }, [moderationBridge, executeScript, localSettings.blur_strength_px]);
 
-    // Start polling at 150ms intervals for responsive moderation
-    pollIntervalRef.current = setInterval(pollForRequests, 150);
-
-    return () => {
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
-        pollIntervalRef.current = null;
-      }
-    };
-  }, [isNative, webViewState.isOpen, isModerationEnabled, executeScript, moderationBridge, localSettings.blur_strength_px]);
-
-  // Also listen for messages via window.postMessage (works in some WebView contexts)
+  /**
+   * Handle messages from WebView via window.postMessage
+   * This is the primary communication channel
+   */
   useEffect(() => {
     const handleMessage = async (event: MessageEvent) => {
-      if (event.data?.type === 'gc-moderation-request' && event.data?.action === 'scan') {
-        console.log('[Browser] Received moderation request via postMessage');
-        const result = await moderationBridge.handleWebViewMessage(event.data);
+      const message = event.data;
+      
+      // Handle new postMessage protocol
+      if (isValidModerationRequest(message)) {
+        console.log('[MW-Host] Received postMessage request:', message.requestId);
+        await processModerationRequest(message);
+        return;
+      }
+      
+      // Handle legacy format (backward compatibility)
+      if (message?.type === 'gc-moderation-request' && message?.action === 'scan') {
+        console.log('[MW-Host] Received legacy moderation request via postMessage');
+        const result = await moderationBridge.handleWebViewMessage(message);
         
         if (result && executeScript) {
-          const escapedSrc = result.src.replace(/'/g, "\\'").replace(/"/g, '\\"');
+          const escapedSrc = escapeForJs(result.src);
           const messageId = (result as any).messageId || 0;
           const responseScript = `
             (function() {
@@ -412,9 +468,9 @@ export const NativeWebViewBrowser = () => {
           `;
           try {
             await executeScript(responseScript);
-            console.log('[Browser] Sent moderation result for:', escapedSrc.substring(0, 50));
+            console.log('[MW-Host] Sent legacy moderation result for:', escapedSrc.substring(0, 50));
           } catch (error) {
-            console.debug('[Browser] Failed to send moderation result:', error);
+            console.debug('[MW-Host] Failed to send legacy moderation result:', error);
           }
         }
       }
@@ -422,7 +478,110 @@ export const NativeWebViewBrowser = () => {
 
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
-  }, [moderationBridge, executeScript]);
+  }, [processModerationRequest, moderationBridge, executeScript]);
+
+  /**
+   * Fallback: Poll for moderation requests from legacy global queue
+   * This is used when postMessage doesn't work reliably
+   */
+  useEffect(() => {
+    if (!isNative || !webViewState.isOpen || !isModerationEnabled()) {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+        pollIntervalRef.current = null;
+      }
+      return;
+    }
+
+    console.log('[MW-Host] Starting legacy queue polling (fallback)...');
+
+    const pollForRequests = async () => {
+      if (!executeScript) return;
+      
+      try {
+        // Get and clear pending requests from WebView's global queue
+        const getQueueScript = `
+          (function() {
+            if (!window.__GC_SCAN_QUEUE__ || window.__GC_SCAN_QUEUE__.length === 0) {
+              return 'EMPTY';
+            }
+            var items = window.__GC_SCAN_QUEUE__.splice(0, 5);
+            return JSON.stringify(items);
+          })();
+        `;
+        
+        const result = await executeScript(getQueueScript);
+        
+        if (!result || result === 'EMPTY' || result === 'null') {
+          return;
+        }
+        
+        let items;
+        try {
+          items = JSON.parse(result);
+        } catch (e) {
+          return;
+        }
+        
+        if (!Array.isArray(items) || items.length === 0) {
+          return;
+        }
+        
+        console.log('[MW-Host] Legacy poll: found', items.length, 'items in queue');
+        
+        // Process each scan request
+        for (const item of items) {
+          const { src, thresholds } = item;
+          
+          if (!src) continue;
+          
+          console.log('[MW-Host] Legacy processing:', src.substring(0, 60));
+          
+          const scanResult = await moderationBridge.scanImage(src, thresholds);
+          
+          if (scanResult) {
+            console.log('[MW-Host] Legacy scan result:', scanResult.shouldBlur, scanResult.category);
+            
+            // Push result back to WebView's results queue
+            const escapedSrc = escapeForJs(src);
+            const pushResultScript = `
+              (function() {
+                if (!window.__GC_SCAN_RESULTS__) window.__GC_SCAN_RESULTS__ = [];
+                window.__GC_SCAN_RESULTS__.push({
+                  src: '${escapedSrc}',
+                  shouldBlur: ${scanResult.shouldBlur},
+                  category: '${scanResult.category}',
+                  confidence: ${scanResult.confidence},
+                  blurStrengthPx: ${localSettings.blur_strength_px || 16}
+                });
+                return 'OK';
+              })();
+            `;
+            
+            try {
+              await executeScript(pushResultScript);
+              console.log('[MW-Host] Legacy result pushed for:', src.substring(0, 50));
+            } catch (e) {
+              console.debug('[MW-Host] Failed to push legacy result:', e);
+            }
+          }
+        }
+      } catch (e) {
+        // Polling errors are expected and ignored in some cases
+        console.debug('[MW-Host] Legacy poll error:', e);
+      }
+    };
+
+    // Start polling at 200ms intervals (less aggressive since postMessage is primary)
+    pollIntervalRef.current = setInterval(pollForRequests, 200);
+
+    return () => {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+        pollIntervalRef.current = null;
+      }
+    };
+  }, [isNative, webViewState.isOpen, isModerationEnabled, executeScript, moderationBridge, localSettings.blur_strength_px]);
 
   // Search handler
   const handleSearch = useCallback(async (query: string) => {

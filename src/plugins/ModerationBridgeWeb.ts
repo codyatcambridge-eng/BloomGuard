@@ -25,6 +25,11 @@ export class ModerationBridgeWeb extends WebPlugin implements ModerationBridgePl
     blurStrength: 24,
     enabled: true,
   };
+  
+  // Timeouts and retry configuration
+  private readonly IMAGE_LOAD_TIMEOUT = 10000; // 10s
+  private readonly INFERENCE_TIMEOUT = 8000; // 8s
+  private readonly MAX_RETRIES = 2;
 
   constructor() {
     super();
@@ -64,6 +69,7 @@ export class ModerationBridgeWeb extends WebPlugin implements ModerationBridgePl
 
   async scan(options: { src: string; thresholds?: ModerationThresholds }): Promise<ModerationScanResult> {
     const { src, thresholds = getThresholdsForSensitivity(this.settings.sensitivity) } = options;
+    const startTime = performance.now();
 
     console.log('[MW-Bridge] scan received:', src.substring(0, 60));
 
@@ -82,14 +88,12 @@ export class ModerationBridgeWeb extends WebPlugin implements ModerationBridgePl
       return this.createSafeResult(src);
     }
 
-    const startTime = performance.now();
-
     try {
-      // Load image
-      const img = await this.loadImage(src);
+      // Load image with hardened loader
+      const img = await this.loadImageWithFallback(src);
       
-      // Classify
-      const predictions = await this.model.classify(img);
+      // Classify with timeout
+      const predictions = await this.classifyWithTimeout(img);
       const inferenceTime = performance.now() - startTime;
 
       // Convert to record format
@@ -123,7 +127,8 @@ export class ModerationBridgeWeb extends WebPlugin implements ModerationBridgePl
       console.log(`[MW-Bridge] scan result: ${category} (blur: ${shouldBlur}, conf: ${(confidence * 100).toFixed(1)}%, time: ${inferenceTime.toFixed(0)}ms)`);
       return result;
     } catch (error) {
-      console.debug('[MW-Bridge] Scan failed:', src.substring(0, 50), error);
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      console.log('[MW-Bridge] Scan failed:', src.substring(0, 50), '-', errorMsg);
       return this.createSafeResult(src, 'error');
     }
   }
@@ -131,8 +136,9 @@ export class ModerationBridgeWeb extends WebPlugin implements ModerationBridgePl
   async scanBatch(options: { sources: string[]; thresholds?: ModerationThresholds }): Promise<{ results: ModerationScanResult[] }> {
     const { sources, thresholds } = options;
     const results: ModerationScanResult[] = [];
+    const startTime = performance.now();
 
-    console.log('[ModerationBridgeWeb] Batch scan:', sources.length, 'images');
+    console.log('[MW-Bridge] scanBatch received:', sources.length, 'images');
 
     // Process in parallel with concurrency limit
     const concurrency = 4;
@@ -144,7 +150,78 @@ export class ModerationBridgeWeb extends WebPlugin implements ModerationBridgePl
       results.push(...batchResults);
     }
 
+    const totalTime = performance.now() - startTime;
+    console.log(`[MW-Bridge] scanBatch complete: ${results.length} images in ${totalTime.toFixed(0)}ms`);
+
     return { results };
+  }
+
+  /**
+   * Process a batch request from WebView postMessage protocol
+   * Returns results in the same order as requested with itemIds preserved
+   */
+  async processModerationRequest(request: {
+    requestId: string;
+    items: Array<{ itemId: string; src: string; sourceType: string }>;
+    thresholds?: ModerationThresholds;
+  }): Promise<{
+    requestId: string;
+    results: Array<{
+      itemId: string;
+      src: string;
+      shouldBlur: boolean;
+      category: ModerationCategory;
+      confidence: number;
+    }>;
+  }> {
+    const { requestId, items, thresholds } = request;
+    const startTime = performance.now();
+
+    console.log('[MW-Bridge] processModerationRequest', requestId, 'items=' + items.length);
+
+    const results: Array<{
+      itemId: string;
+      src: string;
+      shouldBlur: boolean;
+      category: ModerationCategory;
+      confidence: number;
+    }> = [];
+
+    // Process each item
+    for (const item of items) {
+      const { itemId, src, sourceType } = item;
+      
+      console.log('[MW-Bridge] Processing', itemId, '[' + sourceType + ']:', src.substring(0, 60));
+      
+      try {
+        const scanResult = await this.scan({ src, thresholds });
+        
+        results.push({
+          itemId,
+          src,
+          shouldBlur: scanResult.shouldBlur,
+          category: scanResult.category,
+          confidence: scanResult.confidence,
+        });
+
+        console.log('[MW-Bridge] Result', itemId, ':', scanResult.category, 'blur=' + scanResult.shouldBlur);
+      } catch (error) {
+        console.log('[MW-Bridge] Error processing', itemId, ':', error);
+        
+        results.push({
+          itemId,
+          src,
+          shouldBlur: false,
+          category: 'error',
+          confidence: 0,
+        });
+      }
+    }
+
+    const totalTime = performance.now() - startTime;
+    console.log('[MW-Bridge] processModerationRequest complete', requestId, 'time=' + totalTime.toFixed(0) + 'ms');
+
+    return { requestId, results };
   }
 
   async getSettings(): Promise<ModerationSettings> {
@@ -155,7 +232,7 @@ export class ModerationBridgeWeb extends WebPlugin implements ModerationBridgePl
         this.settings = { ...this.settings, ...JSON.parse(stored) };
       }
     } catch (e) {
-      console.debug('[ModerationBridgeWeb] Failed to load settings');
+      console.debug('[MW-Bridge] Failed to load settings');
     }
     return this.settings;
   }
@@ -174,19 +251,45 @@ export class ModerationBridgeWeb extends WebPlugin implements ModerationBridgePl
     try {
       localStorage.setItem('moderation_bridge_settings', JSON.stringify(this.settings));
     } catch (e) {
-      console.debug('[ModerationBridgeWeb] Failed to save settings');
+      console.debug('[MW-Bridge] Failed to save settings');
     }
   }
 
-  private async loadImage(src: string): Promise<HTMLImageElement> {
+  /**
+   * Load image with multiple fallback strategies
+   * 1. Try direct Image() with crossOrigin
+   * 2. Try fetch() -> blob -> createObjectURL
+   * 3. Return error if both fail
+   */
+  private async loadImageWithFallback(src: string): Promise<HTMLImageElement> {
+    // Try direct load first
+    try {
+      return await this.loadImageDirect(src);
+    } catch (directError) {
+      console.log('[MW-Bridge] Direct load failed, trying fetch fallback:', (directError as Error).message);
+    }
+
+    // Try fetch -> blob -> objectURL fallback
+    try {
+      return await this.loadImageViaFetch(src);
+    } catch (fetchError) {
+      console.log('[MW-Bridge] Fetch fallback failed:', (fetchError as Error).message);
+      throw new Error(`Failed to load image: ${(fetchError as Error).message}`);
+    }
+  }
+
+  /**
+   * Direct image load with crossOrigin
+   */
+  private async loadImageDirect(src: string): Promise<HTMLImageElement> {
     return new Promise((resolve, reject) => {
       const img = new Image();
       img.crossOrigin = 'anonymous';
       
       const timeout = setTimeout(() => {
         img.src = '';
-        reject(new Error('Image load timeout'));
-      }, 8000);
+        reject(new Error('Image load timeout (direct)'));
+      }, this.IMAGE_LOAD_TIMEOUT);
 
       img.onload = () => {
         clearTimeout(timeout);
@@ -197,12 +300,103 @@ export class ModerationBridgeWeb extends WebPlugin implements ModerationBridgePl
         resolve(img);
       };
 
-      img.onerror = () => {
+      img.onerror = (e) => {
         clearTimeout(timeout);
-        reject(new Error('Failed to load image'));
+        reject(new Error('Direct image load failed'));
       };
 
       img.src = src;
+    });
+  }
+
+  /**
+   * Load image via fetch -> blob -> objectURL
+   * This can bypass some CORS issues when the server allows fetch but not crossOrigin images
+   */
+  private async loadImageViaFetch(src: string): Promise<HTMLImageElement> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.IMAGE_LOAD_TIMEOUT);
+
+    try {
+      const response = await fetch(src, {
+        signal: controller.signal,
+        mode: 'cors',
+        credentials: 'omit',
+        headers: {
+          'Accept': 'image/*',
+        },
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      const contentType = response.headers.get('content-type');
+      if (contentType && !contentType.startsWith('image/')) {
+        throw new Error(`Invalid content-type: ${contentType}`);
+      }
+
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        
+        const loadTimeout = setTimeout(() => {
+          URL.revokeObjectURL(objectUrl);
+          reject(new Error('Image load timeout (blob)'));
+        }, 5000);
+
+        img.onload = () => {
+          clearTimeout(loadTimeout);
+          // Don't revoke yet - we need it for inference
+          // Schedule cleanup for later
+          setTimeout(() => URL.revokeObjectURL(objectUrl), 5000);
+          
+          if (img.width < 10 || img.height < 10) {
+            reject(new Error('Image too small'));
+            return;
+          }
+          resolve(img);
+        };
+
+        img.onerror = () => {
+          clearTimeout(loadTimeout);
+          URL.revokeObjectURL(objectUrl);
+          reject(new Error('Blob image load failed'));
+        };
+
+        img.src = objectUrl;
+      });
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if ((error as Error).name === 'AbortError') {
+        throw new Error('Fetch timeout');
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Run model classification with timeout
+   */
+  private async classifyWithTimeout(img: HTMLImageElement): Promise<any[]> {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('Inference timeout'));
+      }, this.INFERENCE_TIMEOUT);
+
+      this.model.classify(img)
+        .then((predictions: any[]) => {
+          clearTimeout(timeout);
+          resolve(predictions);
+        })
+        .catch((error: Error) => {
+          clearTimeout(timeout);
+          reject(error);
+        });
     });
   }
 
