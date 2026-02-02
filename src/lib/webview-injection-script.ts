@@ -5,20 +5,23 @@
  * 1. Image detection (img tags, background-images, video posters)
  * 2. Shadow DOM traversal for YouTube/TikTok
  * 3. Dynamic content via MutationObserver
- * 4. Communication with native app via executeScript polling
+ * 4. Communication with native app via postMessage protocol
  * 5. Blur application and reveal toggles
  * 
- * Communication Flow:
- * 1. Script detects images and queues them in window.__GC_SCAN_QUEUE__
- * 2. Native app polls this queue via executeScript
- * 3. Native app processes images and pushes results to window.__GC_SCAN_RESULTS__
- * 4. Script polls results and applies blurs
+ * Communication Flow (postMessage-based):
+ * 1. Script detects images and batches them into scan requests
+ * 2. Script posts { type: 'gc-moderation-request', requestId, items } to parent
+ * 3. Native app receives via message listener, processes with NSFWJS
+ * 4. Native app posts back { type: 'gc-moderation-result', requestId, results }
+ * 5. Script receives results and applies blurs
  */
 
 export interface InjectionConfig {
   sensitivity: number; // 0-4 blur dial
   blurStrength: number; // px
   enabled: boolean;
+  forcedBlur?: boolean; // Dev mode: blur everything
+  debug?: boolean; // Verbose logging
 }
 
 /**
@@ -57,6 +60,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   console.log('[MW] Sensitivity:', ${config.sensitivity});
   console.log('[MW] Blur Strength:', ${config.blurStrength}, 'px');
   console.log('[MW] Enabled:', ${config.enabled});
+  console.log('[MW] Forced Blur:', ${config.forcedBlur || false});
   console.log('[MW] URL:', window.location.href);
   console.log('[MW] ========================================');
 
@@ -64,8 +68,13 @@ export function generateModerationScript(config: InjectionConfig): string {
     sensitivity: ${config.sensitivity},
     blurStrength: ${config.blurStrength},
     enabled: ${config.enabled},
+    forcedBlur: ${config.forcedBlur || false},
+    debug: ${config.debug || false},
     minImageSize: 40,
     scanDelay: 50,
+    batchSize: 5,
+    batchDelay: 100,
+    requestTimeout: 8000,
   };
 
   // Threshold mappings for blur dial levels
@@ -77,18 +86,25 @@ export function generateModerationScript(config: InjectionConfig): string {
     4: { porn: 0.15, sexy: 0.25, hentai: 0.15 },
   };
 
-  // Global queues for native app communication
-  // These are polled by the native app via executeScript
-  window.__GC_SCAN_QUEUE__ = window.__GC_SCAN_QUEUE__ || [];
-  window.__GC_SCAN_RESULTS__ = window.__GC_SCAN_RESULTS__ || [];
+  // ==================== REQUEST ID GENERATION ====================
+  
+  function generateRequestId() {
+    return 'r_' + Math.random().toString(36).slice(2, 9) + '_' + Date.now().toString(36);
+  }
 
-  // Internal state tracking
+  function generateItemId() {
+    return 'i_' + Math.random().toString(36).slice(2, 9);
+  }
+
+  // ==================== STATE MANAGEMENT ====================
+  
   const state = {
     scanned: new Set(),
-    pending: new Set(),
+    pending: new Map(), // itemId -> { element, src, sourceType, requestId, timestamp }
+    pendingRequests: new Map(), // requestId -> { items, timestamp, timeoutId }
     blurred: new Set(),
     revealed: new Set(),
-    elements: new Map(), // src -> element[]
+    elements: new Map(), // itemId -> element
     stats: {
       imgTags: 0,
       bgImages: 0,
@@ -96,9 +112,16 @@ export function generateModerationScript(config: InjectionConfig): string {
       shadowDom: 0,
       skipped: 0,
       blurred: 0,
+      timeouts: 0,
       errors: 0,
+      requestsSent: 0,
+      responsesReceived: 0,
     },
   };
+
+  // Batch queue for collecting items before sending request
+  let batchQueue = [];
+  let batchTimer = null;
 
   // ==================== PLATFORM DETECTION ====================
 
@@ -170,7 +193,7 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   // ==================== BLUR MANAGEMENT ====================
 
-  function applyBlur(element, src, category, blurStrengthPx) {
+  function applyBlur(element, src, category, blurStrengthPx, itemId) {
     if (state.revealed.has(src)) return;
     
     const blurPx = blurStrengthPx || CONFIG.blurStrength;
@@ -181,14 +204,16 @@ export function generateModerationScript(config: InjectionConfig): string {
       element.dataset.mwModerated = 'blurred';
       element.dataset.mwCategory = category || 'flagged';
       element.dataset.mwSrc = src;
+      element.dataset.mwItemId = itemId || '';
       
       state.blurred.add(src);
       state.stats.blurred++;
       
       createRevealOverlay(element, src, category);
-      console.log('[MW] applied blur [' + category + ']:', src.substring(0, 60));
+      console.log('[MW] applied blur [' + category + '] itemId=' + (itemId || 'N/A') + ':', src.substring(0, 60));
     } catch (e) {
       console.error('[MW] Failed to apply blur:', e.message);
+      state.stats.errors++;
     }
   }
 
@@ -281,7 +306,180 @@ export function generateModerationScript(config: InjectionConfig): string {
     element.dataset.mwHasOverlay = 'true';
   }
 
-  // ==================== SCAN QUEUE MANAGEMENT ====================
+  // ==================== POSTMESSAGE PROTOCOL ====================
+
+  /**
+   * Send a batch of items to the host for moderation
+   */
+  function sendModerationRequest(items) {
+    if (items.length === 0) return;
+    
+    const requestId = generateRequestId();
+    const timestamp = Date.now();
+    
+    const message = {
+      type: 'gc-moderation-request',
+      requestId: requestId,
+      items: items.map(item => ({
+        itemId: item.itemId,
+        src: item.src,
+        sourceType: item.sourceType,
+      })),
+      thresholds: THRESHOLDS[CONFIG.sensitivity] || THRESHOLDS[3],
+      timestamp: timestamp,
+    };
+
+    // Store pending request for timeout handling
+    const timeoutId = setTimeout(() => {
+      handleRequestTimeout(requestId);
+    }, CONFIG.requestTimeout);
+
+    state.pendingRequests.set(requestId, {
+      items: items,
+      timestamp: timestamp,
+      timeoutId: timeoutId,
+    });
+
+    state.stats.requestsSent++;
+    
+    console.log('[MW] request sent', requestId, 'items=' + items.length, items.map(i => i.src.substring(0, 40)));
+    console.log('[MW] waiting response', requestId, 'ts=' + timestamp);
+    
+    // Post to parent (host app)
+    window.postMessage(message, '*');
+    
+    // Also try posting to parent window if in iframe
+    if (window.parent && window.parent !== window) {
+      try {
+        window.parent.postMessage(message, '*');
+      } catch (e) {}
+    }
+  }
+
+  /**
+   * Handle timeout for pending request
+   */
+  function handleRequestTimeout(requestId) {
+    const pendingRequest = state.pendingRequests.get(requestId);
+    if (!pendingRequest) return;
+    
+    console.log('[MW] timeout', requestId, 'items=' + pendingRequest.items.length);
+    state.stats.timeouts += pendingRequest.items.length;
+    
+    // Mark items as timed out
+    pendingRequest.items.forEach(item => {
+      state.pending.delete(item.itemId);
+      // Don't add to scanned so they can be retried later
+    });
+    
+    state.pendingRequests.delete(requestId);
+  }
+
+  /**
+   * Process results from host
+   */
+  function handleModerationResult(message) {
+    const { requestId, results } = message;
+    
+    if (!requestId || !Array.isArray(results)) {
+      console.log('[MW] Invalid result message:', message);
+      return;
+    }
+    
+    const pendingRequest = state.pendingRequests.get(requestId);
+    if (pendingRequest) {
+      clearTimeout(pendingRequest.timeoutId);
+      state.pendingRequests.delete(requestId);
+    }
+    
+    state.stats.responsesReceived++;
+    console.log('[MW] received result', requestId, 'count=' + results.length);
+    
+    results.forEach(result => {
+      const { itemId, src, shouldBlur, category, confidence } = result;
+      
+      console.log('[MW] scan result itemId=' + itemId, 'src=' + (src || '').substring(0, 50), 'blur=' + shouldBlur, 'cat=' + category);
+      
+      // Find the element for this item
+      const element = state.elements.get(itemId);
+      state.pending.delete(itemId);
+      state.scanned.add(src);
+      
+      // Apply blur based on result or forced blur mode
+      const shouldApplyBlur = CONFIG.forcedBlur || (shouldBlur && CONFIG.enabled && CONFIG.sensitivity > 0);
+      
+      if (shouldApplyBlur && element && element.isConnected) {
+        applyBlur(element, src, category || 'flagged', CONFIG.blurStrength, itemId);
+      }
+      
+      // Also find any other elements with the same src
+      findAndBlur(src, category, CONFIG.blurStrength, shouldApplyBlur);
+    });
+  }
+
+  /**
+   * Find and blur all elements matching a src
+   */
+  function findAndBlur(src, category, blurStrengthPx, shouldBlur) {
+    if (!shouldBlur) return;
+    if (state.revealed.has(src)) return;
+    
+    try {
+      // Images
+      document.querySelectorAll('img').forEach(img => {
+        if ((img.src === src || img.dataset.mwOrigSrc === src) && !state.revealed.has(src)) {
+          if (img.dataset.mwModerated !== 'blurred') {
+            applyBlur(img, src, category, blurStrengthPx);
+          }
+        }
+      });
+      
+      // Video posters
+      document.querySelectorAll('video').forEach(video => {
+        if ((video.poster === src || video.dataset.mwOrigPoster === src) && !state.revealed.has(src)) {
+          if (video.dataset.mwModerated !== 'blurred') {
+            applyBlur(video, src, category, blurStrengthPx);
+          }
+        }
+      });
+      
+      // Background images
+      document.querySelectorAll('[data-mw-bg-src]').forEach(el => {
+        if (el.dataset.mwBgSrc === src && !state.revealed.has(src)) {
+          if (el.dataset.mwModerated !== 'blurred') {
+            applyBlur(el, src, category, blurStrengthPx);
+          }
+        }
+      });
+    } catch (e) {}
+  }
+
+  // ==================== MESSAGE LISTENER ====================
+
+  window.addEventListener('message', function(event) {
+    const message = event.data;
+    if (!message || typeof message !== 'object') return;
+    
+    if (message.type === 'gc-moderation-result') {
+      handleModerationResult(message);
+    }
+  });
+
+  // ==================== BATCH QUEUE MANAGEMENT ====================
+
+  function flushBatchQueue() {
+    if (batchQueue.length === 0) return;
+    
+    const itemsToSend = batchQueue.splice(0, CONFIG.batchSize);
+    sendModerationRequest(itemsToSend);
+    
+    // If more items remain, schedule another flush
+    if (batchQueue.length > 0) {
+      batchTimer = setTimeout(flushBatchQueue, CONFIG.batchDelay);
+    } else {
+      batchTimer = null;
+    }
+  }
 
   function queueForScan(src, element, sourceType) {
     const url = normalizeUrl(src);
@@ -297,90 +495,46 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     
     // Skip already processed
-    if (state.scanned.has(url) || state.pending.has(url)) {
+    if (state.scanned.has(url)) {
       return false;
     }
     
-    state.pending.add(url);
-    
-    // Track element for later blur application
-    if (!state.elements.has(url)) {
-      state.elements.set(url, []);
+    // Skip if already pending
+    for (const [itemId, pending] of state.pending.entries()) {
+      if (pending.src === url) {
+        return false;
+      }
     }
-    state.elements.get(url).push(element);
     
-    // Add to global queue for native app to pick up
-    window.__GC_SCAN_QUEUE__.push({
+    const itemId = generateItemId();
+    
+    // Store element reference
+    state.elements.set(itemId, element);
+    state.pending.set(itemId, {
+      element: element,
       src: url,
       sourceType: sourceType,
-      thresholds: THRESHOLDS[CONFIG.sensitivity] || THRESHOLDS[3],
       timestamp: Date.now(),
     });
     
-    console.log('[MW] callBridgeScan [' + sourceType + ']:', url.substring(0, 70));
-    return true;
-  }
-
-  // ==================== RESULT PROCESSING ====================
-
-  function processResults() {
-    if (!window.__GC_SCAN_RESULTS__ || window.__GC_SCAN_RESULTS__.length === 0) {
-      return;
+    // Add to batch queue
+    batchQueue.push({
+      itemId: itemId,
+      src: url,
+      sourceType: sourceType,
+    });
+    
+    // Schedule batch flush
+    if (!batchTimer) {
+      batchTimer = setTimeout(flushBatchQueue, CONFIG.batchDelay);
     }
     
-    const results = window.__GC_SCAN_RESULTS__.splice(0, window.__GC_SCAN_RESULTS__.length);
+    if (CONFIG.debug) {
+      console.log('[MW] queued [' + sourceType + '] itemId=' + itemId + ':', url.substring(0, 70));
+    }
     
-    results.forEach(result => {
-      const { src, shouldBlur, category, blurStrengthPx } = result;
-      
-      console.log('[MW] scan result:', src.substring(0, 50), '-> blur:', shouldBlur, 'cat:', category);
-      
-      state.scanned.add(src);
-      state.pending.delete(src);
-      
-      if (shouldBlur && CONFIG.enabled && CONFIG.sensitivity > 0) {
-        const elements = state.elements.get(src) || [];
-        console.log('[MW] Found', elements.length, 'elements to blur');
-        
-        elements.forEach(el => {
-          if (el && el.isConnected) {
-            applyBlur(el, src, category, blurStrengthPx);
-          }
-        });
-        
-        // Also find by src attribute in case elements changed
-        findAndBlur(src, category, blurStrengthPx);
-      }
-    });
+    return true;
   }
-
-  function findAndBlur(src, category, blurStrengthPx) {
-    try {
-      // Images
-      document.querySelectorAll('img').forEach(img => {
-        if (img.src === src && !state.revealed.has(src)) {
-          applyBlur(img, src, category, blurStrengthPx);
-        }
-      });
-      
-      // Video posters
-      document.querySelectorAll('video').forEach(video => {
-        if (video.poster === src && !state.revealed.has(src)) {
-          applyBlur(video, src, category, blurStrengthPx);
-        }
-      });
-      
-      // Background images
-      document.querySelectorAll('[data-mw-bg-src]').forEach(el => {
-        if (el.dataset.mwBgSrc === src && !state.revealed.has(src)) {
-          applyBlur(el, src, category, blurStrengthPx);
-        }
-      });
-    } catch (e) {}
-  }
-
-  // Poll for results from native app
-  setInterval(processResults, 100);
 
   // ==================== SCANNING FUNCTIONS ====================
 
@@ -585,6 +739,50 @@ export function generateModerationScript(config: InjectionConfig): string {
     return observer;
   }
 
+  // ==================== LEGACY QUEUE SUPPORT ====================
+  
+  // Keep legacy queues for backward compatibility with polling approach
+  window.__GC_SCAN_QUEUE__ = window.__GC_SCAN_QUEUE__ || [];
+  window.__GC_SCAN_RESULTS__ = window.__GC_SCAN_RESULTS__ || [];
+  
+  // Poll legacy results queue (fallback if postMessage doesn't work)
+  function processLegacyResults() {
+    if (!window.__GC_SCAN_RESULTS__ || window.__GC_SCAN_RESULTS__.length === 0) {
+      return;
+    }
+    
+    const results = window.__GC_SCAN_RESULTS__.splice(0, window.__GC_SCAN_RESULTS__.length);
+    
+    results.forEach(result => {
+      const { src, shouldBlur, category, blurStrengthPx } = result;
+      
+      console.log('[MW] legacy result:', src.substring(0, 50), '-> blur:', shouldBlur, 'cat:', category);
+      
+      state.scanned.add(src);
+      
+      const shouldApplyBlur = CONFIG.forcedBlur || (shouldBlur && CONFIG.enabled && CONFIG.sensitivity > 0);
+      
+      if (shouldApplyBlur) {
+        findAndBlur(src, category, blurStrengthPx, true);
+        
+        // Also check pending items
+        for (const [itemId, pending] of state.pending.entries()) {
+          if (pending.src === src) {
+            const el = pending.element;
+            if (el && el.isConnected) {
+              applyBlur(el, src, category, blurStrengthPx, itemId);
+            }
+            state.pending.delete(itemId);
+            break;
+          }
+        }
+      }
+    });
+  }
+
+  // Poll for legacy results
+  setInterval(processLegacyResults, 100);
+
   // ==================== INITIALIZATION ====================
 
   // Inject CSS
@@ -640,6 +838,20 @@ export function generateModerationScript(config: InjectionConfig): string {
     scrollTimer = setTimeout(scanFullPage, 150);
   }, { passive: true });
 
+  // SPA navigation detection
+  let lastUrl = window.location.href;
+  const checkUrlChange = () => {
+    if (window.location.href !== lastUrl) {
+      console.log('[MW] SPA navigation detected:', lastUrl, '->', window.location.href);
+      lastUrl = window.location.href;
+      // Clear scanned state for fresh scan
+      state.scanned.clear();
+      state.elements.clear();
+      setTimeout(scanFullPage, 300);
+    }
+  };
+  setInterval(checkUrlChange, 500);
+
   // Expose debug API
   window.__MW_DEBUG__ = {
     state: state,
@@ -647,12 +859,16 @@ export function generateModerationScript(config: InjectionConfig): string {
     platform: PLATFORM,
     scanAll: scanFullPage,
     stats: () => state.stats,
-    queue: () => window.__GC_SCAN_QUEUE__,
-    results: () => window.__GC_SCAN_RESULTS__,
+    pending: () => state.pending,
+    pendingRequests: () => state.pendingRequests,
+    batchQueue: () => batchQueue,
+    setForcedBlur: (enabled) => { CONFIG.forcedBlur = enabled; console.log('[MW] Forced blur:', enabled); },
+    setDebug: (enabled) => { CONFIG.debug = enabled; console.log('[MW] Debug mode:', enabled); },
   };
 
   console.log('[MW] Moderation fully initialized');
   console.log('[MW] Debug API at window.__MW_DEBUG__');
+  console.log('[MW] Toggle forced blur: window.__MW_DEBUG__.setForcedBlur(true)');
 })();
 `;
 }
