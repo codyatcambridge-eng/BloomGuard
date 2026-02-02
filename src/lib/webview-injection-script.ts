@@ -1,16 +1,18 @@
 /**
  * WebView Injection Script for Image Moderation
- * Enhanced for YouTube Shorts, TikTok, Shadow DOM, and dynamic content
  * 
- * Features:
- * 1. MutationObserver for new images and dynamic content
- * 2. Shadow DOM traversal (YouTube, TikTok use custom elements)
- * 3. Background-image CSS detection
- * 4. Video poster and preview thumbnails
- * 5. Lazy-loaded content (data-src, srcset, loading="lazy")
- * 6. IntersectionObserver for viewport-based scanning
- * 7. Platform-specific selectors (YouTube, TikTok, Instagram)
- * 8. Comprehensive logging for debugging
+ * This script runs INSIDE the WebView and handles:
+ * 1. Image detection (img tags, background-images, video posters)
+ * 2. Shadow DOM traversal for YouTube/TikTok
+ * 3. Dynamic content via MutationObserver
+ * 4. Communication with native app via executeScript polling
+ * 5. Blur application and reveal toggles
+ * 
+ * Communication Flow:
+ * 1. Script detects images and queues them in window.__GC_SCAN_QUEUE__
+ * 2. Native app polls this queue via executeScript
+ * 3. Native app processes images and pushes results to window.__GC_SCAN_RESULTS__
+ * 4. Script polls results and applies blurs
  */
 
 export interface InjectionConfig {
@@ -44,29 +46,26 @@ export function generateModerationScript(config: InjectionConfig): string {
   // ==================== INITIALIZATION ====================
   
   // Prevent double injection
-  if (window.__GC_MODERATION_ACTIVE__) {
-    console.log('[GC:init] Already injected, skipping');
+  if (window.__MW_ACTIVE__) {
+    console.log('[MW] Already injected, skipping');
     return;
   }
-  window.__GC_MODERATION_ACTIVE__ = true;
+  window.__MW_ACTIVE__ = true;
   
-  console.log('[GC:init] ========================================');
-  console.log('[GC:init] GoodCreation Moderation Script Starting');
-  console.log('[GC:init] Sensitivity:', ${config.sensitivity});
-  console.log('[GC:init] Blur Strength:', ${config.blurStrength}, 'px');
-  console.log('[GC:init] Enabled:', ${config.enabled});
-  console.log('[GC:init] URL:', window.location.href);
-  console.log('[GC:init] ========================================');
+  console.log('[MW] ========================================');
+  console.log('[MW] injected - Moderation Script Starting');
+  console.log('[MW] Sensitivity:', ${config.sensitivity});
+  console.log('[MW] Blur Strength:', ${config.blurStrength}, 'px');
+  console.log('[MW] Enabled:', ${config.enabled});
+  console.log('[MW] URL:', window.location.href);
+  console.log('[MW] ========================================');
 
   const CONFIG = {
     sensitivity: ${config.sensitivity},
     blurStrength: ${config.blurStrength},
     enabled: ${config.enabled},
-    minImageSize: 50,
-    scanDelay: 100,
-    maxConcurrent: 4,
-    pollInterval: 200,
-    maxPollTime: 30000,
+    minImageSize: 40,
+    scanDelay: 50,
   };
 
   // Threshold mappings for blur dial levels
@@ -78,16 +77,18 @@ export function generateModerationScript(config: InjectionConfig): string {
     4: { porn: 0.15, sexy: 0.25, hentai: 0.15 },
   };
 
-  // Moderation state tracking
+  // Global queues for native app communication
+  // These are polled by the native app via executeScript
+  window.__GC_SCAN_QUEUE__ = window.__GC_SCAN_QUEUE__ || [];
+  window.__GC_SCAN_RESULTS__ = window.__GC_SCAN_RESULTS__ || [];
+
+  // Internal state tracking
   const state = {
     scanned: new Set(),
     pending: new Set(),
     blurred: new Set(),
     revealed: new Set(),
-    queue: [],
-    processing: 0,
-    messageId: 0,
-    pendingScans: new Map(), // messageId -> { src, resolve }
+    elements: new Map(), // src -> element[]
     stats: {
       imgTags: 0,
       bgImages: 0,
@@ -98,17 +99,6 @@ export function generateModerationScript(config: InjectionConfig): string {
       errors: 0,
     },
   };
-
-  // ==================== LOGGING ====================
-
-  function log(category, message, ...args) {
-    const prefix = '[GC:' + category + ']';
-    console.log(prefix, message, ...args);
-  }
-
-  function logStats() {
-    console.log('[GC:stats]', JSON.stringify(state.stats));
-  }
 
   // ==================== PLATFORM DETECTION ====================
 
@@ -128,42 +118,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   const PLATFORM = detectPlatform();
-  log('init', 'Detected platform:', PLATFORM);
-
-  // Platform-specific selectors for containers that hold images
-  const PLATFORM_SELECTORS = {
-    'youtube': [
-      'ytd-app', 'ytd-browse', 'ytd-watch-flexy', 'ytd-search',
-      'ytd-rich-grid-renderer', 'ytd-video-renderer', 'ytd-compact-video-renderer',
-      'ytd-rich-item-renderer', 'ytd-thumbnail', 'ytd-playlist-thumbnail',
-      'ytd-channel-renderer', 'yt-img-shadow', 'yt-image',
-    ],
-    'youtube-shorts': [
-      'ytd-app', 'ytd-shorts', 'ytd-reel-video-renderer', 'ytd-reel-item-renderer',
-      'ytm-shorts-lockup-view-model', 'ytm-reel-item-renderer',
-      'shorts-player', 'ytm-shorts', '#shorts-container',
-      'yt-img-shadow', 'yt-image', 'ytd-thumbnail',
-    ],
-    'tiktok': [
-      '[data-e2e="recommend-list-item-container"]', '.tiktok-feed-item',
-      '.video-feed-item', '.video-card', '.user-avatar',
-      '[class*="DivVideoContainer"]', '[class*="DivPlayerContainer"]',
-      '[class*="ImgAvatar"]', '[class*="ImgPoster"]',
-      '.tiktok-avatar', '.author-card', '.video-infos-container',
-    ],
-    'instagram': [
-      'article', '.x1lliihq', '._aagv', '._aarf', '._aagw',
-      '[data-testid="post-container"]', '.x1n2onr6',
-    ],
-    'twitter': [
-      '[data-testid="tweet"]', '[data-testid="tweetPhoto"]',
-      '.css-1dbjc4n', 'article',
-    ],
-    'facebook': [
-      '[data-pagelet]', '.x1lliihq', '.xu06os2',
-    ],
-    'generic': [],
-  };
+  console.log('[MW] Platform detected:', PLATFORM);
 
   // ==================== URL UTILITIES ====================
 
@@ -185,9 +140,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (match && match[1]) {
         return normalizeUrl(match[1]);
       }
-    } catch (e) {
-      log('error', 'Failed to extract bg image:', e.message);
-    }
+    } catch (e) {}
     return null;
   }
 
@@ -199,13 +152,11 @@ export function generateModerationScript(config: InjectionConfig): string {
       const width = rect.width || element.offsetWidth || 0;
       const height = rect.height || element.offsetHeight || 0;
       
-      // Skip tiny elements
       if (width < CONFIG.minImageSize || height < CONFIG.minImageSize) {
         return false;
       }
       
-      // Check if in or near viewport
-      const buffer = 500;
+      const buffer = 300;
       return (
         rect.top < window.innerHeight + buffer &&
         rect.bottom > -buffer &&
@@ -219,57 +170,56 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   // ==================== BLUR MANAGEMENT ====================
 
-  function applyBlur(element, src, category) {
+  function applyBlur(element, src, category, blurStrengthPx) {
     if (state.revealed.has(src)) return;
     
+    const blurPx = blurStrengthPx || CONFIG.blurStrength;
+    
     try {
-      element.style.filter = 'blur(' + CONFIG.blurStrength + 'px)';
+      element.style.filter = 'blur(' + blurPx + 'px)';
       element.style.transition = 'filter 0.3s ease';
-      element.dataset.gcModerated = 'blurred';
-      element.dataset.gcCategory = category || 'flagged';
-      element.dataset.gcSrc = src;
+      element.dataset.mwModerated = 'blurred';
+      element.dataset.mwCategory = category || 'flagged';
+      element.dataset.mwSrc = src;
       
       state.blurred.add(src);
       state.stats.blurred++;
       
       createRevealOverlay(element, src, category);
-      log('blur', 'Applied blur [' + category + ']:', src.substring(0, 60));
+      console.log('[MW] applied blur [' + category + ']:', src.substring(0, 60));
     } catch (e) {
-      log('error', 'Failed to apply blur:', e.message);
+      console.error('[MW] Failed to apply blur:', e.message);
     }
   }
 
   function removeBlur(element, src) {
     try {
       element.style.filter = 'none';
-      element.dataset.gcModerated = 'revealed';
+      element.dataset.mwModerated = 'revealed';
       
-      const overlay = element.parentElement?.querySelector('.gc-reveal-overlay');
+      const overlay = element.parentElement?.querySelector('.mw-reveal-overlay');
       if (overlay) {
         overlay.style.display = 'none';
       }
       
-      log('reveal', 'Blur removed:', src.substring(0, 60));
-    } catch (e) {
-      log('error', 'Failed to remove blur:', e.message);
-    }
+      console.log('[MW] blur removed:', src.substring(0, 60));
+    } catch (e) {}
   }
 
   function createRevealOverlay(element, src, category) {
-    if (element.dataset.gcHasOverlay === 'true') return;
+    if (element.dataset.mwHasOverlay === 'true') return;
     
     const parent = element.parentElement;
     if (!parent) return;
     
-    // Ensure parent is positioned
     const parentPos = window.getComputedStyle(parent).position;
     if (parentPos === 'static') {
       parent.style.position = 'relative';
     }
     
     const overlay = document.createElement('div');
-    overlay.className = 'gc-reveal-overlay';
-    overlay.dataset.gcFor = src;
+    overlay.className = 'mw-reveal-overlay';
+    overlay.dataset.mwFor = src;
     overlay.style.cssText = [
       'position: absolute',
       'inset: 0',
@@ -286,21 +236,21 @@ export function generateModerationScript(config: InjectionConfig): string {
       'position: absolute',
       'top: 8px',
       'left: 8px',
-      'background: rgba(0,0,0,0.7)',
+      'background: rgba(0,0,0,0.8)',
       'color: #ff6b6b',
-      'padding: 2px 8px',
+      'padding: 3px 8px',
       'border-radius: 4px',
-      'font-size: 11px',
+      'font-size: 10px',
       'font-weight: bold',
     ].join(';');
     badge.textContent = (category || 'flagged').toUpperCase();
     overlay.appendChild(badge);
     
     const btn = document.createElement('button');
-    btn.className = 'gc-reveal-btn';
+    btn.className = 'mw-reveal-btn';
     btn.textContent = '👁 Reveal';
     btn.style.cssText = [
-      'background: rgba(0, 0, 0, 0.85)',
+      'background: rgba(0, 0, 0, 0.9)',
       'color: white',
       'border: 2px solid rgba(255, 255, 255, 0.3)',
       'padding: 10px 20px',
@@ -315,13 +265,11 @@ export function generateModerationScript(config: InjectionConfig): string {
       e.stopPropagation();
       
       if (state.revealed.has(src)) {
-        // Re-blur
         state.revealed.delete(src);
-        applyBlur(element, src, category);
+        applyBlur(element, src, category, CONFIG.blurStrength);
         btn.textContent = '👁 Reveal';
         overlay.style.display = 'flex';
       } else {
-        // Reveal
         state.revealed.add(src);
         removeBlur(element, src);
         btn.textContent = '🔒 Hide';
@@ -330,21 +278,20 @@ export function generateModerationScript(config: InjectionConfig): string {
     
     overlay.appendChild(btn);
     parent.appendChild(overlay);
-    element.dataset.gcHasOverlay = 'true';
+    element.dataset.mwHasOverlay = 'true';
   }
 
-  // ==================== SCAN REQUEST ====================
+  // ==================== SCAN QUEUE MANAGEMENT ====================
 
-  function requestScan(src, sourceType) {
+  function queueForScan(src, element, sourceType) {
     const url = normalizeUrl(src);
     if (!url) {
       state.stats.skipped++;
       return false;
     }
     
-    // Skip data URLs that are too small
+    // Skip tiny data URLs
     if (url.startsWith('data:') && url.length < 1000) {
-      log('skip', 'Tiny data URL');
       state.stats.skipped++;
       return false;
     }
@@ -355,187 +302,91 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     
     state.pending.add(url);
-    state.queue.push({ src: url, sourceType });
     
-    log('queue', '[' + sourceType + '] Queued:', url.substring(0, 70));
-    processQueue();
+    // Track element for later blur application
+    if (!state.elements.has(url)) {
+      state.elements.set(url, []);
+    }
+    state.elements.get(url).push(element);
+    
+    // Add to global queue for native app to pick up
+    window.__GC_SCAN_QUEUE__.push({
+      src: url,
+      sourceType: sourceType,
+      thresholds: THRESHOLDS[CONFIG.sensitivity] || THRESHOLDS[3],
+      timestamp: Date.now(),
+    });
+    
+    console.log('[MW] callBridgeScan [' + sourceType + ']:', url.substring(0, 70));
     return true;
   }
 
-  // ==================== QUEUE PROCESSING ====================
+  // ==================== RESULT PROCESSING ====================
 
-  function processQueue() {
-    while (state.processing < CONFIG.maxConcurrent && state.queue.length > 0) {
-      const item = state.queue.shift();
-      if (!item) continue;
-      
-      state.processing++;
-      sendScanRequest(item.src, item.sourceType);
+  function processResults() {
+    if (!window.__GC_SCAN_RESULTS__ || window.__GC_SCAN_RESULTS__.length === 0) {
+      return;
     }
-  }
-
-  // ==================== COMMUNICATION WITH NATIVE APP ====================
-  
-  // Store pending scan callbacks
-  function sendScanRequest(src, sourceType) {
-    const msgId = ++state.messageId;
     
-    const message = {
-      type: 'gc-moderation-request',
-      action: 'scan',
-      messageId: msgId,
-      src: src,
-      sourceType: sourceType,
-      thresholds: THRESHOLDS[CONFIG.sensitivity] || THRESHOLDS[3],
-    };
+    const results = window.__GC_SCAN_RESULTS__.splice(0, window.__GC_SCAN_RESULTS__.length);
     
-    // Store for result matching
-    state.pendingScans.set(msgId, { src, sourceType });
-    
-    log('scan', 'Sending scan request #' + msgId + ':', src.substring(0, 60));
-    
-    // Try multiple communication channels
-    
-    // 1. iOS WKWebView messageHandlers
-    try {
-      if (window.webkit?.messageHandlers?.ModerationBridge) {
-        window.webkit.messageHandlers.ModerationBridge.postMessage(message);
-        log('comm', 'Sent via webkit messageHandlers');
-      }
-    } catch (e) {}
-    
-    // 2. Android JavaScriptInterface
-    try {
-      if (window.ModerationBridge?.scan) {
-        window.ModerationBridge.scan(JSON.stringify(message));
-        log('comm', 'Sent via Android bridge');
-      }
-    } catch (e) {}
-    
-    // 3. window.postMessage (for InAppBrowser)
-    try {
-      window.postMessage(message, '*');
-      log('comm', 'Sent via postMessage');
-    } catch (e) {}
-    
-    // 4. Parent frame postMessage
-    try {
-      if (window.parent && window.parent !== window) {
-        window.parent.postMessage(message, '*');
-        log('comm', 'Sent via parent.postMessage');
-      }
-    } catch (e) {}
-    
-    // Timeout fallback - mark as safe after delay if no response
-    setTimeout(() => {
-      if (state.pendingScans.has(msgId)) {
-        log('timeout', 'No response for #' + msgId + ', marking safe');
-        handleModerationResult({
-          messageId: msgId,
-          src: src,
-          shouldBlur: false,
-          category: 'timeout',
-          confidence: 0,
+    results.forEach(result => {
+      const { src, shouldBlur, category, blurStrengthPx } = result;
+      
+      console.log('[MW] scan result:', src.substring(0, 50), '-> blur:', shouldBlur, 'cat:', category);
+      
+      state.scanned.add(src);
+      state.pending.delete(src);
+      
+      if (shouldBlur && CONFIG.enabled && CONFIG.sensitivity > 0) {
+        const elements = state.elements.get(src) || [];
+        console.log('[MW] Found', elements.length, 'elements to blur');
+        
+        elements.forEach(el => {
+          if (el && el.isConnected) {
+            applyBlur(el, src, category, blurStrengthPx);
+          }
         });
+        
+        // Also find by src attribute in case elements changed
+        findAndBlur(src, category, blurStrengthPx);
       }
-    }, 10000);
+    });
   }
 
-  // ==================== RESULT HANDLING ====================
-
-  function handleModerationResult(data) {
-    const { src, shouldBlur, category, confidence, messageId } = data;
-    
-    // Clean up pending state
-    if (messageId) {
-      state.pendingScans.delete(messageId);
-    }
-    
-    state.scanned.add(src);
-    state.pending.delete(src);
-    state.processing = Math.max(0, state.processing - 1);
-    
-    log('result', 'Got result:', src.substring(0, 50), '-> blur:', shouldBlur, 'cat:', category, 'conf:', (confidence * 100).toFixed(1) + '%');
-    
-    if (shouldBlur && CONFIG.enabled && CONFIG.sensitivity > 0) {
-      // Find and blur all matching elements
-      const elements = findElementsBySrc(src);
-      log('result', 'Found', elements.length, 'elements to blur');
-      
-      elements.forEach(el => applyBlur(el, src, category));
-    }
-    
-    // Continue processing queue
-    processQueue();
-  }
-
-  // Listen for results from the native app
-  window.addEventListener('message', function(event) {
-    try {
-      const data = event.data;
-      
-      if (data?.type === 'gc-moderation-result') {
-        handleModerationResult(data);
-      }
-      
-      if (data?.type === 'gc-update-config') {
-        Object.assign(CONFIG, data.config);
-        log('config', 'Config updated:', CONFIG);
-      }
-    } catch (e) {
-      log('error', 'Message handler error:', e.message);
-    }
-  });
-
-  // Expose result handler for native callbacks
-  window.__GC_MODERATION_RESULT__ = handleModerationResult;
-
-  // ==================== ELEMENT FINDING ====================
-
-  function findElementsBySrc(src, root = document) {
-    const elements = [];
-    
+  function findAndBlur(src, category, blurStrengthPx) {
     try {
       // Images
-      root.querySelectorAll('img').forEach(img => {
-        if (img.src === src || img.dataset.gcOrigSrc === src) {
-          elements.push(img);
+      document.querySelectorAll('img').forEach(img => {
+        if (img.src === src && !state.revealed.has(src)) {
+          applyBlur(img, src, category, blurStrengthPx);
         }
       });
       
       // Video posters
-      root.querySelectorAll('video').forEach(video => {
-        if (video.poster === src || video.dataset.gcOrigPoster === src) {
-          elements.push(video);
+      document.querySelectorAll('video').forEach(video => {
+        if (video.poster === src && !state.revealed.has(src)) {
+          applyBlur(video, src, category, blurStrengthPx);
         }
       });
       
       // Background images
-      root.querySelectorAll('[data-gc-bg-src]').forEach(el => {
-        if (el.dataset.gcBgSrc === src) {
-          elements.push(el);
+      document.querySelectorAll('[data-mw-bg-src]').forEach(el => {
+        if (el.dataset.mwBgSrc === src && !state.revealed.has(src)) {
+          applyBlur(el, src, category, blurStrengthPx);
         }
       });
-      
-      // Shadow DOMs
-      root.querySelectorAll('*').forEach(el => {
-        if (el.shadowRoot) {
-          elements.push(...findElementsBySrc(src, el.shadowRoot));
-        }
-      });
-    } catch (e) {
-      log('error', 'findElementsBySrc error:', e.message);
-    }
-    
-    return elements;
+    } catch (e) {}
   }
+
+  // Poll for results from native app
+  setInterval(processResults, 100);
 
   // ==================== SCANNING FUNCTIONS ====================
 
   function scanImgElement(img) {
-    if (img.dataset.gcScanned === 'true') return;
+    if (img.dataset.mwScanned === 'true') return;
     
-    // Get source (handle lazy loading patterns)
     let src = img.src ||
               img.dataset.src ||
               img.dataset.lazySrc ||
@@ -553,29 +404,20 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     
     if (!src) {
-      log('skip', 'No src on img:', img.className || img.id || 'unknown');
       state.stats.skipped++;
       return;
     }
     
-    if (!isElementVisible(img)) {
-      // Schedule re-scan when loaded
-      img.addEventListener('load', () => {
-        setTimeout(() => scanImgElement(img), 100);
-      }, { once: true });
-      return;
-    }
+    img.dataset.mwScanned = 'true';
+    img.dataset.mwOrigSrc = src;
     
-    img.dataset.gcScanned = 'true';
-    img.dataset.gcOrigSrc = src;
-    
-    if (requestScan(src, 'img')) {
+    if (queueForScan(src, img, 'img')) {
       state.stats.imgTags++;
     }
   }
 
   function scanVideoPoster(video) {
-    if (video.dataset.gcPosterScanned === 'true') return;
+    if (video.dataset.mwPosterScanned === 'true') return;
     
     const poster = video.poster ||
                    video.dataset.poster ||
@@ -583,26 +425,24 @@ export function generateModerationScript(config: InjectionConfig): string {
     
     if (!poster) return;
     
-    video.dataset.gcPosterScanned = 'true';
-    video.dataset.gcOrigPoster = poster;
+    video.dataset.mwPosterScanned = 'true';
+    video.dataset.mwOrigPoster = poster;
     
-    if (requestScan(poster, 'video-poster')) {
+    if (queueForScan(poster, video, 'video-poster')) {
       state.stats.videoPosters++;
     }
   }
 
   function scanBgImage(element) {
-    if (element.dataset.gcBgScanned === 'true') return;
+    if (element.dataset.mwBgScanned === 'true') return;
     
     const bgUrl = extractBgImageUrl(element);
     if (!bgUrl) return;
     
-    if (!isElementVisible(element)) return;
+    element.dataset.mwBgScanned = 'true';
+    element.dataset.mwBgSrc = bgUrl;
     
-    element.dataset.gcBgScanned = 'true';
-    element.dataset.gcBgSrc = bgUrl;
-    
-    if (requestScan(bgUrl, 'bg-image')) {
+    if (queueForScan(bgUrl, element, 'bg-image')) {
       state.stats.bgImages++;
     }
   }
@@ -610,30 +450,22 @@ export function generateModerationScript(config: InjectionConfig): string {
   function scanShadowRoot(shadowRoot) {
     if (!shadowRoot) return;
     
-    log('shadow', 'Scanning Shadow DOM');
+    console.log('[MW] Scanning Shadow DOM');
     state.stats.shadowDom++;
     
     try {
-      // Scan all images
       shadowRoot.querySelectorAll('img').forEach(scanImgElement);
-      
-      // Scan videos
       shadowRoot.querySelectorAll('video').forEach(scanVideoPoster);
-      
-      // Scan bg images
-      shadowRoot.querySelectorAll('*').forEach(scanBgImage);
-      
-      // Recurse into nested shadow roots
       shadowRoot.querySelectorAll('*').forEach(el => {
+        scanBgImage(el);
         if (el.shadowRoot) {
           scanShadowRoot(el.shadowRoot);
         }
       });
       
-      // Observe shadow root for changes
       setupMutationObserver(shadowRoot);
     } catch (e) {
-      log('error', 'Shadow DOM scan error:', e.message);
+      console.error('[MW] Shadow DOM scan error:', e.message);
     }
   }
 
@@ -642,22 +474,18 @@ export function generateModerationScript(config: InjectionConfig): string {
     
     const tagName = node.tagName?.toUpperCase();
     
-    // Direct element scan
     if (tagName === 'IMG') {
       scanImgElement(node);
     } else if (tagName === 'VIDEO') {
       scanVideoPoster(node);
     }
     
-    // Background image
     scanBgImage(node);
     
-    // Shadow DOM
     if (node.shadowRoot) {
       scanShadowRoot(node.shadowRoot);
     }
     
-    // Scan children
     try {
       node.querySelectorAll('img').forEach(scanImgElement);
       node.querySelectorAll('video').forEach(scanVideoPoster);
@@ -667,33 +495,18 @@ export function generateModerationScript(config: InjectionConfig): string {
           scanShadowRoot(el.shadowRoot);
         }
       });
-    } catch (e) {
-      log('error', 'scanNode error:', e.message);
-    }
+    } catch (e) {}
   }
 
   function scanFullPage() {
     if (!CONFIG.enabled || CONFIG.sensitivity === 0) {
-      log('scan', 'Scanning disabled (sensitivity: ' + CONFIG.sensitivity + ')');
+      console.log('[MW] Scanning disabled (sensitivity: ' + CONFIG.sensitivity + ')');
       return;
     }
     
-    log('scan', '========== FULL PAGE SCAN ==========');
-    log('scan', 'Platform:', PLATFORM);
-    
-    // Scan document body
+    console.log('[MW] ========== FULL PAGE SCAN ==========');
     scanNode(document.body);
-    
-    // Platform-specific containers
-    const selectors = PLATFORM_SELECTORS[PLATFORM] || [];
-    selectors.forEach(selector => {
-      try {
-        document.querySelectorAll(selector).forEach(scanNode);
-      } catch (e) {}
-    });
-    
-    log('scan', '========== SCAN COMPLETE ==========');
-    logStats();
+    console.log('[MW] Stats:', JSON.stringify(state.stats));
   }
 
   // ==================== MUTATION OBSERVER ====================
@@ -703,39 +516,32 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (!CONFIG.enabled || CONFIG.sensitivity === 0) return;
       
       mutations.forEach(mutation => {
-        // Handle added nodes
         mutation.addedNodes.forEach(node => {
           if (node.nodeType !== 1) return;
           setTimeout(() => scanNode(node), CONFIG.scanDelay);
         });
         
-        // Handle attribute changes
         if (mutation.type === 'attributes') {
           const target = mutation.target;
           const attr = mutation.attributeName;
           
-          if (attr === 'src' && target.tagName === 'IMG') {
-            target.dataset.gcScanned = 'false';
-            setTimeout(() => scanImgElement(target), CONFIG.scanDelay);
-          }
-          
-          if (attr === 'srcset' && target.tagName === 'IMG') {
-            target.dataset.gcScanned = 'false';
+          if ((attr === 'src' || attr === 'srcset') && target.tagName === 'IMG') {
+            target.dataset.mwScanned = 'false';
             setTimeout(() => scanImgElement(target), CONFIG.scanDelay);
           }
           
           if (attr === 'poster' && target.tagName === 'VIDEO') {
-            target.dataset.gcPosterScanned = 'false';
+            target.dataset.mwPosterScanned = 'false';
             setTimeout(() => scanVideoPoster(target), CONFIG.scanDelay);
           }
           
           if (attr === 'data-src' || attr === 'data-lazy-src') {
-            target.dataset.gcScanned = 'false';
+            target.dataset.mwScanned = 'false';
             setTimeout(() => scanImgElement(target), CONFIG.scanDelay);
           }
           
           if (attr === 'style') {
-            target.dataset.gcBgScanned = 'false';
+            target.dataset.mwBgScanned = 'false';
             setTimeout(() => scanBgImage(target), CONFIG.scanDelay);
           }
         }
@@ -760,17 +566,15 @@ export function generateModerationScript(config: InjectionConfig): string {
     const observer = new IntersectionObserver((entries) => {
       entries.forEach(entry => {
         if (entry.isIntersecting) {
-          setTimeout(() => scanNode(entry.target), 50);
+          setTimeout(() => scanNode(entry.target), 30);
         }
       });
-    }, { rootMargin: '300px' });
+    }, { rootMargin: '200px' });
     
-    // Observe all images and videos
     document.querySelectorAll('img, video').forEach(el => {
       observer.observe(el);
     });
     
-    // Re-observe on DOM changes
     const mutationObs = new MutationObserver(() => {
       document.querySelectorAll('img, video').forEach(el => {
         observer.observe(el);
@@ -783,10 +587,38 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   // ==================== INITIALIZATION ====================
 
-  // Set up main observer
+  // Inject CSS
+  if (!document.getElementById('mw-moderation-styles')) {
+    const style = document.createElement('style');
+    style.id = 'mw-moderation-styles';
+    style.textContent = \`
+      .mw-reveal-overlay {
+        position: absolute !important;
+        inset: 0 !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        background: rgba(0, 0, 0, 0.25) !important;
+        z-index: 9998 !important;
+        pointer-events: auto !important;
+      }
+      .mw-reveal-btn {
+        z-index: 9999 !important;
+      }
+      [data-mw-moderated="blurred"] {
+        transition: filter 0.3s ease !important;
+      }
+      ytd-thumbnail, ytd-rich-item-renderer, yt-img-shadow, #shorts-player,
+      [class*="DivVideoContainer"], [class*="DivPlayerContainer"], .video-card {
+        position: relative !important;
+      }
+    \`;
+    document.head.appendChild(style);
+    console.log('[MW] CSS styles injected');
+  }
+
+  // Set up observers
   setupMutationObserver(document.body);
-  
-  // Set up intersection observer
   setupIntersectionObserver();
 
   // Initial scan
@@ -796,45 +628,42 @@ export function generateModerationScript(config: InjectionConfig): string {
     window.addEventListener('load', scanFullPage);
   }
 
-  // Periodic rescans for dynamic content
+  // Periodic rescans
   setTimeout(scanFullPage, 500);
   setTimeout(scanFullPage, 1500);
   setTimeout(scanFullPage, 3000);
-  setTimeout(scanFullPage, 5000);
-  setTimeout(scanFullPage, 10000);
 
   // Scroll-triggered rescans
   let scrollTimer;
   window.addEventListener('scroll', () => {
     clearTimeout(scrollTimer);
-    scrollTimer = setTimeout(scanFullPage, 200);
+    scrollTimer = setTimeout(scanFullPage, 150);
   }, { passive: true });
 
-  // Expose API for debugging
-  window.__GC_MODERATION__ = {
+  // Expose debug API
+  window.__MW_DEBUG__ = {
     state: state,
     config: CONFIG,
     platform: PLATFORM,
     scanAll: scanFullPage,
-    scanNode: scanNode,
     stats: () => state.stats,
-    findBySrc: findElementsBySrc,
-    thresholds: THRESHOLDS,
+    queue: () => window.__GC_SCAN_QUEUE__,
+    results: () => window.__GC_SCAN_RESULTS__,
   };
 
-  log('init', 'GoodCreation moderation fully initialized');
-  log('init', 'Debug API available at window.__GC_MODERATION__');
+  console.log('[MW] Moderation fully initialized');
+  console.log('[MW] Debug API at window.__MW_DEBUG__');
 })();
 `;
 }
 
 /**
- * Generate CSS styles for moderation UI
+ * Generate CSS styles for moderation UI (legacy export)
  */
 export function generateModerationStyles(): string {
   return `
-<style id="gc-moderation-styles">
-  .gc-reveal-overlay {
+<style id="mw-moderation-styles">
+  .mw-reveal-overlay {
     position: absolute !important;
     inset: 0 !important;
     display: flex !important;
@@ -845,7 +674,7 @@ export function generateModerationStyles(): string {
     pointer-events: auto !important;
   }
   
-  .gc-reveal-btn {
+  .mw-reveal-btn {
     background: rgba(0, 0, 0, 0.9) !important;
     color: white !important;
     border: 2px solid rgba(255, 255, 255, 0.4) !important;
@@ -854,36 +683,17 @@ export function generateModerationStyles(): string {
     cursor: pointer !important;
     font-size: 14px !important;
     font-weight: bold !important;
-    backdrop-filter: blur(4px) !important;
-    transition: transform 0.2s ease !important;
     z-index: 9999 !important;
-    white-space: nowrap !important;
   }
   
-  .gc-reveal-btn:hover {
-    transform: scale(1.05) !important;
-  }
-  
-  .gc-reveal-btn:active {
-    transform: scale(0.95) !important;
-  }
-  
-  [data-gc-moderated="blurred"] {
+  [data-mw-moderated="blurred"] {
     transition: filter 0.3s ease !important;
   }
   
-  /* YouTube positioning fixes */
   ytd-thumbnail,
   ytd-rich-item-renderer,
-  ytd-video-renderer,
-  ytd-compact-video-renderer,
-  ytd-reel-item-renderer,
   yt-img-shadow,
-  #shorts-player {
-    position: relative !important;
-  }
-  
-  /* TikTok positioning fixes */
+  #shorts-player,
   [class*="DivVideoContainer"],
   [class*="DivPlayerContainer"],
   .video-card {
