@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
+import LabelListener from '@/components/browser/LabelListener';
 import { Shield, AlertTriangle, Loader2, Globe } from 'lucide-react';
 import { useNativeWebView } from '@/hooks/useNativeWebView';
 import { useContentProtection } from '@/hooks/useContentProtection';
