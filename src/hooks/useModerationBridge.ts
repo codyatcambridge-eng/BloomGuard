@@ -53,7 +53,7 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
   useEffect(() => {
     setState(prev => ({ ...prev, isReady: modelReady }));
     if (modelReady) {
-      console.log('[ModerationBridge] AI model ready for scanning');
+      console.log('[MW-Bridge] AI model ready for scanning');
     }
   }, [modelReady]);
 
@@ -83,18 +83,18 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
    */
   const scanImage = useCallback(async (src: string, thresholds?: { porn: number; sexy: number; hentai: number }): Promise<ModerationScanResult | null> => {
     if (!modelReady) {
-      console.log('[ModerationBridge] Model not ready, skipping scan');
+      console.log('[MW-Bridge] Model not ready, skipping scan');
       return null;
     }
     
     if (!isModerationEnabled()) {
-      console.log('[ModerationBridge] Moderation disabled, skipping scan');
+      console.log('[MW-Bridge] Moderation disabled, skipping scan');
       return null;
     }
 
     // Check cache
     if (resultsCache.current.has(src)) {
-      console.log('[ModerationBridge] Cache hit:', src.substring(0, 50));
+      console.log('[MW-Bridge] Cache hit:', src.substring(0, 50));
       return resultsCache.current.get(src)!;
     }
 
@@ -102,12 +102,12 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
     const startTime = performance.now();
 
     try {
-      console.log('[ModerationBridge] Scanning:', src.substring(0, 60));
+      console.log('[MW-Bridge] Scanning:', src.substring(0, 60));
       const result = await classifyImage(src, effectiveThresholds);
       const inferenceTime = performance.now() - startTime;
       
       if (!result) {
-        console.log('[ModerationBridge] No result from classifier');
+        console.log('[MW-Bridge] No result from classifier');
         return null;
       }
 
@@ -123,16 +123,16 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
       }));
 
       if (scanResult.shouldBlur) {
-        console.log('[ModerationBridge] BLUR:', src.substring(0, 50), '->', scanResult.category);
+        console.log('[MW-Bridge] BLUR:', src.substring(0, 50), '->', scanResult.category);
         onImageBlurred?.(src, scanResult);
       } else {
-        console.log('[ModerationBridge] SAFE:', src.substring(0, 50), '->', scanResult.category);
+        console.log('[MW-Bridge] SAFE:', src.substring(0, 50), '->', scanResult.category);
       }
 
       return scanResult;
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : 'Scan failed';
-      console.debug('[ModerationBridge] Scan error:', src.substring(0, 50), errorMsg);
+      console.debug('[MW-Bridge] Scan error:', src.substring(0, 50), errorMsg);
       return null;
     }
   }, [modelReady, isModerationEnabled, getDialThresholds, classifyImage, convertResult, onImageBlurred]);
@@ -224,17 +224,16 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
    * This is the main entry point for WebView moderation requests
    */
   const handleWebViewMessage = useCallback(async (message: any): Promise<ModerationScanResult | null> => {
-    console.log('[ModerationBridge] Received WebView message:', message?.type, message?.action);
+    console.log('[MW-Bridge] Received WebView message:', message?.type, message?.action);
     
     if (message?.type === 'gc-moderation-request' && message?.action === 'scan') {
       const { src, thresholds, messageId, sourceType } = message;
       
-      console.log('[ModerationBridge] Processing scan request #' + messageId + ' [' + sourceType + ']:', src?.substring(0, 60));
+      console.log('[MW-Bridge] Processing scan request #' + messageId + ' [' + sourceType + ']:', src?.substring(0, 60));
       
       const result = await scanImage(src, thresholds);
       
       if (result) {
-        // Include messageId in result for matching
         return { ...result, messageId } as any;
       }
     }
@@ -264,7 +263,7 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
       lastScanTime: 0,
       error: null,
     });
-    console.log('[ModerationBridge] Cache cleared');
+    console.log('[MW-Bridge] Cache cleared');
   }, [modelReady]);
 
   /**

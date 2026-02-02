@@ -202,62 +202,21 @@ export const NativeWebViewBrowser = () => {
   // Inject moderation script into WebView
   const injectModerationScript = useCallback(async (scriptExecutor: (script: string) => Promise<string | null>) => {
     if (!isModerationEnabled()) {
-      console.log('[Browser] Moderation disabled, skipping injection');
+      console.log('[MW-Bridge] Moderation disabled, skipping injection');
       return;
     }
     
     const config = getModerationConfig();
-    console.log('[Browser] Injecting moderation script with config:', config);
+    console.log('[MW-Bridge] Injecting moderation script with config:', config);
     
-    // First inject CSS styles
-    const cssInjection = `
-      (function() {
-        if (document.getElementById('gc-moderation-styles')) return;
-        const style = document.createElement('style');
-        style.id = 'gc-moderation-styles';
-        style.textContent = \`
-          .gc-reveal-overlay {
-            position: absolute !important;
-            inset: 0 !important;
-            display: flex !important;
-            align-items: center !important;
-            justify-content: center !important;
-            background: rgba(0, 0, 0, 0.25) !important;
-            z-index: 9998 !important;
-          }
-          .gc-reveal-btn {
-            background: rgba(0, 0, 0, 0.9) !important;
-            color: white !important;
-            border: 2px solid rgba(255, 255, 255, 0.4) !important;
-            padding: 10px 20px !important;
-            border-radius: 8px !important;
-            cursor: pointer !important;
-            font-size: 14px !important;
-            font-weight: bold !important;
-          }
-          [data-gc-moderated="blurred"] { transition: filter 0.3s ease !important; }
-          ytd-thumbnail, ytd-rich-item-renderer, yt-img-shadow, #shorts-player { position: relative !important; }
-        \`;
-        document.head.appendChild(style);
-        console.log('[GC:inject] CSS styles injected');
-      })();
-    `;
-    
-    try {
-      await scriptExecutor(cssInjection);
-      console.log('[Browser] CSS styles injected');
-    } catch (e) {
-      console.warn('[Browser] CSS injection failed:', e);
-    }
-    
-    // Then inject main moderation script
+    // Inject the main moderation script (includes CSS)
     const mainScript = generateModerationScript(config);
     try {
       await scriptExecutor(mainScript);
       injectionDoneRef.current = true;
-      console.log('[Browser] Main moderation script injected successfully');
+      console.log('[MW-Bridge] Moderation script injected successfully');
     } catch (error) {
-      console.error('[Browser] Moderation script injection failed:', error);
+      console.error('[MW-Bridge] Moderation script injection failed:', error);
     }
   }, [isModerationEnabled, getModerationConfig]);
 
@@ -315,8 +274,8 @@ export const NativeWebViewBrowser = () => {
     },
   });
 
-  // Poll for moderation requests from WebView
-  // InAppBrowser doesn't support direct postMessage, so we use polling
+  // Poll for moderation requests from WebView and push results back
+  // InAppBrowser doesn't support direct postMessage, so we use polling + global variables
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
   
   useEffect(() => {
@@ -328,41 +287,89 @@ export const NativeWebViewBrowser = () => {
       return;
     }
 
-    console.log('[Browser] Starting moderation request polling...');
+    console.log('[MW-Bridge] Starting moderation request polling...');
 
     // Poll for pending scan requests from the injected script
     const pollForRequests = async () => {
       if (!executeScript) return;
       
       try {
-        // Get pending requests from WebView
-        const getPendingScript = `
+        // Get and clear pending requests from WebView's global queue
+        const getQueueScript = `
           (function() {
-            if (!window.__GC_MODERATION__) return JSON.stringify({ pending: [] });
-            
-            const state = window.__GC_MODERATION__.state;
-            const pending = [];
-            
-            // Get pending items that haven't been sent yet
-            state.pendingScans.forEach((item, msgId) => {
-              pending.push({ messageId: msgId, src: item.src, sourceType: item.sourceType });
-            });
-            
-            return JSON.stringify({ pending: pending.slice(0, 5) }); // Batch of 5
+            if (!window.__GC_SCAN_QUEUE__ || window.__GC_SCAN_QUEUE__.length === 0) {
+              return 'EMPTY';
+            }
+            const items = window.__GC_SCAN_QUEUE__.splice(0, 5);
+            return JSON.stringify(items);
           })();
         `;
         
-        await executeScript(getPendingScript);
-        // Note: InAppBrowser executeScript doesn't return values
-        // We need a different approach - modify the injection to use direct callbacks
+        const result = await executeScript(getQueueScript);
         
+        if (!result || result === 'EMPTY' || result === 'null') {
+          return;
+        }
+        
+        let items;
+        try {
+          items = JSON.parse(result);
+        } catch (e) {
+          return;
+        }
+        
+        if (!Array.isArray(items) || items.length === 0) {
+          return;
+        }
+        
+        console.log('[MW-Bridge] scan received', items.length, 'items');
+        
+        // Process each scan request
+        for (const item of items) {
+          const { src, thresholds } = item;
+          
+          if (!src) continue;
+          
+          console.log('[MW-Bridge] Processing:', src.substring(0, 60));
+          
+          // Use the moderation bridge to scan
+          const scanResult = await moderationBridge.scanImage(src, thresholds);
+          
+          if (scanResult) {
+            console.log('[MW-Bridge] scan result:', scanResult.shouldBlur, scanResult.category);
+            
+            // Push result back to WebView's results queue
+            const escapedSrc = src.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+            const pushResultScript = `
+              (function() {
+                if (!window.__GC_SCAN_RESULTS__) window.__GC_SCAN_RESULTS__ = [];
+                window.__GC_SCAN_RESULTS__.push({
+                  src: '${escapedSrc}',
+                  shouldBlur: ${scanResult.shouldBlur},
+                  category: '${scanResult.category}',
+                  confidence: ${scanResult.confidence},
+                  blurStrengthPx: ${localSettings.blur_strength_px || 16}
+                });
+                return 'OK';
+              })();
+            `;
+            
+            try {
+              await executeScript(pushResultScript);
+              console.log('[MW-Bridge] Result pushed for:', src.substring(0, 50));
+            } catch (e) {
+              console.debug('[MW-Bridge] Failed to push result:', e);
+            }
+          }
+        }
       } catch (e) {
-        // Polling errors are expected and ignored
+        // Polling errors are expected and ignored in some cases
+        console.debug('[MW-Bridge] Poll error:', e);
       }
     };
 
-    // Start polling at 200ms intervals
-    pollIntervalRef.current = setInterval(pollForRequests, 500);
+    // Start polling at 150ms intervals for responsive moderation
+    pollIntervalRef.current = setInterval(pollForRequests, 150);
 
     return () => {
       if (pollIntervalRef.current) {
@@ -370,7 +377,7 @@ export const NativeWebViewBrowser = () => {
         pollIntervalRef.current = null;
       }
     };
-  }, [isNative, webViewState.isOpen, isModerationEnabled, executeScript]);
+  }, [isNative, webViewState.isOpen, isModerationEnabled, executeScript, moderationBridge, localSettings.blur_strength_px]);
 
   // Also listen for messages via window.postMessage (works in some WebView contexts)
   useEffect(() => {

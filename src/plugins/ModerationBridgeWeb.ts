@@ -28,7 +28,7 @@ export class ModerationBridgeWeb extends WebPlugin implements ModerationBridgePl
 
   constructor() {
     super();
-    console.log('[ModerationBridgeWeb] Initializing...');
+    console.log('[MW-Bridge] Initializing ModerationBridgeWeb...');
     this.initModel();
   }
 
@@ -41,20 +41,20 @@ export class ModerationBridgeWeb extends WebPlugin implements ModerationBridgePl
 
     this.modelPromise = (async () => {
       try {
-        console.log('[ModerationBridgeWeb] Loading TensorFlow.js and NSFWJS...');
+        console.log('[MW-Bridge] Loading TensorFlow.js and NSFWJS...');
         const tf = await import('@tensorflow/tfjs');
         const nsfwjs = await import('nsfwjs');
         
         await tf.ready();
-        console.log('[ModerationBridgeWeb] TensorFlow ready, setting backend...');
+        console.log('[MW-Bridge] TensorFlow ready, setting backend...');
         
         await tf.setBackend('webgl');
-        console.log('[ModerationBridgeWeb] WebGL backend set, loading model...');
+        console.log('[MW-Bridge] WebGL backend set, loading model...');
         
         this.model = await nsfwjs.load();
-        console.log('[ModerationBridgeWeb] NSFWJS model loaded successfully');
+        console.log('[MW-Bridge] NSFWJS model loaded successfully');
       } catch (error) {
-        console.error('[ModerationBridgeWeb] Failed to load model:', error);
+        console.error('[MW-Bridge] Failed to load model:', error);
         throw error;
       }
     })();
@@ -65,12 +65,12 @@ export class ModerationBridgeWeb extends WebPlugin implements ModerationBridgePl
   async scan(options: { src: string; thresholds?: ModerationThresholds }): Promise<ModerationScanResult> {
     const { src, thresholds = getThresholdsForSensitivity(this.settings.sensitivity) } = options;
 
-    console.log('[ModerationBridgeWeb] Scan request:', src.substring(0, 60));
+    console.log('[MW-Bridge] scan received:', src.substring(0, 60));
 
     // Check cache
     const cacheKey = `${src}:${JSON.stringify(thresholds)}`;
     if (this.imageCache.has(cacheKey)) {
-      console.log('[ModerationBridgeWeb] Cache hit');
+      console.log('[MW-Bridge] Cache hit');
       return this.imageCache.get(cacheKey)!;
     }
 
@@ -78,7 +78,7 @@ export class ModerationBridgeWeb extends WebPlugin implements ModerationBridgePl
     await this.initModel();
     
     if (!this.model) {
-      console.warn('[ModerationBridgeWeb] Model not available, returning safe result');
+      console.warn('[MW-Bridge] Model not available, returning safe result');
       return this.createSafeResult(src);
     }
 
@@ -120,10 +120,10 @@ export class ModerationBridgeWeb extends WebPlugin implements ModerationBridgePl
       this.imageCache.set(cacheKey, result);
       this.limitCache();
 
-      console.log(`[ModerationBridgeWeb] Result: ${category} (blur: ${shouldBlur}, conf: ${(confidence * 100).toFixed(1)}%, time: ${inferenceTime.toFixed(0)}ms)`);
+      console.log(`[MW-Bridge] scan result: ${category} (blur: ${shouldBlur}, conf: ${(confidence * 100).toFixed(1)}%, time: ${inferenceTime.toFixed(0)}ms)`);
       return result;
     } catch (error) {
-      console.debug('[ModerationBridgeWeb] Scan failed:', src.substring(0, 50), error);
+      console.debug('[MW-Bridge] Scan failed:', src.substring(0, 50), error);
       return this.createSafeResult(src, 'error');
     }
   }
