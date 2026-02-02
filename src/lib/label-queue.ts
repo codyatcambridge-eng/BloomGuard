@@ -1,286 +1,129 @@
 /**
- * Label Queue Manager
- * 
- * Handles local storage of labels before upload to backend.
- * Supports offline queueing with batch uploads when online.
+ * Local label queue utility.
+ * - Persists pending labels in localStorage under key 'mw_label_queue'
+ * - Attempts upload to /api/moderation/labels
+ * - Simple retry with exponential backoff
+ *
+ * Note: For privacy, we only upload image bytes if the user explicitly consented (consentImage = true).
+ * For consentImage === true we currently send metadata + consent flag and let the backend fetch image,
+ * or optionally add image bytes if you choose to extend this function.
  */
 
-import { supabase } from '@/integrations/supabase/client';
-
-export type UserLabel = 'shirtless' | 'swimwear' | 'other' | 'unsure';
-
-export interface LabelEntry {
-  id: string;
+export interface LabelItem {
   requestId: string;
   itemId: string;
   src: string;
-  pageUrl: string;
-  platform: string;
-  modelPrediction: string;
-  modelConfidence: number;
-  userLabel: UserLabel;
+  pageUrl?: string;
+  platform?: string;
+  modelPrediction?: { category?: string; confidence?: number };
+  userLabel: 'shirtless' | 'swimwear' | 'other' | 'unsure';
   userComment?: string;
-  consentImage: boolean;
-  imageBase64?: string;
-  deviceMeta: {
-    userAgent: string;
-    screenWidth: number;
-    screenHeight: number;
-    timestamp: number;
-    timezone: string;
-  };
-  createdAt: number;
-  uploaded: boolean;
-  uploadedAt?: number;
-  uploadError?: string;
+  consentImage?: boolean;
+  imageBase64?: string | null; // optional, not used by default
+  timestamp: number;
+  attempts?: number;
+  lastAttempt?: number;
 }
 
-const LABEL_QUEUE_KEY = 'mw_label_queue';
-const UPLOAD_BATCH_SIZE = 10;
-const UPLOAD_RETRY_DELAY = 30000; // 30 seconds
+const STORAGE_KEY = 'mw_label_queue';
+const UPLOAD_URL = '/api/moderation/labels'; // change if your backend path differs
 
-/**
- * Generate a unique label ID
- */
-export function generateLabelId(): string {
-  return 'lbl_' + crypto.randomUUID().slice(0, 8) + '_' + Date.now().toString(36);
-}
-
-/**
- * Get device metadata
- */
-export function getDeviceMeta() {
-  return {
-    userAgent: navigator.userAgent,
-    screenWidth: window.screen.width,
-    screenHeight: window.screen.height,
-    timestamp: Date.now(),
-    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-  };
-}
-
-/**
- * Load queue from localStorage
- */
-export function loadLabelQueue(): LabelEntry[] {
+function readQueue(): LabelItem[] {
   try {
-    const stored = localStorage.getItem(LABEL_QUEUE_KEY);
-    if (stored) {
-      return JSON.parse(stored);
-    }
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    return JSON.parse(raw) as LabelItem[];
   } catch (e) {
-    console.error('[LabelQueue] Failed to load queue:', e);
+    console.error('[label-queue] failed read', e);
+    return [];
   }
-  return [];
 }
 
-/**
- * Save queue to localStorage
- */
-export function saveLabelQueue(queue: LabelEntry[]): void {
+function writeQueue(q: LabelItem[]) {
   try {
-    localStorage.setItem(LABEL_QUEUE_KEY, JSON.stringify(queue));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(q));
   } catch (e) {
-    console.error('[LabelQueue] Failed to save queue:', e);
+    console.error('[label-queue] failed write', e);
   }
 }
 
-/**
- * Add a label to the queue
- */
-export function addLabelToQueue(entry: Omit<LabelEntry, 'id' | 'createdAt' | 'uploaded' | 'deviceMeta'>): LabelEntry {
-  const fullEntry: LabelEntry = {
-    ...entry,
-    id: generateLabelId(),
-    deviceMeta: getDeviceMeta(),
-    createdAt: Date.now(),
-    uploaded: false,
-  };
+export async function enqueueLabel(item: LabelItem) {
+  const q = readQueue();
+  q.push({ ...item, attempts: 0 });
+  writeQueue(q);
+  // try to upload in background
+  uploadPending().catch(e => console.debug('[label-queue] background upload failed', e));
+}
 
-  const queue = loadLabelQueue();
-  queue.push(fullEntry);
-  saveLabelQueue(queue);
-
-  console.log('[LabelQueue] Added label:', fullEntry.id, fullEntry.userLabel, fullEntry.src.substring(0, 50));
-
-  // Trigger upload attempt
-  scheduleUpload();
-
-  return fullEntry;
+export function getPendingCount() {
+  return readQueue().length;
 }
 
 /**
- * Get pending (not uploaded) labels
+ * Upload pending labels (best-effort).
+ * Implements a simple per-item retry with exponential backoff.
  */
-export function getPendingLabels(): LabelEntry[] {
-  return loadLabelQueue().filter(e => !e.uploaded);
-}
-
-/**
- * Get label statistics
- */
-export function getLabelStats(): { total: number; pending: number; uploaded: number; byLabel: Record<UserLabel, number> } {
-  const queue = loadLabelQueue();
-  const byLabel: Record<UserLabel, number> = { shirtless: 0, swimwear: 0, other: 0, unsure: 0 };
-  
-  queue.forEach(e => {
-    byLabel[e.userLabel]++;
-  });
-
-  return {
-    total: queue.length,
-    pending: queue.filter(e => !e.uploaded).length,
-    uploaded: queue.filter(e => e.uploaded).length,
-    byLabel,
-  };
-}
-
-/**
- * Mark labels as uploaded
- */
-export function markLabelsUploaded(ids: string[]): void {
-  const queue = loadLabelQueue();
-  const now = Date.now();
-  
-  queue.forEach(entry => {
-    if (ids.includes(entry.id)) {
-      entry.uploaded = true;
-      entry.uploadedAt = now;
+export async function uploadPending() {
+  const q = readQueue();
+  if (q.length === 0) return;
+  // process items sequentially to avoid overloading device/network
+  for (let i = 0; i < q.length; i++) {
+    const item = q[i];
+    // skip items that have > 5 attempts
+    if ((item.attempts || 0) >= 5) continue;
+    // backoff: don't attempt too frequently
+    const now = Date.now();
+    if (item.lastAttempt && now - item.lastAttempt < Math.pow(2, (item.attempts || 0)) * 1000) {
+      continue;
     }
-  });
-  
-  saveLabelQueue(queue);
-}
-
-/**
- * Mark label upload error
- */
-export function markLabelError(id: string, error: string): void {
-  const queue = loadLabelQueue();
-  
-  queue.forEach(entry => {
-    if (entry.id === id) {
-      entry.uploadError = error;
-    }
-  });
-  
-  saveLabelQueue(queue);
-}
-
-/**
- * Clear old uploaded labels (cleanup)
- */
-export function cleanupOldLabels(maxAgeMs = 7 * 24 * 60 * 60 * 1000): void {
-  const queue = loadLabelQueue();
-  const cutoff = Date.now() - maxAgeMs;
-  
-  const filtered = queue.filter(e => {
-    // Keep if not uploaded or if uploaded recently
-    if (!e.uploaded) return true;
-    return (e.uploadedAt || e.createdAt) > cutoff;
-  });
-  
-  if (filtered.length !== queue.length) {
-    console.log('[LabelQueue] Cleaned up', queue.length - filtered.length, 'old labels');
-    saveLabelQueue(filtered);
-  }
-}
-
-/**
- * Upload pending labels to backend
- */
-export async function uploadPendingLabels(): Promise<{ success: number; failed: number }> {
-  const pending = getPendingLabels();
-  
-  if (pending.length === 0) {
-    return { success: 0, failed: 0 };
-  }
-
-  console.log('[LabelQueue] Uploading', pending.length, 'pending labels');
-  
-  let success = 0;
-  let failed = 0;
-  const successIds: string[] = [];
-
-  // Process in batches
-  for (let i = 0; i < pending.length; i += UPLOAD_BATCH_SIZE) {
-    const batch = pending.slice(i, i + UPLOAD_BATCH_SIZE);
-    
     try {
-      const { error } = await supabase.functions.invoke('moderation-labels', {
-        body: {
-          action: 'submit',
-          labels: batch.map(entry => ({
-            requestId: entry.requestId,
-            itemId: entry.itemId,
-            src: entry.src,
-            pageUrl: entry.pageUrl,
-            platform: entry.platform,
-            modelPrediction: entry.modelPrediction,
-            modelConfidence: entry.modelConfidence,
-            userLabel: entry.userLabel,
-            userComment: entry.userComment,
-            consentImage: entry.consentImage,
-            imageBase64: entry.consentImage ? entry.imageBase64 : undefined,
-            deviceMeta: entry.deviceMeta,
-          })),
-        },
-      });
-
-      if (error) {
-        console.error('[LabelQueue] Upload batch error:', error);
-        failed += batch.length;
-        batch.forEach(e => markLabelError(e.id, error.message));
-      } else {
-        success += batch.length;
-        batch.forEach(e => successIds.push(e.id));
+      item.attempts = (item.attempts || 0) + 1;
+      item.lastAttempt = now;
+      writeQueue(q);
+      // send minimal payload — backend may refetch image if consentImage true
+      const payload: any = {
+        requestId: item.requestId,
+        itemId: item.itemId,
+        src: item.src,
+        pageUrl: item.pageUrl,
+        platform: item.platform,
+        modelPrediction: item.modelPrediction,
+        userLabel: item.userLabel,
+        userComment: item.userComment,
+        consentImage: !!item.consentImage,
+        timestamp: item.timestamp,
+      };
+      if (item.consentImage && item.imageBase64) {
+        // optional: if image base64 available, send it (careful with sizes)
+        payload.imageBase64 = item.imageBase64;
       }
+      const res = await fetch(UPLOAD_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        console.warn('[label-queue] upload failed status', res.status);
+        continue;
+      }
+      // success — remove item
+      const newQ = readQueue().filter(qi => qi.itemId !== item.itemId || qi.requestId !== item.requestId);
+      writeQueue(newQ);
+      console.log('[label-queue] uploaded', item.itemId);
     } catch (e) {
-      console.error('[LabelQueue] Upload exception:', e);
-      failed += batch.length;
-      batch.forEach(entry => markLabelError(entry.id, e instanceof Error ? e.message : 'Unknown error'));
+      console.warn('[label-queue] upload error', e);
+      // continue — will retry later
     }
   }
-
-  // Mark successful uploads
-  if (successIds.length > 0) {
-    markLabelsUploaded(successIds);
-  }
-
-  console.log('[LabelQueue] Upload complete:', success, 'success,', failed, 'failed');
-  
-  return { success, failed };
 }
 
-// Debounced upload scheduler
-let uploadTimeout: ReturnType<typeof setTimeout> | null = null;
-
-export function scheduleUpload(delayMs = 5000): void {
-  if (uploadTimeout) {
-    clearTimeout(uploadTimeout);
-  }
-  
-  uploadTimeout = setTimeout(async () => {
-    uploadTimeout = null;
-    
-    if (!navigator.onLine) {
-      console.log('[LabelQueue] Offline, skipping upload');
-      return;
-    }
-    
-    const result = await uploadPendingLabels();
-    
-    // Schedule retry if there were failures
-    if (result.failed > 0) {
-      scheduleUpload(UPLOAD_RETRY_DELAY);
-    }
-  }, delayMs);
-}
-
-// Upload when coming back online
-if (typeof window !== 'undefined') {
-  window.addEventListener('online', () => {
-    console.log('[LabelQueue] Back online, scheduling upload');
-    scheduleUpload(1000);
-  });
+/**
+ * Utility: start a periodic uploader (call this in app init)
+ */
+export function startLabelQueueUploader(intervalMs = 30_000) {
+  // Trigger initial attempt
+  uploadPending().catch(e => console.debug('[label-queue] initial upload fail', e));
+  setInterval(() => {
+    uploadPending().catch(e => console.debug('[label-queue] periodic upload fail', e));
+  }, intervalMs);
 }
