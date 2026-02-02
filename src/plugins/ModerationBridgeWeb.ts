@@ -6,7 +6,11 @@ import type {
   ModerationSettings,
   ModerationCategory
 } from './ModerationBridge';
-import { calculateCategory, getThresholdsForSensitivity, getBlurStrengthForLevel } from './ModerationBridge';
+import { 
+  calculateCategory, 
+  getThresholdsForSensitivity, 
+  shouldBlurCategory 
+} from './ModerationBridge';
 
 /**
  * Web implementation of ModerationBridge using NSFWJS
@@ -24,6 +28,7 @@ export class ModerationBridgeWeb extends WebPlugin implements ModerationBridgePl
 
   constructor() {
     super();
+    console.log('[ModerationBridgeWeb] Initializing...');
     this.initModel();
   }
 
@@ -36,16 +41,20 @@ export class ModerationBridgeWeb extends WebPlugin implements ModerationBridgePl
 
     this.modelPromise = (async () => {
       try {
+        console.log('[ModerationBridgeWeb] Loading TensorFlow.js and NSFWJS...');
         const tf = await import('@tensorflow/tfjs');
         const nsfwjs = await import('nsfwjs');
         
         await tf.ready();
+        console.log('[ModerationBridgeWeb] TensorFlow ready, setting backend...');
+        
         await tf.setBackend('webgl');
+        console.log('[ModerationBridgeWeb] WebGL backend set, loading model...');
         
         this.model = await nsfwjs.load();
-        console.log('[ModerationBridge] NSFWJS model loaded');
+        console.log('[ModerationBridgeWeb] NSFWJS model loaded successfully');
       } catch (error) {
-        console.error('[ModerationBridge] Failed to load model:', error);
+        console.error('[ModerationBridgeWeb] Failed to load model:', error);
         throw error;
       }
     })();
@@ -56,9 +65,12 @@ export class ModerationBridgeWeb extends WebPlugin implements ModerationBridgePl
   async scan(options: { src: string; thresholds?: ModerationThresholds }): Promise<ModerationScanResult> {
     const { src, thresholds = getThresholdsForSensitivity(this.settings.sensitivity) } = options;
 
+    console.log('[ModerationBridgeWeb] Scan request:', src.substring(0, 60));
+
     // Check cache
     const cacheKey = `${src}:${JSON.stringify(thresholds)}`;
     if (this.imageCache.has(cacheKey)) {
+      console.log('[ModerationBridgeWeb] Cache hit');
       return this.imageCache.get(cacheKey)!;
     }
 
@@ -66,6 +78,7 @@ export class ModerationBridgeWeb extends WebPlugin implements ModerationBridgePl
     await this.initModel();
     
     if (!this.model) {
+      console.warn('[ModerationBridgeWeb] Model not available, returning safe result');
       return this.createSafeResult(src);
     }
 
@@ -79,21 +92,26 @@ export class ModerationBridgeWeb extends WebPlugin implements ModerationBridgePl
       const predictions = await this.model.classify(img);
       const inferenceTime = performance.now() - startTime;
 
-      // Convert to record
+      // Convert to record format
       const predRecord: Record<string, number> = {};
       predictions.forEach((p: any) => {
         predRecord[p.className] = p.probability;
       });
 
-      // Calculate category and blur decision
+      // Calculate category based on predictions
       const category = calculateCategory(predRecord);
+      
+      // Determine if we should blur based on thresholds
       const shouldBlur = this.shouldBlurForThresholds(predRecord, thresholds);
+      
+      // Get confidence (highest prediction)
+      const confidence = Math.max(...Object.values(predRecord));
 
       const result: ModerationScanResult = {
         src,
         shouldBlur,
         category,
-        confidence: Math.max(...Object.values(predRecord)),
+        confidence,
         predictions: predRecord,
         inferenceTime,
       };
@@ -102,17 +120,19 @@ export class ModerationBridgeWeb extends WebPlugin implements ModerationBridgePl
       this.imageCache.set(cacheKey, result);
       this.limitCache();
 
-      console.log(`[ModerationBridge] Scanned ${src.substring(0, 50)}... -> ${category} (blur: ${shouldBlur})`);
+      console.log(`[ModerationBridgeWeb] Result: ${category} (blur: ${shouldBlur}, conf: ${(confidence * 100).toFixed(1)}%, time: ${inferenceTime.toFixed(0)}ms)`);
       return result;
     } catch (error) {
-      console.debug('[ModerationBridge] Scan failed:', src.substring(0, 50), error);
-      return this.createSafeResult(src);
+      console.debug('[ModerationBridgeWeb] Scan failed:', src.substring(0, 50), error);
+      return this.createSafeResult(src, 'error');
     }
   }
 
   async scanBatch(options: { sources: string[]; thresholds?: ModerationThresholds }): Promise<{ results: ModerationScanResult[] }> {
     const { sources, thresholds } = options;
     const results: ModerationScanResult[] = [];
+
+    console.log('[ModerationBridgeWeb] Batch scan:', sources.length, 'images');
 
     // Process in parallel with concurrency limit
     const concurrency = 4;
@@ -135,7 +155,7 @@ export class ModerationBridgeWeb extends WebPlugin implements ModerationBridgePl
         this.settings = { ...this.settings, ...JSON.parse(stored) };
       }
     } catch (e) {
-      console.debug('[ModerationBridge] Failed to load settings');
+      console.debug('[ModerationBridgeWeb] Failed to load settings');
     }
     return this.settings;
   }
@@ -154,7 +174,7 @@ export class ModerationBridgeWeb extends WebPlugin implements ModerationBridgePl
     try {
       localStorage.setItem('moderation_bridge_settings', JSON.stringify(this.settings));
     } catch (e) {
-      console.debug('[ModerationBridge] Failed to save settings');
+      console.debug('[ModerationBridgeWeb] Failed to save settings');
     }
   }
 
@@ -194,11 +214,11 @@ export class ModerationBridgeWeb extends WebPlugin implements ModerationBridgePl
     return porn > thresholds.porn || hentai > thresholds.hentai || sexy > thresholds.sexy;
   }
 
-  private createSafeResult(src: string): ModerationScanResult {
+  private createSafeResult(src: string, category: ModerationCategory = 'safe'): ModerationScanResult {
     return {
       src,
       shouldBlur: false,
-      category: 'safe',
+      category,
       confidence: 1,
       predictions: { Neutral: 1 },
       inferenceTime: 0,

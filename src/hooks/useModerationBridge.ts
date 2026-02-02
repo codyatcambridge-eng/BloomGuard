@@ -5,6 +5,7 @@ import {
   ModerationScanResult, 
   ModerationCategory,
   calculateCategory,
+  getThresholdsForSensitivity,
 } from '@/plugins/ModerationBridge';
 
 export interface ModerationBridgeState {
@@ -51,12 +52,15 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
   // Update ready state when model loads
   useEffect(() => {
     setState(prev => ({ ...prev, isReady: modelReady }));
+    if (modelReady) {
+      console.log('[ModerationBridge] AI model ready for scanning');
+    }
   }, [modelReady]);
 
   /**
    * Convert NSFWJS result to our ModerationScanResult format
    */
-  const convertResult = useCallback((src: string, result: ModerationResult): ModerationScanResult => {
+  const convertResult = useCallback((src: string, result: ModerationResult, inferenceTime: number): ModerationScanResult => {
     const predictions: Record<string, number> = {};
     result.predictions.forEach(p => {
       predictions[p.className] = p.probability;
@@ -70,34 +74,44 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
       category,
       confidence: result.confidence,
       predictions,
-      inferenceTime: result.inferenceTime,
+      inferenceTime,
     };
   }, []);
 
   /**
-   * Scan a single image
+   * Scan a single image and return result
    */
-  const scanImage = useCallback(async (src: string): Promise<ModerationScanResult | null> => {
-    if (!modelReady || !isModerationEnabled()) {
+  const scanImage = useCallback(async (src: string, thresholds?: { porn: number; sexy: number; hentai: number }): Promise<ModerationScanResult | null> => {
+    if (!modelReady) {
+      console.log('[ModerationBridge] Model not ready, skipping scan');
+      return null;
+    }
+    
+    if (!isModerationEnabled()) {
+      console.log('[ModerationBridge] Moderation disabled, skipping scan');
       return null;
     }
 
     // Check cache
     if (resultsCache.current.has(src)) {
+      console.log('[ModerationBridge] Cache hit:', src.substring(0, 50));
       return resultsCache.current.get(src)!;
     }
 
-    const thresholds = getDialThresholds();
+    const effectiveThresholds = thresholds || getDialThresholds();
     const startTime = performance.now();
 
     try {
-      const result = await classifyImage(src, thresholds);
+      console.log('[ModerationBridge] Scanning:', src.substring(0, 60));
+      const result = await classifyImage(src, effectiveThresholds);
+      const inferenceTime = performance.now() - startTime;
       
       if (!result) {
+        console.log('[ModerationBridge] No result from classifier');
         return null;
       }
 
-      const scanResult = convertResult(src, result);
+      const scanResult = convertResult(src, result, inferenceTime);
       resultsCache.current.set(src, scanResult);
 
       // Update state
@@ -105,14 +119,16 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
         ...prev,
         scannedCount: prev.scannedCount + 1,
         blurredCount: prev.blurredCount + (scanResult.shouldBlur ? 1 : 0),
-        lastScanTime: performance.now() - startTime,
+        lastScanTime: inferenceTime,
       }));
 
       if (scanResult.shouldBlur) {
+        console.log('[ModerationBridge] BLUR:', src.substring(0, 50), '->', scanResult.category);
         onImageBlurred?.(src, scanResult);
+      } else {
+        console.log('[ModerationBridge] SAFE:', src.substring(0, 50), '->', scanResult.category);
       }
 
-      console.log(`[ModerationBridge] Scanned ${src.substring(0, 50)}... -> ${scanResult.category} (blur: ${scanResult.shouldBlur})`);
       return scanResult;
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : 'Scan failed';
@@ -205,10 +221,22 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
 
   /**
    * Handle message from WebView (injected script)
+   * This is the main entry point for WebView moderation requests
    */
   const handleWebViewMessage = useCallback(async (message: any): Promise<ModerationScanResult | null> => {
+    console.log('[ModerationBridge] Received WebView message:', message?.type, message?.action);
+    
     if (message?.type === 'gc-moderation-request' && message?.action === 'scan') {
-      return scanImage(message.src);
+      const { src, thresholds, messageId, sourceType } = message;
+      
+      console.log('[ModerationBridge] Processing scan request #' + messageId + ' [' + sourceType + ']:', src?.substring(0, 60));
+      
+      const result = await scanImage(src, thresholds);
+      
+      if (result) {
+        // Include messageId in result for matching
+        return { ...result, messageId } as any;
+      }
     }
     return null;
   }, [scanImage]);
@@ -236,6 +264,7 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
       lastScanTime: 0,
       error: null,
     });
+    console.log('[ModerationBridge] Cache cleared');
   }, [modelReady]);
 
   /**
