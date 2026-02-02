@@ -34,18 +34,14 @@ const loadModel = async (): Promise<nsfwjs.NSFWJS> => {
 
   globalModelPromise = (async () => {
     // Use the quantized model for faster loading and inference
-    // MobileNetV2 quantized model - ~2MB, runs in ~50ms
     await tf.ready();
     
     // Set backend to WebGL for GPU acceleration
     await tf.setBackend('webgl');
     
-    // Use the correct model path - nsfwjs@4 has different structure
-    // Fall back to v2.4.2 which has the expected path structure
-    const model = await nsfwjs.load(
-      'https://cdn.jsdelivr.net/npm/nsfwjs@2.4.2/dist/model/model.json',
-      { size: 299 } // InceptionV3 model expects 299x299 input
-    );
+    // Load the default NSFWJS model from the official URL
+    // This uses the MobileNetV2 model which is ~2MB and runs fast
+    const model = await nsfwjs.load();
     
     globalModel = model;
     return model;
