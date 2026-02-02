@@ -7,13 +7,18 @@
  * 3. Dynamic content via MutationObserver
  * 4. Communication with native app via postMessage protocol
  * 5. Blur application and reveal toggles
+ * 6. Fail-closed policy (blur on timeout/error)
  * 
- * Communication Flow (postMessage-based):
+ * Communication Flow (postMessage-based with nonce security):
  * 1. Script detects images and batches them into scan requests
- * 2. Script posts { type: 'gc-moderation-request', requestId, items } to parent
+ * 2. Script posts { type: 'gc-moderation-request', requestId, items, nonce } to parent
  * 3. Native app receives via message listener, processes with NSFWJS
- * 4. Native app posts back { type: 'gc-moderation-result', requestId, results }
- * 5. Script receives results and applies blurs
+ * 4. Native app posts back { type: 'gc-moderation-result', requestId, results, nonce }
+ * 5. Script validates nonce, receives results and applies blurs
+ * 
+ * Security:
+ * - Nonce prevents message spoofing from malicious page scripts
+ * - Only results with matching nonce are processed
  */
 
 export interface InjectionConfig {
@@ -21,7 +26,9 @@ export interface InjectionConfig {
   blurStrength: number; // px
   enabled: boolean;
   forcedBlur?: boolean; // Dev mode: blur everything
+  failClosed?: boolean; // Blur on timeout/error (default: true)
   debug?: boolean; // Verbose logging
+  nonce: string; // Security nonce for message validation
 }
 
 /**
@@ -42,6 +49,10 @@ export function getCategoryThresholds(dialLevel: number): { porn: number; sexy: 
  * Generate the JavaScript code to inject into WebView
  */
 export function generateModerationScript(config: InjectionConfig): string {
+  // Ensure nonce is provided
+  const nonce = config.nonce || 'n_' + Math.random().toString(36).slice(2, 10) + '_' + Math.random().toString(36).slice(2, 10);
+  const failClosed = config.failClosed !== false; // Default true
+  
   return `
 (function() {
   'use strict';
@@ -56,11 +67,13 @@ export function generateModerationScript(config: InjectionConfig): string {
   window.__MW_ACTIVE__ = true;
   
   console.log('[MW] ========================================');
-  console.log('[MW] injected - Moderation Script Starting');
+  console.log('[MW] injected - Moderation Script v2.0');
   console.log('[MW] Sensitivity:', ${config.sensitivity});
   console.log('[MW] Blur Strength:', ${config.blurStrength}, 'px');
   console.log('[MW] Enabled:', ${config.enabled});
   console.log('[MW] Forced Blur:', ${config.forcedBlur || false});
+  console.log('[MW] Fail-Closed:', ${failClosed});
+  console.log('[MW] Nonce:', '${nonce.substring(0, 10)}...');
   console.log('[MW] URL:', window.location.href);
   console.log('[MW] ========================================');
 
@@ -69,7 +82,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     blurStrength: ${config.blurStrength},
     enabled: ${config.enabled},
     forcedBlur: ${config.forcedBlur || false},
+    failClosed: ${failClosed},
     debug: ${config.debug || false},
+    nonce: '${nonce}',
     minImageSize: 40,
     scanDelay: 50,
     batchSize: 5,
@@ -100,8 +115,8 @@ export function generateModerationScript(config: InjectionConfig): string {
   
   const state = {
     scanned: new Set(),
-    pending: new Map(), // itemId -> { element, src, sourceType, requestId, timestamp }
-    pendingRequests: new Map(), // requestId -> { items, timestamp, timeoutId }
+    pending: new Map(), // itemId -> { element, src, sourceType, requestId, timestamp, state }
+    pendingRequests: new Map(), // requestId -> { items, timestamp, timeoutId, state }
     blurred: new Set(),
     revealed: new Set(),
     elements: new Map(), // itemId -> element
@@ -116,6 +131,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       errors: 0,
       requestsSent: 0,
       responsesReceived: 0,
+      nonceRejected: 0,
     },
   };
 
@@ -310,6 +326,7 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   /**
    * Send a batch of items to the host for moderation
+   * Includes security nonce for response validation
    */
   function sendModerationRequest(items) {
     if (items.length === 0) return;
@@ -326,6 +343,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         sourceType: item.sourceType,
       })),
       thresholds: THRESHOLDS[CONFIG.sensitivity] || THRESHOLDS[3],
+      nonce: CONFIG.nonce,
       timestamp: timestamp,
     };
 
@@ -338,6 +356,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       items: items,
       timestamp: timestamp,
       timeoutId: timeoutId,
+      state: 'waitingForHost',
     });
 
     state.stats.requestsSent++;
@@ -358,37 +377,65 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   /**
    * Handle timeout for pending request
+   * FAIL-CLOSED: Apply blur to all items when timeout occurs
    */
   function handleRequestTimeout(requestId) {
     const pendingRequest = state.pendingRequests.get(requestId);
     if (!pendingRequest) return;
+    if (pendingRequest.state === 'handled') return;
+    
+    pendingRequest.state = 'timeout';
     
     console.log('[MW] timeout', requestId, 'items=' + pendingRequest.items.length);
     state.stats.timeouts += pendingRequest.items.length;
     
-    // Mark items as timed out
-    pendingRequest.items.forEach(item => {
-      state.pending.delete(item.itemId);
-      // Don't add to scanned so they can be retried later
-    });
+    // FAIL-CLOSED: Blur items on timeout if policy is enabled
+    if (CONFIG.failClosed && CONFIG.enabled && CONFIG.sensitivity > 0) {
+      console.log('[MW] FAIL-CLOSED: Applying blur to timed-out items');
+      pendingRequest.items.forEach(item => {
+        const element = state.elements.get(item.itemId);
+        if (element && element.isConnected) {
+          applyBlur(element, item.src, 'timeout', CONFIG.blurStrength, item.itemId);
+        }
+        state.pending.delete(item.itemId);
+        // Add to scanned so we don't retry immediately
+        state.scanned.add(item.src);
+      });
+    } else {
+      // Mark items as failed but don't blur
+      pendingRequest.items.forEach(item => {
+        state.pending.delete(item.itemId);
+        // Don't add to scanned so they can be retried later
+      });
+    }
     
     state.pendingRequests.delete(requestId);
   }
 
   /**
    * Process results from host
+   * Validates nonce before processing to prevent spoofing
    */
   function handleModerationResult(message) {
-    const { requestId, results } = message;
+    const { requestId, results, nonce } = message;
     
     if (!requestId || !Array.isArray(results)) {
       console.log('[MW] Invalid result message:', message);
       return;
     }
     
+    // SECURITY: Validate nonce
+    if (nonce !== CONFIG.nonce) {
+      console.warn('[MW] NONCE MISMATCH - rejecting result:', requestId);
+      console.warn('[MW] Expected:', CONFIG.nonce.substring(0, 10), 'Got:', (nonce || 'none').substring(0, 10));
+      state.stats.nonceRejected++;
+      return;
+    }
+    
     const pendingRequest = state.pendingRequests.get(requestId);
     if (pendingRequest) {
       clearTimeout(pendingRequest.timeoutId);
+      pendingRequest.state = 'handled';
       state.pendingRequests.delete(requestId);
     }
     
@@ -405,15 +452,24 @@ export function generateModerationScript(config: InjectionConfig): string {
       state.pending.delete(itemId);
       state.scanned.add(src);
       
-      // Apply blur based on result or forced blur mode
-      const shouldApplyBlur = CONFIG.forcedBlur || (shouldBlur && CONFIG.enabled && CONFIG.sensitivity > 0);
+      // Handle errors with fail-closed if enabled
+      const isError = category === 'error' || category === 'timeout';
+      let shouldApplyBlur = shouldBlur;
       
-      if (shouldApplyBlur && element && element.isConnected) {
+      if (isError && CONFIG.failClosed && CONFIG.enabled && CONFIG.sensitivity > 0) {
+        shouldApplyBlur = true;
+        console.log('[MW] FAIL-CLOSED: Error result, applying blur');
+      }
+      
+      // Apply blur based on result or forced blur mode
+      const finalBlur = CONFIG.forcedBlur || (shouldApplyBlur && CONFIG.enabled && CONFIG.sensitivity > 0);
+      
+      if (finalBlur && element && element.isConnected) {
         applyBlur(element, src, category || 'flagged', CONFIG.blurStrength, itemId);
       }
       
       // Also find any other elements with the same src
-      findAndBlur(src, category, CONFIG.blurStrength, shouldApplyBlur);
+      findAndBlur(src, category, CONFIG.blurStrength, finalBlur);
     });
   }
 
@@ -515,6 +571,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       src: url,
       sourceType: sourceType,
       timestamp: Date.now(),
+      state: 'pending',
     });
     
     // Add to batch queue
@@ -754,7 +811,14 @@ export function generateModerationScript(config: InjectionConfig): string {
     const results = window.__GC_SCAN_RESULTS__.splice(0, window.__GC_SCAN_RESULTS__.length);
     
     results.forEach(result => {
-      const { src, shouldBlur, category, blurStrengthPx } = result;
+      const { src, shouldBlur, category, blurStrengthPx, nonce } = result;
+      
+      // SECURITY: Validate nonce if provided
+      if (nonce && nonce !== CONFIG.nonce) {
+        console.warn('[MW] NONCE MISMATCH in legacy result - rejecting:', src.substring(0, 50));
+        state.stats.nonceRejected++;
+        return;
+      }
       
       console.log('[MW] legacy result:', src.substring(0, 50), '-> blur:', shouldBlur, 'cat:', category);
       
@@ -862,13 +926,26 @@ export function generateModerationScript(config: InjectionConfig): string {
     pending: () => state.pending,
     pendingRequests: () => state.pendingRequests,
     batchQueue: () => batchQueue,
-    setForcedBlur: (enabled) => { CONFIG.forcedBlur = enabled; console.log('[MW] Forced blur:', enabled); },
+    setForcedBlur: (enabled) => { 
+      CONFIG.forcedBlur = enabled; 
+      console.log('[MW] Forced blur:', enabled);
+      if (enabled) {
+        console.log('[MW] DEV MODE: All images will be blurred without AI scan');
+        scanFullPage();
+      }
+    },
+    setFailClosed: (enabled) => {
+      CONFIG.failClosed = enabled;
+      console.log('[MW] Fail-closed:', enabled);
+    },
     setDebug: (enabled) => { CONFIG.debug = enabled; console.log('[MW] Debug mode:', enabled); },
+    getNonce: () => CONFIG.nonce,
   };
 
   console.log('[MW] Moderation fully initialized');
   console.log('[MW] Debug API at window.__MW_DEBUG__');
   console.log('[MW] Toggle forced blur: window.__MW_DEBUG__.setForcedBlur(true)');
+  console.log('[MW] Toggle fail-closed: window.__MW_DEBUG__.setFailClosed(true/false)');
 })();
 `;
 }

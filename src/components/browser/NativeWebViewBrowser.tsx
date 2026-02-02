@@ -107,7 +107,7 @@ export const NativeWebViewBrowser = () => {
   // Hooks
   const { checkBlockedSite, isChecking } = useContentProtection();
   const { settings } = useSettings();
-  const { settings: localSettings, getModerationConfig, isModerationEnabled } = useLocalSettings();
+  const { settings: localSettings, getModerationConfig, isModerationEnabled, getNonce } = useLocalSettings();
   const deviceId = useDeviceId();
   
   // Moderation bridge for AI image scanning
@@ -296,7 +296,7 @@ export const NativeWebViewBrowser = () => {
    * Process a moderation request from the WebView
    * Uses the new postMessage protocol with requestId/itemId tracking
    */
-  const processModerationRequest = useCallback(async (request: ModerationRequestMessage) => {
+  const processModerationRequest = useCallback(async (request: ModerationRequestMessage, nonce: string) => {
     const { requestId, items, thresholds } = request;
     
     if (pendingRequestsRef.current.has(requestId)) {
@@ -360,12 +360,12 @@ export const NativeWebViewBrowser = () => {
     const elapsedMs = performance.now() - startTime;
     console.log('[MW-Host] scan complete', requestId, 'elapsed=' + elapsedMs.toFixed(0) + 'ms');
     
-    // Post results back to the WebView
-    console.log('[MW-Host] posting results back', requestId, 'count=' + results.length);
+    // Post results back to the WebView with nonce for security
+    console.log('[MW-Host] posting results back', requestId, 'count=' + results.length, 'nonce=' + nonce.substring(0, 10));
     
     if (executeScript) {
       try {
-        const resultMessage = createResultMessage(requestId, results);
+        const resultMessage = createResultMessage(requestId, results, nonce);
         const messageJson = JSON.stringify(resultMessage);
         // Escape for safe injection
         const escapedJson = messageJson
@@ -427,13 +427,22 @@ export const NativeWebViewBrowser = () => {
    * This is the primary communication channel
    */
   useEffect(() => {
+    // Get session nonce from local settings hook
+    const sessionNonce = getNonce();
+    
     const handleMessage = async (event: MessageEvent) => {
       const message = event.data;
       
-      // Handle new postMessage protocol
+      // Handle new postMessage protocol with nonce validation
       if (isValidModerationRequest(message)) {
-        console.log('[MW-Host] Received postMessage request:', message.requestId);
-        await processModerationRequest(message);
+        // Validate nonce
+        if (message.nonce !== sessionNonce) {
+          console.warn('[MW-Host] NONCE MISMATCH - rejecting request:', message.requestId);
+          console.warn('[MW-Host] Expected:', sessionNonce.substring(0, 10), 'Got:', (message.nonce || 'none').substring(0, 10));
+          return;
+        }
+        console.log('[MW-Host] Received postMessage request:', message.requestId, 'nonce valid');
+        await processModerationRequest(message, message.nonce);
         return;
       }
       
@@ -478,7 +487,7 @@ export const NativeWebViewBrowser = () => {
 
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
-  }, [processModerationRequest, moderationBridge, executeScript]);
+  }, [processModerationRequest, moderationBridge, executeScript, getNonce]);
 
   /**
    * Fallback: Poll for moderation requests from legacy global queue
