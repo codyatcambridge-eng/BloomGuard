@@ -349,6 +349,141 @@ function isPdfUrl(url: string): boolean {
   return lowerUrl.endsWith('.pdf') || lowerUrl.includes('.pdf?') || lowerUrl.includes('.pdf#');
 }
 
+// YouTube URL detection and video ID extraction
+function isYouTubeUrl(url: string): boolean {
+  try {
+    const urlObj = new URL(url);
+    const hostname = urlObj.hostname.toLowerCase();
+    return hostname.includes('youtube.com') || hostname.includes('youtu.be');
+  } catch {
+    return false;
+  }
+}
+
+function extractYouTubeVideoId(url: string): string | null {
+  try {
+    const urlObj = new URL(url);
+    
+    // Handle youtu.be short URLs
+    if (urlObj.hostname.includes('youtu.be')) {
+      return urlObj.pathname.slice(1).split('?')[0] || null;
+    }
+    
+    // Handle youtube.com URLs
+    if (urlObj.hostname.includes('youtube.com')) {
+      // /watch?v=VIDEO_ID
+      const vParam = urlObj.searchParams.get('v');
+      if (vParam) return vParam;
+      
+      // /embed/VIDEO_ID or /v/VIDEO_ID
+      const pathMatch = urlObj.pathname.match(/\/(embed|v)\/([^/?]+)/);
+      if (pathMatch) return pathMatch[2];
+      
+      // /shorts/VIDEO_ID
+      const shortsMatch = urlObj.pathname.match(/\/shorts\/([^/?]+)/);
+      if (shortsMatch) return shortsMatch[1];
+    }
+    
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+interface YouTubeMetadata {
+  videoId: string;
+  title: string;
+  channelName: string;
+  description: string;
+  thumbnailUrl: string;
+}
+
+async function fetchYouTubeMetadata(videoId: string, url: string): Promise<YouTubeMetadata> {
+  console.log('[proxy-reader] Fetching YouTube metadata for:', videoId);
+  
+  const defaultMeta: YouTubeMetadata = {
+    videoId,
+    title: 'YouTube Video',
+    channelName: 'Unknown Channel',
+    description: '',
+    thumbnailUrl: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+  };
+  
+  try {
+    // Fetch the YouTube page to extract metadata
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+    
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+      signal: controller.signal,
+    });
+    
+    clearTimeout(timeoutId);
+    
+    if (!response.ok) {
+      console.warn('[proxy-reader] Failed to fetch YouTube page:', response.status);
+      return defaultMeta;
+    }
+    
+    const html = await response.text();
+    
+    // Extract title from og:title or title tag
+    const ogTitleMatch = html.match(/<meta[^>]*property\s*=\s*["']og:title["'][^>]*content\s*=\s*["']([^"']+)["']/i)
+      || html.match(/<meta[^>]*content\s*=\s*["']([^"']+)["'][^>]*property\s*=\s*["']og:title["']/i);
+    if (ogTitleMatch) {
+      defaultMeta.title = decodeHtmlEntities(ogTitleMatch[1].trim());
+    } else {
+      const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+      if (titleMatch) {
+        defaultMeta.title = decodeHtmlEntities(titleMatch[1].replace(' - YouTube', '').trim());
+      }
+    }
+    
+    // Extract channel name from link or JSON data
+    const channelMatch = html.match(/"ownerChannelName"\s*:\s*"([^"]+)"/i)
+      || html.match(/"author"\s*:\s*"([^"]+)"/i)
+      || html.match(/itemprop\s*=\s*["']author["'][^>]*content\s*=\s*["']([^"']+)["']/i);
+    if (channelMatch) {
+      defaultMeta.channelName = decodeHtmlEntities(channelMatch[1].trim());
+    }
+    
+    // Extract description from og:description or meta description
+    const ogDescMatch = html.match(/<meta[^>]*property\s*=\s*["']og:description["'][^>]*content\s*=\s*["']([^"']+)["']/i)
+      || html.match(/<meta[^>]*content\s*=\s*["']([^"']+)["'][^>]*property\s*=\s*["']og:description["']/i);
+    if (ogDescMatch) {
+      defaultMeta.description = decodeHtmlEntities(ogDescMatch[1].trim());
+    } else {
+      const descMatch = html.match(/<meta[^>]*name\s*=\s*["']description["'][^>]*content\s*=\s*["']([^"']+)["']/i);
+      if (descMatch) {
+        defaultMeta.description = decodeHtmlEntities(descMatch[1].trim());
+      }
+    }
+    
+    // Extract better thumbnail from og:image
+    const ogImageMatch = html.match(/<meta[^>]*property\s*=\s*["']og:image["'][^>]*content\s*=\s*["']([^"']+)["']/i)
+      || html.match(/<meta[^>]*content\s*=\s*["']([^"']+)["'][^>]*property\s*=\s*["']og:image["']/i);
+    if (ogImageMatch) {
+      defaultMeta.thumbnailUrl = ogImageMatch[1];
+    }
+    
+    console.log('[proxy-reader] YouTube metadata extracted:', {
+      title: defaultMeta.title.substring(0, 50),
+      channelName: defaultMeta.channelName,
+      hasDescription: defaultMeta.description.length > 0,
+    });
+    
+    return defaultMeta;
+  } catch (error) {
+    console.error('[proxy-reader] Error fetching YouTube metadata:', error);
+    return defaultMeta;
+  }
+}
+
 const MIN_CONTENT_LENGTH = 100;
 const REQUEST_TIMEOUT = 10000;
 
@@ -405,6 +540,31 @@ Deno.serve(async (req) => {
         }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
+    }
+
+    // Check if URL is YouTube - handle specially
+    if (isYouTubeUrl(url)) {
+      const videoId = extractYouTubeVideoId(url);
+      console.log('[proxy-reader] YouTube detected, videoId:', videoId);
+      
+      if (videoId) {
+        const metadata = await fetchYouTubeMetadata(videoId, url);
+        return new Response(
+          JSON.stringify({
+            success: true,
+            isYouTube: true,
+            data: {
+              videoId: metadata.videoId,
+              title: metadata.title,
+              channelName: metadata.channelName,
+              description: metadata.description,
+              thumbnailUrl: metadata.thumbnailUrl,
+              sourceUrl: url,
+            }
+          }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
     }
 
     console.log('[proxy-reader] Fetching URL:', url);

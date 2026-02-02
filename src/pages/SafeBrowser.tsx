@@ -11,8 +11,9 @@ import { SearchResultsView } from "@/components/browser/SearchResultsView";
 import { PDFViewer } from "@/components/browser/PDFViewer";
 import { PreviewModeView } from "@/components/browser/PreviewModeView";
 import { FullFailureView } from "@/components/browser/FullFailureView";
+import { YouTubePreviewView } from "@/components/browser/YouTubePreviewView";
 
-type BrowserView = 'home' | 'search' | 'browse' | 'blocked' | 'fallback' | 'reader' | 'pdf' | 'preview' | 'failure';
+type BrowserView = 'home' | 'search' | 'browse' | 'blocked' | 'fallback' | 'reader' | 'pdf' | 'preview' | 'failure' | 'youtube';
 
 interface SearchResult {
   title: string;
@@ -55,6 +56,15 @@ interface PDFContent {
   sourceUrl: string;
 }
 
+interface YouTubeContent {
+  videoId: string;
+  title: string;
+  channelName: string;
+  description: string;
+  thumbnailUrl: string;
+  sourceUrl: string;
+}
+
 const SafeBrowser = () => {
   const [url, setUrl] = useState("");
   const [displayUrl, setDisplayUrl] = useState("");
@@ -71,6 +81,7 @@ const SafeBrowser = () => {
   const [readerContent, setReaderContent] = useState<ReaderContent | null>(null);
   const [readerError, setReaderError] = useState<string | null>(null);
   const [pdfContent, setPdfContent] = useState<PDFContent | null>(null);
+  const [youtubeContent, setYoutubeContent] = useState<YouTubeContent | null>(null);
   const [failureError, setFailureError] = useState<string | null>(null);
   
   // Search state
@@ -372,7 +383,7 @@ const SafeBrowser = () => {
     handleNavigate(url);
   };
 
-  // Fetch content for Reader Mode (with PDF and Preview fallback)
+  // Fetch content for Reader Mode (with PDF, YouTube, and Preview fallback)
   const handleReaderMode = async () => {
     if (!fallbackUrl) {
       console.error('[SafeBrowser] No fallback URL to load');
@@ -383,6 +394,7 @@ const SafeBrowser = () => {
     setIsLoadingReader(true);
     setReaderError(null);
     setPdfContent(null);
+    setYoutubeContent(null);
     setFailureError(null);
     
     try {
@@ -405,6 +417,22 @@ const SafeBrowser = () => {
         });
         setCurrentView('pdf');
         await logEvent('pdf_mode', extractDomain(fallbackUrl), 'opened');
+        return;
+      }
+
+      // Handle YouTube response
+      if (data?.isYouTube && data?.data) {
+        console.log('[SafeBrowser] YouTube detected, videoId:', data.data.videoId);
+        setYoutubeContent({
+          videoId: data.data.videoId,
+          title: data.data.title,
+          channelName: data.data.channelName,
+          description: data.data.description,
+          thumbnailUrl: data.data.thumbnailUrl,
+          sourceUrl: fallbackUrl,
+        });
+        setCurrentView('youtube');
+        await logEvent('youtube_preview', extractDomain(fallbackUrl), `video:${data.data.videoId}`);
         return;
       }
 
@@ -491,6 +519,7 @@ const SafeBrowser = () => {
   const handleReaderBack = () => {
     setReaderContent(null);
     setPdfContent(null);
+    setYoutubeContent(null);
     setFailureError(null);
     setCurrentView('fallback');
   };
@@ -499,11 +528,36 @@ const SafeBrowser = () => {
     window.open(fallbackUrl, '_blank', 'noopener,noreferrer');
   };
 
+  const handleYouTubeExternalClick = () => {
+    if (youtubeContent) {
+      // Log external click event
+      logEvent('youtube_external_click', extractDomain(fallbackUrl), `video:${youtubeContent.videoId}`);
+      window.open(youtubeContent.sourceUrl, '_blank', 'noopener,noreferrer');
+    }
+  };
+  };
+
   // Navigate from search result
   const handleSearchResultNavigate = (resultUrl: string) => {
     setUrl(resultUrl);
     handleNavigate(resultUrl);
   };
+
+  // Show YouTube Preview view
+  if (currentView === 'youtube' && youtubeContent) {
+    return (
+      <YouTubePreviewView
+        videoId={youtubeContent.videoId}
+        title={youtubeContent.title}
+        channelName={youtubeContent.channelName}
+        description={youtubeContent.description}
+        thumbnailUrl={youtubeContent.thumbnailUrl}
+        sourceUrl={youtubeContent.sourceUrl}
+        onBack={handleReaderBack}
+        onOpenExternal={handleYouTubeExternalClick}
+      />
+    );
+  }
 
   // Show PDF view
   if (currentView === 'pdf' && pdfContent) {
