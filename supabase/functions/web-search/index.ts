@@ -19,6 +19,20 @@ interface SearchResponse {
   query?: string;
 }
 
+// Clean HTML entities and tags
+function cleanText(text: string): string {
+  return text
+    .replace(/&#x27;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 // Parse DuckDuckGo HTML search results
 async function searchDuckDuckGo(query: string): Promise<SearchResult[]> {
   console.log('[web-search] Searching DuckDuckGo for:', query);
@@ -44,95 +58,97 @@ async function searchDuckDuckGo(query: string): Promise<SearchResult[]> {
   const results: SearchResult[] = [];
   const seenUrls = new Set<string>();
   
-  // Primary parsing: Look for result__a links with uddg parameter
-  const resultLinkRegex = /href="[^"]*uddg=([^&"]+)[^"]*"[^>]*class="result__a"[^>]*>([^<]+)</gi;
-  const resultLinkRegex2 = /class="result__a"[^>]*href="[^"]*uddg=([^&"]+)[^"]*"[^>]*>([^<]+)</gi;
+  // DuckDuckGo HTML structure: each result is in a div with class containing "result"
+  // The structure is:
+  // <div class="result results_links results_links_deep web-result">
+  //   <a class="result__a" href="...uddg=ENCODED_URL...">TITLE</a>
+  //   <a class="result__snippet">SNIPPET</a>
+  // </div>
   
-  let match;
+  // Split by result containers
+  const resultDivs = html.split(/class="result\s+results_links/i);
+  console.log('[web-search] Found result divs:', resultDivs.length - 1);
   
-  // Try first pattern
-  while ((match = resultLinkRegex.exec(html)) !== null && results.length < 15) {
-    try {
-      const url = decodeURIComponent(match[1]);
-      const title = match[2].trim();
-      
-      if (url.startsWith('http') && title.length > 10 && !url.includes('duckduckgo') && !seenUrls.has(url)) {
-        seenUrls.add(url);
-        results.push({ title, url, snippet: '' });
-        console.log('[web-search] Found result:', title.substring(0, 40));
-      }
-    } catch (e) {
-      // Skip invalid URLs
-    }
-  }
-  
-  // Try second pattern if first didn't work
-  if (results.length === 0) {
-    while ((match = resultLinkRegex2.exec(html)) !== null && results.length < 15) {
-      try {
-        const url = decodeURIComponent(match[1]);
-        const title = match[2].trim();
-        
-        if (url.startsWith('http') && title.length > 10 && !url.includes('duckduckgo') && !seenUrls.has(url)) {
-          seenUrls.add(url);
-          results.push({ title, url, snippet: '' });
-        }
-      } catch (e) {
-        // Skip invalid URLs
-      }
-    }
-  }
-  
-  // Fallback: Find any external links with uddg
-  if (results.length === 0) {
-    console.log('[web-search] Trying uddg fallback...');
-    const uddgRegex = /href="[^"]*uddg=([^&"]+)[^"]*"[^>]*>([^<]+)</gi;
+  for (let i = 1; i < resultDivs.length && results.length < 10; i++) {
+    const div = resultDivs[i];
     
-    while ((match = uddgRegex.exec(html)) !== null && results.length < 15) {
+    // Find the end of this result div (next major section)
+    const divContent = div.substring(0, 3000); // Limit to avoid overflow
+    
+    // Extract URL (uddg parameter contains the actual URL)
+    const uddgMatch = divContent.match(/uddg=([^&"']+)/);
+    if (!uddgMatch) continue;
+    
+    let url: string;
+    try {
+      url = decodeURIComponent(uddgMatch[1]);
+    } catch {
+      continue;
+    }
+    
+    // Skip non-http URLs and duplicates
+    if (!url.startsWith('http') || url.includes('duckduckgo') || seenUrls.has(url)) {
+      continue;
+    }
+    seenUrls.add(url);
+    
+    // Extract title (text inside result__a link)
+    const titleMatch = divContent.match(/class="result__a"[^>]*>([^<]+)</i);
+    if (!titleMatch) continue;
+    
+    const title = cleanText(titleMatch[1]);
+    if (title.length < 5) continue;
+    
+    // Extract snippet (text inside result__snippet)
+    let snippet = '';
+    const snippetMatch = divContent.match(/class="result__snippet"[^>]*>([^<]+)/i);
+    if (snippetMatch) {
+      snippet = cleanText(snippetMatch[1]);
+    }
+    
+    // Limit snippet length
+    if (snippet.length > 200) {
+      snippet = snippet.substring(0, 200) + '...';
+    }
+    
+    results.push({
+      title,
+      url,
+      snippet,
+    });
+    
+    console.log('[web-search] Parsed:', { 
+      title: title.substring(0, 40), 
+      url: url.substring(0, 50),
+      snippetLen: snippet.length 
+    });
+  }
+  
+  // Fallback: try alternative parsing if no results
+  if (results.length === 0) {
+    console.log('[web-search] Trying fallback parsing...');
+    
+    // Look for any uddg links with reasonable text
+    const linkRegex = /href="[^"]*uddg=([^&"]+)[^"]*"[^>]*>([^<]{10,100})</gi;
+    let match;
+    
+    while ((match = linkRegex.exec(html)) !== null && results.length < 10) {
       try {
         const url = decodeURIComponent(match[1]);
-        const title = match[2].trim();
+        const title = cleanText(match[2]);
         
-        // Filter out low-quality matches
-        if (url.startsWith('http') && 
-            title.length > 15 && 
-            !url.includes('duckduckgo') &&
-            !seenUrls.has(url) &&
-            !title.toLowerCase().includes('duckduckgo') &&
-            !/^[a-z]+\.[a-z]+/.test(title.toLowerCase())) {
+        if (url.startsWith('http') && !url.includes('duckduckgo') && !seenUrls.has(url)) {
           seenUrls.add(url);
           results.push({ title, url, snippet: '' });
         }
-      } catch (e) {
+      } catch {
         // Skip invalid
       }
     }
   }
   
-  // Extract snippets for found URLs
-  for (const result of results) {
-    // Find snippet near this URL in the HTML
-    const urlEscaped = result.url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const snippetRegex = new RegExp(`${urlEscaped.substring(0, 50)}[^<]*<[^>]*>([^<]{20,200})`, 'i');
-    const snippetMatch = html.match(snippetRegex);
-    if (snippetMatch) {
-      result.snippet = snippetMatch[1].replace(/<[^>]+>/g, '').trim();
-    }
-  }
-  
-  // Try to find snippets from result__snippet class
-  const snippetBlocks = html.match(/class="result__snippet"[^>]*>([^<]*(?:<[^>]+>[^<]*)*)/gi) || [];
-  for (let i = 0; i < Math.min(snippetBlocks.length, results.length); i++) {
-    if (!results[i].snippet && snippetBlocks[i]) {
-      const snippetText = snippetBlocks[i].replace(/class="result__snippet"[^>]*>/i, '').replace(/<[^>]+>/g, '').trim();
-      if (snippetText.length > 20) {
-        results[i].snippet = snippetText;
-      }
-    }
-  }
-  
   console.log('[web-search] Total results:', results.length);
-  return results.slice(0, 10); // Return max 10 results
+  return results;
 }
 
 serve(async (req) => {
@@ -161,17 +177,29 @@ serve(async (req) => {
     console.log('[web-search] Processing query:', cleanQuery);
 
     let results: SearchResult[] = [];
+    let error: string | undefined;
     
     try {
       results = await searchDuckDuckGo(cleanQuery);
-    } catch (error) {
-      console.error('[web-search] Search failed:', error);
+    } catch (err) {
+      console.error('[web-search] Search failed:', err);
+      error = 'Search failed. Please try again.';
+    }
+    
+    // If no results and no error, set appropriate message
+    if (results.length === 0 && !error) {
+      console.log('[web-search] No results found for:', cleanQuery);
     }
     
     console.log('[web-search] Returning', results.length, 'results');
     
     return new Response(
-      JSON.stringify({ success: true, results, query: cleanQuery } as SearchResponse),
+      JSON.stringify({ 
+        success: !error, 
+        results, 
+        query: cleanQuery,
+        error: error || (results.length === 0 ? 'No results found.' : undefined)
+      } as SearchResponse),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
 
@@ -180,7 +208,7 @@ serve(async (req) => {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     
     return new Response(
-      JSON.stringify({ success: false, error: errorMessage } as SearchResponse),
+      JSON.stringify({ success: false, error: 'Search failed. Try again.' } as SearchResponse),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
     );
   }
