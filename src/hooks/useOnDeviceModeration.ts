@@ -40,9 +40,11 @@ const loadModel = async (): Promise<nsfwjs.NSFWJS> => {
     // Set backend to WebGL for GPU acceleration
     await tf.setBackend('webgl');
     
+    // Use the correct model path - nsfwjs@4 has different structure
+    // Fall back to v2.4.2 which has the expected path structure
     const model = await nsfwjs.load(
-      'https://cdn.jsdelivr.net/npm/nsfwjs@4/dist/models/mobilenet_v2/model.json',
-      { size: 224 } // MobileNetV2 expects 224x224 input
+      'https://cdn.jsdelivr.net/npm/nsfwjs@2.4.2/dist/model/model.json',
+      { size: 299 } // InceptionV3 model expects 299x299 input
     );
     
     globalModel = model;
