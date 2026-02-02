@@ -8,8 +8,11 @@ import { FallbackModeUI } from "@/components/browser/FallbackModeUI";
 import { ReaderModeView } from "@/components/browser/ReaderModeView";
 import { SafeBrowserHomepage } from "@/components/browser/SafeBrowserHomepage";
 import { SearchResultsView } from "@/components/browser/SearchResultsView";
+import { PDFViewer } from "@/components/browser/PDFViewer";
+import { PreviewModeView } from "@/components/browser/PreviewModeView";
+import { FullFailureView } from "@/components/browser/FullFailureView";
 
-type BrowserView = 'home' | 'search' | 'browse' | 'blocked' | 'fallback' | 'reader';
+type BrowserView = 'home' | 'search' | 'browse' | 'blocked' | 'fallback' | 'reader' | 'pdf' | 'preview' | 'failure';
 
 interface SearchResult {
   title: string;
@@ -39,7 +42,15 @@ const KNOWN_IFRAME_BLOCKERS = [
 
 interface ReaderContent {
   content: string;
+  previewHtml?: string;
   images: string[];
+  title: string;
+  description?: string;
+  sourceUrl: string;
+}
+
+interface PDFContent {
+  pdfUrl: string;
   title: string;
   sourceUrl: string;
 }
@@ -59,6 +70,8 @@ const SafeBrowser = () => {
   const [isLoadingReader, setIsLoadingReader] = useState(false);
   const [readerContent, setReaderContent] = useState<ReaderContent | null>(null);
   const [readerError, setReaderError] = useState<string | null>(null);
+  const [pdfContent, setPdfContent] = useState<PDFContent | null>(null);
+  const [failureError, setFailureError] = useState<string | null>(null);
   
   // Search state
   const [searchQuery, setSearchQuery] = useState("");
@@ -359,7 +372,7 @@ const SafeBrowser = () => {
     handleNavigate(url);
   };
 
-  // Fetch content for Reader Mode
+  // Fetch content for Reader Mode (with PDF and Preview fallback)
   const handleReaderMode = async () => {
     if (!fallbackUrl) {
       console.error('[SafeBrowser] No fallback URL to load');
@@ -369,6 +382,8 @@ const SafeBrowser = () => {
     console.log('[SafeBrowser] Opening Reader Mode for:', fallbackUrl);
     setIsLoadingReader(true);
     setReaderError(null);
+    setPdfContent(null);
+    setFailureError(null);
     
     try {
       const { data, error } = await supabase.functions.invoke('proxy-reader', {
@@ -380,32 +395,93 @@ const SafeBrowser = () => {
         throw new Error(error.message || 'Failed to connect to reader service');
       }
 
+      // Handle PDF response
+      if (data?.isPdf && data?.data) {
+        console.log('[SafeBrowser] PDF detected');
+        setPdfContent({
+          pdfUrl: data.data.pdfUrl,
+          title: data.data.title,
+          sourceUrl: fallbackUrl,
+        });
+        setCurrentView('pdf');
+        await logEvent('pdf_mode', extractDomain(fallbackUrl), 'opened');
+        return;
+      }
+
       if (data?.success && data?.data) {
         const contentData = data.data;
         
+        // Check if Reader Mode failed but Preview is available
+        if (data.readerModeFailed) {
+          console.log('[SafeBrowser] Reader Mode failed, trying Preview Mode');
+          
+          if (contentData.previewHtml && contentData.previewHtml.length > 100) {
+            setReaderContent({
+              content: '',
+              previewHtml: contentData.previewHtml,
+              images: contentData.images || [],
+              title: contentData.title || extractDomain(fallbackUrl),
+              description: contentData.description,
+              sourceUrl: fallbackUrl,
+            });
+            setCurrentView('preview');
+            await logEvent('preview_mode', extractDomain(fallbackUrl), 'opened');
+            return;
+          } else {
+            // Full failure - no readable content and no preview
+            setFailureError('No readable content could be extracted from this page.');
+            setCurrentView('failure');
+            await logEvent('full_failure', extractDomain(fallbackUrl), 'no-content');
+            return;
+          }
+        }
+        
+        // Normal Reader Mode success
         if (!contentData.content || contentData.content.trim().length < 50) {
+          // Try Preview Mode as fallback
+          if (contentData.previewHtml && contentData.previewHtml.length > 100) {
+            console.log('[SafeBrowser] Content too short, using Preview Mode');
+            setReaderContent({
+              content: '',
+              previewHtml: contentData.previewHtml,
+              images: contentData.images || [],
+              title: contentData.title || extractDomain(fallbackUrl),
+              description: contentData.description,
+              sourceUrl: fallbackUrl,
+            });
+            setCurrentView('preview');
+            await logEvent('preview_mode', extractDomain(fallbackUrl), 'fallback');
+            return;
+          }
+          
           console.warn('[SafeBrowser] No readable content found');
-          setReaderError('No readable content found on this page.');
-          setIsLoadingReader(false);
+          setFailureError('No readable content found on this page.');
+          setCurrentView('failure');
+          await logEvent('full_failure', extractDomain(fallbackUrl), 'short-content');
           return;
         }
 
         setReaderContent({
           content: contentData.content,
+          previewHtml: contentData.previewHtml,
           images: contentData.images || [],
           title: contentData.title || extractDomain(fallbackUrl),
+          description: contentData.description,
           sourceUrl: fallbackUrl,
         });
         setCurrentView('reader');
         
         await logEvent('reader_mode', extractDomain(fallbackUrl), 'opened');
       } else {
-        setReaderError(data?.error || 'Failed to load content');
+        setFailureError(data?.error || 'Failed to load content');
+        setCurrentView('failure');
+        await logEvent('full_failure', extractDomain(fallbackUrl), 'api-error');
       }
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : 'Reader Mode failed';
       console.error('[SafeBrowser] Reader mode exception:', error);
-      setReaderError(errorMsg);
+      setFailureError(errorMsg);
+      setCurrentView('failure');
       await logEvent('reader_mode_error', extractDomain(fallbackUrl), 'failed');
     } finally {
       setIsLoadingReader(false);
@@ -414,7 +490,13 @@ const SafeBrowser = () => {
 
   const handleReaderBack = () => {
     setReaderContent(null);
+    setPdfContent(null);
+    setFailureError(null);
     setCurrentView('fallback');
+  };
+
+  const handleOpenExternal = () => {
+    window.open(fallbackUrl, '_blank', 'noopener,noreferrer');
   };
 
   // Navigate from search result
@@ -422,6 +504,64 @@ const SafeBrowser = () => {
     setUrl(resultUrl);
     handleNavigate(resultUrl);
   };
+
+  // Show PDF view
+  if (currentView === 'pdf' && pdfContent) {
+    return (
+      <div className="min-h-screen bg-background flex flex-col">
+        <header className="px-4 py-3 border-b border-border bg-card">
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleReaderBack}
+              className="p-2 text-muted-foreground hover:text-foreground transition-colors border border-border rounded"
+            >
+              <ArrowLeft className="w-5 h-5" />
+            </button>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2">
+                <Shield className="w-4 h-4 text-aqua flex-shrink-0" />
+                <span className="text-xs font-display text-aqua tracking-wider">PDF VIEWER</span>
+              </div>
+            </div>
+          </div>
+        </header>
+        <div className="flex-1">
+          <PDFViewer
+            pdfUrl={pdfContent.pdfUrl}
+            title={pdfContent.title}
+            onOpenExternal={handleOpenExternal}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  // Show Preview Mode view
+  if (currentView === 'preview' && readerContent?.previewHtml) {
+    return (
+      <PreviewModeView
+        previewHtml={readerContent.previewHtml}
+        images={readerContent.images}
+        title={readerContent.title}
+        description={readerContent.description}
+        sourceUrl={readerContent.sourceUrl}
+        onBack={handleReaderBack}
+        onOpenExternal={handleOpenExternal}
+      />
+    );
+  }
+
+  // Show Full Failure view
+  if (currentView === 'failure') {
+    return (
+      <FullFailureView
+        sourceUrl={fallbackUrl}
+        error={failureError || 'This site cannot be rendered safely.'}
+        onBack={handleReaderBack}
+        onRetry={handleReaderMode}
+      />
+    );
+  }
 
   // Show Reader Mode view
   if (currentView === 'reader' && readerContent) {
