@@ -59,9 +59,25 @@ export const ReaderModeView = ({ content, images, title, sourceUrl, onBack }: Re
   // Memoize image list to prevent re-scans
   const uniqueImages = useMemo(() => [...new Set(images)], [images]);
 
+  // Log when component receives content
+  useEffect(() => {
+    console.log('[ReaderMode] Content loaded:', {
+      url: sourceUrl,
+      title,
+      contentLength: content?.length || 0,
+      imageCount: uniqueImages.length,
+    });
+  }, [sourceUrl, title, content, uniqueImages.length]);
+
   // Scan all images with on-device AI
   const scanImages = useCallback(async () => {
     if (!aiReady || uniqueImages.length === 0) return;
+
+    console.log('[ReaderMode] Starting image scan:', {
+      imageCount: uniqueImages.length,
+      aiSensitivity: settings.ai_sensitivity,
+      blurLevel: settings.blur_level,
+    });
 
     setIsScanning(true);
     setScannedCount(0);
@@ -77,6 +93,15 @@ export const ReaderModeView = ({ content, images, title, sourceUrl, onBack }: Re
         if (result) {
           results.set(uniqueImages[i], result);
           successCount++;
+          
+          if (result.shouldBlur) {
+            console.log('[ReaderMode] Image flagged:', {
+              index: i,
+              class: result.dominantClass,
+              confidence: result.confidence.toFixed(2),
+              inferenceTime: result.inferenceTime.toFixed(0) + 'ms',
+            });
+          }
         } else {
           failCount++;
         }
@@ -90,8 +115,14 @@ export const ReaderModeView = ({ content, images, title, sourceUrl, onBack }: Re
     setImageResults(results);
     setIsScanning(false);
 
-    // Show results
+    // Log final results
     const blurredCount = [...results.values()].filter(r => r.shouldBlur).length;
+    console.log('[ReaderMode] Scan complete:', {
+      total: uniqueImages.length,
+      scanned: successCount,
+      blurred: blurredCount,
+      failed: failCount,
+    });
     
     if (settings.show_scan_notifications) {
       if (blurredCount > 0) {
@@ -107,7 +138,7 @@ export const ReaderModeView = ({ content, images, title, sourceUrl, onBack }: Re
         setScanError(`${failCount} image(s) could not be scanned`);
       }
     }
-  }, [aiReady, uniqueImages, classifyImage, thresholds, settings.show_scan_notifications]);
+  }, [aiReady, uniqueImages, classifyImage, thresholds, settings]);
 
   // Auto-scan images when AI is ready
   useEffect(() => {

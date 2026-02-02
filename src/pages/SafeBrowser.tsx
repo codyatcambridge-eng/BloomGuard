@@ -51,6 +51,7 @@ const SafeBrowser = () => {
   const [fallbackUrl, setFallbackUrl] = useState("");
   const [isLoadingReader, setIsLoadingReader] = useState(false);
   const [readerContent, setReaderContent] = useState<ReaderContent | null>(null);
+  const [readerError, setReaderError] = useState<string | null>(null);
   const [iframeLoadFailed, setIframeLoadFailed] = useState(false);
   
   const { checkBlockedSite, isChecking } = useContentProtection();
@@ -106,6 +107,7 @@ const SafeBrowser = () => {
     setIsBlocked(false);
     setIsFallbackMode(false);
     setReaderContent(null);
+    setReaderError(null);
     setIframeLoadFailed(false);
     
     // Clear any pending timeout
@@ -280,36 +282,72 @@ const SafeBrowser = () => {
 
   // Fetch content for Reader Mode
   const handleReaderMode = async () => {
-    if (!fallbackUrl) return;
+    if (!fallbackUrl) {
+      console.error('[SafeBrowser] No fallback URL to load');
+      return;
+    }
 
+    console.log('[SafeBrowser] Opening Reader Mode for:', fallbackUrl);
     setIsLoadingReader(true);
+    setReaderError(null);
     
     try {
+      console.log('[SafeBrowser] Calling proxy-reader edge function...');
       const { data, error } = await supabase.functions.invoke('proxy-reader', {
         body: { url: fallbackUrl }
       });
 
       if (error) {
-        console.error('[SafeBrowser] Reader mode error:', error);
-        throw new Error(error.message);
+        console.error('[SafeBrowser] Edge function error:', error);
+        throw new Error(error.message || 'Failed to connect to reader service');
       }
 
+      console.log('[SafeBrowser] Edge function response:', { 
+        success: data?.success, 
+        hasData: !!data?.data,
+        contentLength: data?.data?.content?.length,
+        imageCount: data?.data?.images?.length,
+        title: data?.data?.title
+      });
+
       if (data?.success && data?.data) {
+        const contentData = data.data;
+        
+        // Check if we got actual content
+        if (!contentData.content || contentData.content.trim().length < 50) {
+          console.warn('[SafeBrowser] No readable content found in response');
+          setReaderError('No readable content found on this page.');
+          setIsLoadingReader(false);
+          return;
+        }
+
         setReaderContent({
-          content: data.data.content,
-          images: data.data.images || [],
-          title: data.data.title || extractDomain(fallbackUrl),
+          content: contentData.content,
+          images: contentData.images || [],
+          title: contentData.title || extractDomain(fallbackUrl),
           sourceUrl: fallbackUrl,
+        });
+        
+        console.log('[SafeBrowser] Reader content set successfully:', {
+          contentLength: contentData.content.length,
+          imageCount: contentData.images?.length || 0,
+          title: contentData.title
         });
         
         // Log reader mode usage
         await logEvent('reader_mode', extractDomain(fallbackUrl), 'opened');
       } else {
-        throw new Error(data?.error || 'Failed to load content');
+        const errorMsg = data?.error || 'Failed to load content from this page';
+        console.error('[SafeBrowser] Reader mode failed:', errorMsg);
+        setReaderError(errorMsg);
       }
     } catch (error) {
-      console.error('[SafeBrowser] Failed to load reader mode:', error);
-      // Could show error toast here
+      const errorMsg = error instanceof Error ? error.message : 'Reader Mode failed to load this site.';
+      console.error('[SafeBrowser] Reader mode exception:', error);
+      setReaderError(errorMsg);
+      
+      // Log failure
+      await logEvent('reader_mode_error', extractDomain(fallbackUrl), 'failed');
     } finally {
       setIsLoadingReader(false);
     }
@@ -464,6 +502,7 @@ const SafeBrowser = () => {
             onReaderMode={handleReaderMode}
             onHome={handleHome}
             isLoading={isLoadingReader}
+            error={readerError}
           />
         ) : currentUrl ? (
           // Iframe for allowed sites - with full browser permissions
