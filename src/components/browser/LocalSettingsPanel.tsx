@@ -1,5 +1,5 @@
-import { Shield, Eye, EyeOff, Bell, RefreshCw } from "lucide-react";
-import { useLocalSettings, BlurLevel, AISensitivity } from "@/hooks/useLocalSettings";
+import { Shield, Eye, EyeOff, Bell, RefreshCw, Gauge, Zap } from "lucide-react";
+import { useLocalSettings, BlurLevel, AISensitivity, BlurDialLevel } from "@/hooks/useLocalSettings";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
@@ -25,6 +25,14 @@ const SENSITIVITY_LEVELS: { value: AISensitivity; label: string; description: st
   { value: 'moderate', label: 'Moderate', description: 'Block explicit and suggestive' },
   { value: 'strict', label: 'Strict', description: 'Block all inappropriate content' },
 ];
+
+const DIAL_LABELS: Record<BlurDialLevel, { label: string; color: string }> = {
+  0: { label: 'Off', color: 'text-muted-foreground' },
+  1: { label: 'Relaxed', color: 'text-green-500' },
+  2: { label: 'Moderate', color: 'text-yellow-500' },
+  3: { label: 'Strict', color: 'text-orange-500' },
+  4: { label: 'Maximum', color: 'text-red-500' },
+};
 
 export const LocalSettingsPanel = () => {
   const { settings, updateSetting, resetSettings, isLoaded } = useLocalSettings();
@@ -67,11 +75,82 @@ export const LocalSettingsPanel = () => {
         />
       </div>
 
-      {/* AI Sensitivity */}
-      <div className="space-y-3">
-        <Label className="text-xs font-display tracking-wider text-muted-foreground">
-          AI SENSITIVITY
-        </Label>
+      {/* Blur Dial (0-4 Sensitivity) */}
+      <div className="space-y-4 py-3 border-b border-silver/20">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Gauge className="w-4 h-4 text-muted-foreground" />
+            <Label className="text-sm font-medium">AI Sensitivity</Label>
+          </div>
+          <span className={`text-sm font-display tracking-wider ${DIAL_LABELS[settings.blur_dial].color}`}>
+            {DIAL_LABELS[settings.blur_dial].label.toUpperCase()}
+          </span>
+        </div>
+        
+        <div className="px-1">
+          <Slider
+            value={[settings.blur_dial]}
+            onValueChange={([value]) => updateSetting('blur_dial', value as BlurDialLevel)}
+            min={0}
+            max={4}
+            step={1}
+            disabled={!settings.shield_active}
+            className="w-full"
+          />
+          <div className="flex justify-between mt-2 text-xs text-muted-foreground">
+            <span>Off</span>
+            <span>Relaxed</span>
+            <span>Mod</span>
+            <span>Strict</span>
+            <span>Max</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Blur Strength (px) */}
+      <div className="space-y-4 py-3 border-b border-silver/20">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            {settings.blur_strength_px > 0 ? (
+              <EyeOff className="w-4 h-4 text-muted-foreground" />
+            ) : (
+              <Eye className="w-4 h-4 text-muted-foreground" />
+            )}
+            <Label className="text-sm font-medium">Blur Strength</Label>
+          </div>
+          <span className="text-sm font-display tracking-wider text-aqua">
+            {settings.blur_strength_px}px
+          </span>
+        </div>
+        
+        <div className="px-1">
+          <Slider
+            value={[settings.blur_strength_px]}
+            onValueChange={([value]) => updateSetting('blur_strength_px', value)}
+            min={0}
+            max={50}
+            step={2}
+            disabled={!settings.shield_active || settings.blur_dial === 0}
+            className="w-full"
+          />
+        </div>
+        
+        {/* Preview */}
+        <div className="relative h-12 rounded-lg overflow-hidden bg-gradient-to-r from-aqua/30 via-primary/30 to-aqua/30">
+          <div 
+            className="absolute inset-0 bg-gradient-to-r from-aqua/60 via-primary/60 to-aqua/60"
+            style={{ filter: `blur(${settings.blur_strength_px}px)` }}
+          />
+          <div className="absolute inset-0 flex items-center justify-center">
+            <span className="text-xs font-medium text-foreground/80 bg-background/50 px-2 py-0.5 rounded">
+              Preview
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* Legacy AI Sensitivity Select (hidden but functional) */}
+      <div className="hidden">
         <Select
           value={settings.ai_sensitivity}
           onValueChange={(value: AISensitivity) => updateSetting('ai_sensitivity', value)}

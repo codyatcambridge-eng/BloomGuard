@@ -1,12 +1,15 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { Shield, AlertTriangle, Loader2, Globe } from 'lucide-react';
 import { useNativeWebView } from '@/hooks/useNativeWebView';
 import { useContentProtection } from '@/hooks/useContentProtection';
 import { useSettings } from '@/hooks/useSettings';
+import { useLocalSettings } from '@/hooks/useLocalSettings';
 import { useDeviceId } from '@/hooks/useDeviceId';
 import { useBrowserNavigation, BrowserView } from '@/hooks/useBrowserNavigation';
 import { useCapacitor } from '@/hooks/useCapacitor';
+import { useModerationBridge } from '@/hooks/useModerationBridge';
 import { supabase } from '@/integrations/supabase/client';
+import { generateModerationScript } from '@/lib/webview-injection-script';
 import { BrowserHeader } from './BrowserHeader';
 import { SafeBrowserHomepage } from './SafeBrowserHomepage';
 import { SearchResultsView } from './SearchResultsView';
@@ -18,6 +21,8 @@ import { PDFViewer } from './PDFViewer';
 import { YouTubePreviewView } from './YouTubePreviewView';
 import { SocialPreviewView, SocialPlatform } from './SocialPreviewView';
 import { ExternalLinkWarning } from './ExternalLinkWarning';
+import { AIStatusBar } from './AIStatusBar';
+import { toast } from 'sonner';
 
 interface SearchResult {
   title: string;
@@ -96,7 +101,31 @@ export const NativeWebViewBrowser = () => {
   // Hooks
   const { checkBlockedSite, isChecking } = useContentProtection();
   const { settings } = useSettings();
+  const { settings: localSettings, getModerationConfig, isModerationEnabled } = useLocalSettings();
   const deviceId = useDeviceId();
+  
+  // Moderation bridge for AI image scanning
+  const moderationBridge = useModerationBridge({
+    onImageBlurred: (src, result) => {
+      console.log('[Browser] Image blurred:', src.substring(0, 50), result.category);
+      if (localSettings.show_scan_notifications) {
+        toast.info(`Image blurred: ${result.category}`, {
+          duration: 2000,
+        });
+      }
+    },
+    onScanComplete: (stats) => {
+      console.log('[Browser] Scan complete:', stats);
+      if (localSettings.show_scan_notifications && stats.blurred > 0) {
+        toast.success(`Scanned ${stats.total} images, ${stats.blurred} blurred`, {
+          duration: 3000,
+        });
+      }
+    },
+  });
+  
+  // Track if moderation script was injected
+  const injectionDoneRef = useRef(false);
   
   const {
     currentView,
@@ -177,18 +206,34 @@ export const NativeWebViewBrowser = () => {
     goBack: webViewGoBack,
     goForward: webViewGoForward,
     reload: webViewReload,
+    executeScript,
   } = useNativeWebView({
     onLoadStart: (url) => {
       console.log('[Browser] Load start:', url);
       setIsLoading(true);
+      injectionDoneRef.current = false;
     },
-    onLoadEnd: (url) => {
+    onLoadEnd: async (url) => {
       console.log('[Browser] Load end:', url);
       setIsLoading(false);
+      
+      // Inject moderation script after page loads
+      if (isModerationEnabled() && !injectionDoneRef.current) {
+        const config = getModerationConfig();
+        const script = generateModerationScript(config);
+        try {
+          await executeScript(script);
+          injectionDoneRef.current = true;
+          console.log('[Browser] Moderation script injected');
+        } catch (error) {
+          console.error('[Browser] Failed to inject moderation script:', error);
+        }
+      }
     },
     onLoadError: (url, error) => {
       console.error('[Browser] Load error:', url, error);
       setIsLoading(false);
+      injectionDoneRef.current = false;
       // On error, offer fallback modes
       setFallbackUrl(url);
       navigate('fallback', '', url);
@@ -197,13 +242,50 @@ export const NativeWebViewBrowser = () => {
       console.log('[Browser] URL change:', url);
       setUrlInput(url);
       navigate('browse', url, url);
+      // Reset injection flag for new page
+      injectionDoneRef.current = false;
     },
     onNavigationRequest: handleNavigationRequest,
     onClose: () => {
       console.log('[Browser] WebView closed');
+      moderationBridge.clearCache();
+      injectionDoneRef.current = false;
       navigate('home', '', '');
     },
   });
+
+  // Listen for moderation messages from injected script
+  useEffect(() => {
+    if (!isNative) return;
+
+    const handleMessage = async (event: MessageEvent) => {
+      if (event.data?.type === 'gc-moderation-request' && event.data?.action === 'scan') {
+        const result = await moderationBridge.handleWebViewMessage(event.data);
+        
+        if (result && executeScript) {
+          // Send result back to WebView
+          const escapedSrc = result.src.replace(/'/g, "\\'").replace(/"/g, '\\"');
+          const responseScript = `
+            window.postMessage({
+              type: 'gc-moderation-result',
+              src: '${escapedSrc}',
+              shouldBlur: ${result.shouldBlur},
+              category: '${result.category}',
+              confidence: ${result.confidence}
+            }, '*');
+          `;
+          try {
+            await executeScript(responseScript);
+          } catch (error) {
+            console.debug('[Browser] Failed to send moderation result:', error);
+          }
+        }
+      }
+    };
+
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, [isNative, moderationBridge, executeScript]);
 
   // Search handler
   const handleSearch = useCallback(async (query: string) => {
@@ -518,6 +600,8 @@ export const NativeWebViewBrowser = () => {
     }
     if (currentView === 'browse' && isNative && webViewState.isOpen) {
       await webViewReload();
+      // Reset injection flag to re-inject moderation script
+      injectionDoneRef.current = false;
       return;
     }
   }, [readerContent, currentView, searchQuery, isNative, webViewState.isOpen, handleReaderMode, handleSearch, webViewReload]);
@@ -526,6 +610,8 @@ export const NativeWebViewBrowser = () => {
     if (isNative && webViewState.isOpen) {
       await closeWebView();
     }
+    moderationBridge.clearCache();
+    injectionDoneRef.current = false;
     setReaderContent(null);
     setPdfContent(null);
     setYoutubeContent(null);
@@ -536,13 +622,37 @@ export const NativeWebViewBrowser = () => {
     setUrlInput('');
     setFallbackUrl('');
     goHome();
-  }, [isNative, webViewState.isOpen, closeWebView, goHome]);
+  }, [isNative, webViewState.isOpen, closeWebView, goHome, moderationBridge]);
 
-  const handleScanPage = useCallback(() => {
+  // Manual scan trigger for current page
+  const handleScanPage = useCallback(async () => {
+    if (!isNative || !isModerationEnabled()) {
+      setIsScanning(true);
+      setTimeout(() => setIsScanning(false), 500);
+      return;
+    }
+    
     setIsScanning(true);
-    // Placeholder for WebView image scanning
+    
+    // Inject a script to re-scan all images
+    const rescanScript = `
+      if (window.__GC_MODERATION__) {
+        window.__GC_MODERATION__.scanAll();
+        'Scan triggered';
+      } else {
+        'Moderation not active';
+      }
+    `;
+    
+    try {
+      await executeScript(rescanScript);
+      console.log('[Browser] Manual scan triggered');
+    } catch (error) {
+      console.error('[Browser] Manual scan failed:', error);
+    }
+    
     setTimeout(() => setIsScanning(false), 1500);
-  }, []);
+  }, [isNative, isModerationEnabled, executeScript]);
 
   const handleFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -732,6 +842,20 @@ export const NativeWebViewBrowser = () => {
         modeLabel={getModeLabel()}
         modeColor={getModeColor()}
       />
+      
+      {/* AI Moderation Status Bar - shown during browse mode */}
+      {currentView === 'browse' && isModerationEnabled() && (
+        <AIStatusBar
+          modelState={moderationBridge.modelState}
+          isScanning={moderationBridge.isScanning || isScanning}
+          scannedCount={moderationBridge.scannedCount}
+          totalCount={moderationBridge.scannedCount + moderationBridge.pendingCount}
+          blurredCount={moderationBridge.blurredCount}
+          safeCount={moderationBridge.scannedCount - moderationBridge.blurredCount}
+          onScan={handleScanPage}
+          compact
+        />
+      )}
 
       <main className="flex-1 relative pb-16">
         {currentView === 'blocked' ? (

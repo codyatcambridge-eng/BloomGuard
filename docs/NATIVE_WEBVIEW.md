@@ -94,11 +94,40 @@ npx cap run android # Requires Android Studio
 ## Hot Reload Development
 The `capacitor.config.ts` is configured with a server URL pointing to the Lovable preview, enabling hot reload during development.
 
-## Image Moderation
-The `useWebViewModeration` hook provides:
-- Batch image scanning with on-device NSFWJS
-- Blur application with reveal toggle
-- JavaScript injection for WebView-based blur
-- Classification tracking (safe, blurred, unscanned)
+## Image Moderation in WebView
 
-All images in Reader Mode, Preview Mode, and Social Previews are automatically scanned.
+### Architecture
+The moderation system uses JavaScript injection to scan images in real-time:
+
+```
+WebView (Injected Script)          React App Layer
+┌──────────────────────┐           ┌──────────────────────┐
+│ MutationObserver     │──scan────▶│ useModerationBridge  │
+│ watches for images   │◀─result───│ (queues requests)    │
+│ applies CSS blur     │           └──────────┬───────────┘
+│ reveal toggle        │                      │
+└──────────────────────┘                      ▼
+                                   ┌──────────────────────┐
+                                   │ useOnDeviceModeration│
+                                   │ NSFWJS (~50ms/image) │
+                                   └──────────────────────┘
+```
+
+### Blur Dial (0-4 Sensitivity)
+| Level | Name     | Description               |
+|-------|----------|---------------------------|
+| 0     | Off      | No scanning               |
+| 1     | Relaxed  | Only explicit content     |
+| 2     | Moderate | Explicit + suggestive     |
+| 3     | Strict   | All questionable content  |
+| 4     | Maximum  | Aggressive filtering      |
+
+### Blur Strength
+Adjustable 0-50px blur via CSS `filter: blur(Xpx)`.
+
+### Key Moderation Files
+- `src/hooks/useModerationBridge.ts` - Bridge between WebView and AI
+- `src/lib/webview-injection-script.ts` - Injected JavaScript
+- `src/plugins/ModerationBridge.ts` - Plugin interface
+- `src/components/browser/LocalSettingsPanel.tsx` - Settings UI
+- `src/components/browser/AIStatusBar.tsx` - Status during browsing
