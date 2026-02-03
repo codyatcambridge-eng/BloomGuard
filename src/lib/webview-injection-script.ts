@@ -314,6 +314,24 @@ export function generateModerationScript(config: InjectionConfig): string {
         state.revealed.add(src);
         removeBlur(element, src);
         btn.textContent = '🔒 Hide';
+        
+        // POST a label request message so the host can open the labeling modal
+        var itemId = element.dataset.mwItemId || 'unknown_' + Date.now();
+        var labelRequest = {
+          type: 'gc-label-request',
+          requestId: 'r_' + Date.now().toString(36),
+          itemId: itemId,
+          src: src,
+          pageUrl: window.location.href,
+          platform: PLATFORM,
+          modelPrediction: { category: category, confidence: null }
+        };
+        console.log('[MW] posting gc-label-request', itemId);
+        window.postMessage(labelRequest, '*');
+        // Also post to parent if in iframe
+        if (window.parent && window.parent !== window) {
+          try { window.parent.postMessage(labelRequest, '*'); } catch(err) {}
+        }
       }
     });
     

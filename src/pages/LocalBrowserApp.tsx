@@ -4,7 +4,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import LocalSafeBrowser from "@/pages/LocalSafeBrowser";
 import { ImageScanner } from "@/components/browser/ImageScanner";
 import { BlocklistManager } from "@/components/browser/BlocklistManager";
-import { LocalSettingsPanel } from "@/components/browser/LocalSettingsPanel";
+import LocalSettingsPanel from "@/components/browser/LocalSettingsPanel";
 import { LocalLogsPanel } from "@/components/browser/LocalLogsPanel";
 
 const LocalBrowserApp = () => {
