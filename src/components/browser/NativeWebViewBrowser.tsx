@@ -593,37 +593,49 @@ export const NativeWebViewBrowser = () => {
     };
   }, [isNative, webViewState.isOpen, isModerationEnabled, executeScript, moderationBridge, localSettings.blur_strength_px]);
 
-  // Search handler
+  // Search handler - redirects to Google search immediately
   const handleSearch = useCallback(async (query: string) => {
+    if (!query.trim()) return;
+    
     console.log('[Browser] Starting search:', query);
-    setSearchQuery(query);
-    setIsSearching(true);
-    setSearchError(null);
-    setSearchResults([]);
-    navigate('search', '', query);
     
-    await logEvent('search', query, 'search_query');
+    // Build Google search URL
+    const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query.trim())}`;
     
-    try {
-      const { data, error } = await supabase.functions.invoke('web-search', {
-        body: { query }
-      });
-      
-      if (error) throw new Error(error.message || 'Search failed');
-      
-      if (data?.success && data?.results) {
-        setSearchResults(data.results);
-      } else {
-        setSearchError(data?.error || 'No results found');
+    // IMMEDIATELY set view to browse and navigate - fail-open approach
+    navigate('browse', searchUrl, searchUrl);
+    setUrlInput(searchUrl);
+    setIsLoading(true);
+    
+    await logEvent('search', query, 'google_redirect');
+    
+    // Open in native WebView or fallback
+    if (isNative) {
+      try {
+        const success = await openWebView(searchUrl, true);
+        if (success) {
+          await logEvent('allowed', 'google.com', 'native-webview');
+        } else {
+          setFallbackUrl(searchUrl);
+          navigate('fallback', '', searchUrl);
+          await logEvent('fallback', 'google.com', 'webview-failed');
+        }
+      } catch (error) {
+        console.error('[Browser] WebView open error:', error);
+        setFallbackUrl(searchUrl);
+        setFailureError(error instanceof Error ? error.message : 'Failed to load search');
+        navigate('failure', '', searchUrl);
+        await logEvent('error', 'google.com', 'webview-error');
       }
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : 'Search failed';
-      console.error('[Browser] Search exception:', error);
-      setSearchError(errorMsg);
-    } finally {
-      setIsSearching(false);
+    } else {
+      // On web, use fallback modes
+      setFallbackUrl(searchUrl);
+      navigate('fallback', '', searchUrl);
+      await logEvent('fallback', 'google.com', 'web-platform');
     }
-  }, [navigate, logEvent]);
+    
+    setIsLoading(false);
+  }, [navigate, logEvent, isNative, openWebView]);
 
   /**
    * Determine if input is a URL vs search query
