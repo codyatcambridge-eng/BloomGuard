@@ -625,6 +625,49 @@ export const NativeWebViewBrowser = () => {
     }
   }, [navigate, logEvent]);
 
+  /**
+   * Determine if input is a URL vs search query
+   * URLs: contain domain TLDs (.com, .org, etc), protocol prefixes, or IP addresses
+   * Searches: everything else
+   */
+  const isUrlInput = useCallback((input: string): boolean => {
+    const trimmed = input.trim().toLowerCase();
+    
+    // Protocol prefix means it's definitely a URL
+    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+      return true;
+    }
+    
+    // Has spaces without protocol = search query
+    if (trimmed.includes(' ')) {
+      return false;
+    }
+    
+    // Common TLDs pattern - if it ends with these, it's a URL
+    const tldPattern = /\.(com|org|net|edu|gov|io|co|app|dev|me|tv|info|biz|xyz|ai|uk|de|fr|jp|cn|ru|br|in|au|ca|es|it|nl|pl|kr|se|no|fi|dk|ch|at|be|cz|gr|hu|ie|pt|ro|sk|za|nz|sg|hk|tw|my|th|ph|vn|id)(\/.*)?(#.*)?$/i;
+    if (tldPattern.test(trimmed)) {
+      return true;
+    }
+    
+    // Contains a dot followed by path = likely URL
+    if (/\.\w+\//.test(trimmed)) {
+      return true;
+    }
+    
+    // IP address pattern
+    if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?/.test(trimmed)) {
+      return true;
+    }
+    
+    // localhost
+    if (trimmed.startsWith('localhost')) {
+      return true;
+    }
+    
+    // Everything else is a search
+    return false;
+  }, []);
+
   // Main navigation handler
   const handleNavigate = useCallback(async (targetUrl?: string, e?: React.FormEvent) => {
     e?.preventDefault();
@@ -632,11 +675,8 @@ export const NativeWebViewBrowser = () => {
     const urlToNavigate = targetUrl || urlInput;
     if (!urlToNavigate.trim()) return;
 
-    // Check if it's a search query
-    const isSearchQuery = !urlToNavigate.includes('.') || 
-      (urlToNavigate.includes(' ') && !urlToNavigate.startsWith('http'));
-    
-    if (isSearchQuery) {
+    // Check if it's a search query or URL
+    if (!isUrlInput(urlToNavigate)) {
       handleSearch(urlToNavigate);
       return;
     }
