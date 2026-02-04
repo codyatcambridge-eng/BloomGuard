@@ -88,8 +88,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     failClosed: ${failClosed},
     debug: ${config.debug || false},
     nonce: '${nonce}',
-    minImageSize: 50, // Minimum image dimension (fail-open below this)
-    semanticDelayMs: 150, // Delay before applying blur
+    minImageSize: 60, // Minimum image dimension (fail-open below this - 60x60)
+    semanticDelayMs: 200, // Delay before applying blur (200ms)
+    neutralFastPass: 0.85, // If Neutral > this, skip blur entirely
+    anatomicalThreshold: 0.60, // Sexy/Porn must be > this to maintain blur
     scanDelay: 50,
     batchSize: 5,
     batchDelay: 100,
@@ -210,7 +212,7 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   /**
    * Check if image is too small (fail-open for avatars/icons)
-   * Images smaller than 50x50 are skipped
+   * Images smaller than 60x60 are skipped
    */
   function isTinyImage(element) {
     const { width, height } = getElementDimensions(element);
@@ -606,6 +608,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   /**
    * Process results from host
    * Validates nonce before processing to prevent spoofing
+   * Implements HIGH-CONFIDENCE BYPASS and ANATOMICAL LOGIC
    */
   function handleModerationResult(message) {
     const { requestId, results, nonce } = message;
@@ -636,7 +639,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     results.forEach(result => {
       const { itemId, src, shouldBlur, category, confidence, reason } = result;
       
-      console.log('[MW] scan result itemId=' + itemId, 'src=' + (src || '').substring(0, 50), 'blur=' + shouldBlur, 'cat=' + category, 'reason=' + (reason || ''));
+      console.log('[MW] scan result itemId=' + itemId, 'src=' + (src || '').substring(0, 50), 'blur=' + shouldBlur, 'cat=' + category, 'conf=' + (confidence || 0).toFixed(2), 'reason=' + (reason || ''));
       
       // Find the element for this item
       const element = state.elements.get(itemId);
@@ -653,9 +656,36 @@ export function generateModerationScript(config: InjectionConfig): string {
       // Check if result came fast enough to skip blur (semantic delay saved)
       const wasInSoftBlur = element && element.dataset.mwModerated === 'softblur';
       
+      // ======== HIGH-CONFIDENCE BYPASS ========
+      // If Neutral > 0.85 (or reason is 'neutral_fastpass'), immediately clear and skip
+      if (reason === 'neutral_fastpass' || (category === 'neutral' && confidence > CONFIG.neutralFastPass)) {
+        console.log('[MW] HIGH-CONFIDENCE BYPASS: Neutral=' + (confidence || 0).toFixed(2) + ' > ' + CONFIG.neutralFastPass);
+        if (element && element.isConnected) {
+          removeSoftBlur(element, src);
+          element.dataset.mwModerated = 'safe-highconf';
+          // Mark as never re-scan
+          element.dataset.mwHighConfSafe = 'true';
+          if (wasInSoftBlur) {
+            state.stats.semanticDelaySaved++;
+          }
+        }
+        findAndRemoveSoftBlur(src);
+        return;
+      }
+      
+      // ======== ANATOMICAL LOGIC ========
+      // Only maintain blur if Sexy or Porn > 0.60
+      // If category is sexy/porn but confidence is below threshold, unblur
+      let shouldApplyBlur = shouldBlur;
+      const isSexyOrPorn = category === 'sexy' || category === 'porn';
+      
+      if (shouldApplyBlur && isSexyOrPorn && confidence < CONFIG.anatomicalThreshold) {
+        console.log('[MW] ANATOMICAL LOGIC: ' + category + '=' + (confidence || 0).toFixed(2) + ' < ' + CONFIG.anatomicalThreshold + ' - unblurring');
+        shouldApplyBlur = false;
+      }
+      
       // FAIL-OPEN: Handle errors gracefully
       const isError = category === 'error' || category === 'timeout';
-      let shouldApplyBlur = shouldBlur;
       
       if (isError) {
         // FAIL-OPEN: Don't blur on error (unless failClosed explicitly set)
@@ -788,11 +818,11 @@ export function generateModerationScript(config: InjectionConfig): string {
       return false;
     }
     
-    // FAIL-OPEN: Skip tiny images (< 50x50)
+    // FAIL-OPEN: Skip tiny images (< 60x60)
     if (isTinyImage(element)) {
       state.stats.skippedTiny++;
       if (CONFIG.debug) {
-        console.log('[MW] skipped tiny image (fail-open):', url.substring(0, 50));
+        console.log('[MW] skipped tiny image (fail-open, <60x60):', url.substring(0, 50));
       }
       return false;
     }
