@@ -11,6 +11,7 @@ import Accountability from "./pages/Accountability";
 import Settings from "./pages/Settings";
 import Logs from "./pages/Logs";
 import NotFound from "./pages/NotFound";
+import AdminLabels from "./pages/AdminLabels";
 
 const queryClient = new QueryClient();
 
@@ -28,6 +29,7 @@ const App = () => (
             <Route path="/accountability" element={<Accountability />} />
             <Route path="/logs" element={<Logs />} />
             <Route path="/settings" element={<Settings />} />
+            <Route path="/admin/labels" element={<AdminLabels />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
           <BottomNav />
