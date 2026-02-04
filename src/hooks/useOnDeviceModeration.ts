@@ -7,6 +7,14 @@ export interface ModerationPrediction {
   probability: number;
 }
 
+export type ModerationReason = 
+  | 'neutral_fastpass' 
+  | 'threshold_hit' 
+  | 'threshold_safe'
+  | 'fail_open_timeout' 
+  | 'fail_open_error'
+  | 'model_not_ready';
+
 export interface ModerationResult {
   isExplicit: boolean;
   shouldBlur: boolean;
@@ -14,6 +22,7 @@ export interface ModerationResult {
   dominantClass: string;
   confidence: number;
   inferenceTime: number;
+  reason: ModerationReason;
 }
 
 export interface AIThresholds {
@@ -21,6 +30,16 @@ export interface AIThresholds {
   sexy: number;
   hentai: number;
 }
+
+// NEW: Raised thresholds to reduce false positives
+export const DEFAULT_THRESHOLDS: AIThresholds = { 
+  porn: 0.60, 
+  sexy: 0.75, 
+  hentai: 0.60 
+};
+
+// NEW: Fast timeout for fail-open behavior
+const FAST_TIMEOUT_MS = 800;
 
 type ModelLoadingState = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -103,15 +122,15 @@ export const useOnDeviceModeration = () => {
     return () => { mounted = false; };
   }, []);
 
-  // Classify a single image with timeout and error handling
+  // Classify a single image with FAIL-OPEN behavior
   const classifyImage = useCallback(async (
     imageSource: HTMLImageElement | HTMLCanvasElement | string,
-    thresholds: AIThresholds = { porn: 0.3, sexy: 0.4, hentai: 0.3 }
+    thresholds: AIThresholds = DEFAULT_THRESHOLDS
   ): Promise<ModerationResult | null> => {
-    // Return null gracefully if model isn't ready
+    // FAIL-OPEN: Return null (no blur) if model isn't ready
     if (modelState !== 'ready' || !modelRef.current) {
       if (modelState === 'error') {
-        console.debug('[OnDeviceAI] Model unavailable, skipping classification');
+        console.debug('[OnDeviceAI] Model unavailable, fail-open: no blur');
       } else {
         console.warn('[OnDeviceAI] Model not ready, state:', modelState);
       }
@@ -120,7 +139,6 @@ export const useOnDeviceModeration = () => {
 
     const startTime = performance.now();
     const LOAD_TIMEOUT = 8000; // 8 second timeout for image loading
-    const CLASSIFY_TIMEOUT = 5000; // 5 second timeout for classification
 
     try {
       let image: HTMLImageElement | HTMLCanvasElement;
@@ -166,16 +184,16 @@ export const useOnDeviceModeration = () => {
         image = imageSource;
       }
 
-      // Run classification with timeout
+      // NEW: Run classification with FAST timeout (800ms) - FAIL-OPEN
       const classifyPromise = modelRef.current.classify(image);
       const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error('Classification timeout')), CLASSIFY_TIMEOUT);
+        setTimeout(() => reject(new Error('Classification timeout')), FAST_TIMEOUT_MS);
       });
       
       const predictions = await Promise.race([classifyPromise, timeoutPromise]);
       const inferenceTime = performance.now() - startTime;
 
-      // Find dominant class and check thresholds
+      // Build prediction map (normalize to lowercase)
       const predMap: Record<string, number> = {};
       predictions.forEach(p => {
         predMap[p.className.toLowerCase()] = p.probability;
@@ -184,7 +202,34 @@ export const useOnDeviceModeration = () => {
       const pornScore = predMap['porn'] || 0;
       const sexyScore = predMap['sexy'] || 0;
       const hentaiScore = predMap['hentai'] || 0;
+      const neutralScore = predMap['neutral'] || 0;
 
+      // NEW: Neutral fast-pass - if Neutral >= 0.90, return safe immediately
+      if (neutralScore >= 0.90) {
+        const result: ModerationResult = {
+          isExplicit: false,
+          shouldBlur: false,
+          predictions: predictions.map(p => ({
+            className: p.className,
+            probability: p.probability,
+          })),
+          dominantClass: 'Neutral',
+          confidence: neutralScore,
+          inferenceTime,
+          reason: 'neutral_fastpass',
+        };
+
+        // Cache result
+        if (cacheKey) {
+          imageCache.current.set(cacheKey, result);
+          limitCache();
+        }
+
+        console.debug('[OnDeviceAI] neutral_fastpass:', neutralScore.toFixed(2));
+        return result;
+      }
+
+      // Check against raised thresholds
       const isExplicit = pornScore > thresholds.porn || hentaiScore > thresholds.hentai;
       const shouldBlur = isExplicit || sexyScore > thresholds.sexy;
 
@@ -192,6 +237,8 @@ export const useOnDeviceModeration = () => {
       const sorted = [...predictions].sort((a, b) => b.probability - a.probability);
       const dominantClass = sorted[0]?.className || 'Unknown';
       const confidence = sorted[0]?.probability || 0;
+
+      const reason: ModerationReason = shouldBlur ? 'threshold_hit' : 'threshold_safe';
 
       const result: ModerationResult = {
         isExplicit,
@@ -203,35 +250,52 @@ export const useOnDeviceModeration = () => {
         dominantClass,
         confidence,
         inferenceTime,
+        reason,
       };
 
       // Cache result
       if (cacheKey) {
         imageCache.current.set(cacheKey, result);
-        // Limit cache size
-        if (imageCache.current.size > 500) {
-          const firstKey = imageCache.current.keys().next().value;
-          if (firstKey) imageCache.current.delete(firstKey);
-        }
+        limitCache();
       }
 
+      console.debug(`[OnDeviceAI] ${reason}: blur=${shouldBlur}, dom=${dominantClass}, conf=${confidence.toFixed(2)}`);
       return result;
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Unknown error';
-      // Only log unexpected errors, not common ones like load failures
-      if (!errorMsg.includes('load') && !errorMsg.includes('timeout') && !errorMsg.includes('small')) {
-        console.error('[OnDeviceAI] Classification error:', errorMsg);
-      } else {
-        console.debug('[OnDeviceAI] Skipped image:', errorMsg);
-      }
-      return null;
+      const inferenceTime = performance.now() - startTime;
+      
+      // NEW: FAIL-OPEN - Return shouldBlur=false on any error or timeout
+      const isTimeout = errorMsg.includes('timeout');
+      const reason: ModerationReason = isTimeout ? 'fail_open_timeout' : 'fail_open_error';
+      
+      console.debug(`[OnDeviceAI] ${reason}:`, errorMsg);
+      
+      // Return a safe result instead of null for fail-open
+      return {
+        isExplicit: false,
+        shouldBlur: false,
+        predictions: [],
+        dominantClass: 'Unknown',
+        confidence: 0,
+        inferenceTime,
+        reason,
+      };
     }
   }, [modelState]);
+
+  // Helper to limit cache size
+  const limitCache = () => {
+    if (imageCache.current.size > 500) {
+      const firstKey = imageCache.current.keys().next().value;
+      if (firstKey) imageCache.current.delete(firstKey);
+    }
+  };
 
   // Classify multiple images in batch
   const classifyBatch = useCallback(async (
     images: string[],
-    thresholds: AIThresholds = { porn: 0.3, sexy: 0.4, hentai: 0.3 }
+    thresholds: AIThresholds = DEFAULT_THRESHOLDS
   ): Promise<Map<string, ModerationResult>> => {
     const results = new Map<string, ModerationResult>();
     
@@ -255,7 +319,7 @@ export const useOnDeviceModeration = () => {
   // Classify from file input
   const classifyFile = useCallback(async (
     file: File,
-    thresholds: AIThresholds = { porn: 0.3, sexy: 0.4, hentai: 0.3 }
+    thresholds: AIThresholds = DEFAULT_THRESHOLDS
   ): Promise<ModerationResult | null> => {
     return new Promise((resolve) => {
       const reader = new FileReader();
@@ -287,5 +351,6 @@ export const useOnDeviceModeration = () => {
     classifyBatch,
     classifyFile,
     clearCache,
+    DEFAULT_THRESHOLDS,
   };
 };
