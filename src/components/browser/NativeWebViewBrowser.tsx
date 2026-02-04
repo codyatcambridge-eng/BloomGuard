@@ -668,7 +668,7 @@ export const NativeWebViewBrowser = () => {
     return false;
   }, []);
 
-  // Main navigation handler
+  // Main navigation handler - immediately navigate to browse view (fail-open)
   const handleNavigate = useCallback(async (targetUrl?: string, e?: React.FormEvent) => {
     e?.preventDefault();
     
@@ -681,30 +681,37 @@ export const NativeWebViewBrowser = () => {
       return;
     }
 
+    // Normalize URL immediately (add https:// if missing)
+    const normalizedUrl = normalizeUrl(urlToNavigate);
+    const domain = extractDomain(urlToNavigate);
+    setUrlInput(normalizedUrl);
+
     // Reset states
-    setIsLoading(true);
     setReaderContent(null);
     setReaderError(null);
     setPdfContent(null);
     setYoutubeContent(null);
     setSocialContent(null);
     setFailureError(null);
-    
-    const normalizedUrl = normalizeUrl(urlToNavigate);
-    const domain = extractDomain(urlToNavigate);
-    setUrlInput(normalizedUrl);
 
-    // Check blocklist
+    // IMMEDIATELY set view to browse - fail-open approach
+    // Moderation runs in background via injection script
+    navigate('browse', normalizedUrl, normalizedUrl);
+    setIsLoading(true);
+
+    // Check blocklist asynchronously (non-blocking)
     if (settings.block_adult_sites) {
-      const result = await checkBlockedSite(normalizedUrl, deviceId);
-      if (result?.isBlocked) {
-        setBlockedReason(result.reason);
-        setBlockedCategory(result.category || 'blocked');
-        navigate('blocked', '', normalizedUrl);
-        await logEvent('blocked', domain, 'blocked');
-        setIsLoading(false);
-        return;
-      }
+      checkBlockedSite(normalizedUrl, deviceId).then(result => {
+        if (result?.isBlocked) {
+          setBlockedReason(result.reason);
+          setBlockedCategory(result.category || 'blocked');
+          navigate('blocked', '', normalizedUrl);
+          logEvent('blocked', domain, 'blocked');
+          setIsLoading(false);
+        }
+      }).catch(err => {
+        console.warn('[Browser] Blocklist check failed (fail-open):', err);
+      });
     }
 
     // Handle PDFs
@@ -718,15 +725,23 @@ export const NativeWebViewBrowser = () => {
 
     // Open in native WebView (for all sites including social platforms)
     if (isNative) {
-      const success = await openWebView(normalizedUrl, true);
-      if (success) {
-        navigate('browse', normalizedUrl, normalizedUrl);
-        await logEvent('allowed', domain, 'native-webview');
-      } else {
-        // WebView failed, offer fallback modes
+      try {
+        const success = await openWebView(normalizedUrl, true);
+        if (success) {
+          await logEvent('allowed', domain, 'native-webview');
+        } else {
+          // WebView failed to open - only then show fallback
+          setFallbackUrl(normalizedUrl);
+          navigate('fallback', '', normalizedUrl);
+          await logEvent('fallback', domain, 'webview-failed');
+        }
+      } catch (error) {
+        // Network/WebView error - show failure only for actual errors
+        console.error('[Browser] WebView open error:', error);
         setFallbackUrl(normalizedUrl);
-        navigate('fallback', '', normalizedUrl);
-        await logEvent('fallback', domain, 'webview-failed');
+        setFailureError(error instanceof Error ? error.message : 'Failed to load page');
+        navigate('failure', '', normalizedUrl);
+        await logEvent('error', domain, 'webview-error');
       }
     } else {
       // On web, use fallback modes for all navigation
@@ -736,7 +751,7 @@ export const NativeWebViewBrowser = () => {
     }
     
     setIsLoading(false);
-  }, [urlInput, settings, checkBlockedSite, deviceId, isNative, openWebView, handleSearch, navigate, logEvent]);
+  }, [urlInput, settings, checkBlockedSite, deviceId, isNative, openWebView, handleSearch, navigate, logEvent, isUrlInput]);
 
   // Reader Mode handler
   const handleReaderMode = useCallback(async () => {
@@ -1280,11 +1295,12 @@ export const NativeWebViewBrowser = () => {
           <SafeBrowserHomepage onSearch={handleSearch} isSearching={isSearching} />
         )}
 
-        {(isLoading || isChecking) && currentView !== 'browse' && (
+        {/* Only show loading overlay for home view - browse view loads in background */}
+        {isLoading && currentView === 'home' && (
           <div className="absolute inset-0 bg-background/80 flex items-center justify-center">
             <div className="text-center">
               <Shield className="w-12 h-12 mx-auto mb-3 text-aqua animate-pulse" />
-              <p className="text-sm text-muted-foreground font-display tracking-wider">CHECKING SITE...</p>
+              <p className="text-sm text-muted-foreground font-display tracking-wider">LOADING...</p>
             </div>
           </div>
         )}
