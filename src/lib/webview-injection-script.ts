@@ -67,7 +67,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   window.__MW_ACTIVE__ = true;
   
   console.log('[MW] ========================================');
-  console.log('[MW] injected - Moderation Script v2.0');
+  console.log('[MW] injected - Moderation Script v2.1');
   console.log('[MW] Sensitivity:', ${config.sensitivity});
   console.log('[MW] Blur Strength:', ${config.blurStrength}, 'px');
   console.log('[MW] Enabled:', ${config.enabled});
@@ -80,12 +80,14 @@ export function generateModerationScript(config: InjectionConfig): string {
   const CONFIG = {
     sensitivity: ${config.sensitivity},
     blurStrength: ${config.blurStrength},
+    softBlurStrength: 8, // NEW: Soft blur for semantic delay
     enabled: ${config.enabled},
     forcedBlur: ${config.forcedBlur || false},
     failClosed: ${failClosed},
     debug: ${config.debug || false},
     nonce: '${nonce}',
     minImageSize: 40,
+    minImageSizeYouTube: 60, // NEW: Skip tiny images on YouTube (avatars/icons)
     scanDelay: 50,
     batchSize: 5,
     batchDelay: 100,
@@ -126,6 +128,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       videoPosters: 0,
       shadowDom: 0,
       skipped: 0,
+      skippedTiny: 0, // NEW: Track tiny image skips
       blurred: 0,
       timeouts: 0,
       errors: 0,
@@ -157,7 +160,8 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   const PLATFORM = detectPlatform();
-  console.log('[MW] Platform detected:', PLATFORM);
+  const IS_YOUTUBE = PLATFORM === 'youtube' || PLATFORM === 'youtube-shorts';
+  console.log('[MW] Platform detected:', PLATFORM, 'isYouTube:', IS_YOUTUBE);
 
   // ==================== URL UTILITIES ====================
 
@@ -191,7 +195,10 @@ export function generateModerationScript(config: InjectionConfig): string {
       const width = rect.width || element.offsetWidth || 0;
       const height = rect.height || element.offsetHeight || 0;
       
-      if (width < CONFIG.minImageSize || height < CONFIG.minImageSize) {
+      // NEW: Use platform-specific minimum size
+      const minSize = IS_YOUTUBE ? CONFIG.minImageSizeYouTube : CONFIG.minImageSize;
+      
+      if (width < minSize || height < minSize) {
         return false;
       }
       
@@ -207,7 +214,58 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
   }
 
+  // NEW: Check if image is too small (for YouTube skip)
+  function isTinyImage(element) {
+    if (!IS_YOUTUBE) return false;
+    
+    try {
+      const rect = element.getBoundingClientRect();
+      const width = rect.width || element.naturalWidth || element.offsetWidth || 0;
+      const height = rect.height || element.naturalHeight || element.offsetHeight || 0;
+      
+      // Skip if either dimension is less than 60px (avatars, icons)
+      if (width < 60 || height < 60) {
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+
   // ==================== BLUR MANAGEMENT ====================
+
+  // NEW: Apply soft blur (semantic delay) - light blur while waiting for result
+  function applySoftBlur(element, src, itemId) {
+    if (state.revealed.has(src)) return;
+    if (element.dataset.mwModerated === 'blurred') return; // Already hard blurred
+    
+    try {
+      element.style.filter = 'blur(' + CONFIG.softBlurStrength + 'px)';
+      element.style.transition = 'filter 0.2s ease';
+      element.dataset.mwModerated = 'softblur';
+      element.dataset.mwSrc = src;
+      element.dataset.mwItemId = itemId || '';
+      element.classList.add('mw-softblur');
+      
+      if (CONFIG.debug) {
+        console.log('[MW] soft blur applied:', src.substring(0, 50));
+      }
+    } catch (e) {}
+  }
+
+  // NEW: Remove soft blur (after safe result)
+  function removeSoftBlur(element, src) {
+    try {
+      if (element.dataset.mwModerated === 'softblur') {
+        element.style.filter = 'none';
+        element.dataset.mwModerated = 'safe';
+        element.classList.remove('mw-softblur');
+        
+        if (CONFIG.debug) {
+          console.log('[MW] soft blur removed (safe):', src.substring(0, 50));
+        }
+      }
+    } catch (e) {}
+  }
 
   function applyBlur(element, src, category, blurStrengthPx, itemId) {
     if (state.revealed.has(src)) return;
@@ -221,6 +279,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       element.dataset.mwCategory = category || 'flagged';
       element.dataset.mwSrc = src;
       element.dataset.mwItemId = itemId || '';
+      element.classList.remove('mw-softblur');
       
       state.blurred.add(src);
       state.stats.blurred++;
@@ -237,6 +296,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     try {
       element.style.filter = 'none';
       element.dataset.mwModerated = 'revealed';
+      element.classList.remove('mw-softblur');
       
       const overlay = element.parentElement?.querySelector('.mw-reveal-overlay');
       if (overlay) {
@@ -420,8 +480,12 @@ export function generateModerationScript(config: InjectionConfig): string {
         state.scanned.add(item.src);
       });
     } else {
-      // Mark items as failed but don't blur
+      // Mark items as failed but don't blur - also remove soft blur
       pendingRequest.items.forEach(item => {
+        const element = state.elements.get(item.itemId);
+        if (element && element.isConnected) {
+          removeSoftBlur(element, item.src);
+        }
         state.pending.delete(item.itemId);
         // Don't add to scanned so they can be retried later
       });
@@ -482,12 +546,23 @@ export function generateModerationScript(config: InjectionConfig): string {
       // Apply blur based on result or forced blur mode
       const finalBlur = CONFIG.forcedBlur || (shouldApplyBlur && CONFIG.enabled && CONFIG.sensitivity > 0);
       
-      if (finalBlur && element && element.isConnected) {
-        applyBlur(element, src, category || 'flagged', CONFIG.blurStrength, itemId);
+      if (element && element.isConnected) {
+        if (finalBlur) {
+          // Apply strong blur
+          applyBlur(element, src, category || 'flagged', CONFIG.blurStrength, itemId);
+        } else {
+          // NEW: Remove soft blur if result is safe
+          removeSoftBlur(element, src);
+        }
       }
       
       // Also find any other elements with the same src
-      findAndBlur(src, category, CONFIG.blurStrength, finalBlur);
+      if (finalBlur) {
+        findAndBlur(src, category, CONFIG.blurStrength, true);
+      } else {
+        // Remove soft blur from all matching elements
+        findAndRemoveSoftBlur(src);
+      }
     });
   }
 
@@ -523,6 +598,21 @@ export function generateModerationScript(config: InjectionConfig): string {
           if (el.dataset.mwModerated !== 'blurred') {
             applyBlur(el, src, category, blurStrengthPx);
           }
+        }
+      });
+    } catch (e) {}
+  }
+
+  // NEW: Find and remove soft blur from all elements matching a src
+  function findAndRemoveSoftBlur(src) {
+    try {
+      document.querySelectorAll('[data-mw-src="' + src + '"]').forEach(el => {
+        removeSoftBlur(el, src);
+      });
+      
+      document.querySelectorAll('img').forEach(img => {
+        if (img.src === src || img.dataset.mwOrigSrc === src) {
+          removeSoftBlur(img, src);
         }
       });
     } catch (e) {}
@@ -568,6 +658,15 @@ export function generateModerationScript(config: InjectionConfig): string {
       return false;
     }
     
+    // NEW: Skip tiny images on YouTube (avatars, icons)
+    if (IS_YOUTUBE && isTinyImage(element)) {
+      state.stats.skippedTiny++;
+      if (CONFIG.debug) {
+        console.log('[MW] skipped tiny YouTube image:', url.substring(0, 50));
+      }
+      return false;
+    }
+    
     // Skip already processed
     if (state.scanned.has(url)) {
       return false;
@@ -591,6 +690,11 @@ export function generateModerationScript(config: InjectionConfig): string {
       timestamp: Date.now(),
       state: 'pending',
     });
+    
+    // NEW: Apply soft blur immediately on YouTube (semantic delay)
+    if (IS_YOUTUBE && CONFIG.enabled && CONFIG.sensitivity > 0) {
+      applySoftBlur(element, url, itemId);
+    }
     
     // Add to batch queue
     batchQueue.push({
@@ -858,6 +962,9 @@ export function generateModerationScript(config: InjectionConfig): string {
             break;
           }
         }
+      } else {
+        // Remove soft blur for safe results
+        findAndRemoveSoftBlur(src);
       }
     });
   }
@@ -887,6 +994,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       [data-mw-moderated="blurred"] {
         transition: filter 0.3s ease !important;
+      }
+      .mw-softblur {
+        transition: filter 0.2s ease !important;
       }
       ytd-thumbnail, ytd-rich-item-renderer, yt-img-shadow, #shorts-player,
       [class*="DivVideoContainer"], [class*="DivPlayerContainer"], .video-card {
@@ -939,6 +1049,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     state: state,
     config: CONFIG,
     platform: PLATFORM,
+    isYouTube: IS_YOUTUBE,
     scanAll: scanFullPage,
     stats: () => state.stats,
     pending: () => state.pending,
@@ -999,6 +1110,10 @@ export function generateModerationStyles(): string {
   
   [data-mw-moderated="blurred"] {
     transition: filter 0.3s ease !important;
+  }
+  
+  .mw-softblur {
+    transition: filter 0.2s ease !important;
   }
   
   ytd-thumbnail,
