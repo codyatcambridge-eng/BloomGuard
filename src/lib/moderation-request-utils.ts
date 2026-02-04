@@ -6,6 +6,7 @@
  * - ID generation (requestId, itemId, nonce)
  * - Message validation
  * - Safe string escaping for executeScript
+ * - Multi-parameter moderation logic
  */
 
 /**
@@ -62,6 +63,9 @@ export interface ModerationRequestItem {
   itemId: string;
   src: string;
   sourceType: 'img' | 'bg-image' | 'video-poster';
+  /** Image dimensions for size filtering */
+  width?: number;
+  height?: number;
 }
 
 /**
@@ -104,6 +108,8 @@ export interface ModerationResultItem {
   confidence: number;
   /** Which triggers matched (for debugging) */
   matchedTriggers?: string[];
+  /** Reason for the decision */
+  reason?: string;
 }
 
 /**
@@ -188,4 +194,193 @@ export function createSafeJsonForInjection(obj: object): string {
     .replace(/'/g, "\\'")
     .replace(/</g, '\\u003c')
     .replace(/>/g, '\\u003e');
+}
+
+// ============= MULTI-PARAMETER MODERATION LOGIC =============
+
+/**
+ * Thresholds for multi-parameter conditional logic
+ */
+export const MODERATION_THRESHOLDS = {
+  /** Neutral fast-pass: if Neutral > this, immediately return safe */
+  neutralFastPass: 0.85,
+  /** Porn threshold */
+  porn: 0.60,
+  /** Sexy threshold */
+  sexy: 0.75,
+  /** Hentai threshold */
+  hentai: 0.60,
+  /** Swimwear/shirtless sexy threshold */
+  swimwearSexy: 0.55,
+  /** Minimum skin density for swimwear detection */
+  minSkinDensity: 0.35,
+  /** Minimum image dimension - smaller images are fail-open */
+  minImageDimension: 50,
+};
+
+/**
+ * Estimated signals from prediction scores
+ */
+export interface ModerationSignals {
+  hasHumanBody: boolean;
+  hasSkinExposure: boolean;
+  hasClothing: boolean;
+  skinDensity: number;
+}
+
+/**
+ * Estimate human body/skin signals from NSFWJS predictions
+ * Since NSFWJS doesn't directly output body parts, we infer from class distributions
+ */
+export function estimateSignals(predictions: Record<string, number>): ModerationSignals {
+  const porn = predictions['porn'] || predictions['Porn'] || 0;
+  const sexy = predictions['sexy'] || predictions['Sexy'] || 0;
+  const neutral = predictions['neutral'] || predictions['Neutral'] || 0;
+  const drawing = predictions['drawing'] || predictions['Drawing'] || 0;
+
+  // Infer human body presence from sexy/porn scores
+  const hasHumanBody = sexy > 0.15 || porn > 0.15;
+
+  // Infer skin exposure from sexy score
+  const hasSkinExposure = sexy > 0.25;
+
+  // Infer clothing presence from neutral score
+  const hasClothing = neutral > 0.50;
+
+  // Skin density: inverse of (neutral + drawing), clamped
+  const clothingSignal = neutral + drawing;
+  const skinDensity = Math.max(0, Math.min(1, 1 - clothingSignal));
+
+  return {
+    hasHumanBody,
+    hasSkinExposure,
+    hasClothing,
+    skinDensity,
+  };
+}
+
+/**
+ * Moderation decision result
+ */
+export interface ModerationDecision {
+  shouldBlur: boolean;
+  reason: string;
+  category: string;
+  confidence: number;
+  signals?: ModerationSignals;
+}
+
+/**
+ * Apply multi-parameter conditional logic for moderation
+ * 
+ * Logic flow:
+ * 1. Primary Filter: Neutral > 0.85 → safe
+ * 2. Human-Centric: Only trigger if Sexy/Porn AND human body/skin present
+ * 3. Swimwear/Shirtless: Sexy > 0.55 AND high skin-density (no clothing)
+ * 4. Standard thresholds with human signal requirement
+ * 
+ * @param predictions - NSFWJS prediction scores (normalized to lowercase keys)
+ * @param dimensions - Optional image dimensions for size filtering
+ */
+export function evaluateModerationDecision(
+  predictions: Record<string, number>,
+  dimensions?: { width: number; height: number }
+): ModerationDecision {
+  // Normalize keys to lowercase
+  const norm: Record<string, number> = {};
+  Object.entries(predictions).forEach(([k, v]) => {
+    norm[k.toLowerCase()] = v;
+  });
+
+  const porn = norm['porn'] || 0;
+  const sexy = norm['sexy'] || 0;
+  const hentai = norm['hentai'] || 0;
+  const neutral = norm['neutral'] || 0;
+
+  // ==== FAIL-OPEN: Size filtering ====
+  if (dimensions) {
+    const { width, height } = dimensions;
+    if (width < MODERATION_THRESHOLDS.minImageDimension || height < MODERATION_THRESHOLDS.minImageDimension) {
+      return {
+        shouldBlur: false,
+        reason: 'fail_open_tiny',
+        category: 'safe',
+        confidence: 1,
+      };
+    }
+  }
+
+  // ==== PRIMARY FILTER: Neutral Fast-pass ====
+  if (neutral > MODERATION_THRESHOLDS.neutralFastPass) {
+    return {
+      shouldBlur: false,
+      reason: 'neutral_fastpass',
+      category: 'neutral',
+      confidence: neutral,
+    };
+  }
+
+  // ==== Estimate human body/skin signals ====
+  const signals = estimateSignals(norm);
+
+  // ==== HUMAN-CENTRIC PARAMETERS ====
+  const hasExplicitScore = 
+    porn > MODERATION_THRESHOLDS.porn || 
+    sexy > MODERATION_THRESHOLDS.sexy || 
+    hentai > MODERATION_THRESHOLDS.hentai;
+
+  const hasHumanSignal = signals.hasHumanBody || signals.hasSkinExposure;
+
+  // If explicit score but no human signal, likely false positive
+  if (hasExplicitScore && !hasHumanSignal) {
+    return {
+      shouldBlur: false,
+      reason: 'human_centric_safe',
+      category: 'safe',
+      confidence: neutral,
+      signals,
+    };
+  }
+
+  // ==== SWIMWEAR/SHIRTLESS LOGIC ====
+  if (
+    sexy > MODERATION_THRESHOLDS.swimwearSexy &&
+    signals.skinDensity >= MODERATION_THRESHOLDS.minSkinDensity &&
+    !signals.hasClothing
+  ) {
+    return {
+      shouldBlur: true,
+      reason: 'swimwear_detected',
+      category: 'swimwear',
+      confidence: sexy,
+      signals,
+    };
+  }
+
+  // ==== STANDARD THRESHOLD CHECK ====
+  const isExplicit = porn > MODERATION_THRESHOLDS.porn || hentai > MODERATION_THRESHOLDS.hentai;
+  const isSuggestive = sexy > MODERATION_THRESHOLDS.sexy;
+  const shouldBlur = (isExplicit || isSuggestive) && hasHumanSignal;
+
+  // Determine category
+  let category = 'safe';
+  let confidence = neutral;
+  if (porn > MODERATION_THRESHOLDS.porn) {
+    category = 'porn';
+    confidence = porn;
+  } else if (hentai > MODERATION_THRESHOLDS.hentai) {
+    category = 'hentai';
+    confidence = hentai;
+  } else if (sexy > MODERATION_THRESHOLDS.sexy) {
+    category = 'sexy';
+    confidence = sexy;
+  }
+
+  return {
+    shouldBlur,
+    reason: shouldBlur ? 'threshold_hit' : 'threshold_safe',
+    category,
+    confidence,
+    signals,
+  };
 }
