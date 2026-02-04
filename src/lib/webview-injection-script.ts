@@ -37,12 +37,12 @@ export interface InjectionConfig {
  */
 export function getCategoryThresholds(dialLevel: number): { porn: number; sexy: number; hentai: number } {
   switch (dialLevel) {
-    case 0: return { porn: 1.1, sexy: 1.1, hentai: 1.1 }; // Off
-    case 1: return { porn: 0.50, sexy: 0.60, hentai: 0.50 }; // Relaxed (stricter)
-    case 2: return { porn: 0.30, sexy: 0.40, hentai: 0.30 }; // Moderate (stricter)
-    case 3: return { porn: 0.20, sexy: 0.30, hentai: 0.20 }; // Strict (much stricter)
-    case 4: return { porn: 0.10, sexy: 0.15, hentai: 0.10 }; // Maximum (extreme)
-    default: return { porn: 0.20, sexy: 0.30, hentai: 0.20 };
+    case 0: return { porn: 1.1, sexy: 1.1, hentai: 1.1 };       // Off
+    case 1: return { porn: 0.40, sexy: 0.50, hentai: 0.40 };    // Relaxed (stricter)
+    case 2: return { porn: 0.25, sexy: 0.35, hentai: 0.25 };    // Moderate (stricter)
+    case 3: return { porn: 0.15, sexy: 0.25, hentai: 0.15 };    // Strict (matches DEFAULT_THRESHOLDS)
+    case 4: return { porn: 0.08, sexy: 0.12, hentai: 0.08 };    // Maximum (extreme)
+    default: return { porn: 0.15, sexy: 0.25, hentai: 0.15 };   // Default to strict
   }
 }
 
@@ -98,13 +98,13 @@ export function generateModerationScript(config: InjectionConfig): string {
     requestTimeout: 8000,
   };
 
-  // Threshold mappings for blur dial levels (stricter for iOS)
+  // Threshold mappings for blur dial levels (STRICT for iOS - blur more aggressively)
   const THRESHOLDS = {
-    0: { porn: 1.1, sexy: 1.1, hentai: 1.1 },
-    1: { porn: 0.50, sexy: 0.60, hentai: 0.50 },
-    2: { porn: 0.30, sexy: 0.40, hentai: 0.30 },
-    3: { porn: 0.20, sexy: 0.30, hentai: 0.20 },
-    4: { porn: 0.10, sexy: 0.15, hentai: 0.10 },
+    0: { porn: 1.1, sexy: 1.1, hentai: 1.1 },       // Off
+    1: { porn: 0.40, sexy: 0.50, hentai: 0.40 },    // Relaxed (stricter)
+    2: { porn: 0.25, sexy: 0.35, hentai: 0.25 },    // Moderate (stricter)
+    3: { porn: 0.15, sexy: 0.25, hentai: 0.15 },    // Strict (matches DEFAULT_THRESHOLDS)
+    4: { porn: 0.08, sexy: 0.12, hentai: 0.08 },    // Maximum (extreme)
   };
 
   // ==================== REQUEST ID GENERATION ====================
