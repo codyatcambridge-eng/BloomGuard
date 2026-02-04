@@ -128,7 +128,7 @@ export const useBrowserNavigation = (options: UseBrowserNavigationOptions = {}) 
     switch (currentView) {
       case 'home': return 'Home';
       case 'search': return 'Search Results';
-      case 'browse': return 'Browsing';
+      case 'browse': return 'GoodCreation';
       case 'blocked': return 'Blocked';
       case 'fallback': return 'Fallback Mode';
       case 'reader': return 'Reader Mode';
