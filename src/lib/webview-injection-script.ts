@@ -38,11 +38,11 @@ export interface InjectionConfig {
 export function getCategoryThresholds(dialLevel: number): { porn: number; sexy: number; hentai: number } {
   switch (dialLevel) {
     case 0: return { porn: 1.1, sexy: 1.1, hentai: 1.1 };       // Off
-    case 1: return { porn: 0.40, sexy: 0.50, hentai: 0.40 };    // Relaxed (stricter)
-    case 2: return { porn: 0.25, sexy: 0.35, hentai: 0.25 };    // Moderate (stricter)
-    case 3: return { porn: 0.15, sexy: 0.25, hentai: 0.15 };    // Strict (matches DEFAULT_THRESHOLDS)
-    case 4: return { porn: 0.08, sexy: 0.12, hentai: 0.08 };    // Maximum (extreme)
-    default: return { porn: 0.15, sexy: 0.25, hentai: 0.15 };   // Default to strict
+    case 1: return { porn: 0.30, sexy: 0.40, hentai: 0.30 };    // Relaxed
+    case 2: return { porn: 0.15, sexy: 0.25, hentai: 0.15 };    // Moderate
+    case 3: return { porn: 0.10, sexy: 0.20, hentai: 0.10 };    // Strict (ZERO-TOLERANCE)
+    case 4: return { porn: 0.05, sexy: 0.10, hentai: 0.05 };    // Maximum (extreme)
+    default: return { porn: 0.10, sexy: 0.20, hentai: 0.10 };   // Default to zero-tolerance
   }
 }
 
@@ -98,13 +98,13 @@ export function generateModerationScript(config: InjectionConfig): string {
     requestTimeout: 8000,
   };
 
-  // Threshold mappings for blur dial levels (STRICT for iOS - blur more aggressively)
+  // Threshold mappings for blur dial levels (ZERO-TOLERANCE for YouTube/thumbnails)
   const THRESHOLDS = {
     0: { porn: 1.1, sexy: 1.1, hentai: 1.1 },       // Off
-    1: { porn: 0.40, sexy: 0.50, hentai: 0.40 },    // Relaxed (stricter)
-    2: { porn: 0.25, sexy: 0.35, hentai: 0.25 },    // Moderate (stricter)
-    3: { porn: 0.15, sexy: 0.25, hentai: 0.15 },    // Strict (matches DEFAULT_THRESHOLDS)
-    4: { porn: 0.08, sexy: 0.12, hentai: 0.08 },    // Maximum (extreme)
+    1: { porn: 0.30, sexy: 0.40, hentai: 0.30 },    // Relaxed
+    2: { porn: 0.15, sexy: 0.25, hentai: 0.15 },    // Moderate
+    3: { porn: 0.10, sexy: 0.20, hentai: 0.10 },    // Strict (ZERO-TOLERANCE)
+    4: { porn: 0.05, sexy: 0.10, hentai: 0.05 },    // Maximum (extreme)
   };
 
   // ==================== REQUEST ID GENERATION ====================
@@ -1068,13 +1068,94 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   // ==================== MUTATION OBSERVER ====================
 
+  /**
+   * YouTube-specific selectors for aggressive thumbnail scanning
+   */
+  const YOUTUBE_SELECTORS = [
+    'ytd-thumbnail',
+    'ytd-rich-item-renderer',
+    'ytd-video-renderer',
+    'ytd-compact-video-renderer',
+    'ytd-grid-video-renderer',
+    'ytd-shelf-renderer',
+    '#thumbnail',
+    '.yt-core-image',
+    'yt-image',
+    'yt-img-shadow',
+    '.ytd-thumbnail img',
+    '.video-thumb',
+    'img[src*="ytimg.com"]',
+    'img[src*="ggpht.com"]',
+  ];
+
+  /**
+   * Check if we're on YouTube
+   */
+  function isYouTube() {
+    return window.location.hostname.includes('youtube.com') || 
+           window.location.hostname.includes('youtu.be');
+  }
+
+  /**
+   * Scan YouTube-specific thumbnail elements aggressively
+   */
+  function scanYouTubeThumbnails() {
+    if (!isYouTube()) return;
+    
+    console.log('[MW] === YOUTUBE THUMBNAIL SCAN ===');
+    
+    YOUTUBE_SELECTORS.forEach(selector => {
+      try {
+        document.querySelectorAll(selector).forEach(el => {
+          // Find all img elements within or the element itself
+          if (el.tagName === 'IMG') {
+            el.dataset.mwScanned = 'false'; // Force rescan
+            scanImgElement(el);
+          } else {
+            // Scan all images inside YouTube components
+            el.querySelectorAll('img').forEach(img => {
+              img.dataset.mwScanned = 'false'; // Force rescan
+              scanImgElement(img);
+            });
+          }
+        });
+      } catch (e) {}
+    });
+  }
+
   function setupMutationObserver(root) {
     const observer = new MutationObserver(mutations => {
       if (!CONFIG.enabled || CONFIG.sensitivity === 0) return;
       
+      let hasYouTubeChanges = false;
+      
       mutations.forEach(mutation => {
         mutation.addedNodes.forEach(node => {
           if (node.nodeType !== 1) return;
+          
+          // Check if this is a YouTube thumbnail element
+          if (isYouTube()) {
+            const el = node;
+            const tagName = el.tagName ? el.tagName.toLowerCase() : '';
+            
+            // YouTube-specific: immediately scan ytd-* elements
+            if (tagName.startsWith('ytd-') || 
+                tagName === 'yt-image' ||
+                el.id === 'thumbnail' ||
+                el.classList?.contains('yt-core-image')) {
+              hasYouTubeChanges = true;
+              // Immediate scan for YouTube elements
+              if (el.tagName === 'IMG') {
+                scanImgElement(el);
+              } else {
+                el.querySelectorAll('img').forEach(img => {
+                  img.dataset.mwScanned = 'false';
+                  scanImgElement(img);
+                });
+              }
+            }
+          }
+          
           // Add to viewport observer for lazy scanning
           observeForViewport(node);
           setTimeout(() => scanNode(node), CONFIG.scanDelay);
@@ -1105,6 +1186,11 @@ export function generateModerationScript(config: InjectionConfig): string {
           }
         }
       });
+      
+      // If YouTube changes detected, do a targeted rescan after a short delay
+      if (hasYouTubeChanges) {
+        setTimeout(scanYouTubeThumbnails, 100);
+      }
     });
     
     observer.observe(root, {
@@ -1115,6 +1201,36 @@ export function generateModerationScript(config: InjectionConfig): string {
     });
     
     return observer;
+  }
+
+  // ==================== YOUTUBE SCROLL HANDLER ====================
+  
+  /**
+   * Handle YouTube infinite scroll - rescan on scroll
+   */
+  function setupYouTubeScrollHandler() {
+    if (!isYouTube()) return;
+    
+    let scrollTimeout = null;
+    let lastScrollY = 0;
+    
+    window.addEventListener('scroll', () => {
+      const currentScrollY = window.scrollY;
+      const scrollDelta = Math.abs(currentScrollY - lastScrollY);
+      
+      // Only trigger if scrolled significantly
+      if (scrollDelta > 200) {
+        lastScrollY = currentScrollY;
+        
+        if (scrollTimeout) clearTimeout(scrollTimeout);
+        scrollTimeout = setTimeout(() => {
+          console.log('[MW] YouTube scroll detected - rescanning thumbnails');
+          scanYouTubeThumbnails();
+        }, 150);
+      }
+    }, { passive: true });
+    
+    console.log('[MW] YouTube scroll handler initialized');
   }
 
   // ==================== LEGACY QUEUE SUPPORT ====================
@@ -1212,24 +1328,52 @@ export function generateModerationScript(config: InjectionConfig): string {
   // Set up observers
   setupMutationObserver(document.body);
   state.viewportObserver = setupViewportObserver();
+  
+  // YouTube-specific: Set up scroll handler for infinite scroll
+  setupYouTubeScrollHandler();
 
   // Initial scan
   if (document.readyState === 'complete') {
     scanFullPage();
+    // YouTube: Extra scan for thumbnails
+    if (isYouTube()) {
+      setTimeout(scanYouTubeThumbnails, 200);
+    }
   } else {
-    window.addEventListener('load', scanFullPage);
+    window.addEventListener('load', () => {
+      scanFullPage();
+      if (isYouTube()) {
+        setTimeout(scanYouTubeThumbnails, 200);
+      }
+    });
   }
 
-  // Periodic rescans
+  // Periodic rescans (more aggressive for YouTube)
+  const isYT = isYouTube();
   setTimeout(scanFullPage, 500);
   setTimeout(scanFullPage, 1500);
   setTimeout(scanFullPage, 3000);
+  
+  if (isYT) {
+    // YouTube-specific: Extra thumbnail scans
+    setTimeout(scanYouTubeThumbnails, 800);
+    setTimeout(scanYouTubeThumbnails, 2000);
+    setTimeout(scanYouTubeThumbnails, 4000);
+    setTimeout(scanYouTubeThumbnails, 6000);
+    // Continuous periodic rescan for YouTube
+    setInterval(scanYouTubeThumbnails, 5000);
+  }
 
   // Scroll-triggered rescans
   let scrollTimer;
   window.addEventListener('scroll', () => {
     clearTimeout(scrollTimer);
-    scrollTimer = setTimeout(scanFullPage, 150);
+    scrollTimer = setTimeout(() => {
+      scanFullPage();
+      if (isYouTube()) {
+        scanYouTubeThumbnails();
+      }
+    }, 150);
   }, { passive: true });
 
   // SPA navigation detection
@@ -1242,6 +1386,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       state.scanned.clear();
       state.elements.clear();
       setTimeout(scanFullPage, 300);
+      if (isYouTube()) {
+        setTimeout(scanYouTubeThumbnails, 500);
+      }
     }
   };
   setInterval(checkUrlChange, 500);
