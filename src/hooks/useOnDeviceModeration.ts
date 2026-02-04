@@ -45,9 +45,9 @@ export interface AIThresholds {
  * Multi-parameter thresholds for refined detection
  */
 export const DEFAULT_THRESHOLDS: AIThresholds = { 
-  porn: 0.60, 
-  sexy: 0.75, 
-  hentai: 0.60 
+  porn: 0.20, 
+  sexy: 0.30, 
+  hentai: 0.20 
 };
 
 /**
@@ -383,6 +383,17 @@ export const useOnDeviceModeration = () => {
       const confidence = sorted[0]?.probability || 0;
 
       const reason: ModerationReason = shouldBlur ? 'threshold_hit' : 'threshold_safe';
+
+      // === CONSOLE LOGGING FOR XCODE DEBUG ===
+      if (sexyScore > 0.05) {
+        console.log(`[OnDeviceAI] SEXY DETECTED: ${(sexyScore * 100).toFixed(1)}% (threshold: ${(thresholds.sexy * 100).toFixed(0)}%)`);
+      }
+      if (pornScore > 0.05) {
+        console.log(`[OnDeviceAI] PORN DETECTED: ${(pornScore * 100).toFixed(1)}% (threshold: ${(thresholds.porn * 100).toFixed(0)}%)`);
+      }
+      if (shouldBlur) {
+        console.log(`[OnDeviceAI] >>> BLUR APPLIED <<< category=${dominantClass}, sexy=${(sexyScore * 100).toFixed(1)}%, porn=${(pornScore * 100).toFixed(1)}%`);
+      }
 
       const result: ModerationResult = {
         isExplicit,

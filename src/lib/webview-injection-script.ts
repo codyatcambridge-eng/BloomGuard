@@ -38,11 +38,11 @@ export interface InjectionConfig {
 export function getCategoryThresholds(dialLevel: number): { porn: number; sexy: number; hentai: number } {
   switch (dialLevel) {
     case 0: return { porn: 1.1, sexy: 1.1, hentai: 1.1 }; // Off
-    case 1: return { porn: 0.7, sexy: 0.85, hentai: 0.7 }; // Relaxed
-    case 2: return { porn: 0.5, sexy: 0.65, hentai: 0.5 }; // Moderate
-    case 3: return { porn: 0.3, sexy: 0.45, hentai: 0.3 }; // Strict
-    case 4: return { porn: 0.15, sexy: 0.25, hentai: 0.15 }; // Maximum
-    default: return { porn: 0.3, sexy: 0.45, hentai: 0.3 };
+    case 1: return { porn: 0.50, sexy: 0.60, hentai: 0.50 }; // Relaxed (stricter)
+    case 2: return { porn: 0.30, sexy: 0.40, hentai: 0.30 }; // Moderate (stricter)
+    case 3: return { porn: 0.20, sexy: 0.30, hentai: 0.20 }; // Strict (much stricter)
+    case 4: return { porn: 0.10, sexy: 0.15, hentai: 0.10 }; // Maximum (extreme)
+    default: return { porn: 0.20, sexy: 0.30, hentai: 0.20 };
   }
 }
 
@@ -98,13 +98,13 @@ export function generateModerationScript(config: InjectionConfig): string {
     requestTimeout: 8000,
   };
 
-  // Threshold mappings for blur dial levels
+  // Threshold mappings for blur dial levels (stricter for iOS)
   const THRESHOLDS = {
     0: { porn: 1.1, sexy: 1.1, hentai: 1.1 },
-    1: { porn: 0.7, sexy: 0.85, hentai: 0.7 },
-    2: { porn: 0.5, sexy: 0.65, hentai: 0.5 },
-    3: { porn: 0.3, sexy: 0.45, hentai: 0.3 },
-    4: { porn: 0.15, sexy: 0.25, hentai: 0.15 },
+    1: { porn: 0.50, sexy: 0.60, hentai: 0.50 },
+    2: { porn: 0.30, sexy: 0.40, hentai: 0.30 },
+    3: { porn: 0.20, sexy: 0.30, hentai: 0.20 },
+    4: { porn: 0.10, sexy: 0.15, hentai: 0.10 },
   };
 
   // ==================== REQUEST ID GENERATION ====================
@@ -288,22 +288,28 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   /**
    * Apply hard blur (for unsafe content)
+   * Uses !important to override site styles on iOS
    */
   function applyBlur(element, src, category, blurStrengthPx, itemId) {
     // Check persistence
     if (state.revealed.has(src)) return;
     if (element.dataset.mwRevealed === 'true') return;
     
-    const blurPx = blurStrengthPx || CONFIG.blurStrength;
+    const blurPx = blurStrengthPx || CONFIG.blurStrength || 30;
     
     try {
-      element.style.filter = 'blur(' + blurPx + 'px)';
+      // Force blur with !important for iOS WebKit
+      element.style.setProperty('filter', 'blur(' + blurPx + 'px)', 'important');
+      element.style.setProperty('-webkit-filter', 'blur(' + blurPx + 'px)', 'important');
+      element.style.setProperty('backdrop-filter', 'blur(' + blurPx + 'px)', 'important');
+      element.style.setProperty('-webkit-backdrop-filter', 'blur(' + blurPx + 'px)', 'important');
       element.style.transition = 'filter 0.3s ease';
       element.dataset.mwModerated = 'blurred';
       element.dataset.mwCategory = category || 'flagged';
       element.dataset.mwSrc = src;
       element.dataset.mwItemId = itemId || '';
       element.classList.remove('mw-softblur');
+      element.classList.add('mw-blurred');
       
       state.blurred.add(src);
       state.stats.blurred++;
