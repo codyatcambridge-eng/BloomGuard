@@ -54,6 +54,7 @@ export const BrowserHeader = ({
 }: BrowserHeaderProps) => {
   const isHome = currentView === 'home';
   const isBrowsing = currentView === 'browse';
+  const isSearch = currentView === 'search';
 
   return (
     <header className="px-3 pt-6 pb-3 border-b border-border bg-card">
@@ -72,7 +73,7 @@ export const BrowserHeader = ({
       {/* URL Bar */}
       <form onSubmit={onSubmit} className="flex gap-2">
         <div className="flex-1 relative">
-          {isHome ? (
+          {isHome || isSearch ? (
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
           ) : (
             <Globe className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
@@ -81,7 +82,7 @@ export const BrowserHeader = ({
             type="text"
             value={urlInput}
             onChange={(e) => onUrlChange(e.target.value)}
-            placeholder={isHome ? "Search or enter URL..." : "Enter URL..."}
+            placeholder={isHome || isSearch ? "Search or enter URL..." : "Enter URL..."}
             className="w-full bg-input border border-silver/30 rounded-sm pl-10 pr-4 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-aqua transition-colors"
           />
           {isLoading && (
