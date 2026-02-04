@@ -45,9 +45,9 @@ export interface AIThresholds {
  * Multi-parameter thresholds for refined detection
  */
 export const DEFAULT_THRESHOLDS: AIThresholds = { 
-  porn: 0.20, 
-  sexy: 0.30, 
-  hentai: 0.20 
+  porn: 0.15, 
+  sexy: 0.25, 
+  hentai: 0.15 
 };
 
 /**
@@ -59,13 +59,13 @@ const NEUTRAL_FASTPASS_THRESHOLD = 0.85;
  * Swimwear/shirtless detection threshold - Sexy must exceed this
  * AND skin-density must be high (no Clothing signal)
  */
-const SWIMWEAR_SEXY_THRESHOLD = 0.55;
+const SWIMWEAR_SEXY_THRESHOLD = 0.30;
 
 /**
  * Minimum skin density to trigger swimwear detection
  * This is estimated from lack of "Neutral" + "Drawing" signals
  */
-const MIN_SKIN_DENSITY_FOR_SWIMWEAR = 0.35;
+const MIN_SKIN_DENSITY_FOR_SWIMWEAR = 0.20;
 
 /**
  * Fast timeout for fail-open behavior (ms)
@@ -317,33 +317,10 @@ export const useOnDeviceModeration = () => {
       // ==== Estimate signals for human-centric logic ====
       const signals = estimateSignals(formattedPredictions);
 
-      // ==== HUMAN-CENTRIC PARAMETERS ====
-      // Only trigger 'unsafe' if Sexy/Porn AND human body/skin detected
+      // ==== STRICT THRESHOLD PARAMETERS ====
+      // Blur if ANY threshold is exceeded - no human-centric bypass
       const hasExplicitScore = pornScore > thresholds.porn || sexyScore > thresholds.sexy || hentaiScore > thresholds.hentai;
-      const hasHumanSignal = signals.hasHumanBody || signals.hasSkinExposure;
-
-      // If no human signal detected but has explicit score, it's likely a false positive
-      // (e.g., abstract art, product photos, etc.)
-      if (hasExplicitScore && !hasHumanSignal) {
-        const result: ModerationResult = {
-          isExplicit: false,
-          shouldBlur: false,
-          predictions: formattedPredictions,
-          dominantClass: formattedPredictions[0]?.className || 'Unknown',
-          confidence: formattedPredictions[0]?.probability || 0,
-          inferenceTime,
-          reason: 'human_centric_safe',
-          signals,
-        };
-
-        if (cacheKey) {
-          imageCache.current.set(cacheKey, result);
-          limitCache();
-        }
-
-        console.debug('[OnDeviceAI] human_centric_safe: no human body/skin signal detected');
-        return result;
-      }
+      const signals_unused = signals; // Keep for debugging but don't gate on it
 
       // ==== SWIMWEAR/SHIRTLESS LOGIC ====
       // If Sexy > 0.55 AND high skin-density (no clothing), mark as unsafe
@@ -373,9 +350,9 @@ export const useOnDeviceModeration = () => {
         return result;
       }
 
-      // ==== STANDARD THRESHOLD CHECK ====
+      // ==== STANDARD THRESHOLD CHECK (STRICT - no human signal requirement) ====
       const isExplicit = pornScore > thresholds.porn || hentaiScore > thresholds.hentai;
-      const shouldBlur = (isExplicit || sexyScore > thresholds.sexy) && hasHumanSignal;
+      const shouldBlur = isExplicit || sexyScore > thresholds.sexy || hasExplicitScore;
 
       // Find dominant class
       const sorted = [...predictions].sort((a, b) => b.probability - a.probability);
