@@ -1,45 +1,24 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-api-key",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
 };
 
-interface LabelEntry {
+interface LabelPayload {
   requestId: string;
   itemId: string;
   src: string;
-  pageUrl: string;
-  platform: string;
-  modelPrediction: string;
-  modelConfidence: number;
+  pageUrl?: string;
+  platform?: string | null;
   userLabel: 'shirtless' | 'swimwear' | 'other' | 'unsure';
-  userComment?: string;
-  consentImage: boolean;
-  imageBase64?: string;
-  deviceMeta: {
-    userAgent: string;
-    screenWidth: number;
-    screenHeight: number;
-    timestamp: number;
-    timezone: string;
-  };
-}
-
-interface SubmitRequest {
-  action: 'submit';
-  labels: LabelEntry[];
-}
-
-interface StatsRequest {
-  action: 'stats';
-}
-
-interface ListRequest {
-  action: 'list';
-  limit?: number;
-  offset?: number;
-  labelFilter?: string;
+  consentUpload: boolean;
+  createdAt: string;
+  modelPrediction?: { category?: string | null; confidence?: number | null } | null;
+  status: 'pending' | 'uploaded' | 'failed';
+  attempts: number;
 }
 
 serve(async (req) => {
@@ -49,86 +28,88 @@ serve(async (req) => {
   }
 
   try {
-    const body = await req.json();
-    const { action } = body;
+    // API Key validation
+    const apiKey = req.headers.get("x-api-key") || req.headers.get("authorization")?.replace("Bearer ", "");
+    const expectedKey = Deno.env.get("MW_API_KEY");
 
-    // Get Supabase client
+    if (!expectedKey) {
+      console.error("[moderation-labels] MW_API_KEY not configured");
+      return new Response(
+        JSON.stringify({ ok: false, error: "Server misconfigured" }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    if (!apiKey || apiKey !== expectedKey) {
+      console.warn("[moderation-labels] Invalid or missing API key");
+      return new Response(
+        JSON.stringify({ ok: false, error: "Unauthorized" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Initialize Supabase client with service role
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    
-    const { createClient } = await import("https://esm.sh/@supabase/supabase-js@2");
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
-    if (action === 'submit') {
-      const { labels } = body as SubmitRequest;
+    // Handle POST - submit labels
+    if (req.method === "POST") {
+      const body = await req.json();
       
-      if (!labels || !Array.isArray(labels) || labels.length === 0) {
+      // Support single label or array of labels
+      const labels: LabelPayload[] = Array.isArray(body) ? body : [body];
+
+      if (labels.length === 0) {
         return new Response(
-          JSON.stringify({ error: 'No labels provided' }),
+          JSON.stringify({ ok: false, error: "No labels provided" }),
           { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }
 
-      console.log(`[moderation-labels] Received ${labels.length} labels`);
+      console.log(`[moderation-labels] Received ${labels.length} label(s)`);
 
-      // Process each label
-      const results = [];
+      const results: { itemId: string; success: boolean; error?: string }[] = [];
+
       for (const label of labels) {
+        // Validate required fields
+        if (!label.requestId || !label.itemId || !label.src || !label.userLabel) {
+          results.push({ itemId: label.itemId || "unknown", success: false, error: "Missing required fields" });
+          continue;
+        }
+
+        // Validate userLabel enum
+        if (!['shirtless', 'swimwear', 'other', 'unsure'].includes(label.userLabel)) {
+          results.push({ itemId: label.itemId, success: false, error: "Invalid userLabel value" });
+          continue;
+        }
+
         try {
-          // Store image if consent given
-          let imagePath: string | null = null;
-          if (label.consentImage && label.imageBase64) {
-            // Extract base64 data
-            const base64Data = label.imageBase64.split(',')[1] || label.imageBase64;
-            const imageBytes = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
-            
-            // Generate unique path
-            const timestamp = Date.now();
-            const fileName = `${label.userLabel}/${timestamp}_${label.itemId}.jpg`;
-            
-            // Upload to storage (create bucket if needed)
-            const { error: uploadError } = await supabase.storage
-              .from('moderation-training')
-              .upload(fileName, imageBytes, {
-                contentType: 'image/jpeg',
-                upsert: true,
-              });
-
-            if (uploadError) {
-              console.error('[moderation-labels] Image upload error:', uploadError);
-            } else {
-              imagePath = fileName;
-              console.log('[moderation-labels] Image stored:', fileName);
-            }
-          }
-
-          // Insert label record
           const { error: insertError } = await supabase
-            .from('moderation_labels')
+            .from("moderation_labels")
             .insert({
               request_id: label.requestId,
               item_id: label.itemId,
               src: label.src,
-              page_url: label.pageUrl,
-              platform: label.platform,
-              model_prediction: label.modelPrediction,
-              model_confidence: label.modelConfidence,
+              page_url: label.pageUrl || null,
+              platform: label.platform || null,
               user_label: label.userLabel,
-              user_comment: label.userComment || null,
-              consent_image: label.consentImage,
-              image_path: imagePath,
-              device_meta: label.deviceMeta,
+              consent_upload: label.consentUpload ?? false,
+              created_at: label.createdAt || new Date().toISOString(),
+              model_prediction: label.modelPrediction || null,
+              status: "uploaded", // Mark as uploaded since we received it
+              attempts: (label.attempts || 0) + 1,
             });
 
           if (insertError) {
-            console.error('[moderation-labels] Insert error:', insertError);
+            console.error("[moderation-labels] Insert error:", insertError);
             results.push({ itemId: label.itemId, success: false, error: insertError.message });
           } else {
             results.push({ itemId: label.itemId, success: true });
           }
         } catch (e) {
-          console.error('[moderation-labels] Label processing error:', e);
-          results.push({ itemId: label.itemId, success: false, error: e.message });
+          console.error("[moderation-labels] Processing error:", e);
+          results.push({ itemId: label.itemId, success: false, error: e instanceof Error ? e.message : "Unknown error" });
         }
       }
 
@@ -136,86 +117,66 @@ serve(async (req) => {
       console.log(`[moderation-labels] Processed ${successCount}/${labels.length} labels`);
 
       return new Response(
-        JSON.stringify({ success: true, results, processed: successCount }),
+        JSON.stringify({ ok: true, processed: successCount, total: labels.length, results }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    if (action === 'stats') {
-      // Get label statistics
-      const { data: totalCount } = await supabase
-        .from('moderation_labels')
-        .select('*', { count: 'exact', head: true });
-
-      const { data: byLabel } = await supabase
-        .from('moderation_labels')
-        .select('user_label');
-
-      const labelCounts: Record<string, number> = {
-        shirtless: 0,
-        swimwear: 0,
-        other: 0,
-        unsure: 0,
-      };
-
-      byLabel?.forEach((row: { user_label: string }) => {
-        if (row.user_label in labelCounts) {
-          labelCounts[row.user_label]++;
-        }
-      });
-
-      const { data: withImages } = await supabase
-        .from('moderation_labels')
-        .select('*', { count: 'exact', head: true })
-        .not('image_path', 'is', null);
-
-      return new Response(
-        JSON.stringify({
-          total: byLabel?.length || 0,
-          byLabel: labelCounts,
-          withImages: withImages?.length || 0,
-        }),
-        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    if (action === 'list') {
-      const { limit = 50, offset = 0, labelFilter } = body as ListRequest;
+    // Handle GET - list labels (for admin viewer)
+    if (req.method === "GET") {
+      const url = new URL(req.url);
+      const limit = Math.min(parseInt(url.searchParams.get("limit") || "100"), 500);
+      const offset = parseInt(url.searchParams.get("offset") || "0");
+      const labelFilter = url.searchParams.get("label");
 
       let query = supabase
-        .from('moderation_labels')
-        .select('*')
-        .order('created_at', { ascending: false })
+        .from("moderation_labels")
+        .select("*")
+        .order("created_at", { ascending: false })
         .range(offset, offset + limit - 1);
 
-      if (labelFilter) {
-        query = query.eq('user_label', labelFilter);
+      if (labelFilter && ['shirtless', 'swimwear', 'other', 'unsure'].includes(labelFilter)) {
+        query = query.eq("user_label", labelFilter);
       }
 
-      const { data, error } = await query;
+      const { data, error, count } = await query;
 
       if (error) {
+        console.error("[moderation-labels] Query error:", error);
         return new Response(
-          JSON.stringify({ error: error.message }),
+          JSON.stringify({ ok: false, error: error.message }),
           { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }
 
+      // Get stats
+      const { data: statsData } = await supabase
+        .from("moderation_labels")
+        .select("user_label");
+
+      const stats = { shirtless: 0, swimwear: 0, other: 0, unsure: 0, total: 0 };
+      statsData?.forEach((row: { user_label: string }) => {
+        if (row.user_label in stats) {
+          stats[row.user_label as keyof typeof stats]++;
+        }
+        stats.total++;
+      });
+
       return new Response(
-        JSON.stringify({ labels: data }),
+        JSON.stringify({ ok: true, labels: data, stats }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
     return new Response(
-      JSON.stringify({ error: 'Unknown action' }),
-      { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      JSON.stringify({ ok: false, error: "Method not allowed" }),
+      { status: 405, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
 
   } catch (e) {
-    console.error('[moderation-labels] Error:', e);
+    console.error("[moderation-labels] Error:", e);
     return new Response(
-      JSON.stringify({ error: e.message }),
+      JSON.stringify({ ok: false, error: e instanceof Error ? e.message : "Internal error" }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }

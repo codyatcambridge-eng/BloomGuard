@@ -104,6 +104,51 @@ export type Database = {
         }
         Relationships: []
       }
+      moderation_labels: {
+        Row: {
+          attempts: number
+          consent_upload: boolean | null
+          created_at: string
+          id: string
+          item_id: string
+          model_prediction: Json | null
+          page_url: string | null
+          platform: string | null
+          request_id: string
+          src: string
+          status: string
+          user_label: string
+        }
+        Insert: {
+          attempts?: number
+          consent_upload?: boolean | null
+          created_at?: string
+          id?: string
+          item_id: string
+          model_prediction?: Json | null
+          page_url?: string | null
+          platform?: string | null
+          request_id: string
+          src: string
+          status?: string
+          user_label: string
+        }
+        Update: {
+          attempts?: number
+          consent_upload?: boolean | null
+          created_at?: string
+          id?: string
+          item_id?: string
+          model_prediction?: Json | null
+          page_url?: string | null
+          platform?: string | null
+          request_id?: string
+          src?: string
+          status?: string
+          user_label?: string
+        }
+        Relationships: []
+      }
       override_requests: {
         Row: {
           created_at: string
