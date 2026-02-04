@@ -7,7 +7,8 @@
  * 3. Dynamic content via MutationObserver
  * 4. Communication with native app via postMessage protocol
  * 5. Blur application and reveal toggles
- * 6. Fail-closed policy (blur on timeout/error)
+ * 6. Fail-open policy (default safe, no blur on timeout/error)
+ * 7. Semantic delay with soft blur while scanning
  * 
  * Communication Flow (postMessage-based with nonce security):
  * 1. Script detects images and batches them into scan requests
@@ -26,7 +27,7 @@ export interface InjectionConfig {
   blurStrength: number; // px
   enabled: boolean;
   forcedBlur?: boolean; // Dev mode: blur everything
-  failClosed?: boolean; // Blur on timeout/error (default: true)
+  failClosed?: boolean; // DEPRECATED: Now fail-open by default
   debug?: boolean; // Verbose logging
   nonce: string; // Security nonce for message validation
 }
@@ -51,7 +52,8 @@ export function getCategoryThresholds(dialLevel: number): { porn: number; sexy: 
 export function generateModerationScript(config: InjectionConfig): string {
   // Ensure nonce is provided
   const nonce = config.nonce || 'n_' + Math.random().toString(36).slice(2, 10) + '_' + Math.random().toString(36).slice(2, 10);
-  const failClosed = config.failClosed !== false; // Default true
+  // FAIL-OPEN by default now - only use fail-closed if explicitly requested
+  const failClosed = config.failClosed === true;
   
   return `
 (function() {
@@ -67,12 +69,12 @@ export function generateModerationScript(config: InjectionConfig): string {
   window.__MW_ACTIVE__ = true;
   
   console.log('[MW] ========================================');
-  console.log('[MW] injected - Moderation Script v2.1');
+  console.log('[MW] injected - Moderation Script v3.0');
   console.log('[MW] Sensitivity:', ${config.sensitivity});
   console.log('[MW] Blur Strength:', ${config.blurStrength}, 'px');
   console.log('[MW] Enabled:', ${config.enabled});
   console.log('[MW] Forced Blur:', ${config.forcedBlur || false});
-  console.log('[MW] Fail-Closed:', ${failClosed});
+  console.log('[MW] Fail-Closed:', ${failClosed}, '(default: fail-open)');
   console.log('[MW] Nonce:', '${nonce.substring(0, 10)}...');
   console.log('[MW] URL:', window.location.href);
   console.log('[MW] ========================================');
@@ -80,14 +82,14 @@ export function generateModerationScript(config: InjectionConfig): string {
   const CONFIG = {
     sensitivity: ${config.sensitivity},
     blurStrength: ${config.blurStrength},
-    softBlurStrength: 8, // NEW: Soft blur for semantic delay
+    softBlurStrength: 8, // Soft blur for semantic delay
     enabled: ${config.enabled},
     forcedBlur: ${config.forcedBlur || false},
     failClosed: ${failClosed},
     debug: ${config.debug || false},
     nonce: '${nonce}',
-    minImageSize: 40,
-    minImageSizeYouTube: 60, // NEW: Skip tiny images on YouTube (avatars/icons)
+    minImageSize: 50, // Minimum image dimension (fail-open below this)
+    semanticDelayMs: 150, // Delay before applying blur
     scanDelay: 50,
     batchSize: 5,
     batchDelay: 100,
@@ -117,24 +119,27 @@ export function generateModerationScript(config: InjectionConfig): string {
   
   const state = {
     scanned: new Set(),
-    pending: new Map(), // itemId -> { element, src, sourceType, requestId, timestamp, state }
+    pending: new Map(), // itemId -> { element, src, sourceType, requestId, timestamp, state, blurTimer }
     pendingRequests: new Map(), // requestId -> { items, timestamp, timeoutId, state }
     blurred: new Set(),
-    revealed: new Set(),
+    revealed: new Set(), // Tracks URLs that user has manually revealed
     elements: new Map(), // itemId -> element
+    viewportObserver: null, // IntersectionObserver for viewport optimization
     stats: {
       imgTags: 0,
       bgImages: 0,
       videoPosters: 0,
       shadowDom: 0,
       skipped: 0,
-      skippedTiny: 0, // NEW: Track tiny image skips
+      skippedTiny: 0,
+      skippedViewport: 0,
       blurred: 0,
       timeouts: 0,
       errors: 0,
       requestsSent: 0,
       responsesReceived: 0,
       nonceRejected: 0,
+      semanticDelaySaved: 0, // Times we avoided blur due to fast safe result
     },
   };
 
@@ -187,21 +192,43 @@ export function generateModerationScript(config: InjectionConfig): string {
     return null;
   }
 
-  // ==================== VISIBILITY CHECK ====================
+  // ==================== SIZE & VISIBILITY CHECK ====================
 
-  function isElementVisible(element) {
+  /**
+   * Get element dimensions
+   */
+  function getElementDimensions(element) {
     try {
       const rect = element.getBoundingClientRect();
-      const width = rect.width || element.offsetWidth || 0;
-      const height = rect.height || element.offsetHeight || 0;
+      const width = rect.width || element.naturalWidth || element.offsetWidth || 0;
+      const height = rect.height || element.naturalHeight || element.offsetHeight || 0;
+      return { width, height };
+    } catch (e) {
+      return { width: 0, height: 0 };
+    }
+  }
+
+  /**
+   * Check if image is too small (fail-open for avatars/icons)
+   * Images smaller than 50x50 are skipped
+   */
+  function isTinyImage(element) {
+    const { width, height } = getElementDimensions(element);
+    return width < CONFIG.minImageSize || height < CONFIG.minImageSize;
+  }
+
+  /**
+   * Check if element is visible in or near viewport
+   */
+  function isElementVisible(element) {
+    try {
+      const { width, height } = getElementDimensions(element);
       
-      // NEW: Use platform-specific minimum size
-      const minSize = IS_YOUTUBE ? CONFIG.minImageSizeYouTube : CONFIG.minImageSize;
-      
-      if (width < minSize || height < minSize) {
+      if (width < CONFIG.minImageSize || height < CONFIG.minImageSize) {
         return false;
       }
       
+      const rect = element.getBoundingClientRect();
       const buffer = 300;
       return (
         rect.top < window.innerHeight + buffer &&
@@ -214,28 +241,16 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
   }
 
-  // NEW: Check if image is too small (for YouTube skip)
-  function isTinyImage(element) {
-    if (!IS_YOUTUBE) return false;
-    
-    try {
-      const rect = element.getBoundingClientRect();
-      const width = rect.width || element.naturalWidth || element.offsetWidth || 0;
-      const height = rect.height || element.naturalHeight || element.offsetHeight || 0;
-      
-      // Skip if either dimension is less than 60px (avatars, icons)
-      if (width < 60 || height < 60) {
-        return true;
-      }
-    } catch (e) {}
-    return false;
-  }
-
   // ==================== BLUR MANAGEMENT ====================
 
-  // NEW: Apply soft blur (semantic delay) - light blur while waiting for result
+  /**
+   * Apply soft blur (semantic delay) - light blur while waiting for result
+   * After CONFIG.semanticDelayMs, if no result, upgrade to full blur
+   */
   function applySoftBlur(element, src, itemId) {
+    // Check persistence: if user revealed this, don't blur
     if (state.revealed.has(src)) return;
+    if (element.dataset.mwRevealed === 'true') return;
     if (element.dataset.mwModerated === 'blurred') return; // Already hard blurred
     
     try {
@@ -252,10 +267,12 @@ export function generateModerationScript(config: InjectionConfig): string {
     } catch (e) {}
   }
 
-  // NEW: Remove soft blur (after safe result)
+  /**
+   * Remove all blur (after safe result)
+   */
   function removeSoftBlur(element, src) {
     try {
-      if (element.dataset.mwModerated === 'softblur') {
+      if (element.dataset.mwModerated === 'softblur' || element.classList.contains('mw-softblur')) {
         element.style.filter = 'none';
         element.dataset.mwModerated = 'safe';
         element.classList.remove('mw-softblur');
@@ -267,8 +284,13 @@ export function generateModerationScript(config: InjectionConfig): string {
     } catch (e) {}
   }
 
+  /**
+   * Apply hard blur (for unsafe content)
+   */
   function applyBlur(element, src, category, blurStrengthPx, itemId) {
+    // Check persistence
     if (state.revealed.has(src)) return;
+    if (element.dataset.mwRevealed === 'true') return;
     
     const blurPx = blurStrengthPx || CONFIG.blurStrength;
     
@@ -284,7 +306,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       state.blurred.add(src);
       state.stats.blurred++;
       
-      createRevealOverlay(element, src, category);
+      createRevealOverlay(element, src, category, itemId);
       console.log('[MW] applied blur [' + category + '] itemId=' + (itemId || 'N/A') + ':', src.substring(0, 60));
     } catch (e) {
       console.error('[MW] Failed to apply blur:', e.message);
@@ -296,7 +318,11 @@ export function generateModerationScript(config: InjectionConfig): string {
     try {
       element.style.filter = 'none';
       element.dataset.mwModerated = 'revealed';
+      element.dataset.mwRevealed = 'true'; // Persistence marker
       element.classList.remove('mw-softblur');
+      
+      // Add to revealed set for persistence
+      state.revealed.add(src);
       
       const overlay = element.parentElement?.querySelector('.mw-reveal-overlay');
       if (overlay) {
@@ -307,7 +333,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     } catch (e) {}
   }
 
-  function createRevealOverlay(element, src, category) {
+  function createRevealOverlay(element, src, category, itemId) {
     if (element.dataset.mwHasOverlay === 'true') return;
     
     const parent = element.parentElement;
@@ -366,38 +392,118 @@ export function generateModerationScript(config: InjectionConfig): string {
       e.stopPropagation();
       
       if (state.revealed.has(src)) {
+        // Re-blur
         state.revealed.delete(src);
-        applyBlur(element, src, category, CONFIG.blurStrength);
+        element.dataset.mwRevealed = 'false';
+        applyBlur(element, src, category, CONFIG.blurStrength, itemId);
         btn.textContent = '👁 Reveal';
         overlay.style.display = 'flex';
       } else {
+        // Reveal and trigger feedback
         state.revealed.add(src);
+        element.dataset.mwRevealed = 'true'; // Persistence
         removeBlur(element, src);
         btn.textContent = '🔒 Hide';
         
         // POST a label request message so the host can open the labeling modal
-        var itemId = element.dataset.mwItemId || 'unknown_' + Date.now();
+        var labelItemId = itemId || element.dataset.mwItemId || 'unknown_' + Date.now();
         var labelRequest = {
           type: 'gc-label-request',
           requestId: 'r_' + Date.now().toString(36),
-          itemId: itemId,
+          itemId: labelItemId,
           src: src,
           pageUrl: window.location.href,
           platform: PLATFORM,
           modelPrediction: { category: category, confidence: null }
         };
-        console.log('[MW] posting gc-label-request', itemId);
+        console.log('[MW] posting gc-label-request', labelItemId);
         window.postMessage(labelRequest, '*');
+        
         // Also post to parent if in iframe
         if (window.parent && window.parent !== window) {
           try { window.parent.postMessage(labelRequest, '*'); } catch(err) {}
         }
+        
+        // Show brief correction overlay
+        showCorrectionOverlay(element, src, category, labelItemId);
       }
     });
     
     overlay.appendChild(btn);
     parent.appendChild(overlay);
     element.dataset.mwHasOverlay = 'true';
+  }
+
+  /**
+   * Show brief "Correct?" overlay after reveal to encourage feedback
+   */
+  function showCorrectionOverlay(element, src, category, itemId) {
+    const parent = element.parentElement;
+    if (!parent) return;
+    
+    // Create a small non-intrusive overlay
+    const correctionDiv = document.createElement('div');
+    correctionDiv.className = 'mw-correction-overlay';
+    correctionDiv.style.cssText = [
+      'position: absolute',
+      'bottom: 8px',
+      'right: 8px',
+      'background: rgba(0, 0, 0, 0.85)',
+      'color: white',
+      'padding: 6px 10px',
+      'border-radius: 6px',
+      'font-size: 11px',
+      'display: flex',
+      'gap: 8px',
+      'align-items: center',
+      'z-index: 10000',
+      'transition: opacity 0.3s ease',
+    ].join(';');
+    
+    correctionDiv.innerHTML = \`
+      <span>Was this correct?</span>
+      <button class="mw-correct-btn" data-correct="true" style="background: #22c55e; border: none; padding: 4px 8px; border-radius: 4px; color: white; cursor: pointer;">👍</button>
+      <button class="mw-correct-btn" data-correct="false" style="background: #ef4444; border: none; padding: 4px 8px; border-radius: 4px; color: white; cursor: pointer;">👎</button>
+    \`;
+    
+    // Handle feedback clicks
+    correctionDiv.querySelectorAll('.mw-correct-btn').forEach(btn => {
+      btn.addEventListener('click', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        const isCorrect = this.dataset.correct === 'true';
+        
+        // Post correction event
+        var correctionEvent = {
+          type: 'gc-correction-feedback',
+          itemId: itemId,
+          src: src,
+          originalCategory: category,
+          wasCorrect: isCorrect,
+          timestamp: Date.now(),
+          platform: PLATFORM,
+        };
+        console.log('[MW] posting correction feedback:', isCorrect ? 'correct' : 'incorrect');
+        window.postMessage(correctionEvent, '*');
+        if (window.parent && window.parent !== window) {
+          try { window.parent.postMessage(correctionEvent, '*'); } catch(err) {}
+        }
+        
+        // Remove the overlay
+        correctionDiv.style.opacity = '0';
+        setTimeout(() => correctionDiv.remove(), 300);
+      });
+    });
+    
+    parent.appendChild(correctionDiv);
+    
+    // Auto-hide after 5 seconds
+    setTimeout(() => {
+      if (correctionDiv.parentElement) {
+        correctionDiv.style.opacity = '0';
+        setTimeout(() => correctionDiv.remove(), 300);
+      }
+    }, 5000);
   }
 
   // ==================== POSTMESSAGE PROTOCOL ====================
@@ -419,6 +525,8 @@ export function generateModerationScript(config: InjectionConfig): string {
         itemId: item.itemId,
         src: item.src,
         sourceType: item.sourceType,
+        width: item.width,
+        height: item.height,
       })),
       thresholds: THRESHOLDS[CONFIG.sensitivity] || THRESHOLDS[3],
       nonce: CONFIG.nonce,
@@ -455,7 +563,7 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   /**
    * Handle timeout for pending request
-   * FAIL-CLOSED: Apply blur to all items when timeout occurs
+   * FAIL-OPEN by default: Do NOT apply blur on timeout
    */
   function handleRequestTimeout(requestId) {
     const pendingRequest = state.pendingRequests.get(requestId);
@@ -467,7 +575,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     console.log('[MW] timeout', requestId, 'items=' + pendingRequest.items.length);
     state.stats.timeouts += pendingRequest.items.length;
     
-    // FAIL-CLOSED: Blur items on timeout if policy is enabled
+    // FAIL-OPEN: Remove soft blur, don't apply hard blur (unless failClosed explicitly set)
     if (CONFIG.failClosed && CONFIG.enabled && CONFIG.sensitivity > 0) {
       console.log('[MW] FAIL-CLOSED: Applying blur to timed-out items');
       pendingRequest.items.forEach(item => {
@@ -476,15 +584,16 @@ export function generateModerationScript(config: InjectionConfig): string {
           applyBlur(element, item.src, 'timeout', CONFIG.blurStrength, item.itemId);
         }
         state.pending.delete(item.itemId);
-        // Add to scanned so we don't retry immediately
         state.scanned.add(item.src);
       });
     } else {
-      // Mark items as failed but don't blur - also remove soft blur
+      // FAIL-OPEN: Remove soft blur, mark as safe
+      console.log('[MW] FAIL-OPEN: Removing soft blur for timed-out items');
       pendingRequest.items.forEach(item => {
         const element = state.elements.get(item.itemId);
         if (element && element.isConnected) {
           removeSoftBlur(element, item.src);
+          element.dataset.mwModerated = 'timeout-safe';
         }
         state.pending.delete(item.itemId);
         // Don't add to scanned so they can be retried later
@@ -525,22 +634,38 @@ export function generateModerationScript(config: InjectionConfig): string {
     console.log('[MW] received result', requestId, 'count=' + results.length);
     
     results.forEach(result => {
-      const { itemId, src, shouldBlur, category, confidence } = result;
+      const { itemId, src, shouldBlur, category, confidence, reason } = result;
       
-      console.log('[MW] scan result itemId=' + itemId, 'src=' + (src || '').substring(0, 50), 'blur=' + shouldBlur, 'cat=' + category);
+      console.log('[MW] scan result itemId=' + itemId, 'src=' + (src || '').substring(0, 50), 'blur=' + shouldBlur, 'cat=' + category, 'reason=' + (reason || ''));
       
       // Find the element for this item
       const element = state.elements.get(itemId);
+      const pendingItem = state.pending.get(itemId);
+      
+      // Clear any pending blur timer (semantic delay)
+      if (pendingItem && pendingItem.blurTimer) {
+        clearTimeout(pendingItem.blurTimer);
+      }
+      
       state.pending.delete(itemId);
       state.scanned.add(src);
       
-      // Handle errors with fail-closed if enabled
+      // Check if result came fast enough to skip blur (semantic delay saved)
+      const wasInSoftBlur = element && element.dataset.mwModerated === 'softblur';
+      
+      // FAIL-OPEN: Handle errors gracefully
       const isError = category === 'error' || category === 'timeout';
       let shouldApplyBlur = shouldBlur;
       
-      if (isError && CONFIG.failClosed && CONFIG.enabled && CONFIG.sensitivity > 0) {
-        shouldApplyBlur = true;
-        console.log('[MW] FAIL-CLOSED: Error result, applying blur');
+      if (isError) {
+        // FAIL-OPEN: Don't blur on error (unless failClosed explicitly set)
+        if (CONFIG.failClosed && CONFIG.enabled && CONFIG.sensitivity > 0) {
+          shouldApplyBlur = true;
+          console.log('[MW] FAIL-CLOSED: Error result, applying blur');
+        } else {
+          shouldApplyBlur = false;
+          console.log('[MW] FAIL-OPEN: Error result, not blurring');
+        }
       }
       
       // Apply blur based on result or forced blur mode
@@ -551,8 +676,11 @@ export function generateModerationScript(config: InjectionConfig): string {
           // Apply strong blur
           applyBlur(element, src, category || 'flagged', CONFIG.blurStrength, itemId);
         } else {
-          // NEW: Remove soft blur if result is safe
+          // Remove soft blur if result is safe
           removeSoftBlur(element, src);
+          if (wasInSoftBlur && !finalBlur) {
+            state.stats.semanticDelaySaved++;
+          }
         }
       }
       
@@ -577,7 +705,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       // Images
       document.querySelectorAll('img').forEach(img => {
         if ((img.src === src || img.dataset.mwOrigSrc === src) && !state.revealed.has(src)) {
-          if (img.dataset.mwModerated !== 'blurred') {
+          if (img.dataset.mwModerated !== 'blurred' && img.dataset.mwRevealed !== 'true') {
             applyBlur(img, src, category, blurStrengthPx);
           }
         }
@@ -586,7 +714,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       // Video posters
       document.querySelectorAll('video').forEach(video => {
         if ((video.poster === src || video.dataset.mwOrigPoster === src) && !state.revealed.has(src)) {
-          if (video.dataset.mwModerated !== 'blurred') {
+          if (video.dataset.mwModerated !== 'blurred' && video.dataset.mwRevealed !== 'true') {
             applyBlur(video, src, category, blurStrengthPx);
           }
         }
@@ -595,7 +723,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       // Background images
       document.querySelectorAll('[data-mw-bg-src]').forEach(el => {
         if (el.dataset.mwBgSrc === src && !state.revealed.has(src)) {
-          if (el.dataset.mwModerated !== 'blurred') {
+          if (el.dataset.mwModerated !== 'blurred' && el.dataset.mwRevealed !== 'true') {
             applyBlur(el, src, category, blurStrengthPx);
           }
         }
@@ -603,7 +731,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     } catch (e) {}
   }
 
-  // NEW: Find and remove soft blur from all elements matching a src
+  /**
+   * Find and remove soft blur from all elements matching a src
+   */
   function findAndRemoveSoftBlur(src) {
     try {
       document.querySelectorAll('[data-mw-src="' + src + '"]').forEach(el => {
@@ -658,17 +788,22 @@ export function generateModerationScript(config: InjectionConfig): string {
       return false;
     }
     
-    // NEW: Skip tiny images on YouTube (avatars, icons)
-    if (IS_YOUTUBE && isTinyImage(element)) {
+    // FAIL-OPEN: Skip tiny images (< 50x50)
+    if (isTinyImage(element)) {
       state.stats.skippedTiny++;
       if (CONFIG.debug) {
-        console.log('[MW] skipped tiny YouTube image:', url.substring(0, 50));
+        console.log('[MW] skipped tiny image (fail-open):', url.substring(0, 50));
       }
       return false;
     }
     
     // Skip already processed
     if (state.scanned.has(url)) {
+      return false;
+    }
+    
+    // Skip if already revealed by user (persistence)
+    if (state.revealed.has(url) || element.dataset.mwRevealed === 'true') {
       return false;
     }
     
@@ -680,27 +815,44 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     
     const itemId = generateItemId();
+    const { width, height } = getElementDimensions(element);
     
     // Store element reference
     state.elements.set(itemId, element);
+    
+    // SEMANTIC DELAY: Apply soft blur immediately, then wait for result
+    // If result comes within semanticDelayMs as "safe", blur is never applied
+    if (CONFIG.enabled && CONFIG.sensitivity > 0) {
+      applySoftBlur(element, url, itemId);
+    }
+    
+    // Set up a timer to upgrade to hard blur if no result within semanticDelayMs
+    // (This is a secondary safeguard; the main timeout is CONFIG.requestTimeout)
+    const blurTimer = setTimeout(() => {
+      const pending = state.pending.get(itemId);
+      if (pending && pending.state === 'pending') {
+        // Still pending after semantic delay - soft blur remains
+        // Hard blur will only be applied when result comes back as unsafe
+        // or on final timeout (if failClosed is true)
+      }
+    }, CONFIG.semanticDelayMs);
+    
     state.pending.set(itemId, {
       element: element,
       src: url,
       sourceType: sourceType,
       timestamp: Date.now(),
       state: 'pending',
+      blurTimer: blurTimer,
     });
     
-    // NEW: Apply soft blur immediately on YouTube (semantic delay)
-    if (IS_YOUTUBE && CONFIG.enabled && CONFIG.sensitivity > 0) {
-      applySoftBlur(element, url, itemId);
-    }
-    
-    // Add to batch queue
+    // Add to batch queue with dimensions
     batchQueue.push({
       itemId: itemId,
       src: url,
       sourceType: sourceType,
+      width: width,
+      height: height,
     });
     
     // Schedule batch flush
@@ -709,10 +861,46 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     
     if (CONFIG.debug) {
-      console.log('[MW] queued [' + sourceType + '] itemId=' + itemId + ':', url.substring(0, 70));
+      console.log('[MW] queued [' + sourceType + '] itemId=' + itemId + ' (' + width + 'x' + height + '):', url.substring(0, 70));
     }
     
     return true;
+  }
+
+  // ==================== VIEWPORT OPTIMIZATION (IntersectionObserver) ====================
+
+  /**
+   * Set up IntersectionObserver to only scan images currently visible
+   */
+  function setupViewportObserver() {
+    if (!('IntersectionObserver' in window)) return null;
+    
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          // Element is now visible - scan it
+          const element = entry.target;
+          if (element.dataset.mwViewportQueued !== 'true') {
+            element.dataset.mwViewportQueued = 'true';
+            setTimeout(() => scanNode(element), 30);
+          }
+        }
+      });
+    }, { 
+      rootMargin: '200px',
+      threshold: 0.01 
+    });
+    
+    return observer;
+  }
+
+  /**
+   * Add element to viewport observer
+   */
+  function observeForViewport(element) {
+    if (state.viewportObserver && element.nodeType === 1) {
+      state.viewportObserver.observe(element);
+    }
   }
 
   // ==================== SCANNING FUNCTIONS ====================
@@ -851,6 +1039,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       mutations.forEach(mutation => {
         mutation.addedNodes.forEach(node => {
           if (node.nodeType !== 1) return;
+          // Add to viewport observer for lazy scanning
+          observeForViewport(node);
           setTimeout(() => scanNode(node), CONFIG.scanDelay);
         });
         
@@ -887,33 +1077,6 @@ export function generateModerationScript(config: InjectionConfig): string {
       attributes: true,
       attributeFilter: ['src', 'srcset', 'poster', 'data-src', 'data-lazy-src', 'data-thumb', 'style'],
     });
-    
-    return observer;
-  }
-
-  // ==================== INTERSECTION OBSERVER ====================
-
-  function setupIntersectionObserver() {
-    if (!('IntersectionObserver' in window)) return;
-    
-    const observer = new IntersectionObserver((entries) => {
-      entries.forEach(entry => {
-        if (entry.isIntersecting) {
-          setTimeout(() => scanNode(entry.target), 30);
-        }
-      });
-    }, { rootMargin: '200px' });
-    
-    document.querySelectorAll('img, video').forEach(el => {
-      observer.observe(el);
-    });
-    
-    const mutationObs = new MutationObserver(() => {
-      document.querySelectorAll('img, video').forEach(el => {
-        observer.observe(el);
-      });
-    });
-    mutationObs.observe(document.body, { childList: true, subtree: true });
     
     return observer;
   }
@@ -998,6 +1161,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       .mw-softblur {
         transition: filter 0.2s ease !important;
       }
+      .mw-correction-overlay {
+        pointer-events: auto !important;
+      }
       ytd-thumbnail, ytd-rich-item-renderer, yt-img-shadow, #shorts-player,
       [class*="DivVideoContainer"], [class*="DivPlayerContainer"], .video-card {
         position: relative !important;
@@ -1009,7 +1175,7 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   // Set up observers
   setupMutationObserver(document.body);
-  setupIntersectionObserver();
+  state.viewportObserver = setupViewportObserver();
 
   // Initial scan
   if (document.readyState === 'complete') {
@@ -1049,12 +1215,12 @@ export function generateModerationScript(config: InjectionConfig): string {
     state: state,
     config: CONFIG,
     platform: PLATFORM,
-    isYouTube: IS_YOUTUBE,
     scanAll: scanFullPage,
     stats: () => state.stats,
     pending: () => state.pending,
     pendingRequests: () => state.pendingRequests,
     batchQueue: () => batchQueue,
+    revealed: () => state.revealed,
     setForcedBlur: (enabled) => { 
       CONFIG.forcedBlur = enabled; 
       console.log('[MW] Forced blur:', enabled);
@@ -1063,68 +1229,9 @@ export function generateModerationScript(config: InjectionConfig): string {
         scanFullPage();
       }
     },
-    setFailClosed: (enabled) => {
-      CONFIG.failClosed = enabled;
-      console.log('[MW] Fail-closed:', enabled);
-    },
-    setDebug: (enabled) => { CONFIG.debug = enabled; console.log('[MW] Debug mode:', enabled); },
-    getNonce: () => CONFIG.nonce,
   };
 
-  console.log('[MW] Moderation fully initialized');
-  console.log('[MW] Debug API at window.__MW_DEBUG__');
-  console.log('[MW] Toggle forced blur: window.__MW_DEBUG__.setForcedBlur(true)');
-  console.log('[MW] Toggle fail-closed: window.__MW_DEBUG__.setFailClosed(true/false)');
+  console.log('[MW] Initialization complete. Call window.__MW_DEBUG__.stats() for stats.');
 })();
-`;
-}
-
-/**
- * Generate CSS styles for moderation UI (legacy export)
- */
-export function generateModerationStyles(): string {
-  return `
-<style id="mw-moderation-styles">
-  .mw-reveal-overlay {
-    position: absolute !important;
-    inset: 0 !important;
-    display: flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    background: rgba(0, 0, 0, 0.25) !important;
-    z-index: 9998 !important;
-    pointer-events: auto !important;
-  }
-  
-  .mw-reveal-btn {
-    background: rgba(0, 0, 0, 0.9) !important;
-    color: white !important;
-    border: 2px solid rgba(255, 255, 255, 0.4) !important;
-    padding: 10px 20px !important;
-    border-radius: 8px !important;
-    cursor: pointer !important;
-    font-size: 14px !important;
-    font-weight: bold !important;
-    z-index: 9999 !important;
-  }
-  
-  [data-mw-moderated="blurred"] {
-    transition: filter 0.3s ease !important;
-  }
-  
-  .mw-softblur {
-    transition: filter 0.2s ease !important;
-  }
-  
-  ytd-thumbnail,
-  ytd-rich-item-renderer,
-  yt-img-shadow,
-  #shorts-player,
-  [class*="DivVideoContainer"],
-  [class*="DivPlayerContainer"],
-  .video-card {
-    position: relative !important;
-  }
-</style>
 `;
 }

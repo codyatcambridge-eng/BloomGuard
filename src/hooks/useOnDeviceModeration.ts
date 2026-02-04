@@ -13,7 +13,10 @@ export type ModerationReason =
   | 'threshold_safe'
   | 'fail_open_timeout' 
   | 'fail_open_error'
-  | 'model_not_ready';
+  | 'fail_open_tiny'
+  | 'model_not_ready'
+  | 'human_centric_safe'
+  | 'swimwear_detected';
 
 export interface ModerationResult {
   isExplicit: boolean;
@@ -23,6 +26,13 @@ export interface ModerationResult {
   confidence: number;
   inferenceTime: number;
   reason: ModerationReason;
+  /** Detected signals for debugging */
+  signals?: {
+    hasHumanBody: boolean;
+    hasSkinExposure: boolean;
+    hasClothing: boolean;
+    skinDensity: number;
+  };
 }
 
 export interface AIThresholds {
@@ -31,15 +41,41 @@ export interface AIThresholds {
   hentai: number;
 }
 
-// NEW: Raised thresholds to reduce false positives
+/**
+ * Multi-parameter thresholds for refined detection
+ */
 export const DEFAULT_THRESHOLDS: AIThresholds = { 
   porn: 0.60, 
   sexy: 0.75, 
   hentai: 0.60 
 };
 
-// NEW: Fast timeout for fail-open behavior
+/**
+ * Neutral fast-pass threshold - if Neutral > this, immediately return safe
+ */
+const NEUTRAL_FASTPASS_THRESHOLD = 0.85;
+
+/**
+ * Swimwear/shirtless detection threshold - Sexy must exceed this
+ * AND skin-density must be high (no Clothing signal)
+ */
+const SWIMWEAR_SEXY_THRESHOLD = 0.55;
+
+/**
+ * Minimum skin density to trigger swimwear detection
+ * This is estimated from lack of "Neutral" + "Drawing" signals
+ */
+const MIN_SKIN_DENSITY_FOR_SWIMWEAR = 0.35;
+
+/**
+ * Fast timeout for fail-open behavior (ms)
+ */
 const FAST_TIMEOUT_MS = 800;
+
+/**
+ * Minimum image dimensions - smaller images fail-open
+ */
+const MIN_IMAGE_DIMENSION = 60;
 
 type ModelLoadingState = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -52,22 +88,61 @@ const loadModel = async (): Promise<nsfwjs.NSFWJS> => {
   if (globalModelPromise) return globalModelPromise;
 
   globalModelPromise = (async () => {
-    // Use the quantized model for faster loading and inference
     await tf.ready();
-    
-    // Set backend to WebGL for GPU acceleration
     await tf.setBackend('webgl');
-    
-    // Load the default NSFWJS model from the official URL
-    // This uses the MobileNetV2 model which is ~2MB and runs fast
     const model = await nsfwjs.load();
-    
     globalModel = model;
     return model;
   })();
 
   return globalModelPromise;
 };
+
+/**
+ * Estimate "signals" from NSFWJS predictions
+ * Since NSFWJS doesn't directly output body parts, we infer from class distributions
+ */
+function estimateSignals(predictions: ModerationPrediction[]): {
+  hasHumanBody: boolean;
+  hasSkinExposure: boolean;
+  hasClothing: boolean;
+  skinDensity: number;
+} {
+  const predMap: Record<string, number> = {};
+  predictions.forEach(p => {
+    predMap[p.className.toLowerCase()] = p.probability;
+  });
+
+  const porn = predMap['porn'] || 0;
+  const sexy = predMap['sexy'] || 0;
+  const hentai = predMap['hentai'] || 0;
+  const neutral = predMap['neutral'] || 0;
+  const drawing = predMap['drawing'] || 0;
+
+  // Infer human body presence from sexy/porn scores
+  // If Sexy or Porn > 0.15, likely has human body
+  const hasHumanBody = (sexy > 0.15 || porn > 0.15);
+
+  // Infer skin exposure from sexy score
+  // Higher sexy = more skin exposure
+  const hasSkinExposure = sexy > 0.25;
+
+  // Infer clothing presence from neutral score
+  // Higher neutral = more likely clothed
+  const hasClothing = neutral > 0.50;
+
+  // Skin density: inverse of (neutral + drawing), clamped
+  // Higher = more exposed skin
+  const clothingSignal = neutral + drawing;
+  const skinDensity = Math.max(0, Math.min(1, 1 - clothingSignal));
+
+  return {
+    hasHumanBody,
+    hasSkinExposure,
+    hasClothing,
+    skinDensity,
+  };
+}
 
 export const useOnDeviceModeration = () => {
   const [modelState, setModelState] = useState<ModelLoadingState>('idle');
@@ -81,14 +156,12 @@ export const useOnDeviceModeration = () => {
     let mounted = true;
 
     const init = async () => {
-      // Prevent multiple init attempts
       if (initAttempted.current) return;
       initAttempted.current = true;
       
       setModelState('loading');
       
       try {
-        // Check if WebGL is available
         const canvas = document.createElement('canvas');
         const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
         if (!gl) {
@@ -107,13 +180,6 @@ export const useOnDeviceModeration = () => {
           setError(errorMsg);
           setModelState('error');
           console.error('[OnDeviceAI] Failed to load model:', err);
-          
-          // Log specific failure reason
-          if (errorMsg.includes('WebGL')) {
-            console.warn('[OnDeviceAI] WebGL not available - image moderation disabled');
-          } else if (errorMsg.includes('fetch')) {
-            console.warn('[OnDeviceAI] Could not fetch model - image moderation disabled');
-          }
         }
       }
     };
@@ -122,7 +188,9 @@ export const useOnDeviceModeration = () => {
     return () => { mounted = false; };
   }, []);
 
-  // Classify a single image with FAIL-OPEN behavior
+  /**
+   * Classify a single image with multi-parameter conditional logic and FAIL-OPEN behavior
+   */
   const classifyImage = useCallback(async (
     imageSource: HTMLImageElement | HTMLCanvasElement | string,
     thresholds: AIThresholds = DEFAULT_THRESHOLDS
@@ -138,7 +206,7 @@ export const useOnDeviceModeration = () => {
     }
 
     const startTime = performance.now();
-    const LOAD_TIMEOUT = 8000; // 8 second timeout for image loading
+    const LOAD_TIMEOUT = 8000;
 
     try {
       let image: HTMLImageElement | HTMLCanvasElement;
@@ -159,16 +227,15 @@ export const useOnDeviceModeration = () => {
           img.crossOrigin = 'anonymous';
           
           const timeout = setTimeout(() => {
-            img.src = ''; // Cancel load
+            img.src = '';
             reject(new Error('Image load timeout'));
           }, LOAD_TIMEOUT);
           
           img.onload = () => {
             clearTimeout(timeout);
-            // Validate image dimensions
-            if (img.width < 10 || img.height < 10) {
-              reject(new Error('Image too small'));
-              return;
+            // FAIL-OPEN: Skip tiny images (< 60x60)
+            if (img.width < MIN_IMAGE_DIMENSION || img.height < MIN_IMAGE_DIMENSION) {
+              reject(new Error('Image too small - fail open'));
             }
             resolve(img);
           };
@@ -182,9 +249,25 @@ export const useOnDeviceModeration = () => {
         });
       } else {
         image = imageSource;
+        
+        // Check dimensions for HTMLImageElement
+        if (image instanceof HTMLImageElement) {
+          if (image.naturalWidth < MIN_IMAGE_DIMENSION || image.naturalHeight < MIN_IMAGE_DIMENSION) {
+            console.debug('[OnDeviceAI] fail_open_tiny: dimensions', image.naturalWidth, 'x', image.naturalHeight);
+            return {
+              isExplicit: false,
+              shouldBlur: false,
+              predictions: [],
+              dominantClass: 'Unknown',
+              confidence: 0,
+              inferenceTime: performance.now() - startTime,
+              reason: 'fail_open_tiny',
+            };
+          }
+        }
       }
 
-      // NEW: Run classification with FAST timeout (800ms) - FAIL-OPEN
+      // Run classification with FAST timeout (800ms) - FAIL-OPEN
       const classifyPromise = modelRef.current.classify(image);
       const timeoutPromise = new Promise<never>((_, reject) => {
         setTimeout(() => reject(new Error('Classification timeout')), FAST_TIMEOUT_MS);
@@ -193,7 +276,12 @@ export const useOnDeviceModeration = () => {
       const predictions = await Promise.race([classifyPromise, timeoutPromise]);
       const inferenceTime = performance.now() - startTime;
 
-      // Build prediction map (normalize to lowercase)
+      // Build prediction map and formatted predictions
+      const formattedPredictions: ModerationPrediction[] = predictions.map(p => ({
+        className: p.className,
+        probability: p.probability,
+      }));
+
       const predMap: Record<string, number> = {};
       predictions.forEach(p => {
         predMap[p.className.toLowerCase()] = p.probability;
@@ -204,22 +292,19 @@ export const useOnDeviceModeration = () => {
       const hentaiScore = predMap['hentai'] || 0;
       const neutralScore = predMap['neutral'] || 0;
 
-      // NEW: Neutral fast-pass - if Neutral >= 0.90, return safe immediately
-      if (neutralScore >= 0.90) {
+      // ==== PRIMARY FILTER: Neutral Fast-pass ====
+      // If Neutral > 0.85, immediately return safe
+      if (neutralScore > NEUTRAL_FASTPASS_THRESHOLD) {
         const result: ModerationResult = {
           isExplicit: false,
           shouldBlur: false,
-          predictions: predictions.map(p => ({
-            className: p.className,
-            probability: p.probability,
-          })),
+          predictions: formattedPredictions,
           dominantClass: 'Neutral',
           confidence: neutralScore,
           inferenceTime,
           reason: 'neutral_fastpass',
         };
 
-        // Cache result
         if (cacheKey) {
           imageCache.current.set(cacheKey, result);
           limitCache();
@@ -229,9 +314,68 @@ export const useOnDeviceModeration = () => {
         return result;
       }
 
-      // Check against raised thresholds
+      // ==== Estimate signals for human-centric logic ====
+      const signals = estimateSignals(formattedPredictions);
+
+      // ==== HUMAN-CENTRIC PARAMETERS ====
+      // Only trigger 'unsafe' if Sexy/Porn AND human body/skin detected
+      const hasExplicitScore = pornScore > thresholds.porn || sexyScore > thresholds.sexy || hentaiScore > thresholds.hentai;
+      const hasHumanSignal = signals.hasHumanBody || signals.hasSkinExposure;
+
+      // If no human signal detected but has explicit score, it's likely a false positive
+      // (e.g., abstract art, product photos, etc.)
+      if (hasExplicitScore && !hasHumanSignal) {
+        const result: ModerationResult = {
+          isExplicit: false,
+          shouldBlur: false,
+          predictions: formattedPredictions,
+          dominantClass: formattedPredictions[0]?.className || 'Unknown',
+          confidence: formattedPredictions[0]?.probability || 0,
+          inferenceTime,
+          reason: 'human_centric_safe',
+          signals,
+        };
+
+        if (cacheKey) {
+          imageCache.current.set(cacheKey, result);
+          limitCache();
+        }
+
+        console.debug('[OnDeviceAI] human_centric_safe: no human body/skin signal detected');
+        return result;
+      }
+
+      // ==== SWIMWEAR/SHIRTLESS LOGIC ====
+      // If Sexy > 0.55 AND high skin-density (no clothing), mark as unsafe
+      const isSwimwearShirtless = 
+        sexyScore > SWIMWEAR_SEXY_THRESHOLD && 
+        signals.skinDensity >= MIN_SKIN_DENSITY_FOR_SWIMWEAR &&
+        !signals.hasClothing;
+
+      if (isSwimwearShirtless) {
+        const result: ModerationResult = {
+          isExplicit: false,
+          shouldBlur: true,
+          predictions: formattedPredictions,
+          dominantClass: 'Swimwear',
+          confidence: sexyScore,
+          inferenceTime,
+          reason: 'swimwear_detected',
+          signals,
+        };
+
+        if (cacheKey) {
+          imageCache.current.set(cacheKey, result);
+          limitCache();
+        }
+
+        console.debug('[OnDeviceAI] swimwear_detected: sexy=', sexyScore.toFixed(2), 'skinDensity=', signals.skinDensity.toFixed(2));
+        return result;
+      }
+
+      // ==== STANDARD THRESHOLD CHECK ====
       const isExplicit = pornScore > thresholds.porn || hentaiScore > thresholds.hentai;
-      const shouldBlur = isExplicit || sexyScore > thresholds.sexy;
+      const shouldBlur = (isExplicit || sexyScore > thresholds.sexy) && hasHumanSignal;
 
       // Find dominant class
       const sorted = [...predictions].sort((a, b) => b.probability - a.probability);
@@ -243,17 +387,14 @@ export const useOnDeviceModeration = () => {
       const result: ModerationResult = {
         isExplicit,
         shouldBlur,
-        predictions: predictions.map(p => ({
-          className: p.className,
-          probability: p.probability,
-        })),
+        predictions: formattedPredictions,
         dominantClass,
         confidence,
         inferenceTime,
         reason,
+        signals,
       };
 
-      // Cache result
       if (cacheKey) {
         imageCache.current.set(cacheKey, result);
         limitCache();
@@ -265,13 +406,17 @@ export const useOnDeviceModeration = () => {
       const errorMsg = err instanceof Error ? err.message : 'Unknown error';
       const inferenceTime = performance.now() - startTime;
       
-      // NEW: FAIL-OPEN - Return shouldBlur=false on any error or timeout
+      // FAIL-OPEN: Return shouldBlur=false on any error or timeout
+      const isTiny = errorMsg.includes('too small');
       const isTimeout = errorMsg.includes('timeout');
-      const reason: ModerationReason = isTimeout ? 'fail_open_timeout' : 'fail_open_error';
+      const reason: ModerationReason = isTiny 
+        ? 'fail_open_tiny' 
+        : isTimeout 
+          ? 'fail_open_timeout' 
+          : 'fail_open_error';
       
       console.debug(`[OnDeviceAI] ${reason}:`, errorMsg);
       
-      // Return a safe result instead of null for fail-open
       return {
         isExplicit: false,
         shouldBlur: false,
@@ -299,7 +444,6 @@ export const useOnDeviceModeration = () => {
   ): Promise<Map<string, ModerationResult>> => {
     const results = new Map<string, ModerationResult>();
     
-    // Process in parallel with concurrency limit
     const concurrency = 4;
     for (let i = 0; i < images.length; i += concurrency) {
       const batch = images.slice(i, i + concurrency);
