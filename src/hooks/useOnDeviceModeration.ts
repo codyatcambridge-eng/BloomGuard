@@ -45,9 +45,9 @@ export interface AIThresholds {
  * Multi-parameter thresholds for refined detection
  */
 export const DEFAULT_THRESHOLDS: AIThresholds = { 
-  porn: 0.15, 
-  sexy: 0.25, 
-  hentai: 0.15 
+  porn: 0.10, 
+  sexy: 0.20, 
+  hentai: 0.10 
 };
 
 /**
