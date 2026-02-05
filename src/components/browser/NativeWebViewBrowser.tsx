@@ -221,32 +221,243 @@ export const NativeWebViewBrowser = () => {
     try {
       await scriptExecutor(mainScript);
 
-      // YouTube-specific hardening: add a host-injected MutationObserver on document.body
-      // (calls into the already-injected script's rescan hooks)
+      // YouTube-specific hardening: Robust MutationObserver targeting specific YouTube selectors
+      // Detects .yt-core-image, ytd-thumbnail img, #thumbnail img and sends to ModerationBridge
       const ytObserverScript = `
         (function() {
+          'use strict';
           try {
-            if (window.__GC_YT_BODY_OBSERVER__) return 'ALREADY';
-            window.__GC_YT_BODY_OBSERVER__ = true;
+            if (window.__GC_YT_ROBUST_OBSERVER__) return 'ALREADY_INSTALLED';
+            window.__GC_YT_ROBUST_OBSERVER__ = true;
 
-            var run = function() {
+            // YouTube-specific selectors to target
+            var YT_SELECTORS = [
+              '.yt-core-image',
+              'ytd-thumbnail img',
+              '#thumbnail img',
+              'yt-img-shadow img',
+              'ytd-rich-item-renderer img',
+              'ytd-video-renderer img',
+              'ytd-compact-video-renderer img',
+              'ytd-grid-video-renderer img',
+              'img[src*="ytimg.com"]',
+              'img[src*="ggpht.com"]'
+            ];
+
+            // Track processed images to avoid duplicates
+            var processedSrcs = new Set();
+            var pendingQueue = [];
+            var flushTimer = null;
+
+            // Check if element is visible in viewport (with 300px buffer)
+            function isInViewport(el) {
               try {
-                if (typeof window.__MW_SCAN_YT__ === 'function') window.__MW_SCAN_YT__();
-              } catch (e) {}
-            };
+                var rect = el.getBoundingClientRect();
+                return (
+                  rect.top < window.innerHeight + 300 &&
+                  rect.bottom > -300 &&
+                  rect.left < window.innerWidth + 300 &&
+                  rect.right > -300 &&
+                  rect.width > 50 && rect.height > 50
+                );
+              } catch (e) { return false; }
+            }
 
-            var obs = new MutationObserver(function() {
-              run();
+            // Extract src from element
+            function getSrc(el) {
+              return el.src || el.dataset.src || el.dataset.lazySrc || el.getAttribute('data-src') || '';
+            }
+
+            // Queue image for moderation scan
+            function queueImage(el) {
+              var src = getSrc(el);
+              if (!src || src.startsWith('data:') && src.length < 500) return;
+              if (processedSrcs.has(src)) return;
+              if (el.dataset.mwYtQueued === 'true') return;
+              
+              // Mark as queued
+              el.dataset.mwYtQueued = 'true';
+              processedSrcs.add(src);
+              
+              // Add to pending queue with element reference
+              pendingQueue.push({ src: src, el: el });
+              
+              // Debounce flush
+              if (!flushTimer) {
+                flushTimer = setTimeout(flushQueue, 50);
+              }
+            }
+
+            // Flush queue - send to ModerationBridge via internal script
+            function flushQueue() {
+              flushTimer = null;
+              if (pendingQueue.length === 0) return;
+              
+              var items = pendingQueue.splice(0, 10); // Process 10 at a time
+              
+              console.log('[MW-YT-Observer] Flushing', items.length, 'YouTube images to scanner');
+              
+              // Trigger the main moderation script's scan on these elements
+              items.forEach(function(item) {
+                try {
+                  // Force rescan by clearing mwScanned flag
+                  if (item.el && item.el.dataset) {
+                    item.el.dataset.mwScanned = 'false';
+                  }
+                } catch (e) {}
+              });
+              
+              // Call the main scanner
+              if (typeof window.__MW_SCAN_YT__ === 'function') {
+                window.__MW_SCAN_YT__();
+              } else if (typeof window.__MW_SCAN_FULL__ === 'function') {
+                window.__MW_SCAN_FULL__();
+              }
+              
+              // Continue if more items
+              if (pendingQueue.length > 0) {
+                flushTimer = setTimeout(flushQueue, 100);
+              }
+            }
+
+            // Scan all YouTube images currently in DOM
+            function scanAllYouTubeImages() {
+              YT_SELECTORS.forEach(function(selector) {
+                try {
+                  document.querySelectorAll(selector).forEach(function(el) {
+                    if (el.tagName === 'IMG' && isInViewport(el)) {
+                      queueImage(el);
+                    }
+                  });
+                } catch (e) {}
+              });
+            }
+
+            // IntersectionObserver for viewport detection
+            var viewportObserver = null;
+            if ('IntersectionObserver' in window) {
+              viewportObserver = new IntersectionObserver(function(entries) {
+                entries.forEach(function(entry) {
+                  if (entry.isIntersecting) {
+                    var el = entry.target;
+                    if (el.tagName === 'IMG') {
+                      queueImage(el);
+                    }
+                  }
+                });
+              }, { rootMargin: '300px', threshold: 0.01 });
+            }
+
+            // Observe an element for viewport entry
+            function observeElement(el) {
+              if (viewportObserver && el.tagName === 'IMG') {
+                viewportObserver.observe(el);
+              }
+            }
+
+            // MutationObserver for DOM changes
+            var mutationObserver = new MutationObserver(function(mutations) {
+              var foundNewImages = false;
+              
+              mutations.forEach(function(mutation) {
+                // Check added nodes
+                mutation.addedNodes.forEach(function(node) {
+                  if (node.nodeType !== 1) return;
+                  
+                  var el = node;
+                  var tagName = el.tagName ? el.tagName.toUpperCase() : '';
+                  
+                  // Direct IMG element
+                  if (tagName === 'IMG') {
+                    observeElement(el);
+                    if (isInViewport(el)) {
+                      queueImage(el);
+                      foundNewImages = true;
+                    }
+                  }
+                  
+                  // YouTube container elements - scan their children
+                  if (tagName.startsWith('YTD-') || 
+                      tagName === 'YT-IMAGE' || 
+                      tagName === 'YT-IMG-SHADOW' ||
+                      el.id === 'thumbnail' ||
+                      el.classList.contains('yt-core-image')) {
+                    try {
+                      el.querySelectorAll('img').forEach(function(img) {
+                        observeElement(img);
+                        if (isInViewport(img)) {
+                          queueImage(img);
+                          foundNewImages = true;
+                        }
+                      });
+                    } catch (e) {}
+                  }
+                  
+                  // Generic: scan all img descendants
+                  try {
+                    el.querySelectorAll && el.querySelectorAll('img').forEach(function(img) {
+                      observeElement(img);
+                    });
+                  } catch (e) {}
+                });
+                
+                // Attribute changes (src, data-src)
+                if (mutation.type === 'attributes') {
+                  var target = mutation.target;
+                  var attr = mutation.attributeName;
+                  if (target.tagName === 'IMG' && (attr === 'src' || attr === 'data-src' || attr === 'srcset')) {
+                    // Reset processed state for this element
+                    target.dataset.mwYtQueued = 'false';
+                    target.dataset.mwScanned = 'false';
+                    var src = getSrc(target);
+                    if (src) processedSrcs.delete(src);
+                    if (isInViewport(target)) {
+                      queueImage(target);
+                      foundNewImages = true;
+                    }
+                  }
+                }
+              });
+              
+              // If new images found, also trigger a full YT scan after a delay
+              if (foundNewImages) {
+                setTimeout(scanAllYouTubeImages, 200);
+              }
             });
 
+            // Start observing
             if (document.body) {
-              obs.observe(document.body, { childList: true, subtree: true });
-              // Kick once immediately
-              run();
+              mutationObserver.observe(document.body, {
+                childList: true,
+                subtree: true,
+                attributes: true,
+                attributeFilter: ['src', 'data-src', 'srcset', 'data-lazy-src']
+              });
+              
+              // Initial scan
+              scanAllYouTubeImages();
+              
+              // Periodic rescans for lazy-loaded content
+              setInterval(scanAllYouTubeImages, 2000);
+              
+              // Scroll handler for infinite scroll
+              var scrollTimer = null;
+              var lastScrollY = 0;
+              window.addEventListener('scroll', function() {
+                var delta = Math.abs(window.scrollY - lastScrollY);
+                if (delta > 100) {
+                  lastScrollY = window.scrollY;
+                  if (scrollTimer) clearTimeout(scrollTimer);
+                  scrollTimer = setTimeout(scanAllYouTubeImages, 100);
+                }
+              }, { passive: true });
+              
+              console.log('[MW-YT-Observer] Robust YouTube MutationObserver installed');
               return 'OK';
             }
             return 'NO_BODY';
           } catch (e) {
+            console.error('[MW-YT-Observer] Error:', e);
             return 'ERR:' + (e && e.message ? e.message : 'unknown');
           }
         })();
