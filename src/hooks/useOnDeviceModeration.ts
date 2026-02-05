@@ -8,14 +8,12 @@ export interface ModerationPrediction {
 }
 
 export type ModerationReason = 
-  | 'neutral_fastpass' 
   | 'threshold_hit' 
   | 'threshold_safe'
   | 'fail_open_timeout' 
   | 'fail_open_error'
   | 'fail_open_tiny'
   | 'model_not_ready'
-  | 'human_centric_safe'
   | 'swimwear_detected';
 
 export interface ModerationResult {
@@ -50,10 +48,6 @@ export const DEFAULT_THRESHOLDS: AIThresholds = {
   hentai: 0.10 
 };
 
-/**
- * Neutral fast-pass threshold - if Neutral > this, immediately return safe
- */
-const NEUTRAL_FASTPASS_THRESHOLD = 0.85;
 
 /**
  * Swimwear/shirtless detection threshold - Sexy must exceed this
@@ -292,27 +286,9 @@ export const useOnDeviceModeration = () => {
       const hentaiScore = predMap['hentai'] || 0;
       const neutralScore = predMap['neutral'] || 0;
 
-      // ==== PRIMARY FILTER: Neutral Fast-pass ====
-      // If Neutral > 0.85, immediately return safe
-      if (neutralScore > NEUTRAL_FASTPASS_THRESHOLD) {
-        const result: ModerationResult = {
-          isExplicit: false,
-          shouldBlur: false,
-          predictions: formattedPredictions,
-          dominantClass: 'Neutral',
-          confidence: neutralScore,
-          inferenceTime,
-          reason: 'neutral_fastpass',
-        };
+      // NOTE: Neutral fast-pass removed (YouTube zero-tolerance)
+      // If a threshold is hit, we rely on strict threshold checks below.
 
-        if (cacheKey) {
-          imageCache.current.set(cacheKey, result);
-          limitCache();
-        }
-
-        console.debug('[OnDeviceAI] neutral_fastpass:', neutralScore.toFixed(2));
-        return result;
-      }
 
       // ==== Estimate signals for human-centric logic ====
       const signals = estimateSignals(formattedPredictions);
