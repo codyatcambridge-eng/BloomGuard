@@ -90,7 +90,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     nonce: '${nonce}',
     minImageSize: 60, // Minimum image dimension (fail-open below this - 60x60)
     semanticDelayMs: 200, // Delay before applying blur (200ms)
-    neutralFastPass: 0.85, // If Neutral > this, skip blur entirely
+    // Neutral fast-pass removed for strict/YouTube mode
     anatomicalThreshold: 0.60, // Sexy/Porn must be > this to maintain blur
     scanDelay: 50,
     batchSize: 5,
@@ -295,7 +295,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (state.revealed.has(src)) return;
     if (element.dataset.mwRevealed === 'true') return;
     
-    const blurPx = blurStrengthPx || CONFIG.blurStrength || 30;
+    const blurPx = (IS_YOUTUBE ? 40 : (blurStrengthPx || CONFIG.blurStrength || 30));
     
     try {
       // Force blur with !important for iOS WebKit
@@ -662,22 +662,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       // Check if result came fast enough to skip blur (semantic delay saved)
       const wasInSoftBlur = element && element.dataset.mwModerated === 'softblur';
       
-      // ======== HIGH-CONFIDENCE BYPASS ========
-      // If Neutral > 0.85 (or reason is 'neutral_fastpass'), immediately clear and skip
-      if (reason === 'neutral_fastpass' || (category === 'neutral' && confidence > CONFIG.neutralFastPass)) {
-        console.log('[MW] HIGH-CONFIDENCE BYPASS: Neutral=' + (confidence || 0).toFixed(2) + ' > ' + CONFIG.neutralFastPass);
-        if (element && element.isConnected) {
-          removeSoftBlur(element, src);
-          element.dataset.mwModerated = 'safe-highconf';
-          // Mark as never re-scan
-          element.dataset.mwHighConfSafe = 'true';
-          if (wasInSoftBlur) {
-            state.stats.semanticDelaySaved++;
-          }
-        }
-        findAndRemoveSoftBlur(src);
-        return;
-      }
+      // ======== Neutral fast-pass removed (strict mode) ========
+
       
       // ======== ANATOMICAL LOGIC ========
       // Only maintain blur if Sexy or Porn > 0.60
@@ -1073,12 +1059,14 @@ export function generateModerationScript(config: InjectionConfig): string {
    */
   const YOUTUBE_SELECTORS = [
     'ytd-thumbnail',
+    'ytd-thumbnail img',
     'ytd-rich-item-renderer',
     'ytd-video-renderer',
     'ytd-compact-video-renderer',
     'ytd-grid-video-renderer',
     'ytd-shelf-renderer',
     '#thumbnail',
+    '#thumbnail img',
     '.yt-core-image',
     'yt-image',
     'yt-img-shadow',
@@ -1324,6 +1312,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     document.head.appendChild(style);
     console.log('[MW] CSS styles injected');
   }
+
+  // Expose targeted rescan hooks for the host (NativeWebViewBrowser)
+  window.__MW_SCAN_FULL__ = scanFullPage;
+  window.__MW_SCAN_YT__ = scanYouTubeThumbnails;
 
   // Set up observers
   setupMutationObserver(document.body);

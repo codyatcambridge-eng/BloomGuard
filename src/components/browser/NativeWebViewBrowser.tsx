@@ -220,6 +220,39 @@ export const NativeWebViewBrowser = () => {
     const mainScript = generateModerationScript(config);
     try {
       await scriptExecutor(mainScript);
+
+      // YouTube-specific hardening: add a host-injected MutationObserver on document.body
+      // (calls into the already-injected script's rescan hooks)
+      const ytObserverScript = `
+        (function() {
+          try {
+            if (window.__GC_YT_BODY_OBSERVER__) return 'ALREADY';
+            window.__GC_YT_BODY_OBSERVER__ = true;
+
+            var run = function() {
+              try {
+                if (typeof window.__MW_SCAN_YT__ === 'function') window.__MW_SCAN_YT__();
+              } catch (e) {}
+            };
+
+            var obs = new MutationObserver(function() {
+              run();
+            });
+
+            if (document.body) {
+              obs.observe(document.body, { childList: true, subtree: true });
+              // Kick once immediately
+              run();
+              return 'OK';
+            }
+            return 'NO_BODY';
+          } catch (e) {
+            return 'ERR:' + (e && e.message ? e.message : 'unknown');
+          }
+        })();
+      `;
+      await scriptExecutor(ytObserverScript);
+
       injectionDoneRef.current = true;
       console.log('[MW-Bridge] Moderation script injected successfully');
     } catch (error) {
