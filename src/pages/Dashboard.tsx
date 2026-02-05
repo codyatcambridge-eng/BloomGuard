@@ -1,11 +1,32 @@
-import { StewardshipRing } from "@/components/dashboard/StewardshipRing";
 import { Shield, Globe, Users, FileText, Settings as SettingsIcon } from "lucide-react";
 import { useNavigate } from "react-router-dom";
-import { useSettings } from "@/hooks/useSettings";
+import { useLocalSettings } from "@/hooks/useLocalSettings";
+import { useStrengthPoints } from "@/hooks/useStrengthPoints";
+import { StreakDisplay } from "@/components/dashboard/StreakDisplay";
+import { RankProgressCard } from "@/components/dashboard/RankProgressCard";
+import { DailyActionsCard } from "@/components/dashboard/DailyActionsCard";
+import { useEffect } from "react";
 
 const Dashboard = () => {
   const navigate = useNavigate();
-  const { settings, isLoading } = useSettings();
+  const { settings, isLoaded: settingsLoaded } = useLocalSettings();
+  const { 
+    streaks, 
+    rankProgress, 
+    todaySP, 
+    todayResistance, 
+    todayGrowth,
+    recordAction,
+    markShieldActive,
+    isLoaded: spLoaded,
+  } = useStrengthPoints();
+
+  // Sync shield status with SP system
+  useEffect(() => {
+    if (settingsLoaded && spLoaded) {
+      markShieldActive(settings.shield_active);
+    }
+  }, [settings.shield_active, settingsLoaded, spLoaded, markShieldActive]);
 
   const quickActions = [
     { path: "/browser", icon: Globe, label: "Safe Browser", color: "text-aqua" },
@@ -28,79 +49,60 @@ const Dashboard = () => {
         <div className="flex items-center gap-3">
           <Shield className="w-8 h-8 text-aqua drop-shadow-[0_0_10px_hsl(180_100%_50%/0.5)]" />
           <div>
-            <h1 className="font-display text-2xl tracking-wider">IRON WATCH</h1>
+            <h1 className="font-display text-2xl tracking-wider">MIRACLE WORKER</h1>
             <p className="text-xs text-silver uppercase tracking-widest">
-              Digital Protection Active
+              {settings.shield_active ? 'Shield Active' : 'Shield Inactive'}
             </p>
           </div>
         </div>
       </header>
 
-      <main className="relative z-10 px-4 space-y-6">
-        {/* Protection Status Ring */}
-        <section className="flex flex-col items-center py-8">
-          <h2 className="font-display text-sm tracking-widest text-silver mb-6">
-            PROTECTION STATUS
+      <main className="relative z-10 px-4 space-y-5 py-5">
+        {/* Dual Streak Display */}
+        <section>
+          <h2 className="font-display text-xs tracking-widest text-silver mb-3">
+            YOUR STREAKS
           </h2>
-          <StewardshipRing 
-            percentage={settings.shield_active ? 100 : 0} 
-            isActive={settings.shield_active} 
+          <StreakDisplay streaks={streaks} />
+        </section>
+
+        {/* Rank Progress */}
+        {rankProgress && (
+          <section>
+            <h2 className="font-display text-xs tracking-widest text-silver mb-3">
+              RANK PROGRESS
+            </h2>
+            <RankProgressCard progress={rankProgress} todaySP={todaySP} />
+          </section>
+        )}
+
+        {/* Daily Actions */}
+        <section>
+          <DailyActionsCard 
+            onRecordAction={recordAction}
+            todayResistance={todayResistance}
+            todayGrowth={todayGrowth}
           />
-          <div className="mt-4 text-center">
-            <p className={`text-sm font-display tracking-wider ${
-              settings.shield_active ? 'text-aqua' : 'text-destructive'
-            }`}>
-              {settings.shield_active ? 'SHIELD ACTIVE' : 'SHIELD INACTIVE'}
-            </p>
-            <p className="text-xs text-muted-foreground mt-1">
-              Blur Level: {settings.blur_sensitivity}
-            </p>
-          </div>
         </section>
 
         {/* Quick Actions */}
         <section>
-          <h2 className="font-display text-sm tracking-widest text-silver mb-3">
+          <h2 className="font-display text-xs tracking-widest text-silver mb-3">
             QUICK ACTIONS
           </h2>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-4 gap-2">
             {quickActions.map(({ path, icon: Icon, label, color }) => (
               <button
                 key={path}
                 onClick={() => navigate(path)}
-                className="cathedral-card flex flex-col items-center gap-3 py-6 hover:border-aqua/50 transition-all"
+                className="cathedral-card flex flex-col items-center gap-2 py-4 hover:border-aqua/50 transition-all"
               >
-                <Icon className={`w-8 h-8 ${color}`} />
-                <span className="font-display text-xs tracking-wider text-foreground">
+                <Icon className={`w-6 h-6 ${color}`} />
+                <span className="font-display text-[10px] tracking-wider text-foreground">
                   {label.toUpperCase()}
                 </span>
               </button>
             ))}
-          </div>
-        </section>
-
-        {/* Status Summary */}
-        <section className="cathedral-card">
-          <h3 className="font-display text-xs tracking-widest text-muted-foreground mb-3">
-            PROTECTION SUMMARY
-          </h3>
-          <div className="space-y-2 text-sm">
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Adult Sites</span>
-              <span className={settings.block_adult_sites ? 'text-aqua' : 'text-silver'}>
-                {settings.block_adult_sites ? 'BLOCKED' : 'ALLOWED'}
-              </span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Social Media</span>
-              <span className={settings.block_social_media ? 'text-aqua' : 'text-silver'}>
-                {settings.block_social_media ? 'BLOCKED' : 'ALLOWED'}
-              </span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Blur Sensitivity</span>
-              <span className="text-gold">{settings.blur_sensitivity}</span>
-            </div>
           </div>
         </section>
       </main>
