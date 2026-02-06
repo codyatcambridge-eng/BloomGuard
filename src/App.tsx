@@ -14,6 +14,7 @@ import NotFound from "./pages/NotFound";
 import AdminLabels from "./pages/AdminLabels";
 import ChallengesScreen from "./pages/ChallengesScreen";
 import ShareCardPreview from "./pages/ShareCardPreview";
+import PartnerRequestsScreen from "./pages/PartnerRequestsScreen";
 
 const queryClient = new QueryClient();
 
@@ -28,6 +29,7 @@ const App = () => (
             <Route path="/" element={<HomeDashboard />} />
             <Route path="/browser" element={<SafeBrowser />} />
             <Route path="/partners" element={<Partners />} />
+            <Route path="/partner-requests" element={<PartnerRequestsScreen />} />
             <Route path="/growth" element={<Growth />} />
             <Route path="/challenges" element={<ChallengesScreen />} />
             <Route path="/share-card" element={<ShareCardPreview />} />
