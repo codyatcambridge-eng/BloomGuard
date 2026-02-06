@@ -14,7 +14,7 @@ export default {
     },
     extend: {
       fontFamily: {
-        display: ['Oswald', 'sans-serif'],
+        display: ['Cinzel', 'serif'],
         sans: ['Inter', 'sans-serif'],
       },
       colors: {
@@ -55,14 +55,10 @@ export default {
           deep: "hsl(var(--cathedral-deep))",
           midnight: "hsl(var(--cathedral-midnight))",
           steel: "hsl(var(--cathedral-steel))",
-        },
-        aqua: {
-          DEFAULT: "hsl(var(--aqua-glow))",
-          dim: "hsl(var(--aqua-dim))",
-          bright: "hsl(var(--aqua-bright))",
+          stone: "hsl(var(--cathedral-stone))",
         },
         gold: {
-          DEFAULT: "hsl(var(--gold-accent))",
+          DEFAULT: "hsl(var(--gold))",
           dim: "hsl(var(--gold-dim))",
           bright: "hsl(var(--gold-bright))",
         },
@@ -70,6 +66,20 @@ export default {
           DEFAULT: "hsl(var(--silver))",
           dim: "hsl(var(--silver-dim))",
           bright: "hsl(var(--silver-bright))",
+        },
+        aqua: {
+          DEFAULT: "hsl(var(--aqua-glow))",
+          dim: "hsl(var(--aqua-dim))",
+          bright: "hsl(var(--aqua-bright))",
+        },
+        techBlue: {
+          DEFAULT: "hsl(var(--tech-blue))",
+          dim: "hsl(var(--tech-blue-dim))",
+          bright: "hsl(var(--tech-blue-bright))",
+        },
+        flame: {
+          DEFAULT: "hsl(var(--flame))",
+          dim: "hsl(var(--flame-dim))",
         },
       },
       borderRadius: {
@@ -86,10 +96,15 @@ export default {
           from: { height: "var(--radix-accordion-content-height)" },
           to: { height: "0" },
         },
+        "fade-in": {
+          "0%": { opacity: "0", transform: "translateY(10px)" },
+          "100%": { opacity: "1", transform: "translateY(0)" },
+        },
       },
       animation: {
         "accordion-down": "accordion-down 0.2s ease-out",
         "accordion-up": "accordion-up 0.2s ease-out",
+        "fade-in": "fade-in 0.3s ease-out",
       },
     },
   },
