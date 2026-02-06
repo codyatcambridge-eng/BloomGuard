@@ -13,3 +13,4 @@ export * from './challengeEngine';
 export * from './gateEngine';
 export * from './recovery';
 export * from './proGuard';
+export * from './utilityPass';
