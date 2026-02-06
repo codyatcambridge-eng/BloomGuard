@@ -5,6 +5,7 @@
 
 export type PartnerRequestType = 
   | 'DISABLE_SHIELD'
+  | 'DISABLE_SAFE_BROWSER'
   | 'UNBLUR_HIGH_RISK'
   | 'CHANGE_SECURITY_SETTINGS';
 
@@ -81,9 +82,10 @@ export function updateRequestStatus(
  */
 export function getRequestTypeLabel(type: PartnerRequestType): string {
   const labels: Record<PartnerRequestType, string> = {
-    DISABLE_SHIELD: 'Disable Shield',
-    UNBLUR_HIGH_RISK: 'Unblur High-Risk Content',
-    CHANGE_SECURITY_SETTINGS: 'Change Security Settings',
+    DISABLE_SHIELD: 'Pause Protection',
+    DISABLE_SAFE_BROWSER: 'Disable Safe Browser',
+    UNBLUR_HIGH_RISK: 'Access Override',
+    CHANGE_SECURITY_SETTINGS: 'Modify Settings',
   };
   return labels[type];
 }
