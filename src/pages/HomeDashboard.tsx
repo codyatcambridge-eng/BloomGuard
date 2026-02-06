@@ -13,9 +13,10 @@
  */
 
 import { useCallback, useState } from 'react';
+import { Coffee } from 'lucide-react';
 import { useDashboardStats } from '@/hooks/useDashboardStats';
 import { useStrengthPoints } from '@/hooks/useStrengthPoints';
-import { LegacyTree } from '@/components/ui/LegacyTree';
+import { useUtilityPass } from '@/hooks/useUtilityPass';
 import {
   RankHeaderCard,
   StreakRow,
@@ -24,12 +25,16 @@ import {
   WeeklyChallengeMiniCard,
   StatsMiniRow,
 } from '@/components/dashboard';
+import { UtilityPassBanner, UtilityPassModal } from '@/components/utility-pass';
 import { toast } from '@/hooks/use-toast';
+import { DEFAULT_USER_PROGRESS } from '@/models/UserProgress';
 
 const HomeDashboard = () => {
   const stats = useDashboardStats();
   const { recordAction } = useStrengthPoints();
+  const { isActive, remainingFormatted, startPass, endPassEarly } = useUtilityPass();
   const [isQuickWinActive, setIsQuickWinActive] = useState(false);
+  const [showUtilityPassModal, setShowUtilityPassModal] = useState(false);
 
   // Handle quick win start
   const handleQuickWinStart = useCallback(() => {
@@ -66,6 +71,12 @@ const HomeDashboard = () => {
     });
   }, []);
 
+  // Handle utility pass completion
+  const handleUtilityPassComplete = useCallback((reason: any, duration: any, gateLevel: number) => {
+    startPass(reason, duration, gateLevel);
+    setShowUtilityPassModal(false);
+  }, [startPass]);
+
   if (stats.isLoading) {
     return (
       <div className="min-h-screen pb-24 warroom-bg flex items-center justify-center">
@@ -76,6 +87,14 @@ const HomeDashboard = () => {
 
   return (
     <div className="min-h-screen pb-24 warroom-bg relative overflow-hidden">
+      {/* Utility Pass Banner (if active) */}
+      {isActive && (
+        <UtilityPassBanner
+          remainingFormatted={remainingFormatted}
+          onEndEarly={endPassEarly}
+        />
+      )}
+      
       {/* Golden beam accent */}
       <div className="golden-beam" />
       
@@ -85,7 +104,7 @@ const HomeDashboard = () => {
       </div>
 
       {/* Header */}
-      <header className="relative z-10 px-5 pt-10 pb-2 text-center">
+      <header className={`relative z-10 px-5 pb-2 text-center ${isActive ? 'pt-24' : 'pt-10'}`}>
         <div className="flex items-center justify-center gap-3">
           <span className="text-gold/40">◆</span>
           <h1 className="font-display text-2xl text-gold tracking-wider">
@@ -138,7 +157,25 @@ const HomeDashboard = () => {
           />
         </section>
 
-        {/* === SECTION 5: Stats Mini Row === */}
+        {/* === SECTION 5: Need a Break? === */}
+        <section>
+          <button
+            onClick={() => setShowUtilityPassModal(true)}
+            disabled={isActive}
+            className={`w-full py-4 px-4 rounded-xl border transition-all duration-200 flex items-center justify-center gap-3 ${
+              isActive 
+                ? 'border-silver/20 bg-cathedral-deep/30 text-silver/50 cursor-not-allowed' 
+                : 'border-silver/30 bg-cathedral-deep/50 text-silver hover:border-techBlue/50 hover:text-techBlue'
+            }`}
+          >
+            <Coffee className="w-4 h-4" />
+            <span className="font-display text-sm tracking-wider">
+              {isActive ? 'Break in progress...' : 'Need a break?'}
+            </span>
+          </button>
+        </section>
+
+        {/* === SECTION 6: Stats Mini Row === */}
         <section className="pt-2">
           <StatsMiniRow
             urgesResisted={stats.urgesResistedThisWeek}
@@ -154,6 +191,14 @@ const HomeDashboard = () => {
         </section>
 
       </main>
+
+      {/* Utility Pass Modal */}
+      <UtilityPassModal
+        isOpen={showUtilityPassModal}
+        onClose={() => setShowUtilityPassModal(false)}
+        onComplete={handleUtilityPassComplete}
+        progress={DEFAULT_USER_PROGRESS}
+      />
     </div>
   );
 };

@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { Shield, DollarSign, CreditCard, AlertTriangle, Eye, EyeOff } from "lucide-react";
+import { Shield, DollarSign, CreditCard, AlertTriangle, Eye, EyeOff, Coffee, Clock, Lock } from "lucide-react";
 import { FrictionUnlockModal } from "@/components/settings/FrictionUnlockModal";
 import { useSettings, BlurLevel } from "@/hooks/useSettings";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
+import { UTILITY_PASS_DURATIONS, UTILITY_PASS_REASONS } from "@/logic/utilityPass";
 
 const Settings = () => {
   const { settings, updateSetting, isLoading, deviceId } = useSettings();
@@ -220,6 +221,51 @@ const Settings = () => {
                 />
               </button>
             </div>
+          </div>
+        </section>
+
+        {/* Utility Pass Rules (Read-only summary) */}
+        <section className="cathedral-card">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="w-10 h-10 rounded-sm bg-techBlue/20 flex items-center justify-center">
+              <Coffee className="w-5 h-5 text-techBlue" />
+            </div>
+            <div>
+              <h3 className="font-display text-sm tracking-wider">UTILITY PASS</h3>
+              <p className="text-xs text-muted-foreground">Time-limited break system</p>
+            </div>
+          </div>
+
+          <div className="space-y-3 text-sm">
+            <div className="flex items-start gap-2 text-muted-foreground">
+              <Clock className="w-4 h-4 mt-0.5 text-techBlue" />
+              <div>
+                <p className="text-foreground font-medium">Duration limits</p>
+                <p className="text-xs">{UTILITY_PASS_DURATIONS.map(d => d.label).join(', ')} (max 15 min)</p>
+              </div>
+            </div>
+
+            <div className="flex items-start gap-2 text-muted-foreground">
+              <Lock className="w-4 h-4 mt-0.5 text-gold" />
+              <div>
+                <p className="text-foreground font-medium">Gate requirement</p>
+                <p className="text-xs">Level 2+ friction (intention + cooldown)</p>
+              </div>
+            </div>
+
+            <div className="flex items-start gap-2 text-muted-foreground">
+              <Shield className="w-4 h-4 mt-0.5 text-aqua" />
+              <div>
+                <p className="text-foreground font-medium">Protection status</p>
+                <p className="text-xs">Shield stays engaged during pass</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 pt-4 border-t border-border">
+            <p className="text-xs text-muted-foreground">
+              Valid reasons: {UTILITY_PASS_REASONS.map(r => r.label).join(', ')}
+            </p>
           </div>
         </section>
 
