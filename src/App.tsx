@@ -4,10 +4,10 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { BottomNav } from "@/components/layout/BottomNav";
-import Dashboard from "./pages/Dashboard";
+import Home from "./pages/Home";
 import SafeBrowser from "./pages/SafeBrowser";
-import LocalBrowserApp from "./pages/LocalBrowserApp";
-import Accountability from "./pages/Accountability";
+import Partners from "./pages/Partners";
+import Growth from "./pages/Growth";
 import Settings from "./pages/Settings";
 import Logs from "./pages/Logs";
 import NotFound from "./pages/NotFound";
@@ -23,12 +23,12 @@ const App = () => (
       <BrowserRouter>
         <div className="min-h-screen bg-background">
           <Routes>
-            <Route path="/" element={<Dashboard />} />
+            <Route path="/" element={<Home />} />
             <Route path="/browser" element={<SafeBrowser />} />
-            <Route path="/local-browser" element={<LocalBrowserApp />} />
-            <Route path="/accountability" element={<Accountability />} />
-            <Route path="/logs" element={<Logs />} />
+            <Route path="/partners" element={<Partners />} />
+            <Route path="/growth" element={<Growth />} />
             <Route path="/settings" element={<Settings />} />
+            <Route path="/logs" element={<Logs />} />
             <Route path="/admin/labels" element={<AdminLabels />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
