@@ -282,6 +282,216 @@
     background: linear-gradient(90deg, hsl(200 60% 40%) 0%, hsl(200 100% 55%) 100%);
     box-shadow: 0 0 10px hsl(200 100% 50% / 0.4);
   }
+
+  /* ==================== RANK THEME CARDS ==================== */
+  
+  /* Stone Theme - Grayscale, minimal */
+  .theme-stone-card {
+    @apply relative rounded-lg;
+    background: linear-gradient(145deg, hsl(220 15% 14%) 0%, hsl(220 20% 10%) 100%);
+    border: 1px solid hsl(220 10% 25% / 0.3);
+  }
+  
+  .theme-stone-button {
+    @apply px-5 py-3 font-display text-sm;
+    background: linear-gradient(135deg, hsl(220 10% 25%) 0%, hsl(220 15% 18%) 100%);
+    color: hsl(220 10% 70%);
+    border: 1px solid hsl(220 10% 35% / 0.4);
+  }
+  
+  .theme-stone-progress {
+    @apply h-full rounded-full;
+    background: linear-gradient(90deg, hsl(220 10% 40%) 0%, hsl(220 10% 55%) 100%);
+  }
+  
+  .theme-stone-badge {
+    @apply inline-flex items-center px-2 py-0.5 text-xs rounded-full;
+    background: hsl(220 10% 20%);
+    color: hsl(220 10% 65%);
+    border: 1px solid hsl(220 10% 30%);
+  }
+  
+  /* Bronze Theme - Subtle warm accent */
+  .theme-bronze-card {
+    @apply relative rounded-lg;
+    background: linear-gradient(145deg, hsl(220 40% 12%) 0%, hsl(220 45% 8%) 100%);
+    border: 1px solid hsl(30 50% 35% / 0.3);
+  }
+  
+  .theme-bronze-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, hsl(30 60% 45% / 0.2), transparent);
+  }
+  
+  .theme-bronze-button {
+    @apply px-5 py-3 font-display text-sm;
+    background: linear-gradient(135deg, hsl(30 50% 35%) 0%, hsl(30 45% 28%) 100%);
+    color: hsl(30 20% 90%);
+    border: 1px solid hsl(30 50% 45% / 0.4);
+    box-shadow: 0 0 10px hsl(30 60% 40% / 0.15);
+  }
+  
+  .theme-bronze-progress {
+    @apply h-full rounded-full;
+    background: linear-gradient(90deg, hsl(30 45% 35%) 0%, hsl(30 55% 50%) 100%);
+    box-shadow: 0 0 8px hsl(30 60% 45% / 0.3);
+  }
+  
+  .theme-bronze-badge {
+    @apply inline-flex items-center px-2.5 py-0.5 text-xs rounded-full;
+    background: hsl(30 40% 25%);
+    color: hsl(30 50% 70%);
+    border: 1px solid hsl(30 50% 40% / 0.4);
+  }
+  
+  /* Iron Theme - Strong visuals, glow on progress */
+  .theme-iron-card {
+    @apply relative rounded-lg;
+    background: linear-gradient(145deg, hsl(220 45% 12%) 0%, hsl(220 50% 8%) 100%);
+    border: 1px solid hsl(200 40% 40% / 0.3);
+  }
+  
+  .theme-iron-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, hsl(200 80% 55% / 0.3), transparent);
+  }
+  
+  .theme-iron-button {
+    @apply px-5 py-3 font-display text-sm;
+    background: linear-gradient(135deg, hsl(200 50% 40%) 0%, hsl(200 45% 30%) 100%);
+    color: hsl(200 20% 95%);
+    border: 1px solid hsl(200 60% 50% / 0.4);
+    box-shadow: 0 0 15px hsl(200 100% 50% / 0.25);
+  }
+  
+  .theme-iron-progress {
+    @apply h-full rounded-full;
+    background: linear-gradient(90deg, hsl(200 50% 40%) 0%, hsl(200 100% 55%) 100%);
+    box-shadow: 0 0 12px hsl(200 100% 50% / 0.4);
+  }
+  
+  .theme-iron-badge {
+    @apply inline-flex items-center px-2.5 py-0.5 text-xs rounded-full;
+    background: hsl(200 40% 25%);
+    color: hsl(200 60% 70%);
+    border: 1px solid hsl(200 50% 45% / 0.4);
+  }
+  
+  /* Gold Theme - Premium cathedral-tech */
+  .theme-gold-card {
+    @apply relative rounded-lg;
+    background: linear-gradient(145deg, hsl(220 45% 11%) 0%, hsl(220 50% 7%) 100%);
+    border: 1px solid hsl(45 60% 40% / 0.35);
+    box-shadow: 
+      inset 0 1px 0 hsl(45 60% 50% / 0.1),
+      0 0 20px hsl(45 100% 50% / 0.1);
+  }
+  
+  .theme-gold-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, hsl(45 80% 55% / 0.4), transparent);
+  }
+  
+  .theme-gold-button {
+    @apply px-6 py-3 font-display text-sm tracking-wider;
+    background: linear-gradient(135deg, hsl(45 100% 55%) 0%, hsl(45 80% 42%) 100%);
+    color: hsl(220 60% 8%);
+    border: 1px solid hsl(45 80% 60% / 0.5);
+    box-shadow: 
+      0 0 20px hsl(45 100% 50% / 0.3),
+      inset 0 1px 0 hsl(45 100% 70% / 0.3);
+  }
+  
+  .theme-gold-progress {
+    @apply h-full rounded-full;
+    background: linear-gradient(90deg, hsl(45 80% 45%) 0%, hsl(45 100% 55%) 100%);
+    box-shadow: 0 0 15px hsl(45 100% 50% / 0.5);
+  }
+  
+  .theme-gold-badge {
+    @apply inline-flex items-center px-2.5 py-0.5 text-xs font-medium rounded-full;
+    background: hsl(45 70% 25%);
+    color: hsl(45 100% 70%);
+    border: 1px solid hsl(45 80% 50% / 0.4);
+    box-shadow: 0 0 8px hsl(45 100% 50% / 0.2);
+  }
+  
+  /* Champ Theme - Highest polish, emblem worthy */
+  .theme-champ-card {
+    @apply relative rounded-xl;
+    background: linear-gradient(145deg, hsl(220 50% 12%) 0%, hsl(220 55% 6%) 100%);
+    border: 1px solid hsl(45 80% 50% / 0.4);
+    box-shadow: 
+      inset 0 1px 0 hsl(45 100% 60% / 0.15),
+      0 0 30px hsl(45 100% 50% / 0.15),
+      0 8px 32px hsl(220 100% 3% / 0.6);
+  }
+  
+  .theme-champ-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, transparent 10%, hsl(45 100% 60% / 0.6), transparent 90%);
+  }
+  
+  .theme-champ-card::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(ellipse 60% 30% at 50% 0%, hsl(45 100% 60% / 0.08) 0%, transparent 70%);
+    pointer-events: none;
+    border-radius: inherit;
+  }
+  
+  .theme-champ-button {
+    @apply px-6 py-3.5 font-display text-sm tracking-widest;
+    background: linear-gradient(135deg, hsl(45 100% 60%) 0%, hsl(45 100% 48%) 100%);
+    color: hsl(220 60% 6%);
+    border: 1px solid hsl(45 100% 65% / 0.6);
+    box-shadow: 
+      0 0 30px hsl(45 100% 50% / 0.4),
+      inset 0 1px 0 hsl(45 100% 80% / 0.4),
+      0 4px 15px hsl(45 100% 40% / 0.3);
+  }
+  
+  .theme-champ-progress {
+    @apply h-full rounded-full;
+    background: linear-gradient(90deg, hsl(45 90% 50%) 0%, hsl(45 100% 60%) 50%, hsl(45 100% 55%) 100%);
+    box-shadow: 
+      0 0 20px hsl(45 100% 50% / 0.6),
+      inset 0 1px 0 hsl(45 100% 80% / 0.3);
+  }
+  
+  .theme-champ-badge {
+    @apply inline-flex items-center px-3 py-1 text-xs font-medium rounded-full;
+    background: linear-gradient(135deg, hsl(45 80% 30%) 0%, hsl(45 60% 22%) 100%);
+    color: hsl(45 100% 75%);
+    border: 1px solid hsl(45 100% 55% / 0.5);
+    box-shadow: 0 0 12px hsl(45 100% 50% / 0.3);
+  }
+
+  /* Bronze accent color class */
+  .text-accent-bronze {
+    color: hsl(30 55% 55%);
+  }
 }
 
 @layer utilities {

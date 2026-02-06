@@ -2,10 +2,13 @@
  * Timer Ring Component
  * 
  * Circular countdown visualization with breathing animation.
+ * Respects prefers-reduced-motion for accessibility.
  */
 
 import { useEffect, useState, useRef } from 'react';
 import { cn } from '@/lib/utils';
+import { motion } from '@/ui';
+import { tokens } from '@/ui/tokens';
 
 interface TimerRingProps {
   durationSeconds: number;
@@ -29,8 +32,11 @@ export function TimerRing({
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
   const startTimeRef = useRef<number>(Date.now());
   const pausedAtRef = useRef<number | null>(null);
+  
+  // Check reduced motion preference
+  const prefersReducedMotion = motion.shouldReduceMotion();
 
-  // Size configurations
+  // Size configurations with accessible touch targets
   const sizeConfig = {
     sm: { diameter: 120, strokeWidth: 6, fontSize: 'text-2xl' },
     md: { diameter: 180, strokeWidth: 8, fontSize: 'text-4xl' },
@@ -94,18 +100,29 @@ export function TimerRing({
     return secs.toString();
   };
 
+  // Get breathing animation class (respects reduced motion)
+  const breathingClass = showBreathing && !isComplete && !prefersReducedMotion 
+    ? 'animate-pulse' 
+    : '';
+
   return (
     <div 
       className={cn(
         'relative flex items-center justify-center',
-        showBreathing && !isComplete && 'animate-pulse',
+        breathingClass,
         className
       )}
       style={{ width: diameter, height: diameter }}
+      role="timer"
+      aria-live="polite"
+      aria-label={`${formatTime(remainingSeconds)} remaining`}
     >
-      {/* Background glow */}
+      {/* Background glow - subtle, respects reduced motion */}
       <div 
-        className="absolute inset-0 rounded-full opacity-20"
+        className={cn(
+          "absolute inset-0 rounded-full",
+          prefersReducedMotion ? "opacity-10" : "opacity-20"
+        )}
         style={{
           background: 'radial-gradient(circle, hsl(var(--gold)) 0%, transparent 70%)',
         }}
@@ -116,6 +133,7 @@ export function TimerRing({
         width={diameter}
         height={diameter}
         className="transform -rotate-90"
+        aria-hidden="true"
       >
         {/* Background circle */}
         <circle
@@ -133,12 +151,14 @@ export function TimerRing({
           cy={diameter / 2}
           r={radius}
           fill="none"
-          stroke={isComplete ? 'hsl(var(--gold))' : 'hsl(var(--techBlue))'}
+          stroke={isComplete ? 'hsl(var(--gold))' : 'hsl(var(--tech-blue))'}
           strokeWidth={strokeWidth}
           strokeLinecap="round"
           strokeDasharray={circumference}
           strokeDashoffset={strokeDashoffset}
-          className="transition-all duration-100"
+          style={{
+            transition: `stroke-dashoffset ${motion.getSafeDuration(100)}ms ${motion.easings.smooth}`,
+          }}
         />
       </svg>
 

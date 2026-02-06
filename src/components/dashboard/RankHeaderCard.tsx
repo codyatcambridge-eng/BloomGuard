@@ -3,12 +3,16 @@
  * 
  * Shows current rank, shield status, and next unlock progress.
  * Top of dashboard hierarchy.
+ * 
+ * Uses rank-based theming from ui/theme.ts
  */
 
 import { cn } from '@/lib/utils';
 import { Shield, Crown } from 'lucide-react';
 import { RankProgress, getRankById } from '@/logic/rank';
 import { NextUnlockProgressBar } from './NextUnlockProgressBar';
+import { getThemeForRank, getAnimationClass } from '@/ui/theme';
+import { tokens } from '@/ui/tokens';
 
 interface RankHeaderCardProps {
   rankProgress: RankProgress | null;
@@ -23,33 +27,41 @@ export function RankHeaderCard({
 }: RankHeaderCardProps) {
   const currentRank = rankProgress?.currentRank ?? getRankById('STONE');
   const nextRank = rankProgress?.nextRank;
+  const theme = getThemeForRank(currentRank.id);
 
   return (
     <div 
       className={cn(
         'relative overflow-hidden rounded-2xl',
-        'bg-gradient-to-br from-cathedral-deep via-cathedral-dark to-cathedral-deep',
-        'border border-silver/10',
+        theme.cardClass,
         'p-5',
         className
       )}
+      style={{ minHeight: tokens.minTouchTarget }}
     >
-      {/* Rank glow effect */}
-      <div 
-        className="absolute inset-0 opacity-20 pointer-events-none"
-        style={{
-          background: `radial-gradient(circle at 50% 0%, ${currentRank.glowColor}, transparent 70%)`,
-        }}
-      />
+      {/* Rank glow effect - respects theme intensity */}
+      {theme.glowOpacity > 0 && (
+        <div 
+          className={cn(
+            "absolute inset-0 pointer-events-none",
+            getAnimationClass('animate-pulse-gold')
+          )}
+          style={{
+            background: `radial-gradient(circle at 50% 0%, ${currentRank.glowColor}, transparent 70%)`,
+            opacity: theme.glowOpacity,
+          }}
+        />
+      )}
 
       {/* Shield Status */}
       <div className="relative flex items-center justify-between mb-4">
         <div className="flex items-center gap-3">
           <div 
             className={cn(
-              'w-10 h-10 rounded-xl flex items-center justify-center',
+              'w-11 h-11 rounded-xl flex items-center justify-center',
               shieldActive ? 'bg-techBlue/20' : 'bg-silver/10'
             )}
+            style={{ minWidth: tokens.minTouchTarget, minHeight: tokens.minTouchTarget }}
           >
             <Shield 
               className={cn(
@@ -73,12 +85,10 @@ export function RankHeaderCard({
 
         {/* Current Rank Badge */}
         <div 
-          className="flex items-center gap-2 px-3 py-1.5 rounded-lg"
-          style={{ 
-            backgroundColor: `${currentRank.color}20`,
-            borderColor: currentRank.color,
-            borderWidth: '1px',
-          }}
+          className={cn(
+            'flex items-center gap-2 px-3 py-1.5 rounded-lg',
+            theme.badgeClass
+          )}
         >
           <Crown className="w-4 h-4" style={{ color: currentRank.color }} />
           <span 
@@ -105,7 +115,7 @@ export function RankHeaderCard({
       {/* Max rank message */}
       {!nextRank && (
         <div className="text-center py-2">
-          <p className="text-sm text-gold font-display">
+          <p className={cn('text-sm font-display', theme.headerColor)}>
             Maximum rank achieved
           </p>
           <p className="text-xs text-muted-foreground mt-1">
