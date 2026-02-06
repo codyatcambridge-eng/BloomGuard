@@ -219,3 +219,86 @@ export function getProgressMessage(progress: RankProgress): string {
   
   return `Every action moves you closer to ${progress.nextRank.name}.`;
 }
+
+// ==================== RANK THRESHOLDS ====================
+
+/**
+ * Rank thresholds - uses OR logic (meet SP OR streak requirement)
+ * 
+ * BRONZE: totalSP >= 350 OR shieldStreakDays >= 8
+ * IRON: totalSP >= 900 OR shieldStreakDays >= 22
+ * GOLD: totalSP >= 2000 OR shieldStreakDays >= 46
+ * CHAMP: totalSP >= 4000 OR shieldStreakDays >= 91
+ */
+export const RANK_THRESHOLDS = {
+  STONE: { sp: 0, streak: 0 },
+  BRONZE: { sp: 350, streak: 8 },
+  IRON: { sp: 900, streak: 22 },
+  GOLD: { sp: 2000, streak: 46 },
+  CHAMP: { sp: 4000, streak: 91 },
+} as const;
+
+/**
+ * Evaluate rank based on SP and shield streak
+ * 
+ * ONLY upgrades, NEVER downgrades.
+ * Uses OR logic: meet SP threshold OR streak threshold.
+ */
+export function evaluateRank(progress: {
+  currentRank: RankId;
+  totalSP: number;
+  shieldStreakDays: number;
+}): RankId {
+  const { currentRank, totalSP, shieldStreakDays } = progress;
+  
+  // Get current rank index to ensure we only go up
+  const rankOrder: RankId[] = ['STONE', 'BRONZE', 'IRON', 'GOLD', 'CHAMP'];
+  const currentIndex = rankOrder.indexOf(currentRank);
+  
+  let newRankIndex = currentIndex;
+  
+  // Check each higher rank
+  for (let i = currentIndex + 1; i < rankOrder.length; i++) {
+    const rankId = rankOrder[i];
+    const threshold = RANK_THRESHOLDS[rankId];
+    
+    // OR logic: meet SP OR streak requirement
+    if (totalSP >= threshold.sp || shieldStreakDays >= threshold.streak) {
+      newRankIndex = i;
+    } else {
+      // Can't skip ranks, stop checking
+      break;
+    }
+  }
+  
+  return rankOrder[newRankIndex];
+}
+
+/**
+ * Check if 120-day champ run is complete
+ */
+export function isChampRunComplete(shieldStreakDays: number): boolean {
+  return shieldStreakDays >= 120;
+}
+
+/**
+ * Get rank by shield streak only (for display purposes)
+ */
+export function getRankByStreak(shieldStreakDays: number): RankId {
+  if (shieldStreakDays >= 91) return 'CHAMP';
+  if (shieldStreakDays >= 46) return 'GOLD';
+  if (shieldStreakDays >= 22) return 'IRON';
+  if (shieldStreakDays >= 8) return 'BRONZE';
+  return 'STONE';
+}
+
+/**
+ * Get rank by SP only (for display purposes)
+ */
+export function getRankBySP(totalSP: number): RankId {
+  if (totalSP >= 4000) return 'CHAMP';
+  if (totalSP >= 2000) return 'GOLD';
+  if (totalSP >= 900) return 'IRON';
+  if (totalSP >= 350) return 'BRONZE';
+  return 'STONE';
+}
