@@ -1,7 +1,7 @@
 import { cn } from "@/lib/utils";
 
 interface LegacyTreeProps {
-  size?: "small" | "medium" | "large";
+  size?: "small" | "medium" | "large" | "hero";
   glowIntensity?: "low" | "medium" | "high";
   className?: string;
 }
@@ -20,6 +20,7 @@ export const LegacyTree = ({
     small: "w-32 h-32",
     medium: "w-48 h-48",
     large: "w-64 h-64",
+    hero: "w-[85vw] h-[85vw] max-w-[400px] max-h-[400px]",
   };
 
   const glowStyles = {
