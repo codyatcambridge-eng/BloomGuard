@@ -7,7 +7,7 @@
 
 import { useState, useCallback, useEffect } from 'react';
 import { cn } from '@/lib/utils';
-import { X, ArrowLeft, Heart } from 'lucide-react';
+import { X, ArrowLeft, Heart, Coffee } from 'lucide-react';
 import { TimerRing } from './TimerRing';
 import { HoldToUnlockButton } from './HoldToUnlockButton';
 import { ReplacementPicker, type ReplacementOption } from './ReplacementPicker';
@@ -42,6 +42,7 @@ interface GateModalProps {
   progress: UserProgress;
   highRiskFlag: boolean;
   onProgressUpdate: (progress: UserProgress, pointsDelta: number) => void;
+  onUtilityPassRequest?: () => void; // Optional callback to open utility pass modal
   className?: string;
 }
 
@@ -51,6 +52,7 @@ export function GateModal({
   progress,
   highRiskFlag,
   onProgressUpdate,
+  onUtilityPassRequest,
   className,
 }: GateModalProps) {
   const nowTs = Date.now();
@@ -288,6 +290,20 @@ export function GateModal({
               >
                 Choose a replacement
               </button>
+              
+              {/* Utility Pass option */}
+              {onUtilityPassRequest && (
+                <button
+                  onClick={() => {
+                    onClose();
+                    onUtilityPassRequest();
+                  }}
+                  className="w-full py-3 flex items-center justify-center gap-2 text-sm text-muted-foreground hover:text-techBlue transition-colors"
+                >
+                  <Coffee className="w-4 h-4" />
+                  <span>Utility Pass (work/school)</span>
+                </button>
+              )}
             </div>
           </div>
         )}
