@@ -10,3 +10,4 @@ export * from './progressEngine';
 export * from './dateUtils';
 export * from './challengeCatalog';
 export * from './gateEngine';
+export * from './recovery';
