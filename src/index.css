@@ -347,4 +347,21 @@
       animation: none;
     }
   }
+
+  /* Degraded Mode - UI-layer only visual effects */
+  .degraded-mode {
+    filter: grayscale(0.4) brightness(0.95);
+    transition: filter 0.5s ease-in-out;
+  }
+  
+  .degraded-mode img,
+  .degraded-mode video,
+  .degraded-mode .media-content {
+    filter: grayscale(0.6) brightness(0.85);
+  }
+  
+  /* Preserve critical UI elements from degraded mode */
+  .degraded-mode .no-degrade {
+    filter: none;
+  }
 }
