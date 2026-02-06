@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap');
 
 @tailwind base;
 @tailwind components;
@@ -6,76 +6,86 @@
 
 @layer base {
   :root {
-    /* War Room Cathedral Color System */
+    /* Cathedral-Tech War Room Color System */
     --background: 220 60% 4%;
-    --foreground: 0 0% 100%;
+    --foreground: 40 30% 95%;
 
     --card: 220 50% 8%;
-    --card-foreground: 0 0% 100%;
+    --card-foreground: 40 30% 95%;
 
     --popover: 220 50% 6%;
-    --popover-foreground: 0 0% 100%;
+    --popover-foreground: 40 30% 95%;
 
     --primary: 220 100% 15%;
-    --primary-foreground: 0 0% 100%;
+    --primary-foreground: 40 30% 95%;
 
     --secondary: 220 40% 12%;
-    --secondary-foreground: 0 0% 100%;
+    --secondary-foreground: 40 30% 95%;
 
     --muted: 220 30% 18%;
     --muted-foreground: 220 15% 55%;
 
-    --accent: 180 100% 50%;
+    --accent: 200 100% 50%;
     --accent-foreground: 220 100% 8%;
 
     --destructive: 0 84% 60%;
     --destructive-foreground: 0 0% 100%;
 
-    --border: 220 30% 25%;
+    --border: 220 30% 20%;
     --input: 220 40% 12%;
-    --ring: 180 100% 50%;
+    --ring: 45 100% 50%;
 
-    --radius: 0.25rem;
+    --radius: 0.375rem;
 
-    /* War Room Cathedral Custom Tokens */
-    --cathedral-deep: 220 100% 12%;
+    /* Cathedral Stone Colors */
+    --cathedral-deep: 220 60% 8%;
     --cathedral-midnight: 220 60% 4%;
-    --cathedral-steel: 220 20% 30%;
+    --cathedral-steel: 220 20% 25%;
+    --cathedral-stone: 30 15% 12%;
     
-    /* Aqua Glow System */
+    /* Tech Blue Accents */
+    --tech-blue: 200 100% 50%;
+    --tech-blue-dim: 200 60% 35%;
+    --tech-blue-bright: 200 100% 60%;
+    
+    /* Radiant Gold - Primary Action */
+    --gold: 45 100% 50%;
+    --gold-dim: 45 80% 40%;
+    --gold-bright: 45 100% 60%;
+    
+    /* Aqua Accents */
     --aqua-glow: 180 100% 50%;
     --aqua-dim: 180 60% 35%;
     --aqua-bright: 180 100% 60%;
     
-    /* Radiant Gold */
-    --gold-accent: 45 100% 50%;
-    --gold-dim: 45 80% 40%;
-    --gold-bright: 45 100% 60%;
-    
     /* Brushed Silver */
-    --silver: 220 10% 70%;
-    --silver-dim: 220 10% 50%;
-    --silver-bright: 220 5% 85%;
+    --silver: 220 10% 65%;
+    --silver-dim: 220 10% 45%;
+    --silver-bright: 220 5% 80%;
+
+    /* Flame Orange for Strength */
+    --flame: 25 100% 55%;
+    --flame-dim: 25 80% 45%;
     
-    /* War Room Gradients */
-    --gradient-warroom: linear-gradient(180deg, hsl(220 60% 6%) 0%, hsl(220 70% 3%) 50%, hsl(220 60% 5%) 100%);
-    --gradient-marble: radial-gradient(ellipse at 30% 20%, hsl(220 50% 10%) 0%, hsl(220 60% 4%) 50%, hsl(220 70% 2%) 100%);
-    --gradient-aqua: linear-gradient(135deg, hsl(180 100% 50%) 0%, hsl(180 60% 35%) 100%);
-    --gradient-shield: linear-gradient(180deg, hsl(220 50% 20%) 0%, hsl(220 100% 10%) 100%);
+    /* Cathedral Gradients */
+    --gradient-cathedral: linear-gradient(180deg, hsl(220 50% 10%) 0%, hsl(220 60% 4%) 50%, hsl(220 50% 6%) 100%);
+    --gradient-marble: radial-gradient(ellipse at 30% 20%, hsl(30 20% 12%) 0%, hsl(220 60% 4%) 50%, hsl(220 70% 2%) 100%);
     --gradient-gold: linear-gradient(135deg, hsl(45 100% 55%) 0%, hsl(45 80% 40%) 100%);
-    --gradient-silver: linear-gradient(135deg, hsl(220 10% 75%) 0%, hsl(220 15% 55%) 100%);
+    --gradient-gold-shine: linear-gradient(135deg, hsl(45 100% 65%) 0%, hsl(45 100% 50%) 50%, hsl(45 80% 40%) 100%);
+    --gradient-silver: linear-gradient(135deg, hsl(220 10% 70%) 0%, hsl(220 15% 50%) 100%);
+    --gradient-tech: linear-gradient(180deg, hsl(200 100% 50% / 0.1) 0%, transparent 100%);
     
-    /* War Room Shadows */
-    --shadow-glow: 0 0 30px hsl(180 100% 50% / 0.4);
+    /* Cathedral Shadows */
+    --shadow-glow: 0 0 30px hsl(45 100% 50% / 0.3);
     --shadow-card: 0 4px 30px hsl(220 100% 3% / 0.8);
-    --shadow-aqua: 0 0 40px hsl(180 100% 50% / 0.5);
     --shadow-gold: 0 0 25px hsl(45 100% 50% / 0.4);
-    --shadow-silver: inset 0 1px 0 hsl(220 10% 80% / 0.1), 0 4px 20px hsl(220 100% 3% / 0.6);
+    --shadow-silver: inset 0 1px 0 hsl(220 10% 60% / 0.15), 0 4px 20px hsl(220 100% 3% / 0.6);
+    --shadow-inner: inset 0 2px 8px hsl(220 100% 2% / 0.5);
   }
 
   .dark {
     --background: 220 60% 4%;
-    --foreground: 0 0% 100%;
+    --foreground: 40 30% 95%;
   }
 }
 
@@ -92,87 +102,107 @@
   }
 
   h1, h2, h3, h4, h5, h6 {
-    font-family: 'Oswald', sans-serif;
-    @apply font-bold tracking-wide uppercase;
+    font-family: 'Cinzel', serif;
+    @apply font-semibold tracking-wide;
   }
 }
 
 @layer components {
+  /* Cathedral Card - Main container style */
   .cathedral-card {
-    @apply bg-card border rounded-sm p-4;
-    border-color: hsl(220 10% 50% / 0.3);
-    box-shadow: var(--shadow-silver);
-    background: linear-gradient(135deg, hsl(220 50% 9%) 0%, hsl(220 50% 7%) 100%);
-  }
-
-  .silver-border {
-    border-color: hsl(220 10% 60% / 0.4);
-  }
-
-  .aqua-ring {
-    background: conic-gradient(
-      from 0deg,
-      hsl(180 100% 50%) 0%,
-      hsl(180 60% 35%) 25%,
-      hsl(180 100% 50%) 50%,
-      hsl(180 60% 35%) 75%,
-      hsl(180 100% 50%) 100%
-    );
-  }
-
-  .aqua-glow {
-    box-shadow: var(--shadow-aqua);
-  }
-
-  .text-aqua {
-    color: hsl(180 100% 50%);
-  }
-
-  .bg-aqua {
-    background-color: hsl(180 100% 50%);
-  }
-
-  .border-aqua {
-    border-color: hsl(180 100% 50%);
-  }
-
-  .text-gold {
-    color: hsl(45 100% 50%);
-  }
-
-  .bg-gold {
-    background: linear-gradient(135deg, hsl(45 100% 55%) 0%, hsl(45 80% 45%) 100%);
-  }
-
-  .text-silver {
-    color: hsl(220 10% 70%);
-  }
-
-  .border-silver {
-    border-color: hsl(220 10% 60% / 0.5);
-  }
-
-  .silver-tablet {
-    background: linear-gradient(145deg, hsl(220 15% 25%) 0%, hsl(220 20% 18%) 50%, hsl(220 15% 22%) 100%);
-    border: 1px solid hsl(220 10% 45% / 0.4);
+    @apply relative rounded-lg p-4;
+    background: linear-gradient(145deg, hsl(220 45% 10%) 0%, hsl(220 50% 7%) 100%);
+    border: 1px solid hsl(45 60% 40% / 0.3);
     box-shadow: 
-      inset 0 1px 0 hsl(220 10% 50% / 0.2),
-      inset 0 -1px 0 hsl(220 20% 10% / 0.3),
+      inset 0 1px 0 hsl(45 60% 50% / 0.1),
+      inset 0 -1px 0 hsl(220 50% 3% / 0.5),
+      0 4px 20px hsl(220 100% 3% / 0.6);
+  }
+
+  .cathedral-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, hsl(45 60% 50% / 0.3), transparent);
+  }
+
+  /* Silver Tablet - Secondary container */
+  .silver-tablet {
+    @apply relative rounded-lg p-4;
+    background: linear-gradient(145deg, hsl(220 20% 18%) 0%, hsl(220 25% 12%) 100%);
+    border: 1px solid hsl(220 15% 40% / 0.3);
+    box-shadow: 
+      inset 0 1px 0 hsl(220 10% 50% / 0.15),
+      inset 0 -1px 0 hsl(220 20% 8% / 0.3),
       0 4px 20px hsl(220 100% 3% / 0.5);
   }
 
+  /* Gold Border Frame */
+  .gold-frame {
+    border: 1px solid hsl(45 60% 45% / 0.4);
+    box-shadow: 
+      inset 0 0 0 1px hsl(45 60% 50% / 0.1),
+      0 0 15px hsl(45 100% 50% / 0.15);
+  }
+
+  /* Tech Glow Effect */
+  .tech-glow {
+    position: relative;
+  }
+
+  .tech-glow::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(180deg, hsl(200 100% 50% / 0.05) 0%, transparent 50%);
+    pointer-events: none;
+  }
+
+  /* Primary Gold Button */
   .gold-button {
+    @apply relative px-6 py-3 font-display text-sm tracking-wider;
     background: linear-gradient(135deg, hsl(45 100% 55%) 0%, hsl(45 80% 42%) 100%);
-    color: hsl(220 100% 8%);
-    box-shadow: 0 0 20px hsl(45 100% 50% / 0.3);
+    color: hsl(220 60% 8%);
+    border: 1px solid hsl(45 80% 60% / 0.5);
+    box-shadow: 
+      0 0 20px hsl(45 100% 50% / 0.3),
+      inset 0 1px 0 hsl(45 100% 70% / 0.3);
     transition: all 0.2s ease;
   }
 
   .gold-button:hover {
-    box-shadow: 0 0 30px hsl(45 100% 50% / 0.5);
+    box-shadow: 
+      0 0 30px hsl(45 100% 50% / 0.5),
+      inset 0 1px 0 hsl(45 100% 70% / 0.4);
     transform: translateY(-1px);
   }
 
+  .gold-button:active {
+    transform: translateY(0);
+    box-shadow: 
+      0 0 15px hsl(45 100% 50% / 0.3),
+      inset 0 2px 4px hsl(45 60% 30% / 0.3);
+  }
+
+  /* Secondary Silver Button */
+  .silver-button {
+    @apply px-5 py-2.5 font-display text-xs tracking-wider;
+    background: linear-gradient(135deg, hsl(220 15% 22%) 0%, hsl(220 20% 16%) 100%);
+    color: hsl(220 10% 70%);
+    border: 1px solid hsl(220 15% 35% / 0.5);
+    transition: all 0.2s ease;
+  }
+
+  .silver-button:hover {
+    background: linear-gradient(135deg, hsl(220 15% 26%) 0%, hsl(220 20% 20%) 100%);
+    border-color: hsl(220 15% 45% / 0.6);
+    color: hsl(220 10% 85%);
+  }
+
+  /* War Room Background */
   .warroom-bg {
     background: var(--gradient-marble);
     position: relative;
@@ -183,50 +213,138 @@
     position: absolute;
     inset: 0;
     background: 
-      radial-gradient(ellipse 80% 50% at 50% 0%, hsl(180 100% 50% / 0.03) 0%, transparent 50%),
+      radial-gradient(ellipse 80% 40% at 50% 0%, hsl(45 100% 50% / 0.03) 0%, transparent 50%),
       radial-gradient(circle at 20% 80%, hsl(220 60% 15% / 0.3) 0%, transparent 40%),
       radial-gradient(circle at 80% 20%, hsl(220 50% 12% / 0.4) 0%, transparent 35%);
     pointer-events: none;
   }
+
+  /* Golden Light Beam */
+  .golden-beam {
+    position: absolute;
+    top: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 2px;
+    height: 100px;
+    background: linear-gradient(180deg, hsl(45 100% 60%) 0%, hsl(45 100% 50% / 0.5) 50%, transparent 100%);
+    box-shadow: 0 0 30px 10px hsl(45 100% 50% / 0.3);
+  }
+
+  /* Stat Colors */
+  .text-gold {
+    color: hsl(45 100% 50%);
+  }
+
+  .text-silver {
+    color: hsl(220 10% 65%);
+  }
+
+  .text-aqua {
+    color: hsl(180 100% 50%);
+  }
+
+  .text-tech-blue {
+    color: hsl(200 100% 55%);
+  }
+
+  .text-flame {
+    color: hsl(25 100% 55%);
+  }
+
+  .bg-gold {
+    background: linear-gradient(135deg, hsl(45 100% 55%) 0%, hsl(45 80% 45%) 100%);
+  }
+
+  .border-gold {
+    border-color: hsl(45 60% 45% / 0.5);
+  }
+
+  .border-silver {
+    border-color: hsl(220 15% 40% / 0.4);
+  }
+
+  /* Progress Bar Styles */
+  .progress-track {
+    @apply relative h-2 rounded-full overflow-hidden;
+    background: hsl(220 40% 12%);
+    border: 1px solid hsl(220 20% 20%);
+  }
+
+  .progress-fill-gold {
+    @apply h-full rounded-full;
+    background: linear-gradient(90deg, hsl(45 80% 45%) 0%, hsl(45 100% 55%) 100%);
+    box-shadow: 0 0 10px hsl(45 100% 50% / 0.5);
+  }
+
+  .progress-fill-blue {
+    @apply h-full rounded-full;
+    background: linear-gradient(90deg, hsl(200 60% 40%) 0%, hsl(200 100% 55%) 100%);
+    box-shadow: 0 0 10px hsl(200 100% 50% / 0.4);
+  }
 }
 
 @layer utilities {
-  .animate-pulse-glow {
-    animation: pulse-glow 2s ease-in-out infinite;
+  /* Animations */
+  .animate-pulse-gold {
+    animation: pulse-gold 3s ease-in-out infinite;
   }
 
-  @keyframes pulse-glow {
-    0%, 100% {
-      box-shadow: 0 0 30px hsl(180 100% 50% / 0.3);
-    }
-    50% {
-      box-shadow: 0 0 60px hsl(180 100% 50% / 0.6);
-    }
-  }
-
-  .animate-ring-rotate {
-    animation: ring-rotate 20s linear infinite;
-  }
-
-  @keyframes ring-rotate {
-    from {
-      transform: rotate(0deg);
-    }
-    to {
-      transform: rotate(360deg);
-    }
-  }
-
-  .animate-gold-pulse {
-    animation: gold-pulse 2s ease-in-out infinite;
-  }
-
-  @keyframes gold-pulse {
+  @keyframes pulse-gold {
     0%, 100% {
       box-shadow: 0 0 20px hsl(45 100% 50% / 0.3);
     }
     50% {
       box-shadow: 0 0 40px hsl(45 100% 50% / 0.5);
+    }
+  }
+
+  .animate-shimmer {
+    animation: shimmer 4s ease-in-out infinite;
+  }
+
+  @keyframes shimmer {
+    0%, 100% {
+      opacity: 0.7;
+    }
+    50% {
+      opacity: 1;
+    }
+  }
+
+  .animate-sway {
+    animation: sway 6s ease-in-out infinite;
+  }
+
+  @keyframes sway {
+    0%, 100% {
+      transform: rotate(-1deg);
+    }
+    50% {
+      transform: rotate(1deg);
+    }
+  }
+
+  .animate-glow-pulse {
+    animation: glow-pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes glow-pulse {
+    0%, 100% {
+      filter: drop-shadow(0 0 8px hsl(45 100% 50% / 0.4));
+    }
+    50% {
+      filter: drop-shadow(0 0 20px hsl(45 100% 50% / 0.7));
+    }
+  }
+
+  /* Reduced motion support */
+  @media (prefers-reduced-motion: reduce) {
+    .animate-pulse-gold,
+    .animate-shimmer,
+    .animate-sway,
+    .animate-glow-pulse {
+      animation: none;
     }
   }
 }
