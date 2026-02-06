@@ -43,8 +43,7 @@ export interface DashboardStats {
   // Challenge
   weeklyChallenge: {
     id: string | null;
-    progress: number;
-    target: number;
+    weeklyProgress: Record<string, number>;
   };
   
   // Loading state
@@ -98,7 +97,7 @@ export function useDashboardStats(): DashboardStats {
         todaySP: 0,
         urgesResistedThisWeek: 0,
         minutesReclaimed: 0,
-        weeklyChallenge: { id: null, progress: 0, target: 0 },
+        weeklyChallenge: { id: null, weeklyProgress: {} },
       };
     }
 
@@ -123,11 +122,6 @@ export function useDashboardStats(): DashboardStats {
     const totalDays = progress.shieldStreakDays || 0;
     const rankProgress = calculateRankProgress(progress.totalSP, totalDays);
 
-    // Weekly challenge progress (from weeklyProgress map)
-    const challengeProgress = progress.weeklyChallengeId 
-      ? (progress.weeklyProgress[progress.weeklyChallengeId] ?? 0)
-      : 0;
-
     return {
       progress,
       rankProgress,
@@ -139,8 +133,7 @@ export function useDashboardStats(): DashboardStats {
       minutesReclaimed,
       weeklyChallenge: {
         id: progress.weeklyChallengeId,
-        progress: challengeProgress,
-        target: 5, // Default target, would come from challenge catalog
+        weeklyProgress: progress.weeklyProgress,
       },
     };
   }, [progress, triggerEvents, focusSessions]);
