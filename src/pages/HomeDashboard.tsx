@@ -133,8 +133,7 @@ const HomeDashboard = () => {
         <section>
           <WeeklyChallengeMiniCard
             challengeId={stats.weeklyChallenge.id}
-            progress={stats.weeklyChallenge.progress}
-            target={stats.weeklyChallenge.target}
+            weeklyProgress={stats.weeklyChallenge.weeklyProgress}
             onTap={handleChallengeTap}
           />
         </section>
