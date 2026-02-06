@@ -1,9 +1,20 @@
-import { Shield, Flame, Clock, Zap, Star, Target } from "lucide-react";
+import { Shield, Flame, Clock, Zap, Star, Target, Dumbbell, BookOpen, Heart, MessageCircle, Play } from "lucide-react";
 import { useStrengthPoints } from "@/hooks/useStrengthPoints";
 import { CathedralCard } from "@/components/ui/CathedralCard";
 import { StreakCard } from "@/components/ui/StreakCard";
 import { LegacyTree } from "@/components/ui/LegacyTree";
 import { StatRow } from "@/components/ui/StatRow";
+import { NEXT_MOVE_OPTIONS } from "@/logic/recovery";
+import { cn } from "@/lib/utils";
+import { toast } from "@/hooks/use-toast";
+
+const ICON_MAP: Record<string, React.ComponentType<{ className?: string }>> = {
+  Target,
+  Dumbbell,
+  BookOpen,
+  Heart,
+  MessageCircle,
+};
 
 const Growth = () => {
   const { 
@@ -13,6 +24,7 @@ const Growth = () => {
     todayResistance,
     todayGrowth,
     isLoaded,
+    recordAction,
   } = useStrengthPoints();
 
   // Calculate weekly SP (placeholder - would need transaction history)
@@ -23,6 +35,28 @@ const Growth = () => {
   const growthActivities = 21;
   const positiveImpacts = 8;
   const panicButtonUses = 6;
+
+  const handleToolkitAction = (actionId: string, points: number) => {
+    // Map recovery next moves to SP actions
+    const actionMap: Record<string, string> = {
+      'QUICK_WIN_10': 'DAILY_CHECK_IN',
+      'WORKOUT': 'REPLACEMENT_ACTION',
+      'JOURNAL': 'REFLECTION_LOGGED',
+      'DEVOTIONAL': 'GOAL_REVIEWED',
+      'TEXT_BUDDY': 'ACCOUNTABILITY_MESSAGE',
+    };
+    
+    const spAction = actionMap[actionId];
+    if (spAction) {
+      recordAction(spAction as any);
+    }
+    
+    toast({
+      title: `+${points} SP`,
+      description: 'Growth action logged!',
+      duration: 2000,
+    });
+  };
 
   if (!isLoaded) {
     return (
@@ -73,6 +107,47 @@ const Growth = () => {
           <StreakCard type="shield" days={streaks.shieldStreak} />
           <StreakCard type="strength" days={streaks.strengthStreak} />
         </section>
+
+        {/* Growth Toolkit */}
+        <CathedralCard>
+          <h3 className="font-display text-sm text-gold mb-4 text-center tracking-wider">
+            GROWTH TOOLKIT
+          </h3>
+          <div className="space-y-2">
+            {NEXT_MOVE_OPTIONS.map((option) => {
+              const Icon = ICON_MAP[option.icon] ?? Target;
+              
+              return (
+                <button
+                  key={option.id}
+                  onClick={() => handleToolkitAction(option.id, option.points)}
+                  className={cn(
+                    'w-full flex items-center gap-4 p-3 rounded-xl',
+                    'border border-silver/10 bg-cathedral-deep/30',
+                    'hover:border-gold/30 hover:bg-cathedral-deep/50',
+                    'transition-all duration-200 active:scale-[0.98]',
+                    'text-left'
+                  )}
+                >
+                  <div className="flex-shrink-0 w-9 h-9 rounded-lg bg-silver/10 flex items-center justify-center">
+                    <Icon className="w-4 h-4 text-silver" />
+                  </div>
+                  
+                  <div className="flex-1 min-w-0">
+                    <span className="block text-sm font-medium text-foreground">
+                      {option.label}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-gold">+{option.points}</span>
+                    <Play className="w-4 h-4 text-silver/50" />
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </CathedralCard>
 
         {/* Detailed Stats */}
         <CathedralCard>
