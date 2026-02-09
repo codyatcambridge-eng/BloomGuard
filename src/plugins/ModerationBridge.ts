@@ -65,6 +65,34 @@ export interface ModerationSettings {
 }
 
 /**
+ * Lightweight blur overlay bridge protocol between host and WebView.
+ * WebView -> Host: MW_BLUR_READY
+ * Host -> WebView: MW_BLUR_STATE (or MW_BLUR_COMMAND/PING)
+ */
+export type BlurBridgeCommand = 'ENABLE_BLUR' | 'DISABLE_BLUR' | 'PING';
+
+export interface BlurReadyEvent {
+  type: 'MW_BLUR_READY';
+  url?: string;
+  reason?: string;
+  timestamp: number;
+}
+
+export interface BlurStateEvent {
+  type: 'MW_BLUR_STATE';
+  enabled: boolean;
+  reason?: string;
+  timestamp: number;
+}
+
+export interface BlurCommandEvent {
+  type: 'MW_BLUR_COMMAND';
+  command: BlurBridgeCommand;
+  reason?: string;
+  timestamp: number;
+}
+
+/**
  * Maps NSFWJS prediction classes to our granular moderation categories
  * Returns the most specific applicable category
  */

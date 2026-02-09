@@ -14,6 +14,8 @@ import { generateModerationScript } from '@/lib/webview-injection-script';
 import { 
   isValidModerationRequest, 
   createResultMessage,
+  createBlurOverlayStateMessage,
+  isBlurOverlayReadyMessage,
   escapeForJs,
   type ModerationRequestMessage,
 } from '@/lib/moderation-request-utils';
@@ -110,11 +112,66 @@ export const NativeWebViewBrowser = () => {
   const { settings } = useSettings();
   const { settings: localSettings, getModerationConfig, isModerationEnabled, getNonce } = useLocalSettings();
   const deviceId = useDeviceId();
+
+  // Central blur source-of-truth with hysteresis to avoid flicker.
+  const blurStateRef = useRef<{ enabled: boolean; reason: string; timestamp: number }>({
+    enabled: false,
+    reason: 'init',
+    timestamp: Date.now(),
+  });
+  const blurReadyRef = useRef(false);
+  const blurPendingRef = useRef<{ enabled: boolean; reason: string; timestamp: number } | null>(null);
+  const blurRetryTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const blurSignalRef = useRef({ unsafeStreak: 0, safeStreak: 0 });
+  const [blurSyncVersion, setBlurSyncVersion] = useState(0);
+
+  const UNSAFE_STREAK_REQUIRED = 2;
+  const SAFE_STREAK_REQUIRED = 2;
+
+  const queueCurrentBlurState = useCallback((reason: string) => {
+    blurPendingRef.current = {
+      enabled: blurStateRef.current.enabled,
+      reason,
+      timestamp: Date.now(),
+    };
+    setBlurSyncVersion(v => v + 1);
+  }, []);
+
+  const setCentralBlurState = useCallback((enabled: boolean, reason: string) => {
+    const prev = blurStateRef.current;
+    if (prev.enabled === enabled && prev.reason === reason) return;
+
+    blurStateRef.current = {
+      enabled,
+      reason,
+      timestamp: Date.now(),
+    };
+    queueCurrentBlurState(reason);
+  }, [queueCurrentBlurState]);
+
+  const processModerationSafetySignal = useCallback((isUnsafe: boolean, reason: string) => {
+    const signal = blurSignalRef.current;
+    if (isUnsafe) {
+      signal.unsafeStreak += 1;
+      signal.safeStreak = 0;
+      if (signal.unsafeStreak >= UNSAFE_STREAK_REQUIRED) {
+        setCentralBlurState(true, reason);
+      }
+      return;
+    }
+
+    signal.safeStreak += 1;
+    signal.unsafeStreak = 0;
+    if (signal.safeStreak >= SAFE_STREAK_REQUIRED) {
+      setCentralBlurState(false, reason);
+    }
+  }, [setCentralBlurState]);
   
   // Moderation bridge for AI image scanning
   const moderationBridge = useModerationBridge({
     onImageBlurred: (src, result) => {
       console.log('[Browser] Image blurred:', src.substring(0, 50), result.category);
+      processModerationSafetySignal(true, 'image_blurred');
       if (localSettings.show_scan_notifications) {
         toast.info(`Image blurred: ${result.category}`, {
           duration: 2000,
@@ -123,6 +180,7 @@ export const NativeWebViewBrowser = () => {
     },
     onScanComplete: (stats) => {
       console.log('[Browser] Scan complete:', stats);
+      processModerationSafetySignal(stats.blurred > 0, stats.blurred > 0 ? 'scan_complete_unsafe' : 'scan_complete_safe');
       if (localSettings.show_scan_notifications && stats.blurred > 0) {
         toast.success(`Scanned ${stats.total} images, ${stats.blurred} blurred`, {
           duration: 3000,
@@ -485,6 +543,9 @@ export const NativeWebViewBrowser = () => {
       console.log('[Browser] URL:', url);
       setIsLoading(true);
       injectionDoneRef.current = false;
+      blurReadyRef.current = false;
+      blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
+      setCentralBlurState(false, 'navigation_load_start');
     },
     onLoadEnd: async (url) => {
       console.log('[Browser] ======= LOAD END =======');
@@ -496,6 +557,16 @@ export const NativeWebViewBrowser = () => {
         // Small delay to ensure DOM is ready
         setTimeout(async () => {
           await injectModerationScript(executeScript);
+          await executeScript(`
+            (function() {
+              try {
+                window.postMessage({ type: 'MW_BLUR_COMMAND', command: 'PING', timestamp: Date.now(), reason: 'host_onLoadEnd' }, '*');
+                return 'OK';
+              } catch (e) {
+                return 'ERR';
+              }
+            })();
+          `);
         }, 500);
       }
     },
@@ -515,15 +586,137 @@ export const NativeWebViewBrowser = () => {
       navigate('browse', url, url);
       // Reset injection for new page navigation
       injectionDoneRef.current = false;
+      blurReadyRef.current = false;
+      blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
+      setCentralBlurState(false, 'url_change_safe_reset');
     },
     onNavigationRequest: handleNavigationRequest,
     onClose: () => {
       console.log('[Browser] ======= WEBVIEW CLOSED =======');
       moderationBridge.clearCache();
       injectionDoneRef.current = false;
+      blurReadyRef.current = false;
+      blurPendingRef.current = null;
+      blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
+      setCentralBlurState(false, 'webview_closed');
       navigate('home', '', '');
     },
   });
+
+  const requestBlurHandshake = useCallback(async (source: string) => {
+    if (!isNative || !webViewState.isOpen || !executeScript) return;
+    await executeScript(`
+      (function() {
+        try {
+          window.postMessage({ type: 'MW_BLUR_COMMAND', command: 'PING', reason: '${escapeForJs(source)}', timestamp: Date.now() }, '*');
+          return 'OK';
+        } catch (e) {
+          return 'ERR';
+        }
+      })();
+    `);
+  }, [isNative, webViewState.isOpen, executeScript]);
+
+  const flushBlurStateToWebView = useCallback(async (attempt: number = 0) => {
+    if (!isNative || !webViewState.isOpen || !executeScript) return;
+    if (!blurReadyRef.current) return;
+
+    const pending = blurPendingRef.current || blurStateRef.current;
+    const stateMessage = createBlurOverlayStateMessage(pending.enabled, pending.reason);
+    const escapedMessage = escapeForJs(JSON.stringify(stateMessage));
+
+    const script = `
+      (function() {
+        try {
+          var msg = JSON.parse('${escapedMessage}');
+          window.postMessage(msg, '*');
+          return 'OK';
+        } catch (e) {
+          return 'ERR';
+        }
+      })();
+    `;
+
+    const result = await executeScript(script);
+    if (result) {
+      blurPendingRef.current = null;
+      return;
+    }
+
+    if (attempt >= 3) {
+      return;
+    }
+
+    if (blurRetryTimerRef.current) {
+      clearTimeout(blurRetryTimerRef.current);
+    }
+    blurRetryTimerRef.current = setTimeout(() => {
+      flushBlurStateToWebView(attempt + 1);
+    }, Math.min(200 * (attempt + 1), 1000));
+  }, [isNative, webViewState.isOpen, executeScript]);
+
+  useEffect(() => {
+    if (!isNative || !webViewState.isOpen) return;
+    if (!blurReadyRef.current) return;
+    flushBlurStateToWebView();
+  }, [blurSyncVersion, isNative, webViewState.isOpen, flushBlurStateToWebView]);
+
+  useEffect(() => {
+    if (!isNative || !webViewState.isOpen) return;
+
+    const onVisible = () => {
+      requestBlurHandshake('host_visible');
+      queueCurrentBlurState('host_visible_resync');
+      flushBlurStateToWebView();
+    };
+
+    window.addEventListener('focus', onVisible);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      window.removeEventListener('focus', onVisible);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [isNative, webViewState.isOpen, requestBlurHandshake, queueCurrentBlurState, flushBlurStateToWebView]);
+
+  useEffect(() => {
+    if (!isNative || !webViewState.isOpen || !executeScript) return;
+    if (!webViewState.currentUrl) return;
+
+    blurReadyRef.current = false;
+
+    const reinjectAndPing = async () => {
+      await injectModerationScript(executeScript);
+      await requestBlurHandshake('url_change_reinject');
+    };
+
+    const timer = setTimeout(reinjectAndPing, 250);
+    return () => clearTimeout(timer);
+  }, [
+    isNative,
+    webViewState.isOpen,
+    webViewState.currentUrl,
+    executeScript,
+    injectModerationScript,
+    requestBlurHandshake,
+  ]);
+
+  useEffect(() => {
+    if (!isNative || !webViewState.isOpen) return;
+    const timer = setInterval(() => {
+      if (!blurReadyRef.current) {
+        requestBlurHandshake('ready_poll');
+      }
+    }, 800);
+    return () => clearInterval(timer);
+  }, [isNative, webViewState.isOpen, requestBlurHandshake]);
+
+  useEffect(() => {
+    return () => {
+      if (blurRetryTimerRef.current) {
+        clearTimeout(blurRetryTimerRef.current);
+      }
+    };
+  }, []);
 
   // ==================== MODERATION MESSAGE HANDLING ====================
   // 
@@ -604,6 +797,9 @@ export const NativeWebViewBrowser = () => {
     
     const elapsedMs = performance.now() - startTime;
     console.log('[MW-Host] scan complete', requestId, 'elapsed=' + elapsedMs.toFixed(0) + 'ms');
+
+    const hasUnsafe = results.some(item => item.shouldBlur);
+    processModerationSafetySignal(hasUnsafe, hasUnsafe ? 'moderation_request_unsafe' : 'moderation_request_safe');
     
     // Post results back to the WebView with nonce for security
     console.log('[MW-Host] posting results back', requestId, 'count=' + results.length, 'nonce=' + nonce.substring(0, 10));
@@ -665,7 +861,7 @@ export const NativeWebViewBrowser = () => {
     }
     
     pendingRequestsRef.current.delete(requestId);
-  }, [moderationBridge, executeScript, localSettings.blur_strength_px]);
+  }, [moderationBridge, executeScript, localSettings.blur_strength_px, processModerationSafetySignal]);
 
   /**
    * Handle messages from WebView via window.postMessage
@@ -677,6 +873,14 @@ export const NativeWebViewBrowser = () => {
     
     const handleMessage = async (event: MessageEvent) => {
       const message = event.data;
+
+      if (isBlurOverlayReadyMessage(message)) {
+        blurReadyRef.current = true;
+        console.log('[MW-Host] Blur overlay READY:', message.reason || 'ready', message.url || '');
+        queueCurrentBlurState('webview_ready_sync');
+        await flushBlurStateToWebView();
+        return;
+      }
       
       // Handle new postMessage protocol with nonce validation
       if (isValidModerationRequest(message)) {
@@ -732,7 +936,7 @@ export const NativeWebViewBrowser = () => {
 
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
-  }, [processModerationRequest, moderationBridge, executeScript, getNonce]);
+  }, [processModerationRequest, moderationBridge, executeScript, getNonce, queueCurrentBlurState, flushBlurStateToWebView]);
 
   /**
    * Fallback: Poll for moderation requests from legacy global queue
@@ -1219,9 +1423,12 @@ export const NativeWebViewBrowser = () => {
       await webViewReload();
       // Reset injection flag to re-inject moderation script
       injectionDoneRef.current = false;
+      blurReadyRef.current = false;
+      blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
+      setCentralBlurState(false, 'manual_reload');
       return;
     }
-  }, [readerContent, currentView, searchQuery, isNative, webViewState.isOpen, handleReaderMode, handleSearch, webViewReload]);
+  }, [readerContent, currentView, searchQuery, isNative, webViewState.isOpen, handleReaderMode, handleSearch, webViewReload, setCentralBlurState]);
 
   const handleHome = useCallback(async () => {
     if (isNative && webViewState.isOpen) {
@@ -1229,6 +1436,10 @@ export const NativeWebViewBrowser = () => {
     }
     moderationBridge.clearCache();
     injectionDoneRef.current = false;
+    blurReadyRef.current = false;
+    blurPendingRef.current = null;
+    blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
+    setCentralBlurState(false, 'home_reset');
     setReaderContent(null);
     setPdfContent(null);
     setYoutubeContent(null);
@@ -1239,7 +1450,7 @@ export const NativeWebViewBrowser = () => {
     setUrlInput('');
     setFallbackUrl('');
     goHome();
-  }, [isNative, webViewState.isOpen, closeWebView, goHome, moderationBridge]);
+  }, [isNative, webViewState.isOpen, closeWebView, goHome, moderationBridge, setCentralBlurState]);
 
   // Manual scan trigger for current page
   const handleScanPage = useCallback(async () => {
@@ -1253,8 +1464,11 @@ export const NativeWebViewBrowser = () => {
     
     // Inject a script to re-scan all images
     const rescanScript = `
-      if (window.__GC_MODERATION__) {
-        window.__GC_MODERATION__.scanAll();
+      if (typeof window.__MW_SCAN_FULL__ === 'function') {
+        window.__MW_SCAN_FULL__();
+        'Scan triggered';
+      } else if (window.__MW_DEBUG__ && typeof window.__MW_DEBUG__.scanAll === 'function') {
+        window.__MW_DEBUG__.scanAll();
         'Scan triggered';
       } else {
         'Moderation not active';

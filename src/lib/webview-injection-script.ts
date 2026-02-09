@@ -64,6 +64,11 @@ export function generateModerationScript(config: InjectionConfig): string {
   // Prevent double injection
   if (window.__MW_ACTIVE__) {
     console.log('[MW] Already injected, skipping');
+    try {
+      if (window.__MW_BLUR_OVERLAY_API__ && typeof window.__MW_BLUR_OVERLAY_API__.sendReady === 'function') {
+        window.__MW_BLUR_OVERLAY_API__.sendReady('reinject');
+      }
+    } catch (e) {}
     return;
   }
   window.__MW_ACTIVE__ = true;
@@ -106,6 +111,177 @@ export function generateModerationScript(config: InjectionConfig): string {
     3: { porn: 0.10, sexy: 0.20, hentai: 0.10 },    // Strict (ZERO-TOLERANCE)
     4: { porn: 0.05, sexy: 0.10, hentai: 0.05 },    // Maximum (extreme)
   };
+
+  // ==================== GLOBAL BLUR OVERLAY PROTOCOL ====================
+
+  const OVERLAY_ID = 'mw-blur-overlay';
+  const OVERLAY_STYLE_ID = 'mw-blur-overlay-style';
+
+  const overlayState = window.__MW_BLUR_STATE__ || {
+    enabled: false,
+    updatedAt: Date.now(),
+    reason: 'init',
+  };
+  window.__MW_BLUR_STATE__ = overlayState;
+
+  function postToHost(payload) {
+    try {
+      window.postMessage(payload, '*');
+    } catch (e) {}
+    try {
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage(payload, '*');
+      }
+    } catch (e) {}
+  }
+
+  function ensureOverlayStyle() {
+    if (document.getElementById(OVERLAY_STYLE_ID)) return;
+    const style = document.createElement('style');
+    style.id = OVERLAY_STYLE_ID;
+    style.textContent = [
+      '#' + OVERLAY_ID + ' {',
+      'position: fixed !important;',
+      'inset: 0 !important;',
+      'z-index: 2147483646 !important;',
+      'pointer-events: none !important;',
+      'display: none !important;',
+      'opacity: 0 !important;',
+      'background: rgba(20,20,20,0.16) !important;',
+      'backdrop-filter: blur(22px) saturate(0.85) !important;',
+      '-webkit-backdrop-filter: blur(22px) saturate(0.85) !important;',
+      'transition: opacity 140ms ease !important;',
+      '}',
+      '#' + OVERLAY_ID + '.mw-enabled {',
+      'display: block !important;',
+      'opacity: 1 !important;',
+      '}',
+    ].join('');
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  function ensureOverlayElement() {
+    let overlay = document.getElementById(OVERLAY_ID);
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.id = OVERLAY_ID;
+      overlay.setAttribute('aria-hidden', 'true');
+      (document.body || document.documentElement).appendChild(overlay);
+    }
+    return overlay;
+  }
+
+  function setOverlayEnabled(enabled, reason) {
+    overlayState.enabled = !!enabled;
+    overlayState.reason = reason || 'unknown';
+    overlayState.updatedAt = Date.now();
+
+    ensureOverlayStyle();
+    const overlay = ensureOverlayElement();
+    if (!overlay) return;
+
+    if (overlayState.enabled) {
+      overlay.classList.add('mw-enabled');
+    } else {
+      overlay.classList.remove('mw-enabled');
+    }
+  }
+
+  function sendBlurReady(reason) {
+    postToHost({
+      type: 'MW_BLUR_READY',
+      reason: reason || 'ready',
+      url: window.location.href,
+      timestamp: Date.now(),
+    });
+  }
+
+  function handleBlurCommand(message) {
+    if (!message || typeof message !== 'object') return false;
+
+    if (message.type === 'MW_BLUR_STATE') {
+      setOverlayEnabled(!!message.enabled, message.reason || 'state');
+      return true;
+    }
+
+    if (message.type !== 'MW_BLUR_COMMAND') return false;
+
+    if (message.command === 'ENABLE_BLUR') {
+      setOverlayEnabled(true, message.reason || 'command_enable');
+      return true;
+    }
+    if (message.command === 'DISABLE_BLUR') {
+      setOverlayEnabled(false, message.reason || 'command_disable');
+      return true;
+    }
+    if (message.command === 'PING') {
+      sendBlurReady('ping');
+      return true;
+    }
+
+    return false;
+  }
+
+  if (!window.__MW_BLUR_LISTENER__) {
+    window.__MW_BLUR_LISTENER__ = true;
+    window.addEventListener('message', function(event) {
+      handleBlurCommand(event && event.data ? event.data : null);
+    });
+  }
+
+  if (!window.__MW_BLUR_NAV_HOOKED__) {
+    window.__MW_BLUR_NAV_HOOKED__ = true;
+    const rawPushState = history.pushState;
+    const rawReplaceState = history.replaceState;
+
+    history.pushState = function() {
+      const result = rawPushState.apply(this, arguments);
+      setTimeout(function() { sendBlurReady('pushState'); }, 0);
+      return result;
+    };
+
+    history.replaceState = function() {
+      const result = rawReplaceState.apply(this, arguments);
+      setTimeout(function() { sendBlurReady('replaceState'); }, 0);
+      return result;
+    };
+
+    window.addEventListener('popstate', function() { sendBlurReady('popstate'); });
+    window.addEventListener('hashchange', function() { sendBlurReady('hashchange'); });
+    window.addEventListener('pageshow', function() { sendBlurReady('pageshow'); });
+    window.addEventListener('load', function() { sendBlurReady('load'); });
+    document.addEventListener('visibilitychange', function() {
+      if (!document.hidden) sendBlurReady('visibility');
+    });
+  }
+
+  if (!window.__MW_BLUR_HEAL_OBSERVER__) {
+    window.__MW_BLUR_HEAL_OBSERVER__ = new MutationObserver(function() {
+      ensureOverlayStyle();
+      const overlay = ensureOverlayElement();
+      if (!overlay) return;
+      if (overlayState.enabled) {
+        overlay.classList.add('mw-enabled');
+      } else {
+        overlay.classList.remove('mw-enabled');
+      }
+    });
+    try {
+      window.__MW_BLUR_HEAL_OBSERVER__.observe(document.documentElement, { childList: true, subtree: true });
+    } catch (e) {}
+  }
+
+  window.__MW_BLUR_OVERLAY_API__ = {
+    enable: function(reason) { setOverlayEnabled(true, reason || 'api_enable'); },
+    disable: function(reason) { setOverlayEnabled(false, reason || 'api_disable'); },
+    setState: function(enabled, reason) { setOverlayEnabled(!!enabled, reason || 'api_state'); },
+    sendReady: function(reason) { sendBlurReady(reason || 'api_ready'); },
+    getState: function() { return { enabled: !!overlayState.enabled, reason: overlayState.reason, updatedAt: overlayState.updatedAt }; },
+  };
+
+  // Fail-open default: overlay starts disabled until host sends state.
+  setOverlayEnabled(false, 'init_default_disabled');
+  sendBlurReady('init');
 
   // ==================== REQUEST ID GENERATION ====================
   
