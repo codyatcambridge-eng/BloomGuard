@@ -5,9 +5,8 @@ import {
   ModerationScanResult, 
   ModerationCategory,
   calculateCategory,
-  getThresholdsForSensitivity,
 } from '@/plugins/ModerationBridge';
-import { isBlurOverlayReadyMessage } from '@/lib/moderation-request-utils';
+import { isBlurOverlayReadyMessage, mapModerationCategoryToSeverity } from '@/lib/moderation-request-utils';
 
 export interface ModerationBridgeState {
   isReady: boolean;
@@ -22,6 +21,13 @@ export interface ModerationBridgeState {
 export interface UseModerationBridgeOptions {
   onImageBlurred?: (src: string, result: ModerationScanResult) => void;
   onScanComplete?: (stats: { total: number; blurred: number; safe: number }) => void;
+  onSignal?: (probs: {
+    Porn: number;
+    Hentai: number;
+    Sexy: number;
+    Neutral: number;
+    Drawing: number;
+  }) => void;
   onError?: (error: string) => void;
 }
 
@@ -34,7 +40,7 @@ export const isWebViewBlurReadyEvent = (message: unknown): boolean => {
  * Handles scan requests from injected JavaScript and returns results
  */
 export const useModerationBridge = (options: UseModerationBridgeOptions = {}) => {
-  const { onImageBlurred, onScanComplete, onError } = options;
+  const { onImageBlurred, onScanComplete, onSignal, onError } = options;
   
   const [state, setState] = useState<ModerationBridgeState>({
     isReady: false,
@@ -71,13 +77,34 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
       predictions[p.className] = p.probability;
     });
 
-    const category = calculateCategory(predictions);
+    const pornScore = predictions.Porn ?? predictions.porn ?? 0;
+    const sexyScore = predictions.Sexy ?? predictions.sexy ?? 0;
+    const hentaiScore = predictions.Hentai ?? predictions.hentai ?? 0;
+
+    let category = calculateCategory(predictions);
+
+    // Keep category aligned with blur decisions so downstream JS doesn't discard unsafe hits.
+    if (result.reason === 'swimwear_detected') {
+      category = 'swimwear';
+    } else if (
+      result.shouldBlur &&
+      (category === 'safe' || category === 'neutral' || category === 'drawing')
+    ) {
+      if (pornScore >= hentaiScore && pornScore >= sexyScore) {
+        category = 'porn';
+      } else if (hentaiScore >= pornScore && hentaiScore >= sexyScore) {
+        category = 'hentai';
+      } else {
+        category = 'sexy';
+      }
+    }
 
     return {
       src,
       shouldBlur: result.shouldBlur,
       category,
       confidence: result.confidence,
+      severity: mapModerationCategoryToSeverity(category),
       predictions,
       inferenceTime,
     };
@@ -119,6 +146,14 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
       const scanResult = convertResult(src, result, inferenceTime);
       resultsCache.current.set(src, scanResult);
 
+      onSignal?.({
+        Porn: scanResult.predictions?.Porn ?? scanResult.predictions?.porn ?? 0,
+        Hentai: scanResult.predictions?.Hentai ?? scanResult.predictions?.hentai ?? 0,
+        Sexy: scanResult.predictions?.Sexy ?? scanResult.predictions?.sexy ?? 0,
+        Neutral: scanResult.predictions?.Neutral ?? scanResult.predictions?.neutral ?? 0,
+        Drawing: scanResult.predictions?.Drawing ?? scanResult.predictions?.drawing ?? 0,
+      });
+
       // Update state
       setState(prev => ({
         ...prev,
@@ -140,7 +175,7 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
       console.debug('[MW-Bridge] Scan error:', src.substring(0, 50), errorMsg);
       return null;
     }
-  }, [modelReady, isModerationEnabled, getDialThresholds, classifyImage, convertResult, onImageBlurred]);
+  }, [modelReady, isModerationEnabled, getDialThresholds, classifyImage, convertResult, onImageBlurred, onSignal]);
 
   /**
    * Process scan queue with concurrency limit

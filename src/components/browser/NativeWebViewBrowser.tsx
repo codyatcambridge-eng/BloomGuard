@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
+import type { PluginListenerHandle } from '@capacitor/core';
 import LabelListener from '@/components/browser/LabelListener';
 import { Shield, AlertTriangle, Loader2, Globe } from 'lucide-react';
 import { useNativeWebView } from '@/hooks/useNativeWebView';
@@ -6,19 +7,28 @@ import { useContentProtection } from '@/hooks/useContentProtection';
 import { useSettings } from '@/hooks/useSettings';
 import { useLocalSettings } from '@/hooks/useLocalSettings';
 import { useDeviceId } from '@/hooks/useDeviceId';
-import { useBrowserNavigation, BrowserView } from '@/hooks/useBrowserNavigation';
+import { useBrowserNavigation } from '@/hooks/useBrowserNavigation';
 import { useCapacitor } from '@/hooks/useCapacitor';
 import { useModerationBridge } from '@/hooks/useModerationBridge';
 import { supabase } from '@/integrations/supabase/client';
-import { generateModerationScript } from '@/lib/webview-injection-script';
-import { 
-  isValidModerationRequest, 
+import { generateModerationSignalScript } from '@/lib/webview-signal-injection-script';
+import {
+  isValidModerationRequest,
   createResultMessage,
   createBlurOverlayStateMessage,
   isBlurOverlayReadyMessage,
   escapeForJs,
+  mapModerationCategoryToSeverity,
+  type ModerationSeverity,
   type ModerationRequestMessage,
 } from '@/lib/moderation-request-utils';
+import {
+  startScanning as startNativeContentFilter,
+  stopScanning as stopNativeContentFilter,
+  setNSFWSignal as pushNativeNsfwSignal,
+  onRiskDecision as onNativeRiskDecision,
+  type NsfwProbabilities,
+} from '@/plugins/ContentFilter';
 import { BrowserHeader } from './BrowserHeader';
 import { SafeBrowserHomepage } from './SafeBrowserHomepage';
 import { SearchResultsView } from './SearchResultsView';
@@ -80,7 +90,9 @@ interface SocialContent {
  * Social platforms load fully in WebView (not preview mode)
  */
 export const NativeWebViewBrowser = () => {
-  const { isNative, platform } = useCapacitor();
+  const { isNative } = useCapacitor();
+  const ENABLE_DOM_BLUR = false;
+  const ENABLE_SIGNAL_PIPELINE = true;
   
   const [urlInput, setUrlInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -124,6 +136,8 @@ export const NativeWebViewBrowser = () => {
   const blurRetryTimerRef = useRef<NodeJS.Timeout | null>(null);
   const blurSignalRef = useRef({ unsafeStreak: 0, safeStreak: 0 });
   const [blurSyncVersion, setBlurSyncVersion] = useState(0);
+  const riskDecisionListenerRef = useRef<PluginListenerHandle | null>(null);
+  const lastNsfwSignalAtRef = useRef(0);
 
   const UNSAFE_STREAK_REQUIRED = 2;
   const SAFE_STREAK_REQUIRED = 2;
@@ -166,12 +180,27 @@ export const NativeWebViewBrowser = () => {
       setCentralBlurState(false, reason);
     }
   }, [setCentralBlurState]);
+
+  const pushNativeSignalCapped = useCallback(async (probs: Partial<NsfwProbabilities>) => {
+    const now = Date.now();
+    if (now - lastNsfwSignalAtRef.current < 500) return; // max 2 FPS
+    lastNsfwSignalAtRef.current = now;
+    try {
+      console.debug('[NSFW-Signal] pushNativeSignalCapped', probs);
+      await pushNativeNsfwSignal(probs);
+    } catch (error) {
+      console.debug('[NSFW-Signal] push failed', error);
+    }
+  }, []);
   
   // Moderation bridge for AI image scanning
   const moderationBridge = useModerationBridge({
-    onImageBlurred: (src, result) => {
-      console.log('[Browser] Image blurred:', src.substring(0, 50), result.category);
-      processModerationSafetySignal(true, 'image_blurred');
+    onSignal: (probs) => {
+      console.debug('[NSFW-Signal] onSignal', probs);
+      pushNativeSignalCapped(probs);
+    },
+    onImageBlurred: (_src, result) => {
+      console.debug('[Browser] Image blurred:', result.category);
       if (localSettings.show_scan_notifications) {
         toast.info(`Image blurred: ${result.category}`, {
           duration: 2000,
@@ -180,7 +209,6 @@ export const NativeWebViewBrowser = () => {
     },
     onScanComplete: (stats) => {
       console.log('[Browser] Scan complete:', stats);
-      processModerationSafetySignal(stats.blurred > 0, stats.blurred > 0 ? 'scan_complete_unsafe' : 'scan_complete_safe');
       if (localSettings.show_scan_notifications && stats.blurred > 0) {
         toast.success(`Scanned ${stats.total} images, ${stats.blurred} blurred`, {
           duration: 3000,
@@ -266,268 +294,27 @@ export const NativeWebViewBrowser = () => {
 
   // Inject moderation script into WebView
   const injectModerationScript = useCallback(async (scriptExecutor: (script: string) => Promise<string | null>) => {
+    if (!ENABLE_SIGNAL_PIPELINE) {
+      return;
+    }
     if (!isModerationEnabled()) {
       console.log('[MW-Bridge] Moderation disabled, skipping injection');
       return;
     }
     
     const config = getModerationConfig();
-    console.log('[MW-Bridge] Injecting moderation script with config:', config);
+    console.log('[MW-Bridge] Injecting signal script with config:', config);
     
-    // Inject the main moderation script (includes CSS)
-    const mainScript = generateModerationScript(config);
+    // Signal-only script: request scanning + host bridge, no DOM blur/overlay mutations.
+    const mainScript = generateModerationSignalScript(config);
     try {
       await scriptExecutor(mainScript);
-
-      // YouTube-specific hardening: Robust MutationObserver targeting specific YouTube selectors
-      // Detects .yt-core-image, ytd-thumbnail img, #thumbnail img and sends to ModerationBridge
-      const ytObserverScript = `
-        (function() {
-          'use strict';
-          try {
-            if (window.__GC_YT_ROBUST_OBSERVER__) return 'ALREADY_INSTALLED';
-            window.__GC_YT_ROBUST_OBSERVER__ = true;
-
-            // YouTube-specific selectors to target
-            var YT_SELECTORS = [
-              '.yt-core-image',
-              'ytd-thumbnail img',
-              '#thumbnail img',
-              'yt-img-shadow img',
-              'ytd-rich-item-renderer img',
-              'ytd-video-renderer img',
-              'ytd-compact-video-renderer img',
-              'ytd-grid-video-renderer img',
-              'img[src*="ytimg.com"]',
-              'img[src*="ggpht.com"]'
-            ];
-
-            // Track processed images to avoid duplicates
-            var processedSrcs = new Set();
-            var pendingQueue = [];
-            var flushTimer = null;
-
-            // Check if element is visible in viewport (with 300px buffer)
-            function isInViewport(el) {
-              try {
-                var rect = el.getBoundingClientRect();
-                return (
-                  rect.top < window.innerHeight + 300 &&
-                  rect.bottom > -300 &&
-                  rect.left < window.innerWidth + 300 &&
-                  rect.right > -300 &&
-                  rect.width > 50 && rect.height > 50
-                );
-              } catch (e) { return false; }
-            }
-
-            // Extract src from element
-            function getSrc(el) {
-              return el.src || el.dataset.src || el.dataset.lazySrc || el.getAttribute('data-src') || '';
-            }
-
-            // Queue image for moderation scan
-            function queueImage(el) {
-              var src = getSrc(el);
-              if (!src || src.startsWith('data:') && src.length < 500) return;
-              if (processedSrcs.has(src)) return;
-              if (el.dataset.mwYtQueued === 'true') return;
-              
-              // Mark as queued
-              el.dataset.mwYtQueued = 'true';
-              processedSrcs.add(src);
-              
-              // Add to pending queue with element reference
-              pendingQueue.push({ src: src, el: el });
-              
-              // Debounce flush
-              if (!flushTimer) {
-                flushTimer = setTimeout(flushQueue, 50);
-              }
-            }
-
-            // Flush queue - send to ModerationBridge via internal script
-            function flushQueue() {
-              flushTimer = null;
-              if (pendingQueue.length === 0) return;
-              
-              var items = pendingQueue.splice(0, 10); // Process 10 at a time
-              
-              console.log('[MW-YT-Observer] Flushing', items.length, 'YouTube images to scanner');
-              
-              // Trigger the main moderation script's scan on these elements
-              items.forEach(function(item) {
-                try {
-                  // Force rescan by clearing mwScanned flag
-                  if (item.el && item.el.dataset) {
-                    item.el.dataset.mwScanned = 'false';
-                  }
-                } catch (e) {}
-              });
-              
-              // Call the main scanner
-              if (typeof window.__MW_SCAN_YT__ === 'function') {
-                window.__MW_SCAN_YT__();
-              } else if (typeof window.__MW_SCAN_FULL__ === 'function') {
-                window.__MW_SCAN_FULL__();
-              }
-              
-              // Continue if more items
-              if (pendingQueue.length > 0) {
-                flushTimer = setTimeout(flushQueue, 100);
-              }
-            }
-
-            // Scan all YouTube images currently in DOM
-            function scanAllYouTubeImages() {
-              YT_SELECTORS.forEach(function(selector) {
-                try {
-                  document.querySelectorAll(selector).forEach(function(el) {
-                    if (el.tagName === 'IMG' && isInViewport(el)) {
-                      queueImage(el);
-                    }
-                  });
-                } catch (e) {}
-              });
-            }
-
-            // IntersectionObserver for viewport detection
-            var viewportObserver = null;
-            if ('IntersectionObserver' in window) {
-              viewportObserver = new IntersectionObserver(function(entries) {
-                entries.forEach(function(entry) {
-                  if (entry.isIntersecting) {
-                    var el = entry.target;
-                    if (el.tagName === 'IMG') {
-                      queueImage(el);
-                    }
-                  }
-                });
-              }, { rootMargin: '300px', threshold: 0.01 });
-            }
-
-            // Observe an element for viewport entry
-            function observeElement(el) {
-              if (viewportObserver && el.tagName === 'IMG') {
-                viewportObserver.observe(el);
-              }
-            }
-
-            // MutationObserver for DOM changes
-            var mutationObserver = new MutationObserver(function(mutations) {
-              var foundNewImages = false;
-              
-              mutations.forEach(function(mutation) {
-                // Check added nodes
-                mutation.addedNodes.forEach(function(node) {
-                  if (node.nodeType !== 1) return;
-                  
-                  var el = node;
-                  var tagName = el.tagName ? el.tagName.toUpperCase() : '';
-                  
-                  // Direct IMG element
-                  if (tagName === 'IMG') {
-                    observeElement(el);
-                    if (isInViewport(el)) {
-                      queueImage(el);
-                      foundNewImages = true;
-                    }
-                  }
-                  
-                  // YouTube container elements - scan their children
-                  if (tagName.startsWith('YTD-') || 
-                      tagName === 'YT-IMAGE' || 
-                      tagName === 'YT-IMG-SHADOW' ||
-                      el.id === 'thumbnail' ||
-                      el.classList.contains('yt-core-image')) {
-                    try {
-                      el.querySelectorAll('img').forEach(function(img) {
-                        observeElement(img);
-                        if (isInViewport(img)) {
-                          queueImage(img);
-                          foundNewImages = true;
-                        }
-                      });
-                    } catch (e) {}
-                  }
-                  
-                  // Generic: scan all img descendants
-                  try {
-                    el.querySelectorAll && el.querySelectorAll('img').forEach(function(img) {
-                      observeElement(img);
-                    });
-                  } catch (e) {}
-                });
-                
-                // Attribute changes (src, data-src)
-                if (mutation.type === 'attributes') {
-                  var target = mutation.target;
-                  var attr = mutation.attributeName;
-                  if (target.tagName === 'IMG' && (attr === 'src' || attr === 'data-src' || attr === 'srcset')) {
-                    // Reset processed state for this element
-                    target.dataset.mwYtQueued = 'false';
-                    target.dataset.mwScanned = 'false';
-                    var src = getSrc(target);
-                    if (src) processedSrcs.delete(src);
-                    if (isInViewport(target)) {
-                      queueImage(target);
-                      foundNewImages = true;
-                    }
-                  }
-                }
-              });
-              
-              // If new images found, also trigger a full YT scan after a delay
-              if (foundNewImages) {
-                setTimeout(scanAllYouTubeImages, 200);
-              }
-            });
-
-            // Start observing
-            if (document.body) {
-              mutationObserver.observe(document.body, {
-                childList: true,
-                subtree: true,
-                attributes: true,
-                attributeFilter: ['src', 'data-src', 'srcset', 'data-lazy-src']
-              });
-              
-              // Initial scan
-              scanAllYouTubeImages();
-              
-              // Periodic rescans for lazy-loaded content
-              setInterval(scanAllYouTubeImages, 2000);
-              
-              // Scroll handler for infinite scroll
-              var scrollTimer = null;
-              var lastScrollY = 0;
-              window.addEventListener('scroll', function() {
-                var delta = Math.abs(window.scrollY - lastScrollY);
-                if (delta > 100) {
-                  lastScrollY = window.scrollY;
-                  if (scrollTimer) clearTimeout(scrollTimer);
-                  scrollTimer = setTimeout(scanAllYouTubeImages, 100);
-                }
-              }, { passive: true });
-              
-              console.log('[MW-YT-Observer] Robust YouTube MutationObserver installed');
-              return 'OK';
-            }
-            return 'NO_BODY';
-          } catch (e) {
-            console.error('[MW-YT-Observer] Error:', e);
-            return 'ERR:' + (e && e.message ? e.message : 'unknown');
-          }
-        })();
-      `;
-      await scriptExecutor(ytObserverScript);
-
       injectionDoneRef.current = true;
       console.log('[MW-Bridge] Moderation script injected successfully');
     } catch (error) {
       console.error('[MW-Bridge] Moderation script injection failed:', error);
     }
-  }, [isModerationEnabled, getModerationConfig]);
+  }, [ENABLE_SIGNAL_PIPELINE, isModerationEnabled, getModerationConfig]);
 
   const {
     state: webViewState,
@@ -551,22 +338,25 @@ export const NativeWebViewBrowser = () => {
       console.log('[Browser] ======= LOAD END =======');
       console.log('[Browser] URL:', url);
       setIsLoading(false);
+      if (!ENABLE_SIGNAL_PIPELINE) return;
       
       // Inject moderation script after page fully loads
       if (!injectionDoneRef.current) {
         // Small delay to ensure DOM is ready
         setTimeout(async () => {
           await injectModerationScript(executeScript);
-          await executeScript(`
-            (function() {
-              try {
-                window.postMessage({ type: 'MW_BLUR_COMMAND', command: 'PING', timestamp: Date.now(), reason: 'host_onLoadEnd' }, '*');
-                return 'OK';
-              } catch (e) {
-                return 'ERR';
-              }
-            })();
-          `);
+          if (ENABLE_DOM_BLUR && executeScript) {
+            await executeScript(`
+              (function() {
+                try {
+                  window.postMessage({ type: 'MW_BLUR_COMMAND', command: 'PING', timestamp: Date.now(), reason: 'host_onLoadEnd' }, '*');
+                  return 'OK';
+                } catch (e) {
+                  return 'ERR';
+                }
+              })();
+            `);
+          }
         }, 500);
       }
     },
@@ -603,7 +393,45 @@ export const NativeWebViewBrowser = () => {
     },
   });
 
+  useEffect(() => {
+    if (!isNative) return;
+    if (!webViewState.isOpen) {
+      riskDecisionListenerRef.current?.remove();
+      riskDecisionListenerRef.current = null;
+      stopNativeContentFilter().catch(() => undefined);
+      return;
+    }
+
+    let cancelled = false;
+    const attach = async () => {
+      try {
+        const startPayload = await startNativeContentFilter({
+          preset: 'balanced',
+          kidMode: false,
+          fps: 1.0,
+          allowRevealDuringHardBlur: false,
+        });
+        console.debug('[ContentFilter] startScanning resolved', startPayload);
+        if (cancelled) return;
+        riskDecisionListenerRef.current = await onNativeRiskDecision((decision) => {
+          console.debug('[ContentFilter] decision', decision.state, decision.riskScore);
+        });
+      } catch (error) {
+        console.debug('[ContentFilter] setup failed', error);
+      }
+    };
+    attach();
+
+    return () => {
+      cancelled = true;
+      riskDecisionListenerRef.current?.remove();
+      riskDecisionListenerRef.current = null;
+      stopNativeContentFilter().catch(() => undefined);
+    };
+  }, [isNative, webViewState.isOpen]);
+
   const requestBlurHandshake = useCallback(async (source: string) => {
+    if (!ENABLE_DOM_BLUR) return;
     if (!isNative || !webViewState.isOpen || !executeScript) return;
     await executeScript(`
       (function() {
@@ -615,9 +443,10 @@ export const NativeWebViewBrowser = () => {
         }
       })();
     `);
-  }, [isNative, webViewState.isOpen, executeScript]);
+  }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, executeScript]);
 
   const flushBlurStateToWebView = useCallback(async (attempt: number = 0) => {
+    if (!ENABLE_DOM_BLUR) return;
     if (!isNative || !webViewState.isOpen || !executeScript) return;
     if (!blurReadyRef.current) return;
 
@@ -653,15 +482,17 @@ export const NativeWebViewBrowser = () => {
     blurRetryTimerRef.current = setTimeout(() => {
       flushBlurStateToWebView(attempt + 1);
     }, Math.min(200 * (attempt + 1), 1000));
-  }, [isNative, webViewState.isOpen, executeScript]);
+  }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, executeScript]);
 
   useEffect(() => {
+    if (!ENABLE_DOM_BLUR) return;
     if (!isNative || !webViewState.isOpen) return;
     if (!blurReadyRef.current) return;
     flushBlurStateToWebView();
-  }, [blurSyncVersion, isNative, webViewState.isOpen, flushBlurStateToWebView]);
+  }, [ENABLE_DOM_BLUR, blurSyncVersion, isNative, webViewState.isOpen, flushBlurStateToWebView]);
 
   useEffect(() => {
+    if (!ENABLE_DOM_BLUR) return;
     if (!isNative || !webViewState.isOpen) return;
 
     const onVisible = () => {
@@ -676,22 +507,29 @@ export const NativeWebViewBrowser = () => {
       window.removeEventListener('focus', onVisible);
       document.removeEventListener('visibilitychange', onVisible);
     };
-  }, [isNative, webViewState.isOpen, requestBlurHandshake, queueCurrentBlurState, flushBlurStateToWebView]);
+  }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, requestBlurHandshake, queueCurrentBlurState, flushBlurStateToWebView]);
 
   useEffect(() => {
+    if (!ENABLE_SIGNAL_PIPELINE) return;
     if (!isNative || !webViewState.isOpen || !executeScript) return;
     if (!webViewState.currentUrl) return;
 
-    blurReadyRef.current = false;
+    if (ENABLE_DOM_BLUR) {
+      blurReadyRef.current = false;
+    }
 
     const reinjectAndPing = async () => {
       await injectModerationScript(executeScript);
-      await requestBlurHandshake('url_change_reinject');
+      if (ENABLE_DOM_BLUR) {
+        await requestBlurHandshake('url_change_reinject');
+      }
     };
 
     const timer = setTimeout(reinjectAndPing, 250);
     return () => clearTimeout(timer);
   }, [
+    ENABLE_SIGNAL_PIPELINE,
+    ENABLE_DOM_BLUR,
     isNative,
     webViewState.isOpen,
     webViewState.currentUrl,
@@ -701,6 +539,7 @@ export const NativeWebViewBrowser = () => {
   ]);
 
   useEffect(() => {
+    if (!ENABLE_DOM_BLUR) return;
     if (!isNative || !webViewState.isOpen) return;
     const timer = setInterval(() => {
       if (!blurReadyRef.current) {
@@ -708,7 +547,7 @@ export const NativeWebViewBrowser = () => {
       }
     }, 800);
     return () => clearInterval(timer);
-  }, [isNative, webViewState.isOpen, requestBlurHandshake]);
+  }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, requestBlurHandshake]);
 
   useEffect(() => {
     return () => {
@@ -757,6 +596,8 @@ export const NativeWebViewBrowser = () => {
       shouldBlur: boolean;
       category: string;
       confidence: number;
+      severity: ModerationSeverity;
+      predictions?: Record<string, number>;
     }> = [];
     
     // Process each item using the moderation bridge
@@ -765,14 +606,21 @@ export const NativeWebViewBrowser = () => {
         const scanResult = await moderationBridge.scanImage(item.src, thresholds);
         
         if (scanResult) {
+          const categoryConfidence = Object.entries(scanResult.predictions || {}).reduce((matched, [label, value]) => {
+            if (matched >= 0) return matched;
+            return label.toLowerCase() === scanResult.category.toLowerCase() ? value : -1;
+          }, -1);
+          const effectiveConfidence = categoryConfidence >= 0 ? categoryConfidence : scanResult.confidence;
           results.push({
             itemId: item.itemId,
             src: item.src,
             shouldBlur: scanResult.shouldBlur,
             category: scanResult.category,
-            confidence: scanResult.confidence,
+            confidence: effectiveConfidence,
+            severity: scanResult.severity || mapModerationCategoryToSeverity(scanResult.category),
+            predictions: scanResult.predictions,
           });
-          console.log('[MW-Host] scan result', item.itemId, ':', scanResult.category, 'blur=' + scanResult.shouldBlur);
+          console.log('[MW-Host] scan result', item.itemId, ':', scanResult.category, 'blur=' + scanResult.shouldBlur, 'conf=' + effectiveConfidence.toFixed(3));
         } else {
           results.push({
             itemId: item.itemId,
@@ -780,6 +628,7 @@ export const NativeWebViewBrowser = () => {
             shouldBlur: false,
             category: 'error',
             confidence: 0,
+            severity: 'safe',
           });
           console.log('[MW-Host] scan result', item.itemId, ': error (no result)');
         }
@@ -791,6 +640,7 @@ export const NativeWebViewBrowser = () => {
           shouldBlur: false,
           category: 'error',
           confidence: 0,
+          severity: 'safe',
         });
       }
     }
@@ -798,8 +648,122 @@ export const NativeWebViewBrowser = () => {
     const elapsedMs = performance.now() - startTime;
     console.log('[MW-Host] scan complete', requestId, 'elapsed=' + elapsedMs.toFixed(0) + 'ms');
 
-    const hasUnsafe = results.some(item => item.shouldBlur);
-    processModerationSafetySignal(hasUnsafe, hasUnsafe ? 'moderation_request_unsafe' : 'moderation_request_safe');
+    const blurMode = localSettings.blur_mode || 'balanced';
+    const modePolicy = blurMode === 'strict'
+      ? {
+          hardConfFloor: 0.90,
+          hardMultiConfFloor: 0.80,
+          hardMultiMinHits: 2,
+          softConfFloor: 0.65,
+          softRatioFloor: 0.35,
+          softMinHits: 3,
+          allowSoftOverlay: true,
+        }
+      : blurMode === 'minimal'
+        ? {
+            hardConfFloor: 0.95,
+            hardMultiConfFloor: 0.90,
+            hardMultiMinHits: 3,
+            softConfFloor: 0.80,
+            softRatioFloor: 0.75,
+            softMinHits: 6,
+            allowSoftOverlay: false,
+          }
+        : {
+            hardConfFloor: 0.85,
+            hardMultiConfFloor: 0.78,
+            hardMultiMinHits: 2,
+            softConfFloor: 0.70,
+            softRatioFloor: 0.50,
+            softMinHits: 4,
+            allowSoftOverlay: true,
+          };
+
+    const hardThresholdBase = typeof localSettings.hard_overlay_confidence_threshold === 'number'
+      ? localSettings.hard_overlay_confidence_threshold
+      : modePolicy.hardConfFloor;
+    const softRatioBase = typeof localSettings.soft_overlay_ratio_threshold === 'number'
+      ? localSettings.soft_overlay_ratio_threshold
+      : modePolicy.softRatioFloor;
+    const softMinHitsBase = typeof localSettings.soft_overlay_min_hits === 'number'
+      ? localSettings.soft_overlay_min_hits
+      : modePolicy.softMinHits;
+
+    const hardConfThreshold = Math.max(hardThresholdBase, modePolicy.hardConfFloor);
+    const softRatioThreshold = Math.max(softRatioBase, modePolicy.softRatioFloor);
+    const softMinHits = Math.max(softMinHitsBase, modePolicy.softMinHits, 2);
+    const softConfidenceFloor = modePolicy.softConfFloor;
+    const tinyDimensionThreshold = 80;
+
+    const itemSizeById = new Map(request.items.map(item => [item.itemId, item]));
+    const eligibleResults = results.filter(item => {
+      const requestItem = itemSizeById.get(item.itemId);
+      if (!requestItem) return true;
+      const width = typeof requestItem.width === 'number' ? requestItem.width : 0;
+      const height = typeof requestItem.height === 'number' ? requestItem.height : 0;
+      if (width <= 0 || height <= 0) return true;
+      return width >= tinyDimensionThreshold && height >= tinyDimensionThreshold;
+    });
+    const denominator = eligibleResults.length > 0 ? eligibleResults.length : results.length;
+    const tinyExcludedCount = Math.max(results.length - eligibleResults.length, 0);
+
+    const hardResults = eligibleResults.filter(item => item.shouldBlur && item.severity === 'hard');
+    const hardStrongHits = hardResults.filter(item => item.confidence >= hardConfThreshold);
+    const hardLowHits = hardResults.filter(item => item.confidence >= modePolicy.hardMultiConfFloor);
+    const hardUnsafeMaxConf = hardResults.reduce((max, item) => Math.max(max, item.confidence), 0);
+
+    const softResults = eligibleResults.filter(item => item.shouldBlur && item.severity === 'soft');
+    const softQualifiedHits = softResults.filter(item => item.confidence >= softConfidenceFloor);
+    const softRatio = denominator > 0 ? softQualifiedHits.length / denominator : 0;
+
+    const hardOverlayDecision =
+      hardStrongHits.length >= 1 ||
+      hardLowHits.length >= modePolicy.hardMultiMinHits;
+    const softOverlayDecision =
+      modePolicy.allowSoftOverlay &&
+      softQualifiedHits.length >= softMinHits &&
+      softRatio >= softRatioThreshold;
+
+    let overlayDecision = hardOverlayDecision;
+    let decisionReason = 'no_hard_signal';
+    if (hardStrongHits.length > 0) {
+      decisionReason = 'hard_confidence_hit';
+    } else if (hardLowHits.length >= modePolicy.hardMultiMinHits) {
+      decisionReason = 'hard_multi_hit';
+    } else if (softOverlayDecision) {
+      overlayDecision = true;
+      decisionReason = 'soft_ratio_hit';
+    }
+
+    const shouldDebugScanSummary = localSettings.prototype_mode || localSettings.show_scan_notifications;
+    if (shouldDebugScanSummary) {
+      const shortUrl = (() => {
+        try {
+          return new URL(currentUrl).hostname;
+        } catch {
+          return (currentUrl || '').replace(/^https?:\/\//, '').split('/')[0] || 'unknown';
+        }
+      })();
+      console.log(
+        `[MW-Host][ScanSummary] url=${shortUrl} req=${requestId} total=${results.length} eligible=${denominator} tinyExcluded=${tinyExcludedCount} hardHits=${hardStrongHits.length} softHits=${softQualifiedHits.length} safeHits=${Math.max(denominator - hardStrongHits.length - softQualifiedHits.length, 0)} hardMax=${hardUnsafeMaxConf.toFixed(3)} softMax=${softQualifiedHits.reduce((max, item) => Math.max(max, item.confidence), 0).toFixed(3)} softRatio=${softRatio.toFixed(3)} mode=${blurMode} decision=${overlayDecision ? 'ON' : 'OFF'} reason=${decisionReason}`
+      );
+    }
+
+    // Hysteresis is based on hard conditions only.
+    if (hardOverlayDecision) {
+      processModerationSafetySignal(true, `moderation_request_hard:${decisionReason}`);
+    } else {
+      processModerationSafetySignal(false, 'moderation_request_no_hard');
+    }
+
+    // Optional strict mode: temporary page-level soft confirmation (no hysteresis stickiness).
+    if (!hardOverlayDecision) {
+      if (softOverlayDecision) {
+        setCentralBlurState(true, 'moderation_request_soft_policy');
+      } else if (blurStateRef.current.reason.startsWith('moderation_request_soft_')) {
+        setCentralBlurState(false, 'moderation_request_soft_cleared');
+      }
+    }
     
     // Post results back to the WebView with nonce for security
     console.log('[MW-Host] posting results back', requestId, 'count=' + results.length, 'nonce=' + nonce.substring(0, 10));
@@ -861,20 +825,34 @@ export const NativeWebViewBrowser = () => {
     }
     
     pendingRequestsRef.current.delete(requestId);
-  }, [moderationBridge, executeScript, localSettings.blur_strength_px, processModerationSafetySignal]);
+  }, [
+    moderationBridge,
+    executeScript,
+    localSettings.blur_strength_px,
+    localSettings.hard_overlay_confidence_threshold,
+    localSettings.soft_overlay_ratio_threshold,
+    localSettings.soft_overlay_min_hits,
+    localSettings.blur_mode,
+    localSettings.prototype_mode,
+    localSettings.show_scan_notifications,
+    currentUrl,
+    processModerationSafetySignal,
+    setCentralBlurState,
+  ]);
 
   /**
    * Handle messages from WebView via window.postMessage
    * This is the primary communication channel
    */
   useEffect(() => {
+    if (!ENABLE_SIGNAL_PIPELINE) return;
     // Get session nonce from local settings hook
     const sessionNonce = getNonce();
     
     const handleMessage = async (event: MessageEvent) => {
       const message = event.data;
 
-      if (isBlurOverlayReadyMessage(message)) {
+      if (ENABLE_DOM_BLUR && isBlurOverlayReadyMessage(message)) {
         blurReadyRef.current = true;
         console.log('[MW-Host] Blur overlay READY:', message.reason || 'ready', message.url || '');
         queueCurrentBlurState('webview_ready_sync');
@@ -936,14 +914,14 @@ export const NativeWebViewBrowser = () => {
 
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
-  }, [processModerationRequest, moderationBridge, executeScript, getNonce, queueCurrentBlurState, flushBlurStateToWebView]);
+  }, [ENABLE_SIGNAL_PIPELINE, ENABLE_DOM_BLUR, processModerationRequest, moderationBridge, executeScript, getNonce, queueCurrentBlurState, flushBlurStateToWebView]);
 
   /**
    * Fallback: Poll for moderation requests from legacy global queue
    * This is used when postMessage doesn't work reliably
    */
   useEffect(() => {
-    if (!isNative || !webViewState.isOpen || !isModerationEnabled()) {
+    if (!ENABLE_SIGNAL_PIPELINE || !isNative || !webViewState.isOpen || !isModerationEnabled()) {
       if (pollIntervalRef.current) {
         clearInterval(pollIntervalRef.current);
         pollIntervalRef.current = null;
@@ -1039,7 +1017,7 @@ export const NativeWebViewBrowser = () => {
         pollIntervalRef.current = null;
       }
     };
-  }, [isNative, webViewState.isOpen, isModerationEnabled, executeScript, moderationBridge, localSettings.blur_strength_px]);
+  }, [ENABLE_SIGNAL_PIPELINE, isNative, webViewState.isOpen, isModerationEnabled, executeScript, moderationBridge, localSettings.blur_strength_px]);
 
   // Search handler - redirects to Google search immediately
   const handleSearch = useCallback(async (query: string) => {

@@ -106,6 +106,7 @@ export interface ModerationResultItem {
   shouldBlur: boolean;
   category: string;
   confidence: number;
+  severity?: ModerationSeverity;
   /** Which triggers matched (for debugging) */
   matchedTriggers?: string[];
   /** Reason for the decision */
@@ -312,6 +313,50 @@ export interface ModerationDecision {
   category: string;
   confidence: number;
   signals?: ModerationSignals;
+}
+
+export type ModerationSeverity = 'safe' | 'soft' | 'hard';
+
+const HARD_EXACT_CATEGORIES = new Set([
+  'porn',
+  'hentai',
+  'nudity',
+  'nude',
+  'explicit',
+]);
+
+const HARD_SUBSTRING_KEYWORDS = [
+  'genital',
+];
+
+const SOFT_EXACT_CATEGORIES = new Set([
+  'sexy',
+  'suggestive',
+  'swimwear',
+  'bikini',
+  'lingerie',
+  'cleavage',
+  'shirtless',
+  'partial_nudity',
+  'shirtless_male',
+]);
+
+/**
+ * Map moderation category labels to coarse safety severity.
+ * Used by host-side aggregation to separate hard-unsafe from soft-unsafe hits.
+ */
+export function mapModerationCategoryToSeverity(category?: string): ModerationSeverity {
+  const normalized = (category || '').toLowerCase();
+  if (!normalized || normalized === 'safe' || normalized === 'neutral' || normalized === 'drawing') {
+    return 'safe';
+  }
+  if (SOFT_EXACT_CATEGORIES.has(normalized)) {
+    return 'soft';
+  }
+  if (HARD_EXACT_CATEGORIES.has(normalized) || HARD_SUBSTRING_KEYWORDS.some(keyword => normalized.includes(keyword))) {
+    return 'hard';
+  }
+  return 'safe';
 }
 
 /**

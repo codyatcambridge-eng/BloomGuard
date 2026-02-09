@@ -3,6 +3,7 @@ import { generateNonce, TriggerConfig } from '@/lib/moderation-request-utils';
 
 export type BlurLevel = 'OFF' | 'LOW' | 'MEDIUM' | 'HIGH';
 export type AISensitivity = 'relaxed' | 'moderate' | 'strict';
+export type BlurMode = 'strict' | 'balanced' | 'minimal';
 
 /**
  * Blur dial levels (0-4)
@@ -37,6 +38,11 @@ export interface LocalProtectionSettings {
   // MVP settings
   blocking_mode: BlockingMode;
   prototype_mode: boolean; // Show labeling UI on reveal
+  // Page-level overlay policy tuning
+  hard_overlay_confidence_threshold: number;
+  soft_overlay_ratio_threshold: number;
+  soft_overlay_min_hits: number;
+  blur_mode: BlurMode;
 }
 
 const SETTINGS_KEY = 'iron_watch_local_settings';
@@ -44,18 +50,22 @@ const SETTINGS_KEY = 'iron_watch_local_settings';
 const DEFAULT_SETTINGS: LocalProtectionSettings = {
   shield_active: true,
   blur_level: 'HIGH',
-  ai_sensitivity: 'strict',
+  ai_sensitivity: 'moderate',
   block_adult_sites: true,
   block_social_media: false,
   auto_scan_images: true,
   show_scan_notifications: true,
-  blur_dial: 3,
+  blur_dial: 2,
   blur_strength_px: 24,
-  fail_closed: true, // Fail-closed by default for safety
+  fail_closed: false, // Fail-open by default to reduce over-blurring from transient scan failures
   debug_mode: false,
   // MVP: Only block shirtless and swimwear
   blocking_mode: 'mvp',
   prototype_mode: false,
+  hard_overlay_confidence_threshold: 0.85,
+  soft_overlay_ratio_threshold: 0.5,
+  soft_overlay_min_hits: 4,
+  blur_mode: 'minimal',
 };
 
 export const useLocalSettings = () => {
