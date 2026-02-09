@@ -7,6 +7,7 @@ import {
   calculateCategory,
   getThresholdsForSensitivity,
 } from '@/plugins/ModerationBridge';
+import { isBlurOverlayReadyMessage } from '@/lib/moderation-request-utils';
 
 export interface ModerationBridgeState {
   isReady: boolean;
@@ -23,6 +24,10 @@ export interface UseModerationBridgeOptions {
   onScanComplete?: (stats: { total: number; blurred: number; safe: number }) => void;
   onError?: (error: string) => void;
 }
+
+export const isWebViewBlurReadyEvent = (message: unknown): boolean => {
+  return isBlurOverlayReadyMessage(message);
+};
 
 /**
  * Hook for managing the moderation bridge between WebView and AI model

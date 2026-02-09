@@ -125,6 +125,31 @@ export interface ModerationResultMessage {
   timestamp?: number;
 }
 
+// ============= WEBVIEW BLUR OVERLAY PROTOCOL =============
+
+export type BlurOverlayCommand = 'ENABLE_BLUR' | 'DISABLE_BLUR' | 'PING';
+
+export interface BlurOverlayCommandMessage {
+  type: 'MW_BLUR_COMMAND';
+  command: BlurOverlayCommand;
+  reason?: string;
+  timestamp: number;
+}
+
+export interface BlurOverlayReadyMessage {
+  type: 'MW_BLUR_READY';
+  url?: string;
+  reason?: string;
+  timestamp: number;
+}
+
+export interface BlurOverlayStateMessage {
+  type: 'MW_BLUR_STATE';
+  enabled: boolean;
+  reason?: string;
+  timestamp: number;
+}
+
 /**
  * State of a pending moderation request
  */
@@ -163,6 +188,27 @@ export function isValidModerationResult(message: any): message is ModerationResu
     typeof message.nonce === 'string' &&
     Array.isArray(message.results)
   );
+}
+
+export function isBlurOverlayReadyMessage(message: any): message is BlurOverlayReadyMessage {
+  return (
+    message &&
+    typeof message === 'object' &&
+    message.type === 'MW_BLUR_READY' &&
+    typeof message.timestamp === 'number'
+  );
+}
+
+export function createBlurOverlayStateMessage(
+  enabled: boolean,
+  reason: string
+): BlurOverlayStateMessage {
+  return {
+    type: 'MW_BLUR_STATE',
+    enabled,
+    reason,
+    timestamp: Date.now(),
+  };
 }
 
 /**
