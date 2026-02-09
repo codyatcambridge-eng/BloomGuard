@@ -53,18 +53,23 @@ export const DEFAULT_THRESHOLDS: AIThresholds = {
  * Swimwear/shirtless detection threshold - Sexy must exceed this
  * AND skin-density must be high (no Clothing signal)
  */
-const SWIMWEAR_SEXY_THRESHOLD = 0.30;
+const SWIMWEAR_SEXY_THRESHOLD = 0.55;
 
 /**
  * Minimum skin density to trigger swimwear detection
  * This is estimated from lack of "Neutral" + "Drawing" signals
  */
-const MIN_SKIN_DENSITY_FOR_SWIMWEAR = 0.20;
+const MIN_SKIN_DENSITY_FOR_SWIMWEAR = 0.35;
+
+/**
+ * Neutral confidence floor used to avoid over-blurring benign content.
+ */
+const NEUTRAL_FAST_PASS_THRESHOLD = 0.80;
 
 /**
  * Fast timeout for fail-open behavior (ms)
  */
-const FAST_TIMEOUT_MS = 800;
+const FAST_TIMEOUT_MS = 3000;
 
 /**
  * Minimum image dimensions - smaller images fail-open
@@ -286,20 +291,46 @@ export const useOnDeviceModeration = () => {
       const hentaiScore = predMap['hentai'] || 0;
       const neutralScore = predMap['neutral'] || 0;
 
-      // NOTE: Neutral fast-pass removed (YouTube zero-tolerance)
-      // If a threshold is hit, we rely on strict threshold checks below.
+      // Neutral fast-pass: strongly neutral images should not be blurred unless explicit scores are meaningful.
+      if (
+        neutralScore >= NEUTRAL_FAST_PASS_THRESHOLD &&
+        pornScore < thresholds.porn &&
+        hentaiScore < thresholds.hentai &&
+        sexyScore < Math.max(thresholds.sexy + 0.2, 0.7)
+      ) {
+        const sorted = [...predictions].sort((a, b) => b.probability - a.probability);
+        const dominantClass = sorted[0]?.className || 'Unknown';
+        const confidence = sorted[0]?.probability || 0;
+        const result: ModerationResult = {
+          isExplicit: false,
+          shouldBlur: false,
+          predictions: formattedPredictions,
+          dominantClass,
+          confidence,
+          inferenceTime,
+          reason: 'threshold_safe',
+          signals: estimateSignals(formattedPredictions),
+        };
 
+        if (cacheKey) {
+          imageCache.current.set(cacheKey, result);
+          limitCache();
+        }
+
+        console.debug('[OnDeviceAI] neutral_fast_pass:', neutralScore.toFixed(2));
+        return result;
+      }
 
       // ==== Estimate signals for human-centric logic ====
       const signals = estimateSignals(formattedPredictions);
 
-      // ==== STRICT THRESHOLD PARAMETERS ====
-      // Blur if ANY threshold is exceeded - no human-centric bypass
-      const hasExplicitScore = pornScore > thresholds.porn || sexyScore > thresholds.sexy || hentaiScore > thresholds.hentai;
-      const signals_unused = signals; // Keep for debugging but don't gate on it
+      // ==== THRESHOLD PARAMETERS ====
+      const pornHit = pornScore > thresholds.porn;
+      const hentaiHit = hentaiScore > thresholds.hentai;
+      const sexyHit = sexyScore > thresholds.sexy;
 
       // ==== SWIMWEAR/SHIRTLESS LOGIC ====
-      // If Sexy > 0.55 AND high skin-density (no clothing), mark as unsafe
+      // If Sexy is high and skin-density is high (with weak clothing signal), mark as unsafe.
       const isSwimwearShirtless = 
         sexyScore > SWIMWEAR_SEXY_THRESHOLD && 
         signals.skinDensity >= MIN_SKIN_DENSITY_FOR_SWIMWEAR &&
@@ -326,9 +357,10 @@ export const useOnDeviceModeration = () => {
         return result;
       }
 
-      // ==== STANDARD THRESHOLD CHECK (STRICT - no human signal requirement) ====
-      const isExplicit = pornScore > thresholds.porn || hentaiScore > thresholds.hentai;
-      const shouldBlur = isExplicit || sexyScore > thresholds.sexy || hasExplicitScore;
+      // ==== STANDARD THRESHOLD CHECK ====
+      // Sexy-only hits are ignored when the image is strongly neutral to reduce false positives.
+      const isExplicit = pornHit || hentaiHit;
+      const shouldBlur = isExplicit || (sexyHit && neutralScore < NEUTRAL_FAST_PASS_THRESHOLD);
 
       // Find dominant class
       const sorted = [...predictions].sort((a, b) => b.probability - a.probability);

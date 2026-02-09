@@ -38,11 +38,11 @@ export interface InjectionConfig {
 export function getCategoryThresholds(dialLevel: number): { porn: number; sexy: number; hentai: number } {
   switch (dialLevel) {
     case 0: return { porn: 1.1, sexy: 1.1, hentai: 1.1 };       // Off
-    case 1: return { porn: 0.30, sexy: 0.40, hentai: 0.30 };    // Relaxed
-    case 2: return { porn: 0.15, sexy: 0.25, hentai: 0.15 };    // Moderate
-    case 3: return { porn: 0.10, sexy: 0.20, hentai: 0.10 };    // Strict (ZERO-TOLERANCE)
-    case 4: return { porn: 0.05, sexy: 0.10, hentai: 0.05 };    // Maximum (extreme)
-    default: return { porn: 0.10, sexy: 0.20, hentai: 0.10 };   // Default to zero-tolerance
+    case 1: return { porn: 0.7, sexy: 0.85, hentai: 0.7 };      // Relaxed
+    case 2: return { porn: 0.5, sexy: 0.65, hentai: 0.5 };      // Moderate
+    case 3: return { porn: 0.3, sexy: 0.45, hentai: 0.3 };      // Strict
+    case 4: return { porn: 0.15, sexy: 0.25, hentai: 0.15 };    // Maximum
+    default: return { porn: 0.3, sexy: 0.45, hentai: 0.3 };
   }
 }
 
@@ -54,6 +54,8 @@ export function generateModerationScript(config: InjectionConfig): string {
   const nonce = config.nonce || 'n_' + Math.random().toString(36).slice(2, 10) + '_' + Math.random().toString(36).slice(2, 10);
   // FAIL-OPEN by default now - only use fail-closed if explicitly requested
   const failClosed = config.failClosed === true;
+  const buildVersion = Date.now();
+  const buildCommit = 'ce87d1f';
   
   return `
 (function() {
@@ -72,6 +74,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     return;
   }
   window.__MW_ACTIVE__ = true;
+  console.log('[MW-INJECT] version=${buildVersion} commit=${buildCommit}');
   
   console.log('[MW] ========================================');
   console.log('[MW] injected - Moderation Script v3.0');
@@ -93,7 +96,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     failClosed: ${failClosed},
     debug: ${config.debug || false},
     nonce: '${nonce}',
-    minImageSize: 60, // Minimum image dimension (fail-open below this - 60x60)
+    minImageSize: 80, // Minimum image dimension (fail-open below this - 80x80)
     semanticDelayMs: 200, // Delay before applying blur (200ms)
     // Neutral fast-pass removed for strict/YouTube mode
     anatomicalThreshold: 0.60, // Sexy/Porn must be > this to maintain blur
@@ -103,14 +106,102 @@ export function generateModerationScript(config: InjectionConfig): string {
     requestTimeout: 8000,
   };
 
-  // Threshold mappings for blur dial levels (ZERO-TOLERANCE for YouTube/thumbnails)
+  // Threshold mappings for blur dial levels.
   const THRESHOLDS = {
     0: { porn: 1.1, sexy: 1.1, hentai: 1.1 },       // Off
-    1: { porn: 0.30, sexy: 0.40, hentai: 0.30 },    // Relaxed
-    2: { porn: 0.15, sexy: 0.25, hentai: 0.15 },    // Moderate
-    3: { porn: 0.10, sexy: 0.20, hentai: 0.10 },    // Strict (ZERO-TOLERANCE)
-    4: { porn: 0.05, sexy: 0.10, hentai: 0.05 },    // Maximum (extreme)
+    1: { porn: 0.7, sexy: 0.85, hentai: 0.7 },      // Relaxed
+    2: { porn: 0.5, sexy: 0.65, hentai: 0.5 },      // Moderate
+    3: { porn: 0.3, sexy: 0.45, hentai: 0.3 },      // Strict
+    4: { porn: 0.15, sexy: 0.25, hentai: 0.15 },    // Maximum
   };
+  const EFFECTIVE_THRESHOLDS = THRESHOLDS[CONFIG.sensitivity] || THRESHOLDS[3];
+  const DEBUG_DISABLE_BLUR_ON_YOUTUBE = false;
+  const DEBUG_BLUR_TRACE_LIMIT = 10;
+  const HOSTNAME = (window.location && window.location.hostname ? window.location.hostname.toLowerCase() : '');
+  const DEBUG_SKIP_DOMAIN_BLUR = DEBUG_DISABLE_BLUR_ON_YOUTUBE && (HOSTNAME.includes('youtube.com') || HOSTNAME.includes('ytimg.com'));
+  let blurTraceCount = 0;
+  let predictionKeysLogged = false;
+  const CATEGORY_ALIASES = {
+    porn: 'porn',
+    pornography: 'porn',
+    explicit: 'porn',
+    nsfw: 'porn',
+    nudity: 'porn',
+    nude: 'porn',
+    sexy: 'sexy',
+    sexual: 'sexy',
+    suggestive: 'sexy',
+    swimwear: 'sexy',
+    shirtless: 'sexy',
+    shirtless_male: 'sexy',
+    partial_nudity: 'sexy',
+    hentai: 'hentai',
+    neutral: 'neutral',
+    safe: 'safe',
+    drawing: 'drawing',
+  };
+  const TRACE_UNSAFE_LABELS = new Set(['porn', 'sexy', 'hentai']);
+  console.log('[MW] Effective config:', JSON.stringify({
+    blurDial: CONFIG.sensitivity,
+    thresholds: EFFECTIVE_THRESHOLDS,
+    minImageSize: CONFIG.minImageSize,
+    debugDisableBlurOnYouTube: DEBUG_DISABLE_BLUR_ON_YOUTUBE,
+    skipBlurOnCurrentDomain: DEBUG_SKIP_DOMAIN_BLUR,
+  }));
+  if (DEBUG_SKIP_DOMAIN_BLUR) {
+    console.log('[MW] DEBUG kill-switch active: skipping blur on hostname', HOSTNAME);
+  }
+
+  function normalizeLabel(label) {
+    const raw = String(label || '').trim().toLowerCase();
+    return CATEGORY_ALIASES[raw] || raw;
+  }
+
+  function toFiniteNumber(value) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function normalizePredictionObject(rawPredictions) {
+    const normalized = {};
+    if (!rawPredictions || typeof rawPredictions !== 'object') return normalized;
+    Object.entries(rawPredictions).forEach(([key, value]) => {
+      const score = toFiniteNumber(value);
+      if (score === null) return;
+      const mapped = normalizeLabel(key);
+      const prev = normalized[mapped];
+      normalized[mapped] = Number.isFinite(prev) ? Math.max(prev, score) : score;
+    });
+    return normalized;
+  }
+
+  function getTopPredictionLabel(predictions) {
+    let label = null;
+    let score = null;
+    Object.entries(predictions || {}).forEach(([k, v]) => {
+      const n = toFiniteNumber(v);
+      if (n === null) return;
+      if (score === null || n > score) {
+        score = n;
+        label = k;
+      }
+    });
+    return { label: label, score: score };
+  }
+
+  function logBlurTraceOncePerElement(trace) {
+    if (blurTraceCount >= DEBUG_BLUR_TRACE_LIMIT) return;
+    blurTraceCount += 1;
+    console.log(
+      '[MW-BLUR-TRACE]',
+      'url=' + String(trace.urlPrefix || '').substring(0, 60),
+      'size=' + (trace.width || 0) + 'x' + (trace.height || 0),
+      'pred=' + (trace.predictedLabel || 'unknown'),
+      'score=' + (toFiniteNumber(trace.labelScoreUsed) ?? 'NaN'),
+      'thr=' + (toFiniteNumber(trace.thresholdUsed) ?? 'n/a'),
+      'reason=' + (trace.decisionReason || 'unknown')
+    );
+  }
 
   // ==================== GLOBAL BLUR OVERLAY PROTOCOL ====================
 
@@ -318,6 +409,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       responsesReceived: 0,
       nonceRejected: 0,
       semanticDelaySaved: 0, // Times we avoided blur due to fast safe result
+      classificationCounts: {},
+      blurSkippedByKillSwitch: 0,
     },
   };
 
@@ -388,7 +481,7 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   /**
    * Check if image is too small (fail-open for avatars/icons)
-   * Images smaller than 60x60 are skipped
+   * Images smaller than 80x80 are skipped
    */
   function isTinyImage(element) {
     const { width, height } = getElementDimensions(element);
@@ -820,8 +913,47 @@ export function generateModerationScript(config: InjectionConfig): string {
     
     results.forEach(result => {
       const { itemId, src, shouldBlur, category, confidence, reason } = result;
+      const rawPredictions = result && typeof result === 'object'
+        ? (result.predictions || result.scores || result.probabilities || null)
+        : null;
+      const normalizedPredictions = normalizePredictionObject(rawPredictions);
+      if (!predictionKeysLogged) {
+        predictionKeysLogged = true;
+        const keys = rawPredictions && typeof rawPredictions === 'object' ? Object.keys(rawPredictions) : [];
+        console.log('[MW] prediction keys:', keys.length ? keys.join(',') : '(none)');
+      }
+      const normalizedCategory = normalizeLabel(category);
+      const topPrediction = getTopPredictionLabel(normalizedPredictions);
+      const unsafeScores = {
+        porn: toFiniteNumber(normalizedPredictions.porn),
+        sexy: toFiniteNumber(normalizedPredictions.sexy),
+        hentai: toFiniteNumber(normalizedPredictions.hentai),
+      };
+      const strongestUnsafeLabel = Object.entries(unsafeScores)
+        .reduce(function(best, entry) {
+          var label = entry[0];
+          var score = entry[1];
+          if (score === null) return best;
+          if (!best || score > best.score) return { label: label, score: score };
+          return best;
+        }, null);
+      const predictedLabel = TRACE_UNSAFE_LABELS.has(normalizedCategory)
+        ? normalizedCategory
+        : ((strongestUnsafeLabel && strongestUnsafeLabel.label) || topPrediction.label || normalizedCategory || 'unknown');
+      const thresholdUsed = Object.prototype.hasOwnProperty.call(EFFECTIVE_THRESHOLDS, predictedLabel)
+        ? EFFECTIVE_THRESHOLDS[predictedLabel]
+        : null;
+      const predictionScore = toFiniteNumber(normalizedPredictions[predictedLabel]);
+      const confidenceScore = toFiniteNumber(confidence);
+      const labelScoreUsed = predictionScore !== null
+        ? predictionScore
+        : (TRACE_UNSAFE_LABELS.has(predictedLabel) ? confidenceScore : null);
+      const thresholdComparable = thresholdUsed !== null && labelScoreUsed !== null;
+      const thresholdHit = thresholdComparable ? (labelScoreUsed > thresholdUsed) : null;
       
       console.log('[MW] scan result itemId=' + itemId, 'src=' + (src || '').substring(0, 50), 'blur=' + shouldBlur, 'cat=' + category, 'conf=' + (confidence || 0).toFixed(2), 'reason=' + (reason || ''));
+      const countKey = predictedLabel || 'unknown';
+      state.stats.classificationCounts[countKey] = (state.stats.classificationCounts[countKey] || 0) + 1;
       
       // Find the element for this item
       const element = state.elements.get(itemId);
@@ -845,11 +977,23 @@ export function generateModerationScript(config: InjectionConfig): string {
       // Only maintain blur if Sexy or Porn > 0.60
       // If category is sexy/porn but confidence is below threshold, unblur
       let shouldApplyBlur = shouldBlur;
-      const isSexyOrPorn = category === 'sexy' || category === 'porn';
+      const isSexyOrPorn = predictedLabel === 'sexy' || predictedLabel === 'porn';
+      let decisionReason = reason || '';
       
       if (shouldApplyBlur && isSexyOrPorn && confidence < CONFIG.anatomicalThreshold) {
-        console.log('[MW] ANATOMICAL LOGIC: ' + category + '=' + (confidence || 0).toFixed(2) + ' < ' + CONFIG.anatomicalThreshold + ' - unblurring');
+        console.log('[MW] ANATOMICAL LOGIC: ' + predictedLabel + '=' + (confidence || 0).toFixed(2) + ' < ' + CONFIG.anatomicalThreshold + ' - unblurring');
         shouldApplyBlur = false;
+        decisionReason = predictedLabel + '<anatomicalThreshold';
+      }
+
+      // Prefer explicit threshold evaluation when label + score are available.
+      // Directionality: score > threshold => blur.
+      if (thresholdComparable) {
+        shouldApplyBlur = !!thresholdHit;
+        decisionReason = thresholdHit ? (predictedLabel + '>=thr') : (predictedLabel + '<thr');
+      } else if (thresholdUsed !== null && labelScoreUsed === null) {
+        shouldApplyBlur = false;
+        decisionReason = 'NaN/default';
       }
       
       // FAIL-OPEN: Handle errors gracefully
@@ -860,19 +1004,36 @@ export function generateModerationScript(config: InjectionConfig): string {
         if (CONFIG.failClosed && CONFIG.enabled && CONFIG.sensitivity > 0) {
           shouldApplyBlur = true;
           console.log('[MW] FAIL-CLOSED: Error result, applying blur');
+          decisionReason = 'failClosed/' + category;
         } else {
           shouldApplyBlur = false;
           console.log('[MW] FAIL-OPEN: Error result, not blurring');
+          decisionReason = 'failOpen/' + category;
         }
       }
       
       // Apply blur based on result or forced blur mode
-      const finalBlur = CONFIG.forcedBlur || (shouldApplyBlur && CONFIG.enabled && CONFIG.sensitivity > 0);
+      let finalBlur = CONFIG.forcedBlur || (shouldApplyBlur && CONFIG.enabled && CONFIG.sensitivity > 0);
+      if (DEBUG_SKIP_DOMAIN_BLUR && !CONFIG.forcedBlur) {
+        if (finalBlur) state.stats.blurSkippedByKillSwitch++;
+        finalBlur = false;
+        decisionReason = 'kill-switch/youtube-domain';
+      }
+      const dims = element ? getElementDimensions(element) : { width: 0, height: 0 };
       
       if (element && element.isConnected) {
         if (finalBlur) {
+          logBlurTraceOncePerElement({
+            urlPrefix: (src || '').substring(0, 60),
+            width: dims.width,
+            height: dims.height,
+            predictedLabel: predictedLabel,
+            labelScoreUsed: labelScoreUsed,
+            thresholdUsed: thresholdUsed,
+            decisionReason: decisionReason,
+          });
           // Apply strong blur
-          applyBlur(element, src, category || 'flagged', CONFIG.blurStrength, itemId);
+          applyBlur(element, src, predictedLabel || category || 'flagged', CONFIG.blurStrength, itemId);
         } else {
           // Remove soft blur if result is safe
           removeSoftBlur(element, src);
@@ -884,12 +1045,15 @@ export function generateModerationScript(config: InjectionConfig): string {
       
       // Also find any other elements with the same src
       if (finalBlur) {
-        findAndBlur(src, category, CONFIG.blurStrength, true);
+        findAndBlur(src, predictedLabel || category, CONFIG.blurStrength, true);
       } else {
         // Remove soft blur from all matching elements
         findAndRemoveSoftBlur(src);
       }
     });
+    if (DEBUG_SKIP_DOMAIN_BLUR) {
+      console.log('[MW] classification counts (kill-switch active):', JSON.stringify(state.stats.classificationCounts), 'blurSkipped=' + state.stats.blurSkippedByKillSwitch);
+    }
   }
 
   /**
@@ -986,11 +1150,11 @@ export function generateModerationScript(config: InjectionConfig): string {
       return false;
     }
     
-    // FAIL-OPEN: Skip tiny images (< 60x60)
+    // FAIL-OPEN: Skip tiny images (< 80x80)
     if (isTinyImage(element)) {
       state.stats.skippedTiny++;
       if (CONFIG.debug) {
-        console.log('[MW] skipped tiny image (fail-open, <60x60):', url.substring(0, 50));
+        console.log('[MW] skipped tiny image (fail-open, <80x80):', url.substring(0, 50));
       }
       return false;
     }

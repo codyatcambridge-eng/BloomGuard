@@ -1,4 +1,5 @@
 import { registerPlugin } from '@capacitor/core';
+import { type ModerationSeverity } from '@/lib/moderation-request-utils';
 
 /**
  * Moderation categories for detailed content classification
@@ -26,6 +27,7 @@ export interface ModerationScanResult {
   shouldBlur: boolean;
   category: ModerationCategory;
   confidence: number;
+  severity: ModerationSeverity;
   predictions: Record<string, number>;
   inferenceTime: number;
 }

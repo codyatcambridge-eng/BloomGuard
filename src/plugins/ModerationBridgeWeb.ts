@@ -11,6 +11,7 @@ import {
   getThresholdsForSensitivity, 
   shouldBlurCategory 
 } from './ModerationBridge';
+import { mapModerationCategoryToSeverity } from '@/lib/moderation-request-utils';
 
 /**
  * Web implementation of ModerationBridge using NSFWJS
@@ -116,6 +117,7 @@ export class ModerationBridgeWeb extends WebPlugin implements ModerationBridgePl
         shouldBlur,
         category,
         confidence,
+        severity: mapModerationCategoryToSeverity(category),
         predictions: predRecord,
         inferenceTime,
       };
@@ -414,6 +416,7 @@ export class ModerationBridgeWeb extends WebPlugin implements ModerationBridgePl
       shouldBlur: false,
       category,
       confidence: 1,
+      severity: mapModerationCategoryToSeverity(category),
       predictions: { Neutral: 1 },
       inferenceTime: 0,
     };
