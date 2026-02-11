@@ -10,8 +10,15 @@ export class ContentFilterWeb extends WebPlugin implements ContentFilterPlugin {
     return { stopped: true, platform: 'web' };
   }
 
+  async getCounters(): Promise<{ softBlurCount: number; hardBlurCount: number }> {
+    return { softBlurCount: 0, hardBlurCount: 0 };
+  }
+
+  async resetCounters(): Promise<Record<string, unknown>> {
+    return { reset: true, platform: 'web' };
+  }
+
   async setNSFWSignal(): Promise<void> {
     return;
   }
 }
-

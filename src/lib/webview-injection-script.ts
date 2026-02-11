@@ -30,6 +30,95 @@ export interface InjectionConfig {
   failClosed?: boolean; // DEPRECATED: Now fail-open by default
   debug?: boolean; // Verbose logging
   nonce: string; // Security nonce for message validation
+  blockingMode?: 'mvp' | 'full';
+  pageEpoch?: number;
+}
+
+export interface FailOpenModePolicyInput {
+  rawShouldBlur: boolean;
+  normalizedCategory: string;
+  predictedLabel: string;
+  isErrorResult: boolean;
+  failClosed: boolean;
+  enabled: boolean;
+  sensitivity: number;
+  blockingMode?: 'mvp' | 'full';
+}
+
+export interface AnatomicalPolicyInput {
+  shouldApplyBlur: boolean;
+  predictedLabel: string;
+  sexyScore: number | null;
+  pornScore: number | null;
+  anatomicalThreshold: number;
+  forceUnsafe: boolean;
+  failClosed: boolean;
+  enabled: boolean;
+  sensitivity: number;
+}
+
+const MVP_UNSAFE_CATEGORIES = new Set([
+  'swimwear',
+  'shirtless',
+  'shirtless_male',
+  'bikini',
+  'swim_trunks',
+  'sports_bra',
+]);
+
+function normalizePolicyLabel(label: string): string {
+  return String(label || '').trim().toLowerCase();
+}
+
+function isMvpAllowedPolicyLabel(label: string): boolean {
+  const normalized = normalizePolicyLabel(label);
+  return MVP_UNSAFE_CATEGORIES.has(normalized) || normalized === 'porn' || normalized === 'hentai';
+}
+
+export function applyFailOpenAndModePolicyDecision(input: FailOpenModePolicyInput): { shouldBlur: boolean; reason: string | null } {
+  const normalizedCategory = normalizePolicyLabel(input.normalizedCategory);
+  const predictedLabel = normalizePolicyLabel(input.predictedLabel);
+  const enabledAndActive = input.enabled && input.sensitivity > 0;
+
+  if (input.isErrorResult) {
+    if (input.failClosed && enabledAndActive) {
+      return { shouldBlur: true, reason: 'failClosed/' + normalizedCategory };
+    }
+    return { shouldBlur: false, reason: 'failOpen/' + normalizedCategory };
+  }
+
+  if (input.blockingMode === 'mvp') {
+    const categoryAllowed = isMvpAllowedPolicyLabel(normalizedCategory);
+    const predictedAllowed = isMvpAllowedPolicyLabel(predictedLabel);
+    if (input.rawShouldBlur && !categoryAllowed && !predictedAllowed) {
+      return { shouldBlur: false, reason: 'mvp_filter/' + (normalizedCategory || predictedLabel || 'unknown') };
+    }
+  }
+
+  return { shouldBlur: !!input.rawShouldBlur, reason: null };
+}
+
+export function applyAnatomicalThresholdDecision(input: AnatomicalPolicyInput): { shouldBlur: boolean; reason: string | null } {
+  if (!input.shouldApplyBlur || input.forceUnsafe) {
+    return { shouldBlur: !!input.shouldApplyBlur, reason: null };
+  }
+  if (input.predictedLabel !== 'sexy' && input.predictedLabel !== 'porn') {
+    return { shouldBlur: !!input.shouldApplyBlur, reason: null };
+  }
+
+  const score = input.predictedLabel === 'sexy' ? input.sexyScore : input.pornScore;
+  if (score === null || !Number.isFinite(score)) {
+    if (input.failClosed && input.enabled && input.sensitivity > 0) {
+      return { shouldBlur: true, reason: input.predictedLabel + '_scoreNaN/failClosed' };
+    }
+    return { shouldBlur: false, reason: input.predictedLabel + '_scoreNaN/failOpen' };
+  }
+
+  if (score < input.anatomicalThreshold) {
+    return { shouldBlur: false, reason: input.predictedLabel + '<anatomicalThreshold' };
+  }
+
+  return { shouldBlur: true, reason: null };
 }
 
 /**
@@ -56,6 +145,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   const failClosed = config.failClosed === true;
   const buildVersion = Date.now();
   const buildCommit = 'ce87d1f';
+  const pageEpoch = Number.isFinite(config.pageEpoch) ? Number(config.pageEpoch) : Date.now();
   
   return `
 (function() {
@@ -71,7 +161,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         window.__MW_BLUR_OVERLAY_API__.sendReady('reinject');
       }
     } catch (e) {}
-    return;
+    return 'MW_ALREADY_ACTIVE';
   }
   window.__MW_ACTIVE__ = true;
   console.log('[MW-INJECT] version=${buildVersion} commit=${buildCommit}');
@@ -96,6 +186,8 @@ export function generateModerationScript(config: InjectionConfig): string {
     failClosed: ${failClosed},
     debug: ${config.debug || false},
     nonce: '${nonce}',
+    blockingMode: '${config.blockingMode || 'mvp'}',
+    pageEpoch: ${pageEpoch},
     minImageSize: 80, // Minimum image dimension (fail-open below this - 80x80)
     semanticDelayMs: 200, // Delay before applying blur (200ms)
     // Neutral fast-pass removed for strict/YouTube mode
@@ -141,6 +233,8 @@ export function generateModerationScript(config: InjectionConfig): string {
     drawing: 'drawing',
   };
   const TRACE_UNSAFE_LABELS = new Set(['porn', 'sexy', 'hentai']);
+  const LEGACY_RESULTS_POLL_MS = 250;
+  const URL_CHANGE_POLL_MS = 1200;
   console.log('[MW] Effective config:', JSON.stringify({
     blurDial: CONFIG.sensitivity,
     thresholds: EFFECTIVE_THRESHOLDS,
@@ -263,6 +357,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function setOverlayEnabled(enabled, reason) {
+    const prevEnabled = !!overlayState.enabled;
     overlayState.enabled = !!enabled;
     overlayState.reason = reason || 'unknown';
     overlayState.updatedAt = Date.now();
@@ -275,6 +370,12 @@ export function generateModerationScript(config: InjectionConfig): string {
       overlay.classList.add('mw-enabled');
     } else {
       overlay.classList.remove('mw-enabled');
+    }
+    if (CONFIG.debug && prevEnabled !== overlayState.enabled) {
+      console.log('[MW][Overlay] enabled=' + overlayState.enabled, 'reason=' + overlayState.reason);
+    }
+    if (CONFIG.debug && prevEnabled !== overlayState.enabled) {
+      console.log('[MW-DIAG][INJECT] source=overlay', 'enabled=' + overlayState.enabled, 'reason=' + overlayState.reason);
     }
   }
 
@@ -291,6 +392,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!message || typeof message !== 'object') return false;
 
     if (message.type === 'MW_BLUR_STATE') {
+      if (CONFIG.debug) {
+        console.log('[MW-DIAG][INJECT] source=overlay_state_message', 'enabled=' + (!!message.enabled), 'reason=' + (message.reason || 'state'));
+      }
       setOverlayEnabled(!!message.enabled, message.reason || 'state');
       return true;
     }
@@ -387,13 +491,18 @@ export function generateModerationScript(config: InjectionConfig): string {
   // ==================== STATE MANAGEMENT ====================
   
   const state = {
+    pageEpoch: Number.isFinite(CONFIG.pageEpoch) ? Number(CONFIG.pageEpoch) : 1,
     scanned: new Set(),
     pending: new Map(), // itemId -> { element, src, sourceType, requestId, timestamp, state, blurTimer }
+    pendingBySrc: new Map(), // src -> itemId (dedupe)
     pendingRequests: new Map(), // requestId -> { items, timestamp, timeoutId, state }
+    safeResolved: new Set(), // src values resolved as safe to suppress legacy re-blur
+    safeResolvedAt: new Map(), // src -> timestamp (bounded/ttl for legacy suppression)
     blurred: new Set(),
     revealed: new Set(), // Tracks URLs that user has manually revealed
     elements: new Map(), // itemId -> element
     viewportObserver: null, // IntersectionObserver for viewport optimization
+    mutationObservers: [],
     stats: {
       imgTags: 0,
       bgImages: 0,
@@ -411,12 +520,191 @@ export function generateModerationScript(config: InjectionConfig): string {
       semanticDelaySaved: 0, // Times we avoided blur due to fast safe result
       classificationCounts: {},
       blurSkippedByKillSwitch: 0,
+      skippedQueueCap: 0,
+      skippedRateLimited: 0,
+      skippedMutationQueueCap: 0,
+      staleEpochDiscarded: 0,
     },
   };
 
   // Batch queue for collecting items before sending request
   let batchQueue = [];
   let batchTimer = null;
+  const NAV_ID = window.__MW_NAV_ID__ || ('mw_' + Date.now().toString(36));
+  const timerState = {
+    legacyResultsInterval: null,
+    urlChangeInterval: null,
+    youtubePeriodicInterval: null,
+    mainScrollTimeout: null,
+    mainScrollHandler: null,
+    youtubeScrollTimeout: null,
+    youtubeScrollHandler: null,
+    debugSummaryInterval: null,
+    initialTimeouts: [],
+    paused: document.visibilityState !== 'visible',
+    teardownDone: false,
+  };
+  const isYouTubeHost = HOSTNAME.includes('youtube.com') || HOSTNAME.includes('youtu.be');
+  const MAX_PENDING_ITEMS = isYouTubeHost ? 220 : 140;
+  const MAX_BATCH_QUEUE_ITEMS = isYouTubeHost ? 180 : 120;
+  const MAX_ENQUEUE_PER_SEC = isYouTubeHost ? 120 : 80;
+  const MAX_SCAN_NODE_PER_SEC = isYouTubeHost ? 90 : 60;
+  const MAX_MUTATION_SCAN_PER_SEC = isYouTubeHost ? 100 : 70;
+  const MAX_MUTATION_QUEUE_ITEMS = isYouTubeHost ? 160 : 100;
+  const MUTATION_SCAN_FLUSH_DELAY_MS = isYouTubeHost ? 70 : 100;
+  const MUTATION_SCAN_FLUSH_BATCH = isYouTubeHost ? 24 : 14;
+  const rateLimiter = {
+    enqueue: { sec: 0, count: 0 },
+    scanNode: { sec: 0, count: 0 },
+    mutationScan: { sec: 0, count: 0 },
+  };
+  const mutationScanQueue = [];
+  const mutationScanSet = new Set();
+  let mutationScanTimer = null;
+
+  function allowPerSecond(bucket, maxPerSecond) {
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (bucket.sec !== nowSec) {
+      bucket.sec = nowSec;
+      bucket.count = 0;
+    }
+    if (bucket.count >= maxPerSecond) return false;
+    bucket.count += 1;
+    return true;
+  }
+
+  function timerLog(action, name) {
+    console.log('[MW][Timer]', action, name, 'navId=' + NAV_ID, 'url=' + window.location.href);
+  }
+
+  function clearNamedInterval(key, reason) {
+    const id = timerState[key];
+    if (!id) return;
+    clearInterval(id);
+    timerState[key] = null;
+    timerLog('stop', key + ':' + reason);
+  }
+
+  function clearNamedTimeout(key, reason) {
+    const id = timerState[key];
+    if (!id) return;
+    clearTimeout(id);
+    timerState[key] = null;
+    timerLog('stop', key + ':' + reason);
+  }
+
+  const SAFE_RESOLVED_MAX = 1500;
+  const SAFE_RESOLVED_TTL_MS = 2 * 60 * 1000;
+
+  function cleanupExpiredSafeResolved() {
+    const now = Date.now();
+    const expired = [];
+    state.safeResolvedAt.forEach(function(ts, src) {
+      if (!Number.isFinite(ts) || (now - ts) > SAFE_RESOLVED_TTL_MS) {
+        expired.push(src);
+      }
+    });
+    expired.forEach(function(src) {
+      state.safeResolvedAt.delete(src);
+      state.safeResolved.delete(src);
+    });
+  }
+
+  function markSafeResolved(src) {
+    if (!src) return;
+    cleanupExpiredSafeResolved();
+    const now = Date.now();
+    state.safeResolved.add(src);
+    state.safeResolvedAt.set(src, now);
+    while (state.safeResolvedAt.size > SAFE_RESOLVED_MAX) {
+      const oldest = state.safeResolvedAt.keys().next();
+      if (oldest.done) break;
+      const oldestSrc = oldest.value;
+      state.safeResolvedAt.delete(oldestSrc);
+      state.safeResolved.delete(oldestSrc);
+    }
+  }
+
+  function clearSafeResolved(src) {
+    if (!src) return;
+    state.safeResolvedAt.delete(src);
+    state.safeResolved.delete(src);
+  }
+
+  function isSafeResolvedActive(src) {
+    const ts = state.safeResolvedAt.get(src);
+    if (!Number.isFinite(ts)) return false;
+    if ((Date.now() - ts) > SAFE_RESOLVED_TTL_MS) {
+      clearSafeResolved(src);
+      return false;
+    }
+    return state.safeResolved.has(src);
+  }
+
+  function clearPendingItem(itemId, reason) {
+    const pendingItem = state.pending.get(itemId);
+    if (!pendingItem) return;
+    if (pendingItem.blurTimer) {
+      clearTimeout(pendingItem.blurTimer);
+    }
+    if (pendingItem.src && state.pendingBySrc.get(pendingItem.src) === itemId) {
+      state.pendingBySrc.delete(pendingItem.src);
+    }
+    state.pending.delete(itemId);
+    if (CONFIG.debug) {
+      console.log('[MW][Pending] cleared itemId=' + itemId, 'reason=' + (reason || 'unknown'));
+    }
+  }
+
+  function pruneDisconnectedPending(reason) {
+    const toClear = [];
+    state.pending.forEach(function(pending, itemId) {
+      if (!pending || !pending.element || !pending.element.isConnected) {
+        toClear.push(itemId);
+      }
+    });
+    toClear.forEach(function(itemId) { clearPendingItem(itemId, reason || 'disconnected'); });
+  }
+
+  function flushMutationScanQueue() {
+    mutationScanTimer = null;
+    if (timerState.paused || timerState.teardownDone) {
+      mutationScanQueue.length = 0;
+      mutationScanSet.clear();
+      return;
+    }
+
+    let processed = 0;
+    while (mutationScanQueue.length > 0 && processed < MUTATION_SCAN_FLUSH_BATCH) {
+      const node = mutationScanQueue.shift();
+      mutationScanSet.delete(node);
+      if (!node || node.nodeType !== 1 || !node.isConnected) continue;
+      if (!allowPerSecond(rateLimiter.mutationScan, MAX_MUTATION_SCAN_PER_SEC)) {
+        state.stats.skippedRateLimited++;
+        continue;
+      }
+      scanNode(node);
+      processed += 1;
+    }
+
+    if (mutationScanQueue.length > 0) {
+      mutationScanTimer = setTimeout(flushMutationScanQueue, MUTATION_SCAN_FLUSH_DELAY_MS);
+    }
+  }
+
+  function queueMutationScan(node) {
+    if (!node || node.nodeType !== 1) return;
+    if (mutationScanSet.has(node)) return;
+    if (mutationScanQueue.length >= MAX_MUTATION_QUEUE_ITEMS) {
+      state.stats.skippedMutationQueueCap++;
+      return;
+    }
+    mutationScanSet.add(node);
+    mutationScanQueue.push(node);
+    if (!mutationScanTimer) {
+      mutationScanTimer = setTimeout(flushMutationScanQueue, MUTATION_SCAN_FLUSH_DELAY_MS);
+    }
+  }
 
   // ==================== PLATFORM DETECTION ====================
 
@@ -516,7 +804,7 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   /**
    * Apply soft blur (semantic delay) - light blur while waiting for result
-   * After CONFIG.semanticDelayMs, if no result, upgrade to full blur
+   * After CONFIG.semanticDelayMs, if no result, keep soft blur only
    */
   function applySoftBlur(element, src, itemId) {
     // Check persistence: if user revealed this, don't blur
@@ -553,6 +841,37 @@ export function generateModerationScript(config: InjectionConfig): string {
         }
       }
     } catch (e) {}
+  }
+
+  const FORCE_UNSAFE_CATEGORIES = new Set([
+    'swimwear',
+    'shirtless',
+    'shirtless_male',
+    'bikini',
+    'swim_trunks',
+    'sports_bra',
+  ]);
+
+  function isExplicitUnsafeLabel(label) {
+    return label === 'porn' || label === 'hentai';
+  }
+
+  function isMvpAllowedCategory(label) {
+    const normalized = normalizeLabel(label);
+    return FORCE_UNSAFE_CATEGORIES.has(normalized) || isExplicitUnsafeLabel(normalized);
+  }
+
+  function applyFailOpenAndModePolicy(rawShouldBlur, normalizedCategory, predictedLabel, isErrorResult) {
+    return applyFailOpenAndModePolicyDecision({
+      rawShouldBlur: !!rawShouldBlur,
+      normalizedCategory: normalizedCategory || '',
+      predictedLabel: predictedLabel || '',
+      isErrorResult: !!isErrorResult,
+      failClosed: CONFIG.failClosed,
+      enabled: CONFIG.enabled,
+      sensitivity: CONFIG.sensitivity,
+      blockingMode: CONFIG.blockingMode,
+    });
   }
 
   /**
@@ -806,6 +1125,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         height: item.height,
       })),
       thresholds: THRESHOLDS[CONFIG.sensitivity] || THRESHOLDS[3],
+      pageEpoch: state.pageEpoch,
       nonce: CONFIG.nonce,
       timestamp: timestamp,
     };
@@ -817,6 +1137,7 @@ export function generateModerationScript(config: InjectionConfig): string {
 
     state.pendingRequests.set(requestId, {
       items: items,
+      pageEpoch: state.pageEpoch,
       timestamp: timestamp,
       timeoutId: timeoutId,
       state: 'waitingForHost',
@@ -846,33 +1167,46 @@ export function generateModerationScript(config: InjectionConfig): string {
     const pendingRequest = state.pendingRequests.get(requestId);
     if (!pendingRequest) return;
     if (pendingRequest.state === 'handled') return;
+    if (Number.isFinite(pendingRequest.pageEpoch) && pendingRequest.pageEpoch !== state.pageEpoch) {
+      state.pendingRequests.delete(requestId);
+      return;
+    }
     
     pendingRequest.state = 'timeout';
     
     console.log('[MW] timeout', requestId, 'items=' + pendingRequest.items.length);
     state.stats.timeouts += pendingRequest.items.length;
     
-    // FAIL-OPEN: Remove soft blur, don't apply hard blur (unless failClosed explicitly set)
-    if (CONFIG.failClosed && CONFIG.enabled && CONFIG.sensitivity > 0) {
+    const timeoutPolicy = applyFailOpenAndModePolicy(false, 'timeout', 'timeout', true);
+    if (CONFIG.debug) {
+      console.log(
+        '[MW-DIAG][INJECT] source=timeout',
+        'requestId=' + requestId,
+        'policy=' + (timeoutPolicy.shouldBlur ? 'failClosed_blur' : 'failOpen_safe'),
+        'reason=' + (timeoutPolicy.reason || 'none')
+      );
+    }
+    if (timeoutPolicy.shouldBlur) {
       console.log('[MW] FAIL-CLOSED: Applying blur to timed-out items');
       pendingRequest.items.forEach(item => {
+        clearPendingItem(item.itemId, 'timeout_failClosed');
         const element = state.elements.get(item.itemId);
         if (element && element.isConnected) {
           applyBlur(element, item.src, 'timeout', CONFIG.blurStrength, item.itemId);
         }
-        state.pending.delete(item.itemId);
         state.scanned.add(item.src);
       });
     } else {
       // FAIL-OPEN: Remove soft blur, mark as safe
       console.log('[MW] FAIL-OPEN: Removing soft blur for timed-out items');
       pendingRequest.items.forEach(item => {
+        clearPendingItem(item.itemId, 'timeout_failOpen');
         const element = state.elements.get(item.itemId);
         if (element && element.isConnected) {
           removeSoftBlur(element, item.src);
           element.dataset.mwModerated = 'timeout-safe';
         }
-        state.pending.delete(item.itemId);
+        markSafeResolved(item.src);
         // Don't add to scanned so they can be retried later
       });
     }
@@ -887,6 +1221,14 @@ export function generateModerationScript(config: InjectionConfig): string {
    */
   function handleModerationResult(message) {
     const { requestId, results, nonce } = message;
+    const resultEpoch = Number.isFinite(message.pageEpoch) ? Number(message.pageEpoch) : null;
+    if (resultEpoch !== null && resultEpoch !== state.pageEpoch) {
+      state.stats.staleEpochDiscarded++;
+      if (CONFIG.debug) {
+        console.log('[MW][Epoch] dropping stale result', 'requestId=' + requestId, 'resultEpoch=' + resultEpoch, 'activeEpoch=' + state.pageEpoch);
+      }
+      return;
+    }
     
     if (!requestId || !Array.isArray(results)) {
       console.log('[MW] Invalid result message:', message);
@@ -964,7 +1306,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         clearTimeout(pendingItem.blurTimer);
       }
       
-      state.pending.delete(itemId);
+      clearPendingItem(itemId, 'result');
       state.scanned.add(src);
       
       // Check if result came fast enough to skip blur (semantic delay saved)
@@ -975,41 +1317,62 @@ export function generateModerationScript(config: InjectionConfig): string {
       
       // ======== ANATOMICAL LOGIC ========
       // Only maintain blur if Sexy or Porn > 0.60
-      // If category is sexy/porn but confidence is below threshold, unblur
       let shouldApplyBlur = shouldBlur;
-      const isSexyOrPorn = predictedLabel === 'sexy' || predictedLabel === 'porn';
       let decisionReason = reason || '';
-      
-      if (shouldApplyBlur && isSexyOrPorn && confidence < CONFIG.anatomicalThreshold) {
-        console.log('[MW] ANATOMICAL LOGIC: ' + predictedLabel + '=' + (confidence || 0).toFixed(2) + ' < ' + CONFIG.anatomicalThreshold + ' - unblurring');
-        shouldApplyBlur = false;
-        decisionReason = predictedLabel + '<anatomicalThreshold';
-      }
+      const forceUnsafe = FORCE_UNSAFE_CATEGORIES.has(normalizeLabel(category));
 
       // Prefer explicit threshold evaluation when label + score are available.
       // Directionality: score > threshold => blur.
-      if (thresholdComparable) {
+      //
+      // Guardrail: preserve host-safe decisions by default.
+      // Only allow threshold-based escalation from safe->blur in strict/max sensitivity
+      // or when failClosed is explicitly enabled.
+      const allowSafeToBlurEscalation = CONFIG.failClosed || CONFIG.sensitivity >= 3;
+      if (!shouldBlur && !allowSafeToBlurEscalation) {
+        shouldApplyBlur = false;
+        decisionReason = 'host_safe_preserved';
+      } else if (forceUnsafe && shouldBlur) {
+        shouldApplyBlur = true;
+        decisionReason = 'forceUnsafeCategory/' + normalizeLabel(category);
+      } else if (thresholdComparable) {
         shouldApplyBlur = !!thresholdHit;
         decisionReason = thresholdHit ? (predictedLabel + '>=thr') : (predictedLabel + '<thr');
       } else if (thresholdUsed !== null && labelScoreUsed === null) {
         shouldApplyBlur = false;
         decisionReason = 'NaN/default';
       }
+
+      const anatomicalDecision = applyAnatomicalThresholdDecision({
+        shouldApplyBlur: shouldApplyBlur,
+        predictedLabel: predictedLabel || '',
+        sexyScore: unsafeScores.sexy,
+        pornScore: unsafeScores.porn,
+        anatomicalThreshold: CONFIG.anatomicalThreshold,
+        forceUnsafe: forceUnsafe,
+        failClosed: CONFIG.failClosed,
+        enabled: CONFIG.enabled,
+        sensitivity: CONFIG.sensitivity,
+      });
+      shouldApplyBlur = anatomicalDecision.shouldBlur;
+      if (anatomicalDecision.reason) {
+        decisionReason = anatomicalDecision.reason;
+        if (CONFIG.debug) {
+          const scoreUsed = predictedLabel === 'sexy' ? unsafeScores.sexy : unsafeScores.porn;
+          console.log('[MW] ANATOMICAL LOGIC:', decisionReason, 'label=' + predictedLabel, 'score=' + String(scoreUsed), 'thr=' + CONFIG.anatomicalThreshold);
+        }
+      }
       
       // FAIL-OPEN: Handle errors gracefully
-      const isError = category === 'error' || category === 'timeout';
-      
-      if (isError) {
-        // FAIL-OPEN: Don't blur on error (unless failClosed explicitly set)
-        if (CONFIG.failClosed && CONFIG.enabled && CONFIG.sensitivity > 0) {
-          shouldApplyBlur = true;
-          console.log('[MW] FAIL-CLOSED: Error result, applying blur');
-          decisionReason = 'failClosed/' + category;
-        } else {
-          shouldApplyBlur = false;
-          console.log('[MW] FAIL-OPEN: Error result, not blurring');
-          decisionReason = 'failOpen/' + category;
-        }
+      const isError = normalizedCategory === 'error' || normalizedCategory === 'timeout' || normalizedCategory === 'error_fail_closed';
+      const policyDecision = applyFailOpenAndModePolicy(
+        shouldApplyBlur,
+        normalizedCategory,
+        predictedLabel,
+        isError
+      );
+      shouldApplyBlur = policyDecision.shouldBlur;
+      if (policyDecision.reason) {
+        decisionReason = policyDecision.reason;
       }
       
       // Apply blur based on result or forced blur mode
@@ -1019,10 +1382,24 @@ export function generateModerationScript(config: InjectionConfig): string {
         finalBlur = false;
         decisionReason = 'kill-switch/youtube-domain';
       }
+      if (CONFIG.debug) {
+        console.log('[MW][Decision] itemId=' + itemId, 'src=' + (src || '').substring(0, 60), 'finalBlur=' + finalBlur, 'reason=' + decisionReason);
+        console.log(
+          '[MW-DIAG][INJECT] source=item_policy',
+          'itemId=' + itemId,
+          'finalBlur=' + finalBlur,
+          'reason=' + (decisionReason || 'none'),
+          'predicted=' + (predictedLabel || 'unknown'),
+          'cat=' + (normalizedCategory || 'unknown'),
+          'threshold=' + (thresholdUsed === null ? 'n/a' : String(thresholdUsed)),
+          'score=' + (labelScoreUsed === null ? 'n/a' : String(labelScoreUsed))
+        );
+      }
       const dims = element ? getElementDimensions(element) : { width: 0, height: 0 };
       
       if (element && element.isConnected) {
         if (finalBlur) {
+          clearSafeResolved(src);
           logBlurTraceOncePerElement({
             urlPrefix: (src || '').substring(0, 60),
             width: dims.width,
@@ -1035,6 +1412,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           // Apply strong blur
           applyBlur(element, src, predictedLabel || category || 'flagged', CONFIG.blurStrength, itemId);
         } else {
+          markSafeResolved(src);
           // Remove soft blur if result is safe
           removeSoftBlur(element, src);
           if (wasInSoftBlur && !finalBlur) {
@@ -1045,8 +1423,10 @@ export function generateModerationScript(config: InjectionConfig): string {
       
       // Also find any other elements with the same src
       if (finalBlur) {
+        clearSafeResolved(src);
         findAndBlur(src, predictedLabel || category, CONFIG.blurStrength, true);
       } else {
+        markSafeResolved(src);
         // Remove soft blur from all matching elements
         findAndRemoveSoftBlur(src);
       }
@@ -1169,11 +1549,22 @@ export function generateModerationScript(config: InjectionConfig): string {
       return false;
     }
     
-    // Skip if already pending
-    for (const [itemId, pending] of state.pending.entries()) {
-      if (pending.src === url) {
+    if (state.pending.size >= MAX_PENDING_ITEMS || batchQueue.length >= MAX_BATCH_QUEUE_ITEMS) {
+      state.stats.skippedQueueCap++;
+      return false;
+    }
+    if (!allowPerSecond(rateLimiter.enqueue, MAX_ENQUEUE_PER_SEC)) {
+      state.stats.skippedRateLimited++;
+      return false;
+    }
+
+    const existingPendingId = state.pendingBySrc.get(url);
+    if (existingPendingId) {
+      const existingPending = state.pending.get(existingPendingId);
+      if (existingPending && existingPending.src === url) {
         return false;
       }
+      state.pendingBySrc.delete(url);
     }
     
     const itemId = generateItemId();
@@ -1182,20 +1573,15 @@ export function generateModerationScript(config: InjectionConfig): string {
     // Store element reference
     state.elements.set(itemId, element);
     
-    // SEMANTIC DELAY: Apply soft blur immediately, then wait for result
-    // If result comes within semanticDelayMs as "safe", blur is never applied
-    if (CONFIG.enabled && CONFIG.sensitivity > 0) {
-      applySoftBlur(element, url, itemId);
-    }
-    
-    // Set up a timer to upgrade to hard blur if no result within semanticDelayMs
-    // (This is a secondary safeguard; the main timeout is CONFIG.requestTimeout)
+    // SEMANTIC DELAY: only apply soft blur after semanticDelayMs if still pending.
+    // Fast safe results will cancel this timer before any blur is shown.
     const blurTimer = setTimeout(() => {
       const pending = state.pending.get(itemId);
       if (pending && pending.state === 'pending') {
-        // Still pending after semantic delay - soft blur remains
-        // Hard blur will only be applied when result comes back as unsafe
-        // or on final timeout (if failClosed is true)
+        applySoftBlur(element, url, itemId);
+        if (CONFIG.debug) {
+          console.log('[MW][Timer] semanticDelay fired: soft blur applied itemId=' + itemId, url.substring(0, 60));
+        }
       }
     }, CONFIG.semanticDelayMs);
     
@@ -1207,6 +1593,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       state: 'pending',
       blurTimer: blurTimer,
     });
+    state.pendingBySrc.set(url, itemId);
     
     // Add to batch queue with dimensions
     batchQueue.push({
@@ -1244,7 +1631,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           const element = entry.target;
           if (element.dataset.mwViewportQueued !== 'true') {
             element.dataset.mwViewportQueued = 'true';
-            setTimeout(() => scanNode(element), 30);
+            queueMutationScan(element);
           }
         }
       });
@@ -1268,8 +1655,6 @@ export function generateModerationScript(config: InjectionConfig): string {
   // ==================== SCANNING FUNCTIONS ====================
 
   function scanImgElement(img) {
-    if (img.dataset.mwScanned === 'true') return;
-    
     let src = img.src ||
               img.dataset.src ||
               img.dataset.lazySrc ||
@@ -1290,8 +1675,10 @@ export function generateModerationScript(config: InjectionConfig): string {
       state.stats.skipped++;
       return;
     }
+    if (img.dataset.mwScanned === 'true' && img.dataset.mwLastScanSrc === src) return;
     
     img.dataset.mwScanned = 'true';
+    img.dataset.mwLastScanSrc = src;
     img.dataset.mwOrigSrc = src;
     
     if (queueForScan(src, img, 'img')) {
@@ -1300,15 +1687,15 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function scanVideoPoster(video) {
-    if (video.dataset.mwPosterScanned === 'true') return;
-    
     const poster = video.poster ||
                    video.dataset.poster ||
                    video.getAttribute('data-poster');
     
     if (!poster) return;
+    if (video.dataset.mwPosterScanned === 'true' && video.dataset.mwLastPoster === poster) return;
     
     video.dataset.mwPosterScanned = 'true';
+    video.dataset.mwLastPoster = poster;
     video.dataset.mwOrigPoster = poster;
     
     if (queueForScan(poster, video, 'video-poster')) {
@@ -1317,12 +1704,12 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function scanBgImage(element) {
-    if (element.dataset.mwBgScanned === 'true') return;
-    
     const bgUrl = extractBgImageUrl(element);
     if (!bgUrl) return;
+    if (element.dataset.mwBgScanned === 'true' && element.dataset.mwLastBg === bgUrl) return;
     
     element.dataset.mwBgScanned = 'true';
+    element.dataset.mwLastBg = bgUrl;
     element.dataset.mwBgSrc = bgUrl;
     
     if (queueForScan(bgUrl, element, 'bg-image')) {
@@ -1354,6 +1741,10 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function scanNode(node) {
     if (!node || node.nodeType !== 1) return;
+    if (!allowPerSecond(rateLimiter.scanNode, MAX_SCAN_NODE_PER_SEC)) {
+      state.stats.skippedRateLimited++;
+      return;
+    }
     
     const tagName = node.tagName?.toUpperCase();
     
@@ -1437,12 +1828,10 @@ export function generateModerationScript(config: InjectionConfig): string {
         document.querySelectorAll(selector).forEach(el => {
           // Find all img elements within or the element itself
           if (el.tagName === 'IMG') {
-            el.dataset.mwScanned = 'false'; // Force rescan
             scanImgElement(el);
           } else {
             // Scan all images inside YouTube components
             el.querySelectorAll('img').forEach(img => {
-              img.dataset.mwScanned = 'false'; // Force rescan
               scanImgElement(img);
             });
           }
@@ -1453,11 +1842,16 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function setupMutationObserver(root) {
     const observer = new MutationObserver(mutations => {
+      if (timerState.paused) return;
       if (!CONFIG.enabled || CONFIG.sensitivity === 0) return;
       
       let hasYouTubeChanges = false;
       
       mutations.forEach(mutation => {
+        mutation.removedNodes.forEach(node => {
+          if (node.nodeType !== 1) return;
+          pruneDisconnectedPending('mutation_removed');
+        });
         mutation.addedNodes.forEach(node => {
           if (node.nodeType !== 1) return;
           
@@ -1472,21 +1866,12 @@ export function generateModerationScript(config: InjectionConfig): string {
                 el.id === 'thumbnail' ||
                 el.classList?.contains('yt-core-image')) {
               hasYouTubeChanges = true;
-              // Immediate scan for YouTube elements
-              if (el.tagName === 'IMG') {
-                scanImgElement(el);
-              } else {
-                el.querySelectorAll('img').forEach(img => {
-                  img.dataset.mwScanned = 'false';
-                  scanImgElement(img);
-                });
-              }
             }
           }
           
           // Add to viewport observer for lazy scanning
           observeForViewport(node);
-          setTimeout(() => scanNode(node), CONFIG.scanDelay);
+          queueMutationScan(node);
         });
         
         if (mutation.type === 'attributes') {
@@ -1494,30 +1879,28 @@ export function generateModerationScript(config: InjectionConfig): string {
           const attr = mutation.attributeName;
           
           if ((attr === 'src' || attr === 'srcset') && target.tagName === 'IMG') {
-            target.dataset.mwScanned = 'false';
-            setTimeout(() => scanImgElement(target), CONFIG.scanDelay);
+            queueMutationScan(target);
           }
           
           if (attr === 'poster' && target.tagName === 'VIDEO') {
-            target.dataset.mwPosterScanned = 'false';
-            setTimeout(() => scanVideoPoster(target), CONFIG.scanDelay);
+            queueMutationScan(target);
           }
           
           if (attr === 'data-src' || attr === 'data-lazy-src') {
-            target.dataset.mwScanned = 'false';
-            setTimeout(() => scanImgElement(target), CONFIG.scanDelay);
+            queueMutationScan(target);
           }
           
           if (attr === 'style') {
-            target.dataset.mwBgScanned = 'false';
-            setTimeout(() => scanBgImage(target), CONFIG.scanDelay);
+            queueMutationScan(target);
           }
         }
       });
       
       // If YouTube changes detected, do a targeted rescan after a short delay
       if (hasYouTubeChanges) {
-        setTimeout(scanYouTubeThumbnails, 100);
+        if (!mutationScanTimer) {
+          mutationScanTimer = setTimeout(flushMutationScanQueue, 100);
+        }
       }
     });
     
@@ -1527,6 +1910,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       attributes: true,
       attributeFilter: ['src', 'srcset', 'poster', 'data-src', 'data-lazy-src', 'data-thumb', 'style'],
     });
+    state.mutationObservers.push(observer);
     
     return observer;
   }
@@ -1538,25 +1922,27 @@ export function generateModerationScript(config: InjectionConfig): string {
    */
   function setupYouTubeScrollHandler() {
     if (!isYouTube()) return;
-    
-    let scrollTimeout = null;
     let lastScrollY = 0;
-    
-    window.addEventListener('scroll', () => {
+
+    timerState.youtubeScrollHandler = () => {
+      if (timerState.paused) return;
       const currentScrollY = window.scrollY;
       const scrollDelta = Math.abs(currentScrollY - lastScrollY);
       
       // Only trigger if scrolled significantly
       if (scrollDelta > 200) {
         lastScrollY = currentScrollY;
-        
-        if (scrollTimeout) clearTimeout(scrollTimeout);
-        scrollTimeout = setTimeout(() => {
+
+        clearNamedTimeout('youtubeScrollTimeout', 'reschedule');
+        timerState.youtubeScrollTimeout = setTimeout(() => {
           console.log('[MW] YouTube scroll detected - rescanning thumbnails');
           scanYouTubeThumbnails();
         }, 150);
+        timerLog('start', 'youtubeScrollTimeout');
       }
-    }, { passive: true });
+    };
+
+    window.addEventListener('scroll', timerState.youtubeScrollHandler, { passive: true });
     
     console.log('[MW] YouTube scroll handler initialized');
   }
@@ -1588,32 +1974,82 @@ export function generateModerationScript(config: InjectionConfig): string {
       console.log('[MW] legacy result:', src.substring(0, 50), '-> blur:', shouldBlur, 'cat:', category);
       
       state.scanned.add(src);
-      
-      const shouldApplyBlur = CONFIG.forcedBlur || (shouldBlur && CONFIG.enabled && CONFIG.sensitivity > 0);
-      
+      const normalizedCategory = normalizeLabel(category);
+      const isError = normalizedCategory === 'error' || normalizedCategory === 'timeout' || normalizedCategory === 'error_fail_closed';
+      const policyDecision = applyFailOpenAndModePolicy(!!shouldBlur, normalizedCategory, normalizedCategory, isError);
+      let shouldApplyBlur = CONFIG.forcedBlur || (policyDecision.shouldBlur && CONFIG.enabled && CONFIG.sensitivity > 0);
+      if (shouldApplyBlur && isSafeResolvedActive(src)) {
+        shouldApplyBlur = false;
+        if (CONFIG.debug) {
+          console.log('[MW] legacy policy decision: safe_resolved_ignore_legacy src=' + src.substring(0, 60));
+        }
+      }
+      if (CONFIG.debug && policyDecision.reason) {
+        console.log('[MW] legacy policy decision:', policyDecision.reason, 'src=' + src.substring(0, 60));
+      }
+
       if (shouldApplyBlur) {
         findAndBlur(src, category, blurStrengthPx, true);
-        
-        // Also check pending items
-        for (const [itemId, pending] of state.pending.entries()) {
-          if (pending.src === src) {
-            const el = pending.element;
-            if (el && el.isConnected) {
-              applyBlur(el, src, category, blurStrengthPx, itemId);
-            }
-            state.pending.delete(itemId);
-            break;
-          }
-        }
       } else {
         // Remove soft blur for safe results
         findAndRemoveSoftBlur(src);
       }
+
+      // Always resolve pending items for this src and cancel semantic-delay timers.
+      for (const [itemId, pending] of state.pending.entries()) {
+        if (pending.src !== src) continue;
+        if (pending.blurTimer) clearTimeout(pending.blurTimer);
+        const el = pending.element;
+        if (!shouldApplyBlur && el && el.isConnected) {
+          removeSoftBlur(el, src);
+          el.dataset.mwModerated = 'safe';
+          markSafeResolved(src);
+        }
+        if (shouldApplyBlur && el && el.isConnected) {
+          applyBlur(el, src, category, blurStrengthPx, itemId);
+          clearSafeResolved(src);
+        }
+        clearPendingItem(itemId, 'legacy_result');
+      }
     });
   }
 
-  // Poll for legacy results
-  setInterval(processLegacyResults, 100);
+  function startLegacyResultsPoll(reason) {
+    if (timerState.legacyResultsInterval || timerState.paused) return;
+    timerState.legacyResultsInterval = setInterval(processLegacyResults, LEGACY_RESULTS_POLL_MS);
+    timerLog('start', 'legacyResultsInterval:' + reason);
+  }
+
+  function countActiveTimerHandles() {
+    let count = 0;
+    if (timerState.legacyResultsInterval) count++;
+    if (timerState.urlChangeInterval) count++;
+    if (timerState.youtubePeriodicInterval) count++;
+    if (timerState.debugSummaryInterval) count++;
+    if (timerState.mainScrollTimeout) count++;
+    if (timerState.youtubeScrollTimeout) count++;
+    count += timerState.initialTimeouts.length;
+    if (batchTimer) count++;
+    state.pendingRequests.forEach(req => { if (req && req.timeoutId) count++; });
+    state.pending.forEach(item => { if (item && item.blurTimer) count++; });
+    return count;
+  }
+
+  function startDebugSummary(reason) {
+    if (!CONFIG.debug || timerState.paused || timerState.debugSummaryInterval) return;
+    timerState.debugSummaryInterval = setInterval(function() {
+      cleanupExpiredSafeResolved();
+      pruneDisconnectedPending('debug_summary');
+      console.log(
+        '[MW][Summary]',
+        'pending=' + state.pending.size,
+        'blurred=' + state.blurred.size,
+        'safeResolved=' + state.safeResolved.size,
+        'activeTimers=' + countActiveTimerHandles()
+      );
+    }, 5000);
+    timerLog('start', 'debugSummaryInterval:' + reason);
+  }
 
   // ==================== INITIALIZATION ====================
 
@@ -1664,49 +2100,65 @@ export function generateModerationScript(config: InjectionConfig): string {
   // YouTube-specific: Set up scroll handler for infinite scroll
   setupYouTubeScrollHandler();
 
+  function scheduleInitTimeout(label, fn, delayMs) {
+    const id = setTimeout(() => {
+      timerState.initialTimeouts = timerState.initialTimeouts.filter(t => t !== id);
+      if (timerState.paused || timerState.teardownDone) return;
+      fn();
+    }, delayMs);
+    timerState.initialTimeouts.push(id);
+    timerLog('start', label + ':' + delayMs + 'ms');
+  }
+
   // Initial scan
   if (document.readyState === 'complete') {
     scanFullPage();
-    // YouTube: Extra scan for thumbnails
     if (isYouTube()) {
-      setTimeout(scanYouTubeThumbnails, 200);
+      scheduleInitTimeout('initialYouTubeScan', scanYouTubeThumbnails, 200);
     }
   } else {
-    window.addEventListener('load', () => {
+    const onLoadScan = () => {
+      if (timerState.teardownDone) return;
       scanFullPage();
       if (isYouTube()) {
-        setTimeout(scanYouTubeThumbnails, 200);
+        scheduleInitTimeout('loadYouTubeScan', scanYouTubeThumbnails, 200);
       }
-    });
+    };
+    window.addEventListener('load', onLoadScan);
   }
 
   // Periodic rescans (more aggressive for YouTube)
   const isYT = isYouTube();
-  setTimeout(scanFullPage, 500);
-  setTimeout(scanFullPage, 1500);
-  setTimeout(scanFullPage, 3000);
+  scheduleInitTimeout('initialFullScan', scanFullPage, 500);
+  scheduleInitTimeout('initialFullScan', scanFullPage, 1500);
+  scheduleInitTimeout('initialFullScan', scanFullPage, 3000);
   
   if (isYT) {
-    // YouTube-specific: Extra thumbnail scans
-    setTimeout(scanYouTubeThumbnails, 800);
-    setTimeout(scanYouTubeThumbnails, 2000);
-    setTimeout(scanYouTubeThumbnails, 4000);
-    setTimeout(scanYouTubeThumbnails, 6000);
-    // Continuous periodic rescan for YouTube
-    setInterval(scanYouTubeThumbnails, 5000);
+    scheduleInitTimeout('initialYouTubeScan', scanYouTubeThumbnails, 800);
+    scheduleInitTimeout('initialYouTubeScan', scanYouTubeThumbnails, 2000);
+    scheduleInitTimeout('initialYouTubeScan', scanYouTubeThumbnails, 4000);
+    scheduleInitTimeout('initialYouTubeScan', scanYouTubeThumbnails, 6000);
+  }
+
+  function startYouTubePeriodicScan(reason) {
+    if (!isYT || timerState.paused || timerState.youtubePeriodicInterval) return;
+    timerState.youtubePeriodicInterval = setInterval(scanYouTubeThumbnails, 5000);
+    timerLog('start', 'youtubePeriodicInterval:' + reason);
   }
 
   // Scroll-triggered rescans
-  let scrollTimer;
-  window.addEventListener('scroll', () => {
-    clearTimeout(scrollTimer);
-    scrollTimer = setTimeout(() => {
+  timerState.mainScrollHandler = () => {
+    if (timerState.paused) return;
+    clearNamedTimeout('mainScrollTimeout', 'reschedule');
+    timerState.mainScrollTimeout = setTimeout(() => {
       scanFullPage();
       if (isYouTube()) {
         scanYouTubeThumbnails();
       }
     }, 150);
-  }, { passive: true });
+    timerLog('start', 'mainScrollTimeout');
+  };
+  window.addEventListener('scroll', timerState.mainScrollHandler, { passive: true });
 
   // SPA navigation detection
   let lastUrl = window.location.href;
@@ -1714,16 +2166,133 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (window.location.href !== lastUrl) {
       console.log('[MW] SPA navigation detected:', lastUrl, '->', window.location.href);
       lastUrl = window.location.href;
+      state.pageEpoch += 1;
+      if (CONFIG.debug) {
+        console.log('[MW][Epoch] incremented pageEpoch=' + state.pageEpoch);
+      }
+
+      if (batchTimer) {
+        clearTimeout(batchTimer);
+        batchTimer = null;
+      }
+      if (mutationScanTimer) {
+        clearTimeout(mutationScanTimer);
+        mutationScanTimer = null;
+      }
+      mutationScanQueue.length = 0;
+      mutationScanSet.clear();
+      batchQueue = [];
+      state.pendingRequests.forEach(req => {
+        if (req && req.timeoutId) clearTimeout(req.timeoutId);
+      });
+      state.pendingRequests.clear();
+      state.pending.forEach((_item, itemId) => clearPendingItem(itemId, 'spa_epoch_reset'));
+      state.pendingBySrc.clear();
       // Clear scanned state for fresh scan
       state.scanned.clear();
       state.elements.clear();
-      setTimeout(scanFullPage, 300);
+      scheduleInitTimeout('spaFullScan', scanFullPage, 300);
       if (isYouTube()) {
-        setTimeout(scanYouTubeThumbnails, 500);
+        scheduleInitTimeout('spaYouTubeScan', scanYouTubeThumbnails, 500);
       }
     }
   };
-  setInterval(checkUrlChange, 500);
+
+  function startUrlChangePoll(reason) {
+    if (timerState.urlChangeInterval || timerState.paused) return;
+    timerState.urlChangeInterval = setInterval(checkUrlChange, URL_CHANGE_POLL_MS);
+    timerLog('start', 'urlChangeInterval:' + reason);
+  }
+
+  function stopManagedTimers(reason) {
+    clearNamedInterval('legacyResultsInterval', reason);
+    clearNamedInterval('urlChangeInterval', reason);
+    clearNamedInterval('youtubePeriodicInterval', reason);
+    clearNamedInterval('debugSummaryInterval', reason);
+    clearNamedTimeout('mainScrollTimeout', reason);
+    clearNamedTimeout('youtubeScrollTimeout', reason);
+    if (batchTimer) {
+      clearTimeout(batchTimer);
+      batchTimer = null;
+      timerLog('stop', 'batchTimer:' + reason);
+    }
+    if (mutationScanTimer) {
+      clearTimeout(mutationScanTimer);
+      mutationScanTimer = null;
+      timerLog('stop', 'mutationScanTimer:' + reason);
+    }
+    mutationScanQueue.length = 0;
+    mutationScanSet.clear();
+    timerState.initialTimeouts.forEach(t => clearTimeout(t));
+    timerState.initialTimeouts = [];
+    state.pendingRequests.forEach(req => {
+      if (req && req.timeoutId) clearTimeout(req.timeoutId);
+    });
+    state.pending.forEach(item => {
+      if (item && item.blurTimer) clearTimeout(item.blurTimer);
+    });
+    state.pendingBySrc.clear();
+    cleanupExpiredSafeResolved();
+    pruneDisconnectedPending('stopManagedTimers');
+  }
+
+  function startManagedTimers(reason) {
+    if (timerState.paused || timerState.teardownDone) return;
+    startLegacyResultsPoll(reason);
+    startUrlChangePoll(reason);
+    startYouTubePeriodicScan(reason);
+    startDebugSummary(reason);
+  }
+
+  function pauseManagedTimers(reason) {
+    if (timerState.paused) return;
+    timerState.paused = true;
+    stopManagedTimers(reason || 'pause');
+  }
+
+  function resumeManagedTimers(reason) {
+    if (!timerState.paused) return;
+    timerState.paused = false;
+    startManagedTimers(reason || 'resume');
+  }
+
+  function teardownManagedScheduling(reason) {
+    if (timerState.teardownDone) return;
+    timerState.teardownDone = true;
+    pauseManagedTimers(reason || 'teardown');
+    if (timerState.mainScrollHandler) {
+      window.removeEventListener('scroll', timerState.mainScrollHandler);
+      timerState.mainScrollHandler = null;
+    }
+    if (timerState.youtubeScrollHandler) {
+      window.removeEventListener('scroll', timerState.youtubeScrollHandler);
+      timerState.youtubeScrollHandler = null;
+    }
+    if (state.viewportObserver && typeof state.viewportObserver.disconnect === 'function') {
+      state.viewportObserver.disconnect();
+      state.viewportObserver = null;
+    }
+    state.mutationObservers.forEach(observer => {
+      try { observer.disconnect(); } catch (e) {}
+    });
+    state.mutationObservers = [];
+    window.__MW_ACTIVE__ = false;
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      resumeManagedTimers('visibility_visible');
+      return;
+    }
+    pauseManagedTimers('visibility_hidden');
+  });
+  window.addEventListener('beforeunload', () => teardownManagedScheduling('beforeunload'));
+  window.addEventListener('pagehide', () => teardownManagedScheduling('pagehide'));
+  window.__MW_TEARDOWN__ = function(reason) {
+    teardownManagedScheduling(reason || 'host_teardown');
+  };
+
+  startManagedTimers('init');
 
   // Expose debug API
   window.__MW_DEBUG__ = {
@@ -1747,6 +2316,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   };
 
   console.log('[MW] Initialization complete. Call window.__MW_DEBUG__.stats() for stats.');
+  return 'MW_INJECTED';
 })();
 `;
 }
