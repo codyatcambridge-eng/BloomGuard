@@ -85,6 +85,7 @@ export interface TriggerConfig {
 export interface ModerationRequestMessage {
   type: 'gc-moderation-request';
   requestId: string;
+  pageEpoch?: number;
   items: ModerationRequestItem[];
   thresholds?: {
     porn: number;
@@ -121,6 +122,7 @@ export interface ModerationResultItem {
 export interface ModerationResultMessage {
   type: 'gc-moderation-result';
   requestId: string;
+  pageEpoch?: number;
   results: ModerationResultItem[];
   nonce: string;
   timestamp?: number;
@@ -219,11 +221,13 @@ export function createBlurOverlayStateMessage(
 export function createResultMessage(
   requestId: string,
   results: ModerationResultItem[],
-  nonce: string
+  nonce: string,
+  pageEpoch?: number
 ): ModerationResultMessage {
   return {
     type: 'gc-moderation-result',
     requestId,
+    pageEpoch,
     results,
     nonce,
     timestamp: Date.now(),

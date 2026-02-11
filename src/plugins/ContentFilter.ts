@@ -23,6 +23,8 @@ export interface ContentFilterRiskDecision {
 
 export interface ContentFilterPlugin {
   startScanning(options?: {
+    preset?: 'balanced' | 'strict' | 'relaxed';
+    kidMode?: boolean;
     fps?: number;
     hysteresisOnMs?: number;
     hysteresisOffMs?: number;
@@ -35,6 +37,11 @@ export interface ContentFilterPlugin {
     revealDurationSeconds?: number;
   }): Promise<Record<string, unknown>>;
   stopScanning(): Promise<Record<string, unknown>>;
+  getCounters(): Promise<{
+    softBlurCount: number;
+    hardBlurCount: number;
+  }>;
+  resetCounters(): Promise<Record<string, unknown>>;
   setNSFWSignal(options: {
     score: number;
     probs?: NsfwProbabilities;
@@ -72,6 +79,8 @@ export const startScanning = (options?: Parameters<ContentFilterPlugin['startSca
   ContentFilter.startScanning(options);
 
 export const stopScanning = () => ContentFilter.stopScanning();
+export const getCounters = () => ContentFilter.getCounters();
+export const resetCounters = () => ContentFilter.resetCounters();
 
 export const setNSFWSignal = async (probs: Partial<NsfwProbabilities>) => {
   const normalized = normalizeNsfwProbabilities(probs);

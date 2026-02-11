@@ -11,7 +11,7 @@ import { useBrowserNavigation } from '@/hooks/useBrowserNavigation';
 import { useCapacitor } from '@/hooks/useCapacitor';
 import { useModerationBridge } from '@/hooks/useModerationBridge';
 import { supabase } from '@/integrations/supabase/client';
-import { generateModerationSignalScript } from '@/lib/webview-signal-injection-script';
+import { generateModerationScript } from '@/lib/webview-injection-script';
 import {
   isValidModerationRequest,
   createResultMessage,
@@ -138,9 +138,15 @@ export const NativeWebViewBrowser = () => {
   const [blurSyncVersion, setBlurSyncVersion] = useState(0);
   const riskDecisionListenerRef = useRef<PluginListenerHandle | null>(null);
   const lastNsfwSignalAtRef = useRef(0);
+  const webViewPageEpochRef = useRef(0);
 
   const UNSAFE_STREAK_REQUIRED = 2;
   const SAFE_STREAK_REQUIRED = 2;
+  const isDebugMode = localSettings.debug_mode === true;
+  const debugLog = useCallback((...args: unknown[]) => {
+    if (!isDebugMode) return;
+    console.log(...args);
+  }, [isDebugMode]);
 
   const queueCurrentBlurState = useCallback((reason: string) => {
     blurPendingRef.current = {
@@ -168,6 +174,12 @@ export const NativeWebViewBrowser = () => {
     if (isUnsafe) {
       signal.unsafeStreak += 1;
       signal.safeStreak = 0;
+      debugLog(
+        '[MW-DIAG][HOST] hysteresis signal=unsafe',
+        'reason=' + reason,
+        'unsafeStreak=' + signal.unsafeStreak,
+        'safeStreak=' + signal.safeStreak,
+      );
       if (signal.unsafeStreak >= UNSAFE_STREAK_REQUIRED) {
         setCentralBlurState(true, reason);
       }
@@ -176,6 +188,12 @@ export const NativeWebViewBrowser = () => {
 
     signal.safeStreak += 1;
     signal.unsafeStreak = 0;
+    debugLog(
+      '[MW-DIAG][HOST] hysteresis signal=safe',
+      'reason=' + reason,
+      'unsafeStreak=' + signal.unsafeStreak,
+      'safeStreak=' + signal.safeStreak,
+    );
     if (signal.safeStreak >= SAFE_STREAK_REQUIRED) {
       setCentralBlurState(false, reason);
     }
@@ -219,6 +237,15 @@ export const NativeWebViewBrowser = () => {
   
   // Track if moderation script was injected
   const injectionDoneRef = useRef(false);
+  const injectionInFlightRef = useRef(false);
+  const lastInjectedUrlRef = useRef('');
+  const lastInjectionAtRef = useRef(0);
+  const duplicateInjectionSkipsRef = useRef(0);
+  const injectionSentinelFailuresRef = useRef(0);
+  const loadEndInjectTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const navigationSeqRef = useRef(0);
+  const activeNavIdRef = useRef(0);
+  const currentUrlRef = useRef('');
   
   const {
     currentView,
@@ -293,7 +320,36 @@ export const NativeWebViewBrowser = () => {
   }, [settings, checkBlockedSite, deviceId, navigate, logEvent]);
 
   // Inject moderation script into WebView
-  const injectModerationScript = useCallback(async (scriptExecutor: (script: string) => Promise<string | null>) => {
+  const clearLoadEndInjectTimer = useCallback(() => {
+    if (loadEndInjectTimerRef.current) {
+      clearTimeout(loadEndInjectTimerRef.current);
+      console.log(
+        '[MW-Host][Timer] stop',
+        'name=loadEndInjectTimer',
+        'navId=' + activeNavIdRef.current,
+        'url=' + (lastInjectedUrlRef.current || 'unknown'),
+      );
+      loadEndInjectTimerRef.current = null;
+    }
+  }, []);
+
+  const markNavigation = useCallback((reason: string, url: string) => {
+    navigationSeqRef.current += 1;
+    activeNavIdRef.current = navigationSeqRef.current;
+    webViewPageEpochRef.current = activeNavIdRef.current;
+    console.log(
+      '[MW-Inject][Nav]',
+      'navId=' + activeNavIdRef.current,
+      'reason=' + reason,
+      'targetUrl=' + (url || 'unknown'),
+    );
+  }, []);
+
+  const injectModerationScript = useCallback(async (
+    scriptExecutor: (script: string) => Promise<string | null>,
+    reason: string,
+    urlHint?: string,
+  ) => {
     if (!ENABLE_SIGNAL_PIPELINE) {
       return;
     }
@@ -301,18 +357,96 @@ export const NativeWebViewBrowser = () => {
       console.log('[MW-Bridge] Moderation disabled, skipping injection');
       return;
     }
+
+    const targetUrl = urlHint || currentUrlRef.current || '';
+    const navId = activeNavIdRef.current || 0;
+    const now = Date.now();
+    const recentlyInjectedSameUrl =
+      injectionDoneRef.current &&
+      !!targetUrl &&
+      lastInjectedUrlRef.current === targetUrl &&
+      now - lastInjectionAtRef.current < 2000;
+
+    if (injectionInFlightRef.current || recentlyInjectedSameUrl) {
+      duplicateInjectionSkipsRef.current += 1;
+      console.log(
+        '[MW-Inject][Skip]',
+        'navId=' + navId,
+        'reason=' + reason,
+        'targetUrl=' + (targetUrl || 'unknown'),
+        'skipCount=' + duplicateInjectionSkipsRef.current,
+      );
+      return;
+    }
+
+    injectionInFlightRef.current = true;
+    const sentinelProbeScript = `(function(){ return window.__MW_ACTIVE__ === true ? 'MW_ALREADY_ACTIVE' : 'MW_MISSING'; })();`;
+    const config = {
+      ...getModerationConfig(),
+      pageEpoch: webViewPageEpochRef.current,
+    };
+    console.log('[MW-Inject][Probe]', 'navId=' + navId, 'reason=' + reason, 'targetUrl=' + (targetUrl || 'unknown'));
     
-    const config = getModerationConfig();
-    console.log('[MW-Bridge] Injecting signal script with config:', config);
-    
-    // Signal-only script: request scanning + host bridge, no DOM blur/overlay mutations.
-    const mainScript = generateModerationSignalScript(config);
+    // Full moderation script: request scanning + host bridge + DOM blur/reveal behavior.
+    const mainScript = generateModerationScript(config);
     try {
-      await scriptExecutor(mainScript);
+      const probeResult = await scriptExecutor(sentinelProbeScript);
+      if (probeResult === 'MW_ALREADY_ACTIVE') {
+        injectionDoneRef.current = true;
+        lastInjectedUrlRef.current = targetUrl;
+        lastInjectionAtRef.current = Date.now();
+        duplicateInjectionSkipsRef.current += 1;
+        console.log(
+          '[MW-Inject][Skip] already active',
+          'navId=' + navId,
+          'reason=' + reason,
+          'targetUrl=' + (targetUrl || 'unknown'),
+          'skipCount=' + duplicateInjectionSkipsRef.current,
+        );
+        return;
+      } else if (probeResult === 'MW_MISSING') {
+        // proceed to guarded injection
+      } else {
+        console.warn(
+          '[MW-Inject][Warn] unexpected probe; attempting injection once',
+          'navId=' + navId,
+          'reason=' + reason,
+          'targetUrl=' + (targetUrl || 'unknown'),
+          'value=' + String(probeResult),
+        );
+      }
+
+      const injectionResult = await scriptExecutor(mainScript);
       injectionDoneRef.current = true;
-      console.log('[MW-Bridge] Moderation script injected successfully');
+      lastInjectedUrlRef.current = targetUrl;
+      lastInjectionAtRef.current = Date.now();
+      if (injectionResult === 'MW_ALREADY_ACTIVE') {
+        duplicateInjectionSkipsRef.current += 1;
+        console.log(
+          '[MW-Inject][Skip]',
+          'navId=' + navId,
+          'reason=' + reason,
+          'targetUrl=' + (targetUrl || 'unknown'),
+          'result=MW_ALREADY_ACTIVE',
+          'skipCount=' + duplicateInjectionSkipsRef.current,
+        );
+      } else if (injectionResult === 'MW_INJECTED') {
+        console.log('[MW-Inject][Injected]', 'navId=' + navId, 'reason=' + reason, 'targetUrl=' + (targetUrl || 'unknown'));
+      } else {
+        injectionSentinelFailuresRef.current += 1;
+        console.warn(
+          '[MW-Inject][Warn] Unexpected injection sentinel',
+          'navId=' + navId,
+          'reason=' + reason,
+          'value=' + String(injectionResult),
+          'targetUrl=' + (targetUrl || 'unknown'),
+          'failures=' + injectionSentinelFailuresRef.current,
+        );
+      }
     } catch (error) {
       console.error('[MW-Bridge] Moderation script injection failed:', error);
+    } finally {
+      injectionInFlightRef.current = false;
     }
   }, [ENABLE_SIGNAL_PIPELINE, isModerationEnabled, getModerationConfig]);
 
@@ -328,8 +462,12 @@ export const NativeWebViewBrowser = () => {
     onLoadStart: (url) => {
       console.log('[Browser] ======= LOAD START =======');
       console.log('[Browser] URL:', url);
+      markNavigation('onLoadStart', url);
+      teardownWebViewScheduling('navigation_start', url).catch(() => undefined);
       setIsLoading(true);
+      clearLoadEndInjectTimer();
       injectionDoneRef.current = false;
+      injectionInFlightRef.current = false;
       blurReadyRef.current = false;
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       setCentralBlurState(false, 'navigation_load_start');
@@ -343,8 +481,9 @@ export const NativeWebViewBrowser = () => {
       // Inject moderation script after page fully loads
       if (!injectionDoneRef.current) {
         // Small delay to ensure DOM is ready
-        setTimeout(async () => {
-          await injectModerationScript(executeScript);
+        clearLoadEndInjectTimer();
+        loadEndInjectTimerRef.current = setTimeout(async () => {
+          await injectModerationScript(executeScript, 'onLoadEnd', url);
           if (ENABLE_DOM_BLUR && executeScript) {
             await executeScript(`
               (function() {
@@ -357,7 +496,14 @@ export const NativeWebViewBrowser = () => {
               })();
             `);
           }
+          loadEndInjectTimerRef.current = null;
         }, 500);
+        console.log(
+          '[MW-Host][Timer] start',
+          'name=loadEndInjectTimer',
+          'navId=' + activeNavIdRef.current,
+          'url=' + (url || 'unknown'),
+        );
       }
     },
     onLoadError: (url, error) => {
@@ -365,17 +511,22 @@ export const NativeWebViewBrowser = () => {
       console.error('[Browser] URL:', url);
       console.error('[Browser] Error:', error);
       setIsLoading(false);
+      clearLoadEndInjectTimer();
       injectionDoneRef.current = false;
+      injectionInFlightRef.current = false;
       setFallbackUrl(url);
       navigate('fallback', '', url);
     },
     onUrlChange: (url) => {
       console.log('[Browser] ======= URL CHANGE =======');
       console.log('[Browser] New URL:', url);
+      markNavigation('onUrlChange', url);
       setUrlInput(url);
       navigate('browse', url, url);
       // Reset injection for new page navigation
+      clearLoadEndInjectTimer();
       injectionDoneRef.current = false;
+      injectionInFlightRef.current = false;
       blurReadyRef.current = false;
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       setCentralBlurState(false, 'url_change_safe_reset');
@@ -383,8 +534,11 @@ export const NativeWebViewBrowser = () => {
     onNavigationRequest: handleNavigationRequest,
     onClose: () => {
       console.log('[Browser] ======= WEBVIEW CLOSED =======');
+      teardownWebViewScheduling('webview_closed', webViewState.currentUrl).catch(() => undefined);
+      clearLoadEndInjectTimer();
       moderationBridge.clearCache();
       injectionDoneRef.current = false;
+      injectionInFlightRef.current = false;
       blurReadyRef.current = false;
       blurPendingRef.current = null;
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
@@ -392,6 +546,32 @@ export const NativeWebViewBrowser = () => {
       navigate('home', '', '');
     },
   });
+
+  useEffect(() => {
+    currentUrlRef.current = webViewState.currentUrl || '';
+  }, [webViewState.currentUrl]);
+
+  const teardownWebViewScheduling = useCallback(async (reason: string, urlHint?: string) => {
+    if (!isNative || !executeScript) return;
+    const escapedReason = escapeForJs(reason);
+    await executeScript(`
+      (function() {
+        try {
+          if (typeof window.__MW_TEARDOWN__ === 'function') window.__MW_TEARDOWN__('${escapedReason}');
+          if (typeof window.__MW_SIGNAL_TEARDOWN__ === 'function') window.__MW_SIGNAL_TEARDOWN__('${escapedReason}');
+          return 'OK';
+        } catch (e) {
+          return 'ERR';
+        }
+      })();
+    `);
+    console.log(
+      '[MW-Host][Timer] teardown',
+      'reason=' + reason,
+      'navId=' + activeNavIdRef.current,
+      'url=' + (urlHint || webViewState.currentUrl || 'unknown'),
+    );
+  }, [isNative, executeScript, webViewState.currentUrl]);
 
   useEffect(() => {
     if (!isNative) return;
@@ -514,19 +694,40 @@ export const NativeWebViewBrowser = () => {
     if (!isNative || !webViewState.isOpen || !executeScript) return;
     if (!webViewState.currentUrl) return;
 
+    debugLog(
+      '[MW-DIAG][HOST] pipeline state',
+      'domOverlay=' + (ENABLE_DOM_BLUR ? 'on' : 'off'),
+      'signalPipeline=' + (ENABLE_SIGNAL_PIPELINE ? 'on' : 'off'),
+      'url=' + (webViewState.currentUrl || 'unknown'),
+    );
+
     if (ENABLE_DOM_BLUR) {
       blurReadyRef.current = false;
     }
 
     const reinjectAndPing = async () => {
-      await injectModerationScript(executeScript);
+      await injectModerationScript(executeScript, 'url_change_reinject', webViewState.currentUrl);
       if (ENABLE_DOM_BLUR) {
         await requestBlurHandshake('url_change_reinject');
       }
     };
 
     const timer = setTimeout(reinjectAndPing, 250);
-    return () => clearTimeout(timer);
+    console.log(
+      '[MW-Host][Timer] start',
+      'name=reinjectTimer',
+      'navId=' + activeNavIdRef.current,
+      'url=' + (webViewState.currentUrl || 'unknown'),
+    );
+    return () => {
+      clearTimeout(timer);
+      console.log(
+        '[MW-Host][Timer] stop',
+        'name=reinjectTimer',
+        'navId=' + activeNavIdRef.current,
+        'url=' + (webViewState.currentUrl || 'unknown'),
+      );
+    };
   }, [
     ENABLE_SIGNAL_PIPELINE,
     ENABLE_DOM_BLUR,
@@ -536,6 +737,7 @@ export const NativeWebViewBrowser = () => {
     executeScript,
     injectModerationScript,
     requestBlurHandshake,
+    clearLoadEndInjectTimer,
   ]);
 
   useEffect(() => {
@@ -551,11 +753,12 @@ export const NativeWebViewBrowser = () => {
 
   useEffect(() => {
     return () => {
+      clearLoadEndInjectTimer();
       if (blurRetryTimerRef.current) {
         clearTimeout(blurRetryTimerRef.current);
       }
     };
-  }, []);
+  }, [clearLoadEndInjectTimer]);
 
   // ==================== MODERATION MESSAGE HANDLING ====================
   // 
@@ -566,7 +769,6 @@ export const NativeWebViewBrowser = () => {
   // Host -> WebView: executeScript to call window.postMessage inside the page
   // ==================== 
 
-  const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const pendingRequestsRef = useRef<Set<string>>(new Set());
   
   /**
@@ -575,15 +777,62 @@ export const NativeWebViewBrowser = () => {
    */
   const processModerationRequest = useCallback(async (request: ModerationRequestMessage, nonce: string) => {
     const { requestId, items, thresholds } = request;
+    const requestEpoch = Number.isFinite(request.pageEpoch) ? Number(request.pageEpoch) : null;
+    const activeEpoch = webViewPageEpochRef.current;
     
     if (pendingRequestsRef.current.has(requestId)) {
       console.log('[MW-Host] Duplicate request ignored:', requestId);
       return;
     }
     pendingRequestsRef.current.add(requestId);
+
+    if (requestEpoch !== null && requestEpoch !== activeEpoch) {
+      debugLog(
+        '[MW-Host][Epoch] stale request ignored',
+        'req=' + requestId,
+        'requestEpoch=' + requestEpoch,
+        'activeEpoch=' + activeEpoch,
+      );
+
+      const staleResults = items.map(item => ({
+        itemId: item.itemId,
+        src: item.src,
+        shouldBlur: false,
+        category: 'safe_epoch_stale',
+        confidence: 0,
+        severity: 'safe' as ModerationSeverity,
+      }));
+
+      if (executeScript) {
+        try {
+          const staleMessage = createResultMessage(requestId, staleResults, nonce, requestEpoch ?? undefined);
+          const escapedJson = JSON.stringify(staleMessage)
+            .replace(/\\/g, '\\\\')
+            .replace(/'/g, "\\'")
+            .replace(/</g, '\\u003c')
+            .replace(/>/g, '\\u003e');
+          await executeScript(`
+            (function() {
+              try {
+                var msg = JSON.parse('${escapedJson}');
+                window.postMessage(msg, '*');
+                return 'OK';
+              } catch (e) {
+                return 'ERR';
+              }
+            })();
+          `);
+        } catch {
+          // Fail-open by design for stale requests.
+        }
+      }
+
+      pendingRequestsRef.current.delete(requestId);
+      return;
+    }
     
     const startTime = performance.now();
-    console.log('[MW-Host] request received', requestId, 'items=' + items.length);
+    console.log('[MW-Host] request received', requestId, 'items=' + items.length, 'epoch=' + (requestEpoch ?? 'n/a'));
     items.forEach(item => {
       console.log('[MW-Host]   -', item.itemId, '[' + item.sourceType + ']:', item.src.substring(0, 60));
     });
@@ -622,25 +871,27 @@ export const NativeWebViewBrowser = () => {
           });
           console.log('[MW-Host] scan result', item.itemId, ':', scanResult.category, 'blur=' + scanResult.shouldBlur, 'conf=' + effectiveConfidence.toFixed(3));
         } else {
+          const shouldBlurOnFailure = localSettings.fail_closed === true;
           results.push({
             itemId: item.itemId,
             src: item.src,
-            shouldBlur: false,
-            category: 'error',
-            confidence: 0,
-            severity: 'safe',
+            shouldBlur: shouldBlurOnFailure,
+            category: shouldBlurOnFailure ? 'error_fail_closed' : 'error',
+            confidence: shouldBlurOnFailure ? 1 : 0,
+            severity: shouldBlurOnFailure ? 'hard' : 'safe',
           });
-          console.log('[MW-Host] scan result', item.itemId, ': error (no result)');
+          console.log('[MW-Host] scan result', item.itemId, ': error (no result), failClosed=' + shouldBlurOnFailure);
         }
       } catch (error) {
+        const shouldBlurOnFailure = localSettings.fail_closed === true;
         console.log('[MW-Host] scan error', item.itemId, ':', error);
         results.push({
           itemId: item.itemId,
           src: item.src,
-          shouldBlur: false,
-          category: 'error',
-          confidence: 0,
-          severity: 'safe',
+          shouldBlur: shouldBlurOnFailure,
+          category: shouldBlurOnFailure ? 'error_fail_closed' : 'error',
+          confidence: shouldBlurOnFailure ? 1 : 0,
+          severity: shouldBlurOnFailure ? 'hard' : 'safe',
         });
       }
     }
@@ -735,7 +986,7 @@ export const NativeWebViewBrowser = () => {
       decisionReason = 'soft_ratio_hit';
     }
 
-    const shouldDebugScanSummary = localSettings.prototype_mode || localSettings.show_scan_notifications;
+    const shouldDebugScanSummary = isDebugMode || localSettings.prototype_mode || localSettings.show_scan_notifications;
     if (shouldDebugScanSummary) {
       const shortUrl = (() => {
         try {
@@ -764,13 +1015,25 @@ export const NativeWebViewBrowser = () => {
         setCentralBlurState(false, 'moderation_request_soft_cleared');
       }
     }
+
+    debugLog(
+      '[MW-DIAG][HOST] decision source=' + (overlayDecision ? 'overlay_on' : 'overlay_off'),
+      'reason=' + decisionReason,
+      'hardDecision=' + hardOverlayDecision,
+      'softDecision=' + softOverlayDecision,
+      'hardStrong=' + hardStrongHits.length,
+      'hardLow=' + hardLowHits.length,
+      'softQualified=' + softQualifiedHits.length,
+      'domOverlay=' + (ENABLE_DOM_BLUR ? 'on' : 'off'),
+      'epoch=' + (requestEpoch ?? activeEpoch),
+    );
     
     // Post results back to the WebView with nonce for security
     console.log('[MW-Host] posting results back', requestId, 'count=' + results.length, 'nonce=' + nonce.substring(0, 10));
     
     if (executeScript) {
       try {
-        const resultMessage = createResultMessage(requestId, results, nonce);
+        const resultMessage = createResultMessage(requestId, results, nonce, requestEpoch ?? undefined);
         const messageJson = JSON.stringify(resultMessage);
         // Escape for safe injection
         const escapedJson = messageJson
@@ -828,6 +1091,8 @@ export const NativeWebViewBrowser = () => {
   }, [
     moderationBridge,
     executeScript,
+    debugLog,
+    isDebugMode,
     localSettings.blur_strength_px,
     localSettings.hard_overlay_confidence_threshold,
     localSettings.soft_overlay_ratio_threshold,
@@ -922,19 +1187,88 @@ export const NativeWebViewBrowser = () => {
    */
   useEffect(() => {
     if (!ENABLE_SIGNAL_PIPELINE || !isNative || !webViewState.isOpen || !isModerationEnabled()) {
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
-        pollIntervalRef.current = null;
-      }
       return;
     }
 
-    console.log('[MW-Host] Starting legacy queue polling (fallback)...');
+    console.log('[MW-Host] Starting adaptive legacy queue polling (fallback)...');
+    const MIN_POLL_MS = 300;
+    const MAX_POLL_MS = 3000;
+    const EMPTY_BACKOFF_MS = 250;
+    const HIDDEN_POLL_MS = 2000;
+    const IDLE_EMPTY_POLLS = 10;
+    const IDLE_NO_ACTIVITY_MS = 15000;
+    const IDLE_MIN_POLL_MS = 2000;
+    const IDLE_MAX_POLL_MS = 5000;
+    const IDLE_BACKOFF_MS = 500;
+    let pollDelayMs = MIN_POLL_MS;
+    let cancelled = false;
+    let pollTimer: NodeJS.Timeout | null = null;
+    let pollInFlight = false;
+    let consecutiveEmptyPolls = 0;
+    let lastActivityAt = Date.now();
+    let idleMode = false;
+    let idlePollMs = IDLE_MIN_POLL_MS;
 
-    const pollForRequests = async () => {
-      if (!executeScript) return;
+    const exitIdleMode = (reason: string) => {
+      if (!idleMode) return;
+      idleMode = false;
+      idlePollMs = IDLE_MIN_POLL_MS;
+      pollDelayMs = MIN_POLL_MS;
+      consecutiveEmptyPolls = 0;
+      console.log('[MW-Host][Poll] exitingIdle', 'reason=' + reason, 'pollMs=' + pollDelayMs);
+    };
+
+    const maybeEnterIdleMode = () => {
+      if (idleMode) return;
+      if (document.visibilityState !== 'visible') return;
+      if (consecutiveEmptyPolls < IDLE_EMPTY_POLLS) return;
+      if (Date.now() - lastActivityAt < IDLE_NO_ACTIVITY_MS) return;
+      idleMode = true;
+      idlePollMs = IDLE_MIN_POLL_MS;
+      pollDelayMs = idlePollMs;
+      console.log('[MW-Host][Poll] enteringIdle', 'pollMs=' + pollDelayMs);
+    };
+
+    const onActivity = (reason: string) => {
+      lastActivityAt = Date.now();
+      exitIdleMode(reason);
+    };
+
+    const onScroll = () => onActivity('scroll');
+    const onPopState = () => onActivity('popstate');
+    const onHashChange = () => onActivity('hashchange');
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') onActivity('visible');
+    };
+    window.addEventListener('scroll', onScroll, { passive: true });
+    window.addEventListener('popstate', onPopState);
+    window.addEventListener('hashchange', onHashChange);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    const scheduleNextPoll = (delayMs: number) => {
+      if (cancelled) return;
+      if (pollTimer) {
+        clearTimeout(pollTimer);
+      }
+      pollTimer = setTimeout(runPollLoop, delayMs);
+      console.log(
+        '[MW-Host][Timer] start',
+        'name=legacyPollTimer',
+        'delayMs=' + delayMs,
+        'navId=' + activeNavIdRef.current,
+        'url=' + (webViewState.currentUrl || 'unknown'),
+      );
+    };
+
+    const pollForRequests = async (): Promise<boolean> => {
+      if (!executeScript) return false;
+      if (pollInFlight) return false;
+      pollInFlight = true;
       
       try {
+        if (document.visibilityState !== 'visible') {
+          return false;
+        }
         // Get and clear pending requests from WebView's global queue
         const getQueueScript = `
           (function() {
@@ -949,18 +1283,18 @@ export const NativeWebViewBrowser = () => {
         const result = await executeScript(getQueueScript);
         
         if (!result || result === 'EMPTY' || result === 'null') {
-          return;
+          return false;
         }
         
         let items;
         try {
           items = JSON.parse(result);
         } catch (e) {
-          return;
+          return false;
         }
         
         if (!Array.isArray(items) || items.length === 0) {
-          return;
+          return false;
         }
         
         console.log('[MW-Host] Legacy poll: found', items.length, 'items in queue');
@@ -1002,22 +1336,58 @@ export const NativeWebViewBrowser = () => {
             }
           }
         }
+        return true;
       } catch (e) {
         // Polling errors are expected and ignored in some cases
         console.debug('[MW-Host] Legacy poll error:', e);
+        return false;
+      } finally {
+        pollInFlight = false;
       }
     };
 
-    // Start polling at 200ms intervals (less aggressive since postMessage is primary)
-    pollIntervalRef.current = setInterval(pollForRequests, 200);
+    const runPollLoop = async () => {
+      if (cancelled) return;
+      const hadWork = await pollForRequests();
+      if (document.visibilityState !== 'visible') {
+        pollDelayMs = HIDDEN_POLL_MS;
+      } else if (hadWork) {
+        lastActivityAt = Date.now();
+        consecutiveEmptyPolls = 0;
+        exitIdleMode('request');
+        pollDelayMs = MIN_POLL_MS;
+      } else {
+        consecutiveEmptyPolls += 1;
+        maybeEnterIdleMode();
+        if (idleMode) {
+          idlePollMs = Math.min(idlePollMs + IDLE_BACKOFF_MS, IDLE_MAX_POLL_MS);
+          pollDelayMs = idlePollMs;
+        } else {
+          pollDelayMs = Math.min(pollDelayMs + EMPTY_BACKOFF_MS, MAX_POLL_MS);
+        }
+      }
+      scheduleNextPoll(pollDelayMs);
+    };
+    scheduleNextPoll(MIN_POLL_MS);
 
     return () => {
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
-        pollIntervalRef.current = null;
+      cancelled = true;
+      if (pollTimer) {
+        clearTimeout(pollTimer);
+        pollTimer = null;
+        console.log(
+          '[MW-Host][Timer] stop',
+          'name=legacyPollTimer',
+          'navId=' + activeNavIdRef.current,
+          'url=' + (webViewState.currentUrl || 'unknown'),
+        );
       }
+      window.removeEventListener('scroll', onScroll);
+      window.removeEventListener('popstate', onPopState);
+      window.removeEventListener('hashchange', onHashChange);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [ENABLE_SIGNAL_PIPELINE, isNative, webViewState.isOpen, isModerationEnabled, executeScript, moderationBridge, localSettings.blur_strength_px]);
+  }, [ENABLE_SIGNAL_PIPELINE, isNative, webViewState.isOpen, isModerationEnabled, executeScript, moderationBridge, localSettings.blur_strength_px, webViewState.currentUrl]);
 
   // Search handler - redirects to Google search immediately
   const handleSearch = useCallback(async (query: string) => {
@@ -1409,6 +1779,7 @@ export const NativeWebViewBrowser = () => {
   }, [readerContent, currentView, searchQuery, isNative, webViewState.isOpen, handleReaderMode, handleSearch, webViewReload, setCentralBlurState]);
 
   const handleHome = useCallback(async () => {
+    teardownWebViewScheduling('home_reset', webViewState.currentUrl).catch(() => undefined);
     if (isNative && webViewState.isOpen) {
       await closeWebView();
     }
@@ -1428,7 +1799,7 @@ export const NativeWebViewBrowser = () => {
     setUrlInput('');
     setFallbackUrl('');
     goHome();
-  }, [isNative, webViewState.isOpen, closeWebView, goHome, moderationBridge, setCentralBlurState]);
+  }, [isNative, webViewState.isOpen, webViewState.currentUrl, closeWebView, goHome, moderationBridge, setCentralBlurState, teardownWebViewScheduling]);
 
   // Manual scan trigger for current page
   const handleScanPage = useCallback(async () => {

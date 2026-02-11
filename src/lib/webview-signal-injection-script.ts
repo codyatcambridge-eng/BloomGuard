@@ -30,6 +30,8 @@ export function generateModerationSignalScript(config: SignalInjectionConfig): s
   var THRESHOLDS = ${JSON.stringify(thresholds)};
   var SCAN_INTERVAL_MS = 1200;
   var MIN_DIMENSION = 50;
+  var NAV_ID = (window.__MW_NAV_ID__ || ('mw_sig_' + Date.now().toString(36)));
+  var PAGE_URL = (window.location && window.location.href) ? window.location.href : 'unknown';
   var state = window.__MW_SIGNAL_STATE__;
 
   if (!state) {
@@ -50,6 +52,10 @@ export function generateModerationSignalScript(config: SignalInjectionConfig): s
   function log() {
     if (!DEBUG) return;
     try { console.log.apply(console, arguments); } catch (e) {}
+  }
+
+  function logTimer(action, name) {
+    log('[MW-Signal][Timer]', action, name, 'navId=' + NAV_ID, 'url=' + PAGE_URL);
   }
 
   function postToHost(message) {
@@ -133,11 +139,58 @@ export function generateModerationSignalScript(config: SignalInjectionConfig): s
   function scheduleCollect() {
     if (state.scheduled) return;
     state.scheduled = true;
-    setTimeout(function() {
+    var t = setTimeout(function() {
       state.scheduled = false;
       collectImages();
     }, 120);
+    state.collectTimer = t;
   }
+
+  function stopScanTimer(reason) {
+    if (state.scanTimer) {
+      clearInterval(state.scanTimer);
+      state.scanTimer = null;
+      logTimer('stop', 'scanTimer:' + reason);
+    }
+  }
+
+  function startScanTimer(reason) {
+    if (state.scanTimer || !ENABLED || document.visibilityState !== 'visible') return;
+    state.scanTimer = setInterval(collectImages, SCAN_INTERVAL_MS);
+    logTimer('start', 'scanTimer:' + reason);
+  }
+
+  function teardown(reason) {
+    stopScanTimer(reason || 'teardown');
+    if (state.flushTimer) {
+      clearTimeout(state.flushTimer);
+      state.flushTimer = null;
+      logTimer('stop', 'flushTimer:' + (reason || 'teardown'));
+    }
+    if (state.collectTimer) {
+      clearTimeout(state.collectTimer);
+      state.collectTimer = null;
+      logTimer('stop', 'collectTimer:' + (reason || 'teardown'));
+    }
+    window.removeEventListener('scroll', scheduleCollect);
+    window.removeEventListener('load', scheduleCollect);
+    document.removeEventListener('visibilitychange', onVisibilityChange);
+    window.removeEventListener('beforeunload', onBeforeUnload);
+    window.removeEventListener('pagehide', onPageHide);
+    window.__MW_SIGNAL_ACTIVE__ = false;
+  }
+
+  function onVisibilityChange() {
+    if (document.visibilityState === 'visible') {
+      startScanTimer('visible');
+      scheduleCollect();
+      return;
+    }
+    stopScanTimer('hidden');
+  }
+
+  function onBeforeUnload() { teardown('beforeunload'); }
+  function onPageHide() { teardown('pagehide'); }
 
   function install() {
     if (window.__MW_SIGNAL_ACTIVE__) {
@@ -147,10 +200,13 @@ export function generateModerationSignalScript(config: SignalInjectionConfig): s
     window.__MW_SIGNAL_ACTIVE__ = true;
 
     scheduleCollect();
-    state.scanTimer = setInterval(collectImages, SCAN_INTERVAL_MS);
+    startScanTimer('install');
     window.addEventListener('scroll', scheduleCollect, { passive: true });
     window.addEventListener('load', scheduleCollect);
-    document.addEventListener('visibilitychange', scheduleCollect);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    window.addEventListener('beforeunload', onBeforeUnload);
+    window.addEventListener('pagehide', onPageHide);
+    window.__MW_SIGNAL_TEARDOWN__ = teardown;
     log('[MW-Signal] installed');
   }
 

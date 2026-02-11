@@ -65,7 +65,7 @@ const DEFAULT_SETTINGS: LocalProtectionSettings = {
   hard_overlay_confidence_threshold: 0.85,
   soft_overlay_ratio_threshold: 0.5,
   soft_overlay_min_hits: 4,
-  blur_mode: 'minimal',
+  blur_mode: 'balanced',
 };
 
 export const useLocalSettings = () => {
