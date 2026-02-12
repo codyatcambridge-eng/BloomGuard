@@ -25,6 +25,7 @@ export interface ContentFilterPlugin {
   startScanning(options?: {
     preset?: 'balanced' | 'strict' | 'relaxed';
     kidMode?: boolean;
+    debug?: boolean;
     fps?: number;
     hysteresisOnMs?: number;
     hysteresisOffMs?: number;
