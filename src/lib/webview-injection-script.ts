@@ -310,6 +310,14 @@ export function generateModerationScript(config: InjectionConfig): string {
   window.__MW_BLUR_STATE__ = overlayState;
 
   function postToHost(payload) {
+    let delivered = false;
+    try {
+      if (window.mobileApp && typeof window.mobileApp.postMessage === 'function') {
+        window.mobileApp.postMessage({ detail: payload });
+        delivered = true;
+      }
+    } catch (e) {}
+    if (delivered) return;
     try {
       window.postMessage(payload, '*');
     } catch (e) {}
@@ -318,6 +326,13 @@ export function generateModerationScript(config: InjectionConfig): string {
         window.parent.postMessage(payload, '*');
       }
     } catch (e) {}
+  }
+
+  function readHostEventPayload(eventLike) {
+    if (!eventLike || typeof eventLike !== 'object') return null;
+    if (eventLike.detail && typeof eventLike.detail === 'object') return eventLike.detail;
+    if (eventLike.data && typeof eventLike.data === 'object') return eventLike.data;
+    return null;
   }
 
   function ensureOverlayStyle() {
@@ -419,9 +434,11 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   if (!window.__MW_BLUR_LISTENER__) {
     window.__MW_BLUR_LISTENER__ = true;
-    window.addEventListener('message', function(event) {
-      handleBlurCommand(event && event.data ? event.data : null);
-    });
+    const onBlurCommandEvent = function(event) {
+      handleBlurCommand(readHostEventPayload(event));
+    };
+    window.addEventListener('message', onBlurCommandEvent);
+    window.addEventListener('messageFromNative', onBlurCommandEvent);
   }
 
   if (!window.__MW_BLUR_NAV_HOOKED__) {
@@ -531,6 +548,23 @@ export function generateModerationScript(config: InjectionConfig): string {
   let batchQueue = [];
   let batchTimer = null;
   const NAV_ID = window.__MW_NAV_ID__ || ('mw_' + Date.now().toString(36));
+  window.__MW_NAV_ID__ = NAV_ID;
+  const NONCE_PREFIX = String(CONFIG.nonce || '').substring(0, 6);
+  postToHost({
+    type: 'MW_INJECTED_ACK',
+    navId: NAV_ID,
+    pageEpoch: CONFIG.pageEpoch,
+    noncePrefix: NONCE_PREFIX,
+    url: window.location.href,
+    timestamp: Date.now(),
+  });
+  console.log(
+    '[MW][ACK] MW_INJECTED_ACK',
+    'navId=' + NAV_ID,
+    'pageEpoch=' + CONFIG.pageEpoch,
+    'noncePrefix=' + NONCE_PREFIX,
+    'url=' + window.location.href,
+  );
   const timerState = {
     legacyResultsInterval: null,
     urlChangeInterval: null,
@@ -831,6 +865,9 @@ export function generateModerationScript(config: InjectionConfig): string {
    */
   function removeSoftBlur(element, src) {
     try {
+      const beforeState = element.dataset.mwModerated || '';
+      const beforeFilter = element.style.getPropertyValue('filter') || element.style.filter || '';
+      const beforeHasBlur = beforeFilter.toLowerCase().includes('blur(');
       if (element.dataset.mwModerated === 'softblur' || element.classList.contains('mw-softblur')) {
         element.style.filter = 'none';
         element.dataset.mwModerated = 'safe';
@@ -840,6 +877,14 @@ export function generateModerationScript(config: InjectionConfig): string {
           console.log('[MW] soft blur removed (safe):', src.substring(0, 50));
         }
       }
+      console.log(
+        '[MW][JSBlur][AutoRemoveCheck]',
+        'src=' + String(src || '').substring(0, 120),
+        'beforeState=' + beforeState,
+        'beforeHasBlur=' + beforeHasBlur,
+        'afterState=' + (element.dataset.mwModerated || ''),
+        'afterFilter=' + (element.style.getPropertyValue('filter') || element.style.filter || '')
+      );
     } catch (e) {}
   }
 
@@ -856,22 +901,60 @@ export function generateModerationScript(config: InjectionConfig): string {
     return label === 'porn' || label === 'hentai';
   }
 
-  function isMvpAllowedCategory(label) {
-    const normalized = normalizeLabel(label);
-    return FORCE_UNSAFE_CATEGORIES.has(normalized) || isExplicitUnsafeLabel(normalized);
+  function normalizePolicyCategory(label) {
+    return String(label || '').trim().toLowerCase();
   }
 
-  function applyFailOpenAndModePolicy(rawShouldBlur, normalizedCategory, predictedLabel, isErrorResult) {
-    return applyFailOpenAndModePolicyDecision({
-      rawShouldBlur: !!rawShouldBlur,
-      normalizedCategory: normalizedCategory || '',
-      predictedLabel: predictedLabel || '',
-      isErrorResult: !!isErrorResult,
-      failClosed: CONFIG.failClosed,
-      enabled: CONFIG.enabled,
-      sensitivity: CONFIG.sensitivity,
-      blockingMode: CONFIG.blockingMode,
-    });
+  function isMvpAllowedCategory(label) {
+    const raw = normalizePolicyCategory(label);
+    return FORCE_UNSAFE_CATEGORIES.has(raw) || isExplicitUnsafeLabel(raw);
+  }
+
+  function applyFailOpenAndModePolicy(rawShouldBlur, rawCategory, predictedLabel, isErrorResult) {
+    const normalizedCategory = normalizePolicyCategory(rawCategory);
+    const normalizedPredicted = normalizePolicyCategory(predictedLabel);
+    const enabledAndActive = CONFIG.enabled && CONFIG.sensitivity > 0;
+
+    if (isErrorResult) {
+      if (CONFIG.failClosed && enabledAndActive) {
+        return { shouldBlur: true, reason: 'failClosed/' + normalizedCategory };
+      }
+      return { shouldBlur: false, reason: 'failOpen/' + normalizedCategory };
+    }
+
+    if (CONFIG.blockingMode === 'mvp') {
+      const categoryAllowed = isMvpAllowedCategory(normalizedCategory);
+      const predictedAllowed = isMvpAllowedCategory(normalizedPredicted);
+      if (!!rawShouldBlur && !categoryAllowed && !predictedAllowed) {
+        return { shouldBlur: false, reason: 'mvp_filter/' + (normalizedCategory || normalizedPredicted || 'unknown') };
+      }
+    }
+
+    return { shouldBlur: !!rawShouldBlur, reason: null };
+  }
+
+  function applyAnatomicalThreshold(shouldApplyBlur, predictedLabel, unsafeScores, forceUnsafe) {
+    const normalizedPredicted = normalizePolicyCategory(predictedLabel);
+    if (!shouldApplyBlur || forceUnsafe) {
+      return { shouldBlur: !!shouldApplyBlur, reason: null };
+    }
+    if (normalizedPredicted !== 'sexy' && normalizedPredicted !== 'porn') {
+      return { shouldBlur: !!shouldApplyBlur, reason: null };
+    }
+
+    const score = normalizedPredicted === 'sexy' ? unsafeScores.sexy : unsafeScores.porn;
+    if (score === null || !Number.isFinite(score)) {
+      if (CONFIG.failClosed && CONFIG.enabled && CONFIG.sensitivity > 0) {
+        return { shouldBlur: true, reason: normalizedPredicted + '_scoreNaN/failClosed' };
+      }
+      return { shouldBlur: false, reason: normalizedPredicted + '_scoreNaN/failOpen' };
+    }
+
+    if (score < CONFIG.anatomicalThreshold) {
+      return { shouldBlur: false, reason: normalizedPredicted + '<anatomicalThreshold' };
+    }
+
+    return { shouldBlur: true, reason: null };
   }
 
   /**
@@ -903,6 +986,15 @@ export function generateModerationScript(config: InjectionConfig): string {
       state.stats.blurred++;
       
       createRevealOverlay(element, src, category, itemId);
+      const appliedFilter = element.style.getPropertyValue('filter') || element.style.filter || '';
+      const filterPriority = element.style.getPropertyPriority('filter') || 'none';
+      console.log(
+        '[MW][JSBlur][Apply]',
+        'itemId=' + (itemId || 'N/A'),
+        'src=' + String(src || '').substring(0, 120),
+        'filter=' + appliedFilter,
+        'priority=' + filterPriority
+      );
       console.log('[MW] applied blur [' + category + '] itemId=' + (itemId || 'N/A') + ':', src.substring(0, 60));
     } catch (e) {
       console.error('[MW] Failed to apply blur:', e.message);
@@ -1013,12 +1105,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           modelPrediction: { category: category, confidence: null }
         };
         console.log('[MW] posting gc-label-request', labelItemId);
-        window.postMessage(labelRequest, '*');
-        
-        // Also post to parent if in iframe
-        if (window.parent && window.parent !== window) {
-          try { window.parent.postMessage(labelRequest, '*'); } catch(err) {}
-        }
+        postToHost(labelRequest);
         
         // Show brief correction overlay
         showCorrectionOverlay(element, src, category, labelItemId);
@@ -1080,10 +1167,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           platform: PLATFORM,
         };
         console.log('[MW] posting correction feedback:', isCorrect ? 'correct' : 'incorrect');
-        window.postMessage(correctionEvent, '*');
-        if (window.parent && window.parent !== window) {
-          try { window.parent.postMessage(correctionEvent, '*'); } catch(err) {}
-        }
+        postToHost(correctionEvent);
         
         // Remove the overlay
         correctionDiv.style.opacity = '0';
@@ -1146,17 +1230,26 @@ export function generateModerationScript(config: InjectionConfig): string {
     state.stats.requestsSent++;
     
     console.log('[MW] request sent', requestId, 'items=' + items.length, items.map(i => i.src.substring(0, 40)));
+    console.log(
+      '[MW][REQ] MW_REQ_SENT',
+      'requestId=' + requestId,
+      'navId=' + NAV_ID,
+      'pageEpoch=' + state.pageEpoch,
+      'noncePrefix=' + NONCE_PREFIX,
+      'items=' + items.length,
+    );
+    postToHost({
+      type: 'MW_REQ_SENT',
+      requestId: requestId,
+      navId: NAV_ID,
+      pageEpoch: state.pageEpoch,
+      noncePrefix: NONCE_PREFIX,
+      itemCount: items.length,
+      timestamp: timestamp,
+    });
     console.log('[MW] waiting response', requestId, 'ts=' + timestamp);
     
-    // Post to parent (host app)
-    window.postMessage(message, '*');
-    
-    // Also try posting to parent window if in iframe
-    if (window.parent && window.parent !== window) {
-      try {
-        window.parent.postMessage(message, '*');
-      } catch (e) {}
-    }
+    postToHost(message);
   }
 
   /**
@@ -1175,6 +1268,23 @@ export function generateModerationScript(config: InjectionConfig): string {
     pendingRequest.state = 'timeout';
     
     console.log('[MW] timeout', requestId, 'items=' + pendingRequest.items.length);
+    console.warn(
+      '[MW][REQ] MW_REQ_TIMEOUT',
+      'requestId=' + requestId,
+      'navId=' + NAV_ID,
+      'pageEpoch=' + state.pageEpoch,
+      'noncePrefix=' + NONCE_PREFIX,
+      'items=' + pendingRequest.items.length,
+    );
+    postToHost({
+      type: 'MW_REQ_TIMEOUT',
+      requestId: requestId,
+      navId: NAV_ID,
+      pageEpoch: state.pageEpoch,
+      noncePrefix: NONCE_PREFIX,
+      itemCount: pendingRequest.items.length,
+      timestamp: Date.now(),
+    });
     state.stats.timeouts += pendingRequest.items.length;
     
     const timeoutPolicy = applyFailOpenAndModePolicy(false, 'timeout', 'timeout', true);
@@ -1220,40 +1330,56 @@ export function generateModerationScript(config: InjectionConfig): string {
    * Implements HIGH-CONFIDENCE BYPASS and ANATOMICAL LOGIC
    */
   function handleModerationResult(message) {
-    const { requestId, results, nonce } = message;
-    const resultEpoch = Number.isFinite(message.pageEpoch) ? Number(message.pageEpoch) : null;
-    if (resultEpoch !== null && resultEpoch !== state.pageEpoch) {
-      state.stats.staleEpochDiscarded++;
-      if (CONFIG.debug) {
-        console.log('[MW][Epoch] dropping stale result', 'requestId=' + requestId, 'resultEpoch=' + resultEpoch, 'activeEpoch=' + state.pageEpoch);
+    try {
+      const { requestId, results, nonce } = message;
+      const resultEpoch = Number.isFinite(message.pageEpoch) ? Number(message.pageEpoch) : null;
+      const expectedNoncePrefix = String(CONFIG.nonce || '').substring(0, 6);
+      const receivedNoncePrefix = String(nonce || 'none').substring(0, 6);
+      if (resultEpoch !== null && resultEpoch !== state.pageEpoch) {
+        state.stats.staleEpochDiscarded++;
+        console.warn(
+          '[MW][RejectResult]',
+          'reason=epoch',
+          'requestId=' + requestId,
+          'expectedNonce=' + expectedNoncePrefix,
+          'gotNonce=' + receivedNoncePrefix,
+          'resultEpoch=' + resultEpoch,
+          'activeEpoch=' + state.pageEpoch
+        );
+        return;
       }
-      return;
-    }
-    
-    if (!requestId || !Array.isArray(results)) {
-      console.log('[MW] Invalid result message:', message);
-      return;
-    }
-    
-    // SECURITY: Validate nonce
-    if (nonce !== CONFIG.nonce) {
-      console.warn('[MW] NONCE MISMATCH - rejecting result:', requestId);
-      console.warn('[MW] Expected:', CONFIG.nonce.substring(0, 10), 'Got:', (nonce || 'none').substring(0, 10));
-      state.stats.nonceRejected++;
-      return;
-    }
-    
-    const pendingRequest = state.pendingRequests.get(requestId);
-    if (pendingRequest) {
-      clearTimeout(pendingRequest.timeoutId);
-      pendingRequest.state = 'handled';
-      state.pendingRequests.delete(requestId);
-    }
-    
-    state.stats.responsesReceived++;
-    console.log('[MW] received result', requestId, 'count=' + results.length);
-    
-    results.forEach(result => {
+      
+      if (!requestId || !Array.isArray(results)) {
+        console.log('[MW] Invalid result message:', message);
+        return;
+      }
+      
+      // SECURITY: Validate nonce
+      if (nonce !== CONFIG.nonce) {
+        state.stats.nonceRejected++;
+        console.warn(
+          '[MW][RejectResult]',
+          'reason=nonce',
+          'requestId=' + requestId,
+          'expectedNonce=' + expectedNoncePrefix,
+          'gotNonce=' + receivedNoncePrefix,
+          'resultEpoch=' + (resultEpoch === null ? 'none' : resultEpoch),
+          'activeEpoch=' + state.pageEpoch
+        );
+        return;
+      }
+      
+      const pendingRequest = state.pendingRequests.get(requestId);
+      if (pendingRequest) {
+        clearTimeout(pendingRequest.timeoutId);
+        pendingRequest.state = 'handled';
+        state.pendingRequests.delete(requestId);
+      }
+      
+      state.stats.responsesReceived++;
+      console.log('[MW] received result', requestId, 'count=' + results.length);
+      
+      results.forEach(result => {
       const { itemId, src, shouldBlur, category, confidence, reason } = result;
       const rawPredictions = result && typeof result === 'object'
         ? (result.predictions || result.scores || result.probabilities || null)
@@ -1264,6 +1390,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         const keys = rawPredictions && typeof rawPredictions === 'object' ? Object.keys(rawPredictions) : [];
         console.log('[MW] prediction keys:', keys.length ? keys.join(',') : '(none)');
       }
+      const rawCategory = normalizePolicyCategory(category);
       const normalizedCategory = normalizeLabel(category);
       const topPrediction = getTopPredictionLabel(normalizedPredictions);
       const unsafeScores = {
@@ -1319,7 +1446,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       // Only maintain blur if Sexy or Porn > 0.60
       let shouldApplyBlur = shouldBlur;
       let decisionReason = reason || '';
-      const forceUnsafe = FORCE_UNSAFE_CATEGORIES.has(normalizeLabel(category));
+      const forceUnsafe = FORCE_UNSAFE_CATEGORIES.has(rawCategory);
 
       // Prefer explicit threshold evaluation when label + score are available.
       // Directionality: score > threshold => blur.
@@ -1333,7 +1460,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         decisionReason = 'host_safe_preserved';
       } else if (forceUnsafe && shouldBlur) {
         shouldApplyBlur = true;
-        decisionReason = 'forceUnsafeCategory/' + normalizeLabel(category);
+        decisionReason = 'forceUnsafeCategory/' + rawCategory;
       } else if (thresholdComparable) {
         shouldApplyBlur = !!thresholdHit;
         decisionReason = thresholdHit ? (predictedLabel + '>=thr') : (predictedLabel + '<thr');
@@ -1342,17 +1469,12 @@ export function generateModerationScript(config: InjectionConfig): string {
         decisionReason = 'NaN/default';
       }
 
-      const anatomicalDecision = applyAnatomicalThresholdDecision({
-        shouldApplyBlur: shouldApplyBlur,
-        predictedLabel: predictedLabel || '',
-        sexyScore: unsafeScores.sexy,
-        pornScore: unsafeScores.porn,
-        anatomicalThreshold: CONFIG.anatomicalThreshold,
-        forceUnsafe: forceUnsafe,
-        failClosed: CONFIG.failClosed,
-        enabled: CONFIG.enabled,
-        sensitivity: CONFIG.sensitivity,
-      });
+      const anatomicalDecision = applyAnatomicalThreshold(
+        shouldApplyBlur,
+        predictedLabel || '',
+        unsafeScores,
+        forceUnsafe,
+      );
       shouldApplyBlur = anatomicalDecision.shouldBlur;
       if (anatomicalDecision.reason) {
         decisionReason = anatomicalDecision.reason;
@@ -1363,10 +1485,11 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       
       // FAIL-OPEN: Handle errors gracefully
-      const isError = normalizedCategory === 'error' || normalizedCategory === 'timeout' || normalizedCategory === 'error_fail_closed';
+      const errorCategory = rawCategory || normalizedCategory;
+      const isError = errorCategory === 'error' || errorCategory === 'timeout' || errorCategory === 'error_fail_closed';
       const policyDecision = applyFailOpenAndModePolicy(
         shouldApplyBlur,
-        normalizedCategory,
+        rawCategory,
         predictedLabel,
         isError
       );
@@ -1398,7 +1521,15 @@ export function generateModerationScript(config: InjectionConfig): string {
       const dims = element ? getElementDimensions(element) : { width: 0, height: 0 };
       
       if (element && element.isConnected) {
+        const preDecisionState = element.dataset.mwModerated || '';
+        const preDecisionFilter = element.style.getPropertyValue('filter') || element.style.filter || '';
+        const preDecisionHasBlur = preDecisionFilter.toLowerCase().includes('blur(');
         if (finalBlur) {
+          console.log(
+            '[MW][JSBlur] applied reason=' + (decisionReason || 'unknown'),
+            'src=' + String(src || '').substring(0, 120),
+            'itemId=' + String(itemId || ''),
+          );
           clearSafeResolved(src);
           logBlurTraceOncePerElement({
             urlPrefix: (src || '').substring(0, 60),
@@ -1412,6 +1543,16 @@ export function generateModerationScript(config: InjectionConfig): string {
           // Apply strong blur
           applyBlur(element, src, predictedLabel || category || 'flagged', CONFIG.blurStrength, itemId);
         } else {
+          if (preDecisionState === 'blurred' || element.classList.contains('mw-blurred') || preDecisionHasBlur) {
+            console.log(
+              '[MW][JSBlur][SafeOnPreviouslyBlurred]',
+              'itemId=' + (itemId || 'N/A'),
+              'src=' + String(src || '').substring(0, 120),
+              'decisionReason=' + (decisionReason || 'none'),
+              'state=' + preDecisionState,
+              'hasBlurFilter=' + preDecisionHasBlur
+            );
+          }
           markSafeResolved(src);
           // Remove soft blur if result is safe
           removeSoftBlur(element, src);
@@ -1430,9 +1571,13 @@ export function generateModerationScript(config: InjectionConfig): string {
         // Remove soft blur from all matching elements
         findAndRemoveSoftBlur(src);
       }
-    });
-    if (DEBUG_SKIP_DOMAIN_BLUR) {
-      console.log('[MW] classification counts (kill-switch active):', JSON.stringify(state.stats.classificationCounts), 'blurSkipped=' + state.stats.blurSkippedByKillSwitch);
+      });
+      if (DEBUG_SKIP_DOMAIN_BLUR) {
+        console.log('[MW] classification counts (kill-switch active):', JSON.stringify(state.stats.classificationCounts), 'blurSkipped=' + state.stats.blurSkippedByKillSwitch);
+      }
+    } catch (err) {
+      const message = err && err.message ? err.message : String(err);
+      console.error('[MW][InjectError]', message);
     }
   }
 
@@ -1492,14 +1637,16 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   // ==================== MESSAGE LISTENER ====================
 
-  window.addEventListener('message', function(event) {
-    const message = event.data;
+  const onModerationResultEvent = function(event) {
+    const message = readHostEventPayload(event);
     if (!message || typeof message !== 'object') return;
     
     if (message.type === 'gc-moderation-result') {
       handleModerationResult(message);
     }
-  });
+  };
+  window.addEventListener('message', onModerationResultEvent);
+  window.addEventListener('messageFromNative', onModerationResultEvent);
 
   // ==================== BATCH QUEUE MANAGEMENT ====================
 
@@ -1962,7 +2109,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     const results = window.__GC_SCAN_RESULTS__.splice(0, window.__GC_SCAN_RESULTS__.length);
     
     results.forEach(result => {
-      const { src, shouldBlur, category, blurStrengthPx, nonce } = result;
+      const { src, shouldBlur, category, blurStrengthPx, nonce, pageEpoch, epoch } = result;
       
       // SECURITY: Validate nonce if provided
       if (nonce && nonce !== CONFIG.nonce) {
@@ -1974,10 +2121,20 @@ export function generateModerationScript(config: InjectionConfig): string {
       console.log('[MW] legacy result:', src.substring(0, 50), '-> blur:', shouldBlur, 'cat:', category);
       
       state.scanned.add(src);
+      const rawCategory = normalizePolicyCategory(category);
       const normalizedCategory = normalizeLabel(category);
-      const isError = normalizedCategory === 'error' || normalizedCategory === 'timeout' || normalizedCategory === 'error_fail_closed';
-      const policyDecision = applyFailOpenAndModePolicy(!!shouldBlur, normalizedCategory, normalizedCategory, isError);
+      const errorCategory = rawCategory || normalizedCategory;
+      const isError = errorCategory === 'error' || errorCategory === 'timeout' || errorCategory === 'error_fail_closed';
+      const policyDecision = applyFailOpenAndModePolicy(!!shouldBlur, rawCategory, rawCategory, isError);
       let shouldApplyBlur = CONFIG.forcedBlur || (policyDecision.shouldBlur && CONFIG.enabled && CONFIG.sensitivity > 0);
+      const hasEpoch = Number.isFinite(pageEpoch) || Number.isFinite(epoch);
+      console.log(
+        '[MW][LegacyResult][Decision]',
+        'src=' + String(src || '').substring(0, 120),
+        'applyBlur=' + shouldApplyBlur,
+        'hasNonce=' + (!!nonce),
+        'hasEpoch=' + hasEpoch
+      );
       if (shouldApplyBlur && isSafeResolvedActive(src)) {
         shouldApplyBlur = false;
         if (CONFIG.debug) {

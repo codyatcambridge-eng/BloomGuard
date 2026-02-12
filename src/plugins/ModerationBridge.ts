@@ -119,7 +119,7 @@ export function calculateCategory(predictions: Record<string, number>): Moderati
   if (sexy > 0.8) return 'sexy';
   if (sexy > 0.6) return 'suggestive';
   if (sexy > 0.4) return 'partial_nudity';
-  if (sexy > 0.6) return 'swimwear';
+  if (sexy > 0.35) return 'swimwear';
   
   // Safe content
   if (neutral > 0.8) return 'neutral';

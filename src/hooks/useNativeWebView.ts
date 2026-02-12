@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { Capacitor } from '@capacitor/core';
+import { Capacitor, type PluginListenerHandle } from '@capacitor/core';
 import { InAppBrowser, OpenWebViewOptions, ToolBarType, BackgroundColor } from '@capgo/inappbrowser';
 
 export type WebViewEvent = 
@@ -32,6 +32,7 @@ export interface UseNativeWebViewOptions {
   onUrlChange?: (url: string) => void;
   onNavigationRequest?: (url: string) => Promise<boolean> | boolean; // Return false to block navigation
   onClose?: () => void;
+  onMessageFromWebview?: (payload: unknown) => void;
 }
 
 export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
@@ -42,6 +43,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     onUrlChange,
     onNavigationRequest,
     onClose,
+    onMessageFromWebview,
   } = options;
 
   const [state, setState] = useState<WebViewState>({
@@ -93,6 +95,8 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
   useEffect(() => {
     if (!isNative || listenersSetupRef.current) return;
     listenersSetupRef.current = true;
+    let messageFromWebviewHandle: PluginListenerHandle | null = null;
+    let disposed = false;
 
     // URL change listener
     InAppBrowser.addListener('urlChangeEvent', (event) => {
@@ -176,11 +180,36 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
       onClose?.();
     });
 
+    void InAppBrowser.addListener('messageFromWebview', (event) => {
+      const payload = (
+        event &&
+        typeof event === 'object' &&
+        'detail' in event &&
+        (event as { detail?: unknown }).detail !== undefined
+      )
+        ? (event as { detail?: unknown }).detail
+        : event;
+      onMessageFromWebview?.(payload);
+    }).then((handle) => {
+      if (disposed) {
+        void handle.remove();
+        return;
+      }
+      messageFromWebviewHandle = handle;
+    }).catch((error) => {
+      console.error('[NativeWebView] Failed to add messageFromWebview listener:', error);
+    });
+
     return () => {
+      disposed = true;
+      if (messageFromWebviewHandle) {
+        void messageFromWebviewHandle.remove();
+        messageFromWebviewHandle = null;
+      }
       InAppBrowser.removeAllListeners();
       listenersSetupRef.current = false;
     };
-  }, [isNative, onUrlChange, onLoadEnd, onLoadError, onClose, markClosed]);
+  }, [isNative, onUrlChange, onLoadEnd, onLoadError, onClose, onMessageFromWebview, markClosed]);
 
   // Open URL in native WebView
   const open = useCallback(async (url: string, inApp: boolean = true) => {
@@ -367,6 +396,17 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     }
   }, [isNative]);
 
+  const postMessageToWebView = useCallback(async (detail: Record<string, unknown>): Promise<boolean> => {
+    if (!isNative) return false;
+    try {
+      await InAppBrowser.postMessage({ detail });
+      return true;
+    } catch (error) {
+      console.error('[NativeWebView] postMessage error:', error);
+      return false;
+    }
+  }, [isNative]);
+
   // Execute JavaScript in the WebView
   const executeScript = useCallback(async (script: string): Promise<string | null> => {
     if (!isNative) return null;
@@ -434,6 +474,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     goForward,
     reload,
     setUrl,
+    postMessageToWebView,
     executeScript,
   };
 };
