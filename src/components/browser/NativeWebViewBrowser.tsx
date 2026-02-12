@@ -148,11 +148,25 @@ export const NativeWebViewBrowser = () => {
 
   const UNSAFE_STREAK_REQUIRED = 2;
   const SAFE_STREAK_REQUIRED = 2;
+  const HARD_MIN_HOLD_MS = 1400;
+  const SOFT_MIN_HOLD_MS = 700;
   const isDebugMode = localSettings.debug_mode === true;
   const debugLog = useCallback((...args: unknown[]) => {
     if (!isDebugMode) return;
     console.log(...args);
   }, [isDebugMode]);
+  const emitHostApplyDiag = useCallback((
+    itemId: string,
+    decision: string,
+    reason: string,
+    src?: string,
+    nsfwScore?: number,
+  ) => {
+    const scorePart = Number.isFinite(nsfwScore) ? ` nsfwScore=${Number(nsfwScore).toFixed(3)}` : '';
+    console.log(
+      `[MW-DIAG][APPLY] navId=${activeNavIdRef.current} pageEpoch=${webViewPageEpochRef.current} itemId=${itemId} decision=${decision} reason=${reason}${scorePart} srcPrefix=${String(src || currentUrlRef.current || '').substring(0, 80)}`,
+    );
+  }, []);
 
   const queueCurrentBlurState = useCallback((reason: string) => {
     blurPendingRef.current = {
@@ -166,14 +180,35 @@ export const NativeWebViewBrowser = () => {
   const setCentralBlurState = useCallback((enabled: boolean, reason: string) => {
     const prev = blurStateRef.current;
     if (prev.enabled === enabled && prev.reason === reason) return;
+    if (!enabled && prev.enabled) {
+      const heldMs = Date.now() - prev.timestamp;
+      const minHoldMs = prev.reason.startsWith('moderation_request_hard')
+        ? HARD_MIN_HOLD_MS
+        : SOFT_MIN_HOLD_MS;
+      if (heldMs < minHoldMs) {
+        debugLog(
+          '[MW-Host][HOLD] suppress_clear',
+          'heldMs=' + heldMs,
+          'minHoldMs=' + minHoldMs,
+          'reason=' + prev.reason,
+        );
+        return;
+      }
+    }
 
     blurStateRef.current = {
       enabled,
       reason,
       timestamp: Date.now(),
     };
+    emitHostApplyDiag(
+      'overlay',
+      enabled ? 'overlay_on' : 'overlay_off',
+      reason || 'none',
+      currentUrlRef.current,
+    );
     queueCurrentBlurState(reason);
-  }, [queueCurrentBlurState]);
+  }, [queueCurrentBlurState, debugLog, emitHostApplyDiag]);
 
   const processModerationSafetySignal = useCallback((isUnsafe: boolean, reason: string) => {
     const signal = blurSignalRef.current;
@@ -251,8 +286,17 @@ export const NativeWebViewBrowser = () => {
   const loadEndInjectTimerRef = useRef<NodeJS.Timeout | null>(null);
   const navigationSeqRef = useRef(0);
   const activeNavIdRef = useRef(0);
+  const ackedPageEpochRef = useRef<number | null>(null);
+  const ackReceivedAtRef = useRef(0);
+  const injectionAliveNavIdRef = useRef<number | null>(null);
+  const legacyPollSuppressedUntilRef = useRef(0);
+  const legacyPollTimerActiveRef = useRef(false);
+  const legacyPollExecuteScriptCallsRef = useRef<number[]>([]);
+  const legacyPollDegradedUntilRef = useRef(0);
+  const legacyPollLastDegradeLogAtRef = useRef(0);
   const currentUrlRef = useRef('');
   const messageFromWebViewHandlerRef = useRef<((payload: unknown) => void) | null>(null);
+  const LEGACY_ACK_WINDOW_MS = 12_000;
   
   const {
     currentView,
@@ -344,6 +388,10 @@ export const NativeWebViewBrowser = () => {
     navigationSeqRef.current += 1;
     activeNavIdRef.current = navigationSeqRef.current;
     webViewPageEpochRef.current = activeNavIdRef.current;
+    ackedPageEpochRef.current = null;
+    ackReceivedAtRef.current = 0;
+    injectionAliveNavIdRef.current = null;
+    legacyPollSuppressedUntilRef.current = 0;
     console.log(
       '[MW-Inject][Nav]',
       'navId=' + activeNavIdRef.current,
@@ -351,6 +399,21 @@ export const NativeWebViewBrowser = () => {
       'targetUrl=' + (url || 'unknown'),
     );
   }, []);
+
+  const markInjectionAliveForNav = useCallback((signalType: string, source: 'capgo' | 'window') => {
+    const now = Date.now();
+    injectionAliveNavIdRef.current = activeNavIdRef.current;
+    ackedPageEpochRef.current = webViewPageEpochRef.current;
+    ackReceivedAtRef.current = now;
+    legacyPollSuppressedUntilRef.current = now + LEGACY_ACK_WINDOW_MS;
+    console.log(
+      '[MW-Host][InjectAlive]',
+      'signal=' + signalType,
+      'source=' + source,
+      'navId=' + activeNavIdRef.current,
+      'suppressedForMs=' + LEGACY_ACK_WINDOW_MS,
+    );
+  }, [LEGACY_ACK_WINDOW_MS]);
 
   const injectModerationScript = useCallback(async (
     scriptExecutor: (script: string) => Promise<string | null>,
@@ -399,6 +462,7 @@ export const NativeWebViewBrowser = () => {
       '[MW-Inject][Config]',
       'enabled=' + config.enabled,
       'sensitivity=' + config.sensitivity,
+      'debug=' + config.debug,
       'blockingMode=' + config.blockingMode,
       'nonce=' + String(config.nonce || '').substring(0, 10),
       'settingsLoaded=' + settingsLoaded,
@@ -827,21 +891,28 @@ export const NativeWebViewBrowser = () => {
     pendingRequestsRef.current.add(requestId);
 
     if (requestEpoch !== null && requestEpoch !== activeEpoch) {
-      debugLog(
-        '[MW-Host][Epoch] stale request ignored',
-        'req=' + requestId,
-        'requestEpoch=' + requestEpoch,
+      console.log(
+        '[MW-Host][EPOCH] stale_req',
+        'requestId=' + requestId,
+        'reqEpoch=' + requestEpoch,
         'activeEpoch=' + activeEpoch,
+        'action=soft_hold',
       );
 
       const staleResults = items.map(item => ({
         itemId: item.itemId,
         src: item.src,
         shouldBlur: false,
-        category: 'safe_epoch_stale',
+        category: 'unknown_keep_soft',
         confidence: 0,
-        severity: 'safe' as ModerationSeverity,
+        severity: 'soft' as ModerationSeverity,
+        reason: 'soft_hold/epoch_stale',
+        softHoldTtlMs: 1600,
+        requeueUnderEpoch: activeEpoch,
       }));
+      items.forEach((item) => {
+        emitHostApplyDiag(item.itemId, 'soft_hold', 'epoch_stale', item.src);
+      });
 
       try {
         const staleMessage = createResultMessage(requestId, staleResults, nonce, requestEpoch ?? undefined);
@@ -892,6 +963,13 @@ export const NativeWebViewBrowser = () => {
             severity: scanResult.severity || mapModerationCategoryToSeverity(scanResult.category),
             predictions: scanResult.predictions,
           });
+          emitHostApplyDiag(
+            item.itemId,
+            scanResult.shouldBlur ? 'blur' : 'safe',
+            scanResult.category || 'unknown',
+            item.src,
+            effectiveConfidence,
+          );
           console.log('[MW-Host] scan result', item.itemId, ':', scanResult.category, 'blur=' + scanResult.shouldBlur, 'conf=' + effectiveConfidence.toFixed(3));
         } else {
           const shouldBlurOnFailure = localSettings.fail_closed === true;
@@ -903,6 +981,13 @@ export const NativeWebViewBrowser = () => {
             confidence: shouldBlurOnFailure ? 1 : 0,
             severity: shouldBlurOnFailure ? 'hard' : 'safe',
           });
+          emitHostApplyDiag(
+            item.itemId,
+            shouldBlurOnFailure ? 'blur' : 'safe',
+            shouldBlurOnFailure ? 'error_fail_closed' : 'error_fail_open',
+            item.src,
+            shouldBlurOnFailure ? 1 : 0,
+          );
           console.log('[MW-Host] scan result', item.itemId, ': error (no result), failClosed=' + shouldBlurOnFailure);
         }
       } catch (error) {
@@ -916,6 +1001,13 @@ export const NativeWebViewBrowser = () => {
           confidence: shouldBlurOnFailure ? 1 : 0,
           severity: shouldBlurOnFailure ? 'hard' : 'safe',
         });
+        emitHostApplyDiag(
+          item.itemId,
+          shouldBlurOnFailure ? 'blur' : 'safe',
+          shouldBlurOnFailure ? 'scan_exception_fail_closed' : 'scan_exception_fail_open',
+          item.src,
+          shouldBlurOnFailure ? 1 : 0,
+        );
       }
     }
     
@@ -981,7 +1073,7 @@ export const NativeWebViewBrowser = () => {
     const denominator = eligibleResults.length > 0 ? eligibleResults.length : results.length;
     const tinyExcludedCount = Math.max(results.length - eligibleResults.length, 0);
 
-    const hardResults = eligibleResults.filter(item => item.shouldBlur && item.severity === 'hard');
+    const hardResults = eligibleResults.filter(item => item.shouldBlur || item.severity === 'hard');
     const hardStrongHits = hardResults.filter(item => item.confidence >= hardConfThreshold);
     const hardLowHits = hardResults.filter(item => item.confidence >= modePolicy.hardMultiConfFloor);
     const hardUnsafeMaxConf = hardResults.reduce((max, item) => Math.max(max, item.confidence), 0);
@@ -990,7 +1082,9 @@ export const NativeWebViewBrowser = () => {
     const softQualifiedHits = softResults.filter(item => item.confidence >= softConfidenceFloor);
     const softRatio = denominator > 0 ? softQualifiedHits.length / denominator : 0;
 
+    const anyHardSignal = hardResults.length > 0;
     const hardOverlayDecision =
+      anyHardSignal ||
       hardStrongHits.length >= 1 ||
       hardLowHits.length >= modePolicy.hardMultiMinHits;
     const softOverlayDecision =
@@ -1004,6 +1098,8 @@ export const NativeWebViewBrowser = () => {
       decisionReason = 'hard_confidence_hit';
     } else if (hardLowHits.length >= modePolicy.hardMultiMinHits) {
       decisionReason = 'hard_multi_hit';
+    } else if (anyHardSignal) {
+      decisionReason = 'hard_any_signal';
     } else if (softOverlayDecision) {
       overlayDecision = true;
       decisionReason = 'soft_ratio_hit';
@@ -1019,7 +1115,7 @@ export const NativeWebViewBrowser = () => {
         }
       })();
       console.log(
-        `[MW-Host][ScanSummary] url=${shortUrl} req=${requestId} total=${results.length} eligible=${denominator} tinyExcluded=${tinyExcludedCount} hardHits=${hardStrongHits.length} softHits=${softQualifiedHits.length} safeHits=${Math.max(denominator - hardStrongHits.length - softQualifiedHits.length, 0)} hardMax=${hardUnsafeMaxConf.toFixed(3)} softMax=${softQualifiedHits.reduce((max, item) => Math.max(max, item.confidence), 0).toFixed(3)} softRatio=${softRatio.toFixed(3)} mode=${blurMode} decision=${overlayDecision ? 'ON' : 'OFF'} reason=${decisionReason}`
+        `[MW-Host][ScanSummary] url=${shortUrl} req=${requestId} total=${results.length} eligible=${denominator} tinyExcluded=${tinyExcludedCount} hardHits=${hardResults.length} softHits=${softQualifiedHits.length} safeHits=${Math.max(denominator - hardResults.length - softQualifiedHits.length, 0)} hardMax=${hardUnsafeMaxConf.toFixed(3)} softMax=${softQualifiedHits.reduce((max, item) => Math.max(max, item.confidence), 0).toFixed(3)} softRatio=${softRatio.toFixed(3)} mode=${blurMode} decision=${overlayDecision ? 'ON' : 'OFF'} reason=${decisionReason}`
       );
     }
 
@@ -1081,6 +1177,7 @@ export const NativeWebViewBrowser = () => {
     currentUrl,
     processModerationSafetySignal,
     setCentralBlurState,
+    emitHostApplyDiag,
   ]);
 
   /**
@@ -1109,17 +1206,27 @@ export const NativeWebViewBrowser = () => {
 
       const typedMessage = message as Record<string, unknown>;
       if (typedMessage.type === 'MW_INJECTED_ACK') {
+        markInjectionAliveForNav('MW_INJECTED_ACK', source);
+        const ackEpoch = Number(typedMessage.pageEpoch);
+        const currentNavEpoch = webViewPageEpochRef.current;
+        const ackForCurrentNav = Number.isFinite(ackEpoch) && ackEpoch === currentNavEpoch;
+        if (ackForCurrentNav) {
+          ackedPageEpochRef.current = ackEpoch;
+          ackReceivedAtRef.current = Date.now();
+        }
         console.log(
           '[MW-Host][ACK] MW_INJECTED_ACK',
           'source=' + source,
           'navId=' + String(typedMessage.navId ?? 'none'),
           'pageEpoch=' + String(typedMessage.pageEpoch ?? 'none'),
+          'ackForCurrentNav=' + String(ackForCurrentNav),
           'noncePrefix=' + String(typedMessage.noncePrefix ?? 'none'),
           'url=' + String(typedMessage.url ?? 'unknown'),
         );
         return;
       }
       if (typedMessage.type === 'MW_REQ_SENT') {
+        markInjectionAliveForNav('MW_REQ_SENT', source);
         console.log(
           '[MW-Host][REQ] MW_REQ_SENT',
           'source=' + source,
@@ -1142,6 +1249,9 @@ export const NativeWebViewBrowser = () => {
           'items=' + String(typedMessage.itemCount ?? '0'),
         );
         return;
+      }
+      if (typedMessage.type === 'MW_BLUR_READY') {
+        markInjectionAliveForNav('MW_BLUR_READY', source);
       }
 
       if (ENABLE_DOM_BLUR && isBlurOverlayReadyMessage(message)) {
@@ -1205,7 +1315,7 @@ export const NativeWebViewBrowser = () => {
       messageFromWebViewHandlerRef.current = null;
       window.removeEventListener('message', handleWindowMessage);
     };
-  }, [ENABLE_SIGNAL_PIPELINE, ENABLE_DOM_BLUR, processModerationRequest, moderationBridge, postMessageToWebView, getNonce, queueCurrentBlurState, flushBlurStateToWebView]);
+  }, [ENABLE_SIGNAL_PIPELINE, ENABLE_DOM_BLUR, processModerationRequest, moderationBridge, postMessageToWebView, getNonce, queueCurrentBlurState, flushBlurStateToWebView, markInjectionAliveForNav]);
 
   /**
    * Fallback: Poll for moderation requests from legacy global queue
@@ -1216,7 +1326,10 @@ export const NativeWebViewBrowser = () => {
       return;
     }
 
-    console.log('[MW-Host] Starting adaptive legacy queue polling (fallback)...');
+    legacyPollTimerActiveRef.current = false;
+    const LEGACY_POLL_EXEC_WINDOW_MS = 60_000;
+    const LEGACY_POLL_EXEC_THRESHOLD = 25;
+    const LEGACY_POLL_DEGRADE_MS = 30_000;
     const MIN_POLL_MS = 300;
     const MAX_POLL_MS = 3000;
     const EMPTY_BACKOFF_MS = 250;
@@ -1234,6 +1347,107 @@ export const NativeWebViewBrowser = () => {
     let lastActivityAt = Date.now();
     let idleMode = false;
     let idlePollMs = IDLE_MIN_POLL_MS;
+
+    const hasRecentAckForCurrentNav = () =>
+      ackedPageEpochRef.current === webViewPageEpochRef.current &&
+      (Date.now() - ackReceivedAtRef.current) <= LEGACY_ACK_WINDOW_MS;
+    const shouldSuppressPollForInjectAlive = () =>
+      injectionAliveNavIdRef.current === activeNavIdRef.current &&
+      Date.now() < legacyPollSuppressedUntilRef.current;
+    const getLegacyPollDiag = () => {
+      const now = Date.now();
+      const hasRecentAck = hasRecentAckForCurrentNav();
+      const ackAgeMs = ackReceivedAtRef.current > 0 ? Math.max(0, now - ackReceivedAtRef.current) : -1;
+      return {
+        now,
+        hasRecentAck,
+        ackAgeMs,
+        navId: activeNavIdRef.current,
+        url: webViewState.currentUrl || currentUrlRef.current || 'unknown',
+        injectAliveNavId: injectionAliveNavIdRef.current,
+        suppressedUntil: legacyPollSuppressedUntilRef.current,
+      };
+    };
+    const logLegacyPollGate = (action: 'start_or_skip' | 'scheduled', callsite: string, gateReason: string) => {
+      const diag = getLegacyPollDiag();
+      console.log(
+        '[MW-Host][LegacyPollGate]',
+        'action=' + action,
+        'reason=' + callsite,
+        'gateReason=' + gateReason,
+        'navId=' + diag.navId,
+        'url=' + diag.url,
+        'injectAliveNavId=' + String(diag.injectAliveNavId ?? 'none'),
+        'suppressedUntil=' + diag.suppressedUntil,
+        'now=' + diag.now,
+        'hasRecentAck=' + diag.hasRecentAck,
+        'ackAgeMs=' + diag.ackAgeMs,
+      );
+    };
+    const evaluateLegacyPollGate = (callsite: string) => {
+      const url = webViewState.currentUrl || currentUrlRef.current || '';
+      let gateReason = 'allow';
+      if (cancelled) {
+        gateReason = 'cancelled';
+      } else if (Date.now() < legacyPollDegradedUntilRef.current) {
+        gateReason = 'cancelled';
+      } else if (!url) {
+        gateReason = 'url_missing';
+      } else if (
+        injectionAliveNavIdRef.current !== null &&
+        injectionAliveNavIdRef.current !== activeNavIdRef.current
+      ) {
+        gateReason = 'nav_mismatch';
+      } else if (hasRecentAckForCurrentNav()) {
+        gateReason = 'fresh_ack';
+      } else if (shouldSuppressPollForInjectAlive()) {
+        gateReason = 'injection_alive_window';
+      }
+      const allow = gateReason === 'allow';
+      logLegacyPollGate('start_or_skip', callsite, gateReason);
+      return { allow, gateReason };
+    };
+    const activateLegacyPollDegrade = (reason: string, suppressMs: number, count: number) => {
+      const now = Date.now();
+      const until = now + suppressMs;
+      legacyPollDegradedUntilRef.current = Math.max(legacyPollDegradedUntilRef.current, until);
+      if (now - legacyPollLastDegradeLogAtRef.current >= 500) {
+        legacyPollLastDegradeLogAtRef.current = now;
+        console.warn(
+          '[MW-Host][Degrade]',
+          'reason=' + reason,
+          'suppressMs=' + suppressMs,
+          'count=' + count,
+          'until=' + legacyPollDegradedUntilRef.current,
+          'navId=' + activeNavIdRef.current,
+          'url=' + (webViewState.currentUrl || currentUrlRef.current || 'unknown'),
+        );
+      }
+    };
+    const trackExecuteScriptRate = () => {
+      const now = Date.now();
+      const fresh = legacyPollExecuteScriptCallsRef.current.filter(ts => (now - ts) <= LEGACY_POLL_EXEC_WINDOW_MS);
+      fresh.push(now);
+      legacyPollExecuteScriptCallsRef.current = fresh;
+      if (fresh.length > LEGACY_POLL_EXEC_THRESHOLD) {
+        activateLegacyPollDegrade('executeScript_rate_limit', LEGACY_POLL_DEGRADE_MS, fresh.length);
+      }
+      return fresh.length;
+    };
+
+    const clearPollTimer = (reason: string) => {
+      if (!pollTimer) return;
+      clearTimeout(pollTimer);
+      pollTimer = null;
+      legacyPollTimerActiveRef.current = false;
+      console.log('[MW-Host][LegacyPoll] stop reason=' + reason);
+      console.log(
+        '[MW-Host][Timer] stop',
+        'name=legacyPollTimer',
+        'navId=' + activeNavIdRef.current,
+        'url=' + (webViewState.currentUrl || 'unknown'),
+      );
+    };
 
     const exitIdleMode = (reason: string) => {
       if (!idleMode) return;
@@ -1271,16 +1485,46 @@ export const NativeWebViewBrowser = () => {
     window.addEventListener('hashchange', onHashChange);
     document.addEventListener('visibilitychange', onVisibilityChange);
 
-    const scheduleNextPoll = (delayMs: number) => {
-      if (cancelled) return;
-      if (pollTimer) {
-        clearTimeout(pollTimer);
+    const scheduleNextPoll = (delayMs: number, reason: string) => {
+      const gate = evaluateLegacyPollGate('scheduleNextPoll:' + reason);
+      if (!gate.allow) {
+        if (Date.now() < legacyPollDegradedUntilRef.current) {
+          const count = legacyPollExecuteScriptCallsRef.current.length;
+          activateLegacyPollDegrade('executeScript_rate_limit', Math.max(legacyPollDegradedUntilRef.current - Date.now(), 0), count);
+        }
+        clearPollTimer(gate.gateReason);
+        return;
       }
-      pollTimer = setTimeout(runPollLoop, delayMs);
+      if (legacyPollTimerActiveRef.current && !pollTimer) {
+        logLegacyPollGate('start_or_skip', 'scheduleNextPoll:' + reason, 'cancelled');
+        return;
+      }
+      if (pollTimer) clearPollTimer('reschedule');
+      pollTimer = setTimeout(() => {
+        pollTimer = null;
+        legacyPollTimerActiveRef.current = false;
+        void runPollLoop();
+      }, delayMs);
+      legacyPollTimerActiveRef.current = true;
+      logLegacyPollGate('scheduled', 'scheduleNextPoll:' + reason, 'scheduled');
+      const ackAgeMs = ackReceivedAtRef.current > 0 ? Math.max(0, Date.now() - ackReceivedAtRef.current) : -1;
+      console.log(
+        '[MW-Host][LegacyPoll] start',
+        'reason=' + reason,
+        'hasAck=' + String(hasRecentAckForCurrentNav()),
+        'ackAgeMs=' + String(ackAgeMs),
+        'navId=' + activeNavIdRef.current,
+        'url=' + (webViewState.currentUrl || 'unknown'),
+      );
       console.log(
         '[MW-Host][Timer] start',
         'name=legacyPollTimer',
         'delayMs=' + delayMs,
+        'injectAliveNavId=' + String(injectionAliveNavIdRef.current ?? 'none'),
+        'suppressedUntil=' + legacyPollSuppressedUntilRef.current,
+        'now=' + Date.now(),
+        'hasRecentAck=' + String(hasRecentAckForCurrentNav()),
+        'ackAgeMs=' + String(ackAgeMs),
         'navId=' + activeNavIdRef.current,
         'url=' + (webViewState.currentUrl || 'unknown'),
       );
@@ -1289,6 +1533,7 @@ export const NativeWebViewBrowser = () => {
     const pollForRequests = async (): Promise<boolean> => {
       if (!executeScript) return false;
       if (pollInFlight) return false;
+      if (Date.now() < legacyPollDegradedUntilRef.current) return false;
       pollInFlight = true;
       
       try {
@@ -1306,6 +1551,7 @@ export const NativeWebViewBrowser = () => {
           })();
         `;
         
+        trackExecuteScriptRate();
         const result = await executeScript(getQueueScript);
         
         if (!result || result === 'EMPTY' || result === 'null') {
@@ -1355,9 +1601,15 @@ export const NativeWebViewBrowser = () => {
             `;
             
             try {
+              trackExecuteScriptRate();
               await executeScript(pushResultScript);
               console.log('[MW-Host] Legacy result pushed for:', src.substring(0, 50));
             } catch (e) {
+              const text = String(e || '');
+              if (text.includes('WebProcess') || text.includes('didClose') || text.toLowerCase().includes('web process')) {
+                const count = legacyPollExecuteScriptCallsRef.current.length;
+                activateLegacyPollDegrade('webprocess_recent_crash', LEGACY_POLL_DEGRADE_MS, count);
+              }
               console.debug('[MW-Host] Failed to push legacy result:', e);
             }
           }
@@ -1365,6 +1617,11 @@ export const NativeWebViewBrowser = () => {
         return true;
       } catch (e) {
         // Polling errors are expected and ignored in some cases
+        const text = String(e || '');
+        if (text.includes('WebProcess') || text.includes('didClose') || text.toLowerCase().includes('web process')) {
+          const count = legacyPollExecuteScriptCallsRef.current.length;
+          activateLegacyPollDegrade('webprocess_recent_crash', LEGACY_POLL_DEGRADE_MS, count);
+        }
         console.debug('[MW-Host] Legacy poll error:', e);
         return false;
       } finally {
@@ -1373,7 +1630,11 @@ export const NativeWebViewBrowser = () => {
     };
 
     const runPollLoop = async () => {
-      if (cancelled) return;
+      const gate = evaluateLegacyPollGate('runPollLoop');
+      if (!gate.allow) {
+        clearPollTimer(gate.gateReason);
+        return;
+      }
       const hadWork = await pollForRequests();
       if (document.visibilityState !== 'visible') {
         pollDelayMs = HIDDEN_POLL_MS;
@@ -1392,22 +1653,31 @@ export const NativeWebViewBrowser = () => {
           pollDelayMs = Math.min(pollDelayMs + EMPTY_BACKOFF_MS, MAX_POLL_MS);
         }
       }
-      scheduleNextPoll(pollDelayMs);
+      scheduleNextPoll(pollDelayMs, hadWork ? 'work_seen' : (idleMode ? 'idle_backoff' : 'empty_backoff'));
     };
-    scheduleNextPoll(MIN_POLL_MS);
+    const initialGate = evaluateLegacyPollGate('effect_start');
+    if (!initialGate.allow) {
+      if (Date.now() < legacyPollDegradedUntilRef.current) {
+        const count = legacyPollExecuteScriptCallsRef.current.length;
+        activateLegacyPollDegrade('executeScript_rate_limit', Math.max(legacyPollDegradedUntilRef.current - Date.now(), 0), count);
+      }
+      clearPollTimer(initialGate.gateReason);
+      return () => {
+        cancelled = true;
+        legacyPollTimerActiveRef.current = false;
+        window.removeEventListener('scroll', onScroll);
+        window.removeEventListener('popstate', onPopState);
+        window.removeEventListener('hashchange', onHashChange);
+        document.removeEventListener('visibilitychange', onVisibilityChange);
+      };
+    }
+    console.log('[MW-Host] Starting adaptive legacy queue polling (fallback)...');
+    scheduleNextPoll(MIN_POLL_MS, 'effect_start');
 
     return () => {
       cancelled = true;
-      if (pollTimer) {
-        clearTimeout(pollTimer);
-        pollTimer = null;
-        console.log(
-          '[MW-Host][Timer] stop',
-          'name=legacyPollTimer',
-          'navId=' + activeNavIdRef.current,
-          'url=' + (webViewState.currentUrl || 'unknown'),
-        );
-      }
+      clearPollTimer('effect_cleanup');
+      legacyPollTimerActiveRef.current = false;
       window.removeEventListener('scroll', onScroll);
       window.removeEventListener('popstate', onPopState);
       window.removeEventListener('hashchange', onHashChange);

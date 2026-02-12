@@ -196,6 +196,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     batchSize: 5,
     batchDelay: 100,
     requestTimeout: 8000,
+    timeoutMaxWaitMs: 18000,
   };
 
   // Threshold mappings for blur dial levels.
@@ -213,6 +214,15 @@ export function generateModerationScript(config: InjectionConfig): string {
   const DEBUG_SKIP_DOMAIN_BLUR = DEBUG_DISABLE_BLUR_ON_YOUTUBE && (HOSTNAME.includes('youtube.com') || HOSTNAME.includes('ytimg.com'));
   let blurTraceCount = 0;
   let predictionKeysLogged = false;
+  if (CONFIG.debug) {
+    console.log(
+      '[MW-DIAG][BOOT]',
+      'epoch=' + CONFIG.pageEpoch,
+      'debug=' + CONFIG.debug,
+      'url=' + window.location.href,
+      'userAgent=' + String(navigator.userAgent || '').substring(0, 220),
+    );
+  }
   const CATEGORY_ALIASES = {
     porn: 'porn',
     pornography: 'porn',
@@ -294,6 +304,19 @@ export function generateModerationScript(config: InjectionConfig): string {
       'score=' + (toFiniteNumber(trace.labelScoreUsed) ?? 'NaN'),
       'thr=' + (toFiniteNumber(trace.thresholdUsed) ?? 'n/a'),
       'reason=' + (trace.decisionReason || 'unknown')
+    );
+  }
+
+  function emitApplyDiag(itemId, decision, reason, src, nsfwScore) {
+    const scorePart = Number.isFinite(nsfwScore) ? (' nsfwScore=' + Number(nsfwScore).toFixed(3)) : '';
+    console.log(
+      '[MW-DIAG][APPLY] navId=' + NAV_ID +
+      ' pageEpoch=' + state.pageEpoch +
+      ' itemId=' + String(itemId || 'none') +
+      ' decision=' + String(decision || 'none') +
+      ' reason=' + String(reason || 'none') +
+      scorePart +
+      ' srcPrefix=' + String(src || '').substring(0, 80)
     );
   }
 
@@ -512,6 +535,8 @@ export function generateModerationScript(config: InjectionConfig): string {
     scanned: new Set(),
     pending: new Map(), // itemId -> { element, src, sourceType, requestId, timestamp, state, blurTimer }
     pendingBySrc: new Map(), // src -> itemId (dedupe)
+    requeueCooldown: new Map(), // src -> { ts, epoch }
+    timeoutGraceByItem: new Map(), // itemId -> timeoutId
     pendingRequests: new Map(), // requestId -> { items, timestamp, timeoutId, state }
     safeResolved: new Set(), // src values resolved as safe to suppress legacy re-blur
     safeResolvedAt: new Map(), // src -> timestamp (bounded/ttl for legacy suppression)
@@ -545,11 +570,19 @@ export function generateModerationScript(config: InjectionConfig): string {
   };
 
   // Batch queue for collecting items before sending request
+  const REQUEUE_COOLDOWN_MS = 1200;
   let batchQueue = [];
   let batchTimer = null;
   const NAV_ID = window.__MW_NAV_ID__ || ('mw_' + Date.now().toString(36));
   window.__MW_NAV_ID__ = NAV_ID;
   const NONCE_PREFIX = String(CONFIG.nonce || '').substring(0, 6);
+  console.log(
+    '[MW-DIAG][BOOT]',
+    'host=' + String(window.location.hostname || ''),
+    'path=' + String(window.location.pathname || ''),
+    'enabled=' + String(CONFIG.enabled),
+    'noncePrefix=' + NONCE_PREFIX,
+  );
   postToHost({
     type: 'MW_INJECTED_ACK',
     navId: NAV_ID,
@@ -629,6 +662,8 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   const SAFE_RESOLVED_MAX = 1500;
   const SAFE_RESOLVED_TTL_MS = 2 * 60 * 1000;
+  const SRC_BLUR_CACHE_TTL_MS = 15 * 1000;
+  const srcBlurCache = new Map();
 
   function cleanupExpiredSafeResolved() {
     const now = Date.now();
@@ -675,9 +710,79 @@ export function generateModerationScript(config: InjectionConfig): string {
     return state.safeResolved.has(src);
   }
 
+  function pruneSrcBlurCache(nowMs) {
+    const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+    const expired = [];
+    srcBlurCache.forEach(function(entry, src) {
+      if (!entry || !Number.isFinite(entry.expiresAt) || entry.expiresAt <= now) {
+        expired.push(src);
+      }
+    });
+    expired.forEach(function(src) { srcBlurCache.delete(src); });
+  }
+
+  function setSrcBlurCache(src, severity, reason, ttlMs) {
+    if (!src) return;
+    const now = Date.now();
+    pruneSrcBlurCache(now);
+    const boundedTtl = Number.isFinite(ttlMs) ? Math.max(5000, Math.min(20000, ttlMs)) : SRC_BLUR_CACHE_TTL_MS;
+    srcBlurCache.set(src, {
+      severity: severity === 'hard' ? 'hard' : 'soft',
+      reason: String(reason || 'none'),
+      decidedAt: now,
+      expiresAt: now + boundedTtl,
+    });
+    console.log(
+      '[MW-DIAG][CACHE]',
+      'set',
+      'severity=' + (severity === 'hard' ? 'hard' : 'soft'),
+      'ttlMs=' + boundedTtl,
+      'reason=' + String(reason || 'none'),
+      'src=' + String(src || '').substring(0, 120),
+    );
+  }
+
+  function clearSrcBlurCache(src) {
+    if (!src) return;
+    srcBlurCache.delete(src);
+  }
+
+  function getSrcBlurCache(src) {
+    if (!src) return null;
+    pruneSrcBlurCache(Date.now());
+    return srcBlurCache.get(src) || null;
+  }
+
+  function maybeReapplyBlurFromCache(element, src, itemId) {
+    if (!element || !src) return false;
+    if (state.revealed.has(src) || element.dataset.mwRevealed === 'true') return false;
+    const cached = getSrcBlurCache(src);
+    if (!cached) return false;
+    if (cached.severity === 'hard') {
+      if (element.dataset.mwModerated === 'blurred') return false;
+      applyBlur(element, src, cached.reason || 'cached', CONFIG.blurStrength, itemId);
+    } else {
+      if (element.dataset.mwModerated === 'blurred' || element.dataset.mwModerated === 'softblur') return false;
+      applySoftBlur(element, src, itemId);
+    }
+    console.log(
+      '[MW-DIAG][REAPPLY]',
+      'itemId=' + String(itemId || 'none'),
+      'reason=src_cache_hit',
+      'severity=' + cached.severity,
+      'src=' + String(src || '').substring(0, 120),
+    );
+    return true;
+  }
+
   function clearPendingItem(itemId, reason) {
     const pendingItem = state.pending.get(itemId);
     if (!pendingItem) return;
+    const timeoutGraceId = state.timeoutGraceByItem.get(itemId);
+    if (timeoutGraceId) {
+      clearTimeout(timeoutGraceId);
+      state.timeoutGraceByItem.delete(itemId);
+    }
     if (pendingItem.blurTimer) {
       clearTimeout(pendingItem.blurTimer);
     }
@@ -731,6 +836,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (mutationScanSet.has(node)) return;
     if (mutationScanQueue.length >= MAX_MUTATION_QUEUE_ITEMS) {
       state.stats.skippedMutationQueueCap++;
+      diagWindow.skippedCap++;
+      logCapHit('MAX_MUTATION_QUEUE_ITEMS(' + MAX_MUTATION_QUEUE_ITEMS + ')', 1);
+      maybeLogSkip('mutation', node, getDiagItemId(node, 'mutation'), 'cap', '');
       return;
     }
     mutationScanSet.add(node);
@@ -760,6 +868,216 @@ export function generateModerationScript(config: InjectionConfig): string {
   const PLATFORM = detectPlatform();
   const IS_YOUTUBE = PLATFORM === 'youtube' || PLATFORM === 'youtube-shorts';
   console.log('[MW] Platform detected:', PLATFORM, 'isYouTube:', IS_YOUTUBE);
+  const DIAG_MAX_SKIP_LOGS_PER_CYCLE = 30;
+  const DIAG_MAX_APPLY_FAIL_LOGS_PER_CYCLE = 20;
+  const DIAG_COVERAGE_INTERVAL_MS = 2000;
+  const diagWindow = {
+    queued: 0,
+    skippedCooldown: 0,
+    skippedDedupe: 0,
+    skippedCap: 0,
+    skipLogsEmitted: 0,
+    applyFailLogsEmitted: 0,
+    lastCoverageAt: 0,
+    cycle: 0,
+  };
+
+  function resetDiagWindow() {
+    diagWindow.queued = 0;
+    diagWindow.skippedCooldown = 0;
+    diagWindow.skippedDedupe = 0;
+    diagWindow.skippedCap = 0;
+    diagWindow.skipLogsEmitted = 0;
+    diagWindow.applyFailLogsEmitted = 0;
+    diagWindow.cycle += 1;
+  }
+
+  function isInViewportForCoverage(element) {
+    if (!element || typeof element.getBoundingClientRect !== 'function') return false;
+    try {
+      const rect = element.getBoundingClientRect();
+      return rect.bottom > 0 &&
+        rect.right > 0 &&
+        rect.top < window.innerHeight &&
+        rect.left < window.innerWidth;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function getDiagItemId(element, type) {
+    if (!element || !element.dataset) {
+      return 'diag_' + type + '_' + Math.random().toString(36).slice(2, 8);
+    }
+    if (element.dataset.mwItemId) return element.dataset.mwItemId;
+    if (!element.dataset.mwDiagItemId) {
+      element.dataset.mwDiagItemId = 'diag_' + type + '_' + Math.random().toString(36).slice(2, 8);
+    }
+    return element.dataset.mwDiagItemId;
+  }
+
+  function getSrcPrefix(src) {
+    return String(src || '').substring(0, 80);
+  }
+
+  function toDiagType(type) {
+    const raw = String(type || '').toLowerCase();
+    if (raw === 'mutation') return 'img';
+    if (raw.indexOf('video') !== -1) return 'video';
+    if (raw.indexOf('bg') !== -1) return 'bg';
+    return 'img';
+  }
+
+  function maybeLogSkip(type, element, itemId, reason, srcPrefix) {
+    if (!CONFIG.debug) return;
+    if (!element || !isInViewportForCoverage(element)) return;
+    if (isTinyImage(element)) return;
+    if (diagWindow.skipLogsEmitted >= DIAG_MAX_SKIP_LOGS_PER_CYCLE) return;
+    diagWindow.skipLogsEmitted += 1;
+    console.log(
+      '[MW-DIAG][SKIP]',
+      'epoch=' + state.pageEpoch,
+      'type=' + toDiagType(type),
+      'itemId=' + String(itemId || 'none'),
+      'reason=' + reason,
+      'srcPrefix=' + getSrcPrefix(srcPrefix || '')
+    );
+  }
+
+  function logChosenSrc(type, itemId, chosenField, src) {
+    if (!CONFIG.debug) return;
+    console.log(
+      '[MW-DIAG][SRC]',
+      'epoch=' + state.pageEpoch,
+      'type=' + toDiagType(type),
+      'itemId=' + String(itemId || 'none'),
+      'chosen=' + String(chosenField || 'none'),
+      'srcPrefix=' + getSrcPrefix(src)
+    );
+  }
+
+  function logCapHit(cap, dropped) {
+    if (!CONFIG.debug) return;
+    console.log(
+      '[MW-DIAG][CAP]',
+      'epoch=' + state.pageEpoch,
+      'cap=' + String(cap),
+      'dropped=' + String(dropped)
+    );
+  }
+
+  function maybeLogApplyFail(itemId, decision, reason, srcPrefix) {
+    if (!CONFIG.debug) return;
+    if (diagWindow.applyFailLogsEmitted >= DIAG_MAX_APPLY_FAIL_LOGS_PER_CYCLE) return;
+    diagWindow.applyFailLogsEmitted += 1;
+    console.warn(
+      '[MW-DIAG][APPLY_FAIL]',
+      'epoch=' + state.pageEpoch,
+      'itemId=' + String(itemId || 'none'),
+      'decision=' + String(decision || 'none'),
+      'reason=' + String(reason || 'unknown'),
+      'srcPrefix=' + getSrcPrefix(srcPrefix)
+    );
+  }
+
+  function emitCoverageSummary(reason) {
+    if (!CONFIG.debug) return;
+    const now = Date.now();
+    if ((now - diagWindow.lastCoverageAt) < DIAG_COVERAGE_INTERVAL_MS) return;
+    diagWindow.lastCoverageAt = now;
+    let imgsTotal = 0;
+    let imgsVisible = 0;
+    let videosTotal = 0;
+    let bgThumbs = 0;
+    let iframes = 0;
+    let bgSamples = 0;
+    try {
+      const imgs = document.querySelectorAll('img');
+      imgsTotal = imgs.length;
+      imgs.forEach(function(img) {
+        if (isInViewportForCoverage(img)) imgsVisible += 1;
+      });
+      videosTotal = document.querySelectorAll('video').length;
+      iframes = document.querySelectorAll('iframe').length;
+      const MAX_BG_SAMPLE = 800;
+      const sampleSet = new Set();
+      const maybeAddBgCandidate = function(el) {
+        if (!el || sampleSet.size >= MAX_BG_SAMPLE) return;
+        if (!(el instanceof Element)) return;
+        sampleSet.add(el);
+      };
+      const collectVisibleWithParents = function(selector) {
+        const nodes = document.querySelectorAll(selector);
+        for (let i = 0; i < nodes.length && sampleSet.size < MAX_BG_SAMPLE; i += 1) {
+          const el = nodes[i];
+          if (!isInViewportForCoverage(el)) continue;
+          maybeAddBgCandidate(el);
+          maybeAddBgCandidate(el.parentElement);
+          maybeAddBgCandidate(el.parentElement && el.parentElement.parentElement);
+        }
+      };
+      collectVisibleWithParents('img');
+      collectVisibleWithParents('video');
+
+      const rows = 3;
+      const cols = 6;
+      for (let r = 0; r < rows && sampleSet.size < MAX_BG_SAMPLE; r += 1) {
+        for (let c = 0; c < cols && sampleSet.size < MAX_BG_SAMPLE; c += 1) {
+          const x = Math.floor(((c + 0.5) / cols) * Math.max(window.innerWidth, 1));
+          const y = Math.floor(((r + 0.5) / rows) * Math.max(window.innerHeight, 1));
+          const stack = document.elementsFromPoint(x, y) || [];
+          for (let i = 0; i < stack.length && i < 4 && sampleSet.size < MAX_BG_SAMPLE; i += 1) {
+            maybeAddBgCandidate(stack[i]);
+            maybeAddBgCandidate(stack[i] && stack[i].parentElement);
+          }
+        }
+      }
+
+      sampleSet.forEach(function(el) {
+        try {
+          bgSamples += 1;
+          const bg = window.getComputedStyle(el).backgroundImage;
+          if (bg && bg !== 'none' && bg.indexOf('url(') !== -1) bgThumbs += 1;
+        } catch (e) {}
+      });
+    } catch (e) {}
+    console.log(
+      '[MW-DIAG][COVERAGE]',
+      'epoch=' + state.pageEpoch,
+      'imgsTotal=' + imgsTotal,
+      'imgsVisible=' + imgsVisible,
+      'videosTotal=' + videosTotal,
+      'bgThumbs=' + bgThumbs,
+      'bgSamples=' + bgSamples,
+      'iframes=' + iframes,
+      'queued=' + diagWindow.queued,
+      'skippedCooldown=' + diagWindow.skippedCooldown,
+      'skippedDedupe=' + diagWindow.skippedDedupe,
+      'skippedCap=' + diagWindow.skippedCap,
+      'reason=' + String(reason || 'scan')
+    );
+    resetDiagWindow();
+  }
+
+  function extractImgSourceCandidate(img) {
+    if (!img) return { src: null, chosen: 'none' };
+    if (img.currentSrc) return { src: img.currentSrc, chosen: 'currentSrc' };
+    if (img.src) return { src: img.src, chosen: 'src' };
+    if (img.srcset) {
+      const first = String(img.srcset || '').split(',')[0];
+      const srcsetUrl = first ? first.trim().split(' ')[0] : '';
+      if (srcsetUrl) return { src: srcsetUrl, chosen: 'srcset' };
+    }
+    const attrDataSrc = img.getAttribute('data-src');
+    if (attrDataSrc) return { src: attrDataSrc, chosen: 'data-src' };
+    const attrDataLazySrc = img.getAttribute('data-lazy-src');
+    if (attrDataLazySrc) return { src: attrDataLazySrc, chosen: 'data-lazy-src' };
+    const attrDataOriginal = img.getAttribute('data-original');
+    if (attrDataOriginal) return { src: attrDataOriginal, chosen: 'data-original' };
+    const attrDataIurl = img.getAttribute('data-iurl');
+    if (attrDataIurl) return { src: attrDataIurl, chosen: 'data-iurl' };
+    return { src: null, chosen: 'none' };
+  }
 
   // ==================== URL UTILITIES ====================
 
@@ -769,6 +1087,42 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (normalized.startsWith('//')) normalized = 'https:' + normalized;
     if (!normalized.startsWith('http') && !normalized.startsWith('data:')) return null;
     return normalized;
+  }
+
+  function isYouTubeShortsContext() {
+    const host = String(window.location && window.location.hostname ? window.location.hostname : '').toLowerCase();
+    const path = String(window.location && window.location.pathname ? window.location.pathname : '').toLowerCase();
+    return host.includes('youtube.com') && path.includes('/shorts');
+  }
+
+  function isYouTubeShortsPosterBg(sourceType, src) {
+    if (String(sourceType || '') !== 'bg-image') return false;
+    if (!isYouTubeShortsContext()) return false;
+    try {
+      const normalized = normalizeUrl(src);
+      if (!normalized) return false;
+      const parsed = new URL(normalized);
+      const host = String(parsed.hostname || '').toLowerCase();
+      const pathAndQuery = String((parsed.pathname || '') + (parsed.search || '')).toLowerCase();
+      if (host !== 'i.ytimg.com' && host !== 'ytimg.com' && !host.endsWith('.ytimg.com')) return false;
+      return /(?:frame0|hqdefault)[.]jpg(?:$|[?&])/.test(pathAndQuery);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  const YOUTUBE_STRONG_SAFE_NEUTRAL_MIN = 0.85;
+  const YOUTUBE_STRONG_SAFE_UNSAFE_MAX = 0.12;
+  function isYouTubeStrongSafeDecision(neutralScore, unsafeScores) {
+    if (neutralScore === null || !Number.isFinite(neutralScore)) return false;
+    const porn = toFiniteNumber(unsafeScores && unsafeScores.porn);
+    const sexy = toFiniteNumber(unsafeScores && unsafeScores.sexy);
+    const hentai = toFiniteNumber(unsafeScores && unsafeScores.hentai);
+    const lowUnsafe =
+      (porn === null || porn <= YOUTUBE_STRONG_SAFE_UNSAFE_MAX) &&
+      (sexy === null || sexy <= YOUTUBE_STRONG_SAFE_UNSAFE_MAX) &&
+      (hentai === null || hentai <= YOUTUBE_STRONG_SAFE_UNSAFE_MAX);
+    return neutralScore >= YOUTUBE_STRONG_SAFE_NEUTRAL_MIN && lowUnsafe;
   }
 
   function extractBgImageUrl(element) {
@@ -886,6 +1240,65 @@ export function generateModerationScript(config: InjectionConfig): string {
         'afterFilter=' + (element.style.getPropertyValue('filter') || element.style.filter || '')
       );
     } catch (e) {}
+  }
+
+  function removeTimeoutRevealOverlay(element, itemId) {
+    try {
+      if (!element || !element.parentElement) return;
+      const overlay = element.parentElement.querySelector('.mw-timeout-reveal-overlay[data-mw-item-id="' + String(itemId || '') + '"]');
+      if (overlay) {
+        overlay.remove();
+      }
+    } catch (e) {}
+  }
+
+  function createTimeoutRevealOverlay(element, src, itemId) {
+    if (!element || !element.parentElement) return;
+    const parent = element.parentElement;
+    removeTimeoutRevealOverlay(element, itemId);
+
+    const parentPos = window.getComputedStyle(parent).position;
+    if (parentPos === 'static') {
+      parent.style.position = 'relative';
+    }
+
+    const overlay = document.createElement('button');
+    overlay.className = 'mw-timeout-reveal-overlay';
+    overlay.dataset.mwFor = src || '';
+    overlay.dataset.mwItemId = itemId || '';
+    overlay.setAttribute('type', 'button');
+    overlay.textContent = 'Tap to reveal';
+    overlay.style.cssText = [
+      'position: absolute',
+      'inset: 0',
+      'display: flex',
+      'align-items: center',
+      'justify-content: center',
+      'background: rgba(10, 10, 10, 0.52)',
+      'color: #fff',
+      'font-size: 13px',
+      'font-weight: 700',
+      'letter-spacing: 0.2px',
+      'border: 0',
+      'cursor: pointer',
+      'z-index: 9998',
+      'pointer-events: auto',
+    ].join(';');
+
+    overlay.addEventListener('click', function(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      state.revealed.add(src);
+      clearSrcBlurCache(src);
+      element.dataset.mwRevealed = 'true';
+      element.dataset.mwModerated = 'revealed';
+      element.classList.remove('mw-softblur');
+      element.style.filter = 'none';
+      overlay.remove();
+      emitApplyDiag(itemId, 'tap_reveal', 'timeout_overlay_tap', src);
+    });
+
+    parent.appendChild(overlay);
   }
 
   const FORCE_UNSAFE_CATEGORIES = new Set([
@@ -1011,6 +1424,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       
       // Add to revealed set for persistence
       state.revealed.add(src);
+      clearSrcBlurCache(src);
       
       const overlay = element.parentElement?.querySelector('.mw-reveal-overlay');
       if (overlay) {
@@ -1197,6 +1611,23 @@ export function generateModerationScript(config: InjectionConfig): string {
     
     const requestId = generateRequestId();
     const timestamp = Date.now();
+    const skippedTotal = diagWindow.skippedCooldown + diagWindow.skippedDedupe + diagWindow.skippedCap;
+    const reasonCounts = [
+      { reason: 'dedupe', count: diagWindow.skippedDedupe },
+      { reason: 'cooldown', count: diagWindow.skippedCooldown },
+      { reason: 'cap', count: diagWindow.skippedCap },
+    ]
+      .filter(entry => entry.count > 0)
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 2)
+      .map(entry => entry.reason + ':' + entry.count)
+      .join(',');
+    console.log(
+      '[MW-DIAG][SUMMARY]',
+      'queued=' + items.length,
+      'skipped=' + skippedTotal,
+      'topReasons=' + (reasonCounts || 'none'),
+    );
     
     const message = {
       type: 'gc-moderation-request',
@@ -1307,17 +1738,46 @@ export function generateModerationScript(config: InjectionConfig): string {
         state.scanned.add(item.src);
       });
     } else {
-      // FAIL-OPEN: Remove soft blur, mark as safe
-      console.log('[MW] FAIL-OPEN: Removing soft blur for timed-out items');
+      // FAIL-OPEN+HOLD: Keep soft blur while waiting longer for a late SAFE/UNSAFE result.
+      console.log('[MW] FAIL-OPEN: Keeping soft blur during timeout grace window');
       pendingRequest.items.forEach(item => {
-        clearPendingItem(item.itemId, 'timeout_failOpen');
+        const pending = state.pending.get(item.itemId);
         const element = state.elements.get(item.itemId);
-        if (element && element.isConnected) {
-          removeSoftBlur(element, item.src);
-          element.dataset.mwModerated = 'timeout-safe';
+        if (pending) {
+          pending.state = 'timeout_wait';
         }
-        markSafeResolved(item.src);
-        // Don't add to scanned so they can be retried later
+        if (element && element.isConnected && element.dataset.mwModerated !== 'blurred') {
+          applySoftBlur(element, item.src, item.itemId);
+          element.dataset.mwModerated = 'timeout-wait';
+          setSrcBlurCache(item.src, 'soft', 'timeout_fail_open_wait', CONFIG.timeoutMaxWaitMs);
+        }
+        state.requeueCooldown.set(item.src, { ts: Date.now(), epoch: state.pageEpoch });
+        emitApplyDiag(item.itemId, 'soft_hold', 'timeout_fail_open_wait', item.src);
+        if (state.timeoutGraceByItem.has(item.itemId)) {
+          clearTimeout(state.timeoutGraceByItem.get(item.itemId));
+        }
+        const maxWaitTimer = setTimeout(() => {
+          const stillPending = state.pending.get(item.itemId);
+          if (!stillPending || stillPending.state !== 'timeout_wait') return;
+          const timeoutElement = stillPending.element || state.elements.get(item.itemId);
+          if (timeoutElement && timeoutElement.isConnected && timeoutElement.dataset.mwModerated !== 'blurred') {
+            applySoftBlur(timeoutElement, item.src, item.itemId);
+            timeoutElement.dataset.mwModerated = 'timeout-tap-to-reveal';
+            createTimeoutRevealOverlay(timeoutElement, item.src, item.itemId);
+          }
+          emitApplyDiag(item.itemId, 'tap_to_reveal', 'timeout_max_wait', item.src);
+          clearPendingItem(item.itemId, 'timeout_max_wait');
+          markSafeResolved(item.src);
+        }, CONFIG.timeoutMaxWaitMs);
+        state.timeoutGraceByItem.set(item.itemId, maxWaitTimer);
+        if (CONFIG.debug) {
+          console.log(
+            '[MW][Timer] timeout max-wait started',
+            'itemId=' + item.itemId,
+            'waitMs=' + CONFIG.timeoutMaxWaitMs,
+            'src=' + String(item.src || '').substring(0, 60)
+          );
+        }
       });
     }
     
@@ -1381,6 +1841,11 @@ export function generateModerationScript(config: InjectionConfig): string {
       
       results.forEach(result => {
       const { itemId, src, shouldBlur, category, confidence, reason } = result;
+      const timeoutGraceId = state.timeoutGraceByItem.get(itemId);
+      if (timeoutGraceId) {
+        clearTimeout(timeoutGraceId);
+        state.timeoutGraceByItem.delete(itemId);
+      }
       const rawPredictions = result && typeof result === 'object'
         ? (result.predictions || result.scores || result.probabilities || null)
         : null;
@@ -1414,6 +1879,9 @@ export function generateModerationScript(config: InjectionConfig): string {
         : null;
       const predictionScore = toFiniteNumber(normalizedPredictions[predictedLabel]);
       const confidenceScore = toFiniteNumber(confidence);
+      const neutralScore = toFiniteNumber(normalizedPredictions.neutral) !== null
+        ? toFiniteNumber(normalizedPredictions.neutral)
+        : ((normalizedCategory === 'neutral' || normalizedCategory === 'safe') ? confidenceScore : null);
       const labelScoreUsed = predictionScore !== null
         ? predictionScore
         : (TRACE_UNSAFE_LABELS.has(predictedLabel) ? confidenceScore : null);
@@ -1427,10 +1895,66 @@ export function generateModerationScript(config: InjectionConfig): string {
       // Find the element for this item
       const element = state.elements.get(itemId);
       const pendingItem = state.pending.get(itemId);
+      if (!element && CONFIG.debug) {
+        if (diagWindow.applyFailLogsEmitted < DIAG_MAX_APPLY_FAIL_LOGS_PER_CYCLE) {
+          diagWindow.applyFailLogsEmitted += 1;
+          console.warn(
+            '[MW-DIAG][APPLY_FAIL]',
+            'epoch=' + state.pageEpoch,
+            'itemId=' + String(itemId || 'none'),
+            'decision=' + (shouldBlur ? 'blur' : 'safe'),
+            'reason=missing_element',
+            'srcPrefix=' + getSrcPrefix(src)
+          );
+        }
+      } else if (element && !element.isConnected && CONFIG.debug) {
+        if (diagWindow.applyFailLogsEmitted < DIAG_MAX_APPLY_FAIL_LOGS_PER_CYCLE) {
+          diagWindow.applyFailLogsEmitted += 1;
+          console.warn(
+            '[MW-DIAG][APPLY_FAIL]',
+            'epoch=' + state.pageEpoch,
+            'itemId=' + String(itemId || 'none'),
+            'decision=' + (shouldBlur ? 'blur' : 'safe'),
+            'reason=disconnected',
+            'srcPrefix=' + getSrcPrefix(src)
+          );
+        }
+      }
       
       // Clear any pending blur timer (semantic delay)
       if (pendingItem && pendingItem.blurTimer) {
         clearTimeout(pendingItem.blurTimer);
+      }
+      const isEpochSoftHold =
+        normalizedCategory === 'unknown_keep_soft' ||
+        String(reason || '').indexOf('soft_hold/epoch_stale') === 0;
+      if (isEpochSoftHold) {
+        const holdTtlRaw = Number(result && result.softHoldTtlMs);
+        const holdTtlMs = Number.isFinite(holdTtlRaw) ? Math.max(1200, Math.min(2000, holdTtlRaw)) : 1600;
+        const pendingSourceType = (pendingItem && pendingItem.sourceType) || 'img';
+        const pendingElement = (pendingItem && pendingItem.element) || state.elements.get(itemId) || null;
+        if (pendingElement && pendingElement.isConnected) {
+          applySoftBlur(pendingElement, src, itemId);
+        }
+        setSrcBlurCache(src, 'soft', 'epoch_soft_hold_requeue', holdTtlMs);
+        emitApplyDiag(
+          itemId,
+          'soft_hold',
+          'epoch_soft_hold_requeue',
+          src,
+          labelScoreUsed === null ? confidenceScore : labelScoreUsed
+        );
+        clearPendingItem(itemId, 'epoch_soft_hold');
+        clearSafeResolved(src);
+        setTimeout(function() {
+          if (timerState.teardownDone || timerState.paused) return;
+          const latestElement = state.elements.get(itemId) || pendingElement;
+          if (!latestElement || !latestElement.isConnected) return;
+          state.scanned.delete(src);
+          state.requeueCooldown.set(src, { ts: Date.now() - REQUEUE_COOLDOWN_MS, epoch: state.pageEpoch });
+          queueForScan(src, latestElement, pendingSourceType, itemId);
+        }, holdTtlMs);
+        return;
       }
       
       clearPendingItem(itemId, 'result');
@@ -1500,9 +2024,22 @@ export function generateModerationScript(config: InjectionConfig): string {
       
       // Apply blur based on result or forced blur mode
       let finalBlur = CONFIG.forcedBlur || (shouldApplyBlur && CONFIG.enabled && CONFIG.sensitivity > 0);
+      let keepSoftBlur = false;
+      const shouldApplyYouTubeShortsStrict =
+        !!(pendingItem && pendingItem.shortsSoftDefault) ||
+        isYouTubeShortsPosterBg(pendingItem ? pendingItem.sourceType : '', src);
+      if (!finalBlur && shouldApplyYouTubeShortsStrict) {
+        if (isYouTubeStrongSafeDecision(neutralScore, unsafeScores)) {
+          decisionReason = 'youtube_strong_safe_clear';
+        } else {
+          keepSoftBlur = true;
+          decisionReason = 'youtube_shorts_soft_default';
+        }
+      }
       if (DEBUG_SKIP_DOMAIN_BLUR && !CONFIG.forcedBlur) {
         if (finalBlur) state.stats.blurSkippedByKillSwitch++;
         finalBlur = false;
+        keepSoftBlur = false;
         decisionReason = 'kill-switch/youtube-domain';
       }
       if (CONFIG.debug) {
@@ -1519,8 +2056,16 @@ export function generateModerationScript(config: InjectionConfig): string {
         );
       }
       const dims = element ? getElementDimensions(element) : { width: 0, height: 0 };
+      if (finalBlur) {
+        setSrcBlurCache(src, 'hard', decisionReason || predictedLabel || category || 'hard', SRC_BLUR_CACHE_TTL_MS);
+      } else if (keepSoftBlur) {
+        setSrcBlurCache(src, 'soft', decisionReason || 'soft_hold', SRC_BLUR_CACHE_TTL_MS);
+      } else {
+        clearSrcBlurCache(src);
+      }
       
       if (element && element.isConnected) {
+        removeTimeoutRevealOverlay(element, itemId);
         const preDecisionState = element.dataset.mwModerated || '';
         const preDecisionFilter = element.style.getPropertyValue('filter') || element.style.filter || '';
         const preDecisionHasBlur = preDecisionFilter.toLowerCase().includes('blur(');
@@ -1543,6 +2088,10 @@ export function generateModerationScript(config: InjectionConfig): string {
           // Apply strong blur
           applyBlur(element, src, predictedLabel || category || 'flagged', CONFIG.blurStrength, itemId);
         } else {
+          if (keepSoftBlur) {
+            clearSafeResolved(src);
+            applySoftBlur(element, src, itemId);
+          }
           if (preDecisionState === 'blurred' || element.classList.contains('mw-blurred') || preDecisionHasBlur) {
             console.log(
               '[MW][JSBlur][SafeOnPreviouslyBlurred]',
@@ -1553,21 +2102,34 @@ export function generateModerationScript(config: InjectionConfig): string {
               'hasBlurFilter=' + preDecisionHasBlur
             );
           }
-          markSafeResolved(src);
-          // Remove soft blur if result is safe
-          removeSoftBlur(element, src);
-          if (wasInSoftBlur && !finalBlur) {
-            state.stats.semanticDelaySaved++;
+          if (!keepSoftBlur) {
+            markSafeResolved(src);
+            // Remove soft blur if result is safe
+            removeSoftBlur(element, src);
+            if (wasInSoftBlur && !finalBlur) {
+              state.stats.semanticDelaySaved++;
+            }
           }
         }
       }
+      emitApplyDiag(
+        itemId,
+        finalBlur ? 'blur' : (keepSoftBlur ? 'soft_hold' : 'safe'),
+        decisionReason || 'none',
+        src,
+        labelScoreUsed === null ? confidenceScore : labelScoreUsed
+      );
       
       // Also find any other elements with the same src
       if (finalBlur) {
         clearSafeResolved(src);
         findAndBlur(src, predictedLabel || category, CONFIG.blurStrength, true);
+      } else if (keepSoftBlur) {
+        clearSafeResolved(src);
+        findAndApplySoftBlur(src);
       } else {
         markSafeResolved(src);
+        clearSrcBlurCache(src);
         // Remove soft blur from all matching elements
         findAndRemoveSoftBlur(src);
       }
@@ -1623,6 +2185,11 @@ export function generateModerationScript(config: InjectionConfig): string {
    */
   function findAndRemoveSoftBlur(src) {
     try {
+      document.querySelectorAll('.mw-timeout-reveal-overlay').forEach(el => {
+        if (el.dataset && el.dataset.mwFor === src) {
+          el.remove();
+        }
+      });
       document.querySelectorAll('[data-mw-src="' + src + '"]').forEach(el => {
         removeSoftBlur(el, src);
       });
@@ -1630,6 +2197,20 @@ export function generateModerationScript(config: InjectionConfig): string {
       document.querySelectorAll('img').forEach(img => {
         if (img.src === src || img.dataset.mwOrigSrc === src) {
           removeSoftBlur(img, src);
+        }
+      });
+    } catch (e) {}
+  }
+
+  function findAndApplySoftBlur(src) {
+    try {
+      document.querySelectorAll('[data-mw-src="' + src + '"]').forEach(el => {
+        if (el.dataset && el.dataset.mwRevealed === 'true') return;
+        applySoftBlur(el, src, (el.dataset && el.dataset.mwItemId) || '');
+      });
+      document.querySelectorAll('[data-mw-bg-src]').forEach(el => {
+        if (el.dataset && el.dataset.mwBgSrc === src && el.dataset.mwRevealed !== 'true') {
+          applySoftBlur(el, src, (el.dataset && el.dataset.mwItemId) || '');
         }
       });
     } catch (e) {}
@@ -1664,22 +2245,26 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
   }
 
-  function queueForScan(src, element, sourceType) {
+  function queueForScan(src, element, sourceType, itemIdForDiag) {
+    const diagItemId = itemIdForDiag || getDiagItemId(element, sourceType || 'item');
     const url = normalizeUrl(src);
     if (!url) {
       state.stats.skipped++;
+      maybeLogSkip(sourceType, element, diagItemId, 'no_src', src);
       return false;
     }
     
     // Skip tiny data URLs
     if (url.startsWith('data:') && url.length < 1000) {
       state.stats.skipped++;
+      maybeLogSkip(sourceType, element, diagItemId, 'no_src', url);
       return false;
     }
     
     // FAIL-OPEN: Skip tiny images (< 80x80)
     if (isTinyImage(element)) {
       state.stats.skippedTiny++;
+      maybeLogSkip(sourceType, element, diagItemId, 'too_small', url);
       if (CONFIG.debug) {
         console.log('[MW] skipped tiny image (fail-open, <80x80):', url.substring(0, 50));
       }
@@ -1688,20 +2273,55 @@ export function generateModerationScript(config: InjectionConfig): string {
     
     // Skip already processed
     if (state.scanned.has(url)) {
+      diagWindow.skippedDedupe++;
+      maybeLogSkip(sourceType, element, diagItemId, 'dedupe', url);
       return false;
     }
     
     // Skip if already revealed by user (persistence)
     if (state.revealed.has(url) || element.dataset.mwRevealed === 'true') {
+      diagWindow.skippedDedupe++;
+      maybeLogSkip(sourceType, element, diagItemId, 'dedupe', url);
+      return false;
+    }
+    maybeReapplyBlurFromCache(element, url, diagItemId);
+
+    const now = Date.now();
+    const previousCooldown = state.requeueCooldown.get(url);
+    if (
+      previousCooldown &&
+      previousCooldown.epoch === state.pageEpoch &&
+      (now - previousCooldown.ts) < REQUEUE_COOLDOWN_MS
+    ) {
+      state.stats.skippedRateLimited++;
+      diagWindow.skippedCooldown++;
+      maybeLogSkip(sourceType, element, diagItemId, 'cooldown', url);
+      if (CONFIG.debug) {
+        console.log(
+          '[MW][QueueCooldown] skip',
+          'src=' + url.substring(0, 80),
+          'ageMs=' + (now - previousCooldown.ts),
+          'epoch=' + state.pageEpoch,
+        );
+      }
       return false;
     }
     
     if (state.pending.size >= MAX_PENDING_ITEMS || batchQueue.length >= MAX_BATCH_QUEUE_ITEMS) {
       state.stats.skippedQueueCap++;
+      diagWindow.skippedCap++;
+      logCapHit(
+        'MAX_PENDING_ITEMS(' + MAX_PENDING_ITEMS + ')/MAX_BATCH_QUEUE_ITEMS(' + MAX_BATCH_QUEUE_ITEMS + ')',
+        1
+      );
+      maybeLogSkip(sourceType, element, diagItemId, 'cap', url);
       return false;
     }
     if (!allowPerSecond(rateLimiter.enqueue, MAX_ENQUEUE_PER_SEC)) {
       state.stats.skippedRateLimited++;
+      diagWindow.skippedCap++;
+      logCapHit('MAX_ENQUEUE_PER_SEC(' + MAX_ENQUEUE_PER_SEC + ')', 1);
+      maybeLogSkip(sourceType, element, diagItemId, 'cap', url);
       return false;
     }
 
@@ -1709,6 +2329,8 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (existingPendingId) {
       const existingPending = state.pending.get(existingPendingId);
       if (existingPending && existingPending.src === url) {
+        diagWindow.skippedDedupe++;
+        maybeLogSkip(sourceType, element, diagItemId, 'dedupe', url);
         return false;
       }
       state.pendingBySrc.delete(url);
@@ -1716,9 +2338,15 @@ export function generateModerationScript(config: InjectionConfig): string {
     
     const itemId = generateItemId();
     const { width, height } = getElementDimensions(element);
+    const shortsSoftDefault = isYouTubeShortsPosterBg(sourceType, url);
     
     // Store element reference
     state.elements.set(itemId, element);
+    if (shortsSoftDefault) {
+      applySoftBlur(element, url, itemId);
+      emitApplyDiag(itemId, 'soft_hold', 'youtube_shorts_soft_default', url);
+      setSrcBlurCache(url, 'soft', 'youtube_shorts_soft_default', SRC_BLUR_CACHE_TTL_MS);
+    }
     
     // SEMANTIC DELAY: only apply soft blur after semanticDelayMs if still pending.
     // Fast safe results will cancel this timer before any blur is shown.
@@ -1736,11 +2364,13 @@ export function generateModerationScript(config: InjectionConfig): string {
       element: element,
       src: url,
       sourceType: sourceType,
-      timestamp: Date.now(),
+      shortsSoftDefault: shortsSoftDefault,
+      timestamp: now,
       state: 'pending',
       blurTimer: blurTimer,
     });
     state.pendingBySrc.set(url, itemId);
+    state.requeueCooldown.set(url, { ts: now, epoch: state.pageEpoch });
     
     // Add to batch queue with dimensions
     batchQueue.push({
@@ -1750,6 +2380,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       width: width,
       height: height,
     });
+    diagWindow.queued++;
     
     // Schedule batch flush
     if (!batchTimer) {
@@ -1802,33 +2433,22 @@ export function generateModerationScript(config: InjectionConfig): string {
   // ==================== SCANNING FUNCTIONS ====================
 
   function scanImgElement(img) {
-    let src = img.src ||
-              img.dataset.src ||
-              img.dataset.lazySrc ||
-              img.dataset.thumbSrc ||
-              img.getAttribute('data-src') ||
-              img.getAttribute('data-lazy-src') ||
-              img.getAttribute('data-thumb');
-    
-    // Handle srcset
-    if (!src && img.srcset) {
-      const parts = img.srcset.split(',');
-      if (parts.length > 0) {
-        src = parts[0].trim().split(' ')[0];
-      }
-    }
-    
+    const diagItemId = getDiagItemId(img, 'img');
+    const srcChoice = extractImgSourceCandidate(img);
+    const src = srcChoice.src;
     if (!src) {
       state.stats.skipped++;
+      maybeLogSkip('img', img, diagItemId, 'no_src', '');
       return;
     }
+    logChosenSrc('img', diagItemId, srcChoice.chosen, src);
     if (img.dataset.mwScanned === 'true' && img.dataset.mwLastScanSrc === src) return;
     
     img.dataset.mwScanned = 'true';
     img.dataset.mwLastScanSrc = src;
     img.dataset.mwOrigSrc = src;
     
-    if (queueForScan(src, img, 'img')) {
+    if (queueForScan(src, img, 'img', diagItemId)) {
       state.stats.imgTags++;
     }
   }
@@ -1838,28 +2458,35 @@ export function generateModerationScript(config: InjectionConfig): string {
                    video.dataset.poster ||
                    video.getAttribute('data-poster');
     
-    if (!poster) return;
+    const diagItemId = getDiagItemId(video, 'video');
+    if (!poster) {
+      maybeLogSkip('video', video, diagItemId, 'no_src', '');
+      return;
+    }
+    logChosenSrc('video', diagItemId, 'poster', poster);
     if (video.dataset.mwPosterScanned === 'true' && video.dataset.mwLastPoster === poster) return;
     
     video.dataset.mwPosterScanned = 'true';
     video.dataset.mwLastPoster = poster;
     video.dataset.mwOrigPoster = poster;
     
-    if (queueForScan(poster, video, 'video-poster')) {
+    if (queueForScan(poster, video, 'video-poster', diagItemId)) {
       state.stats.videoPosters++;
     }
   }
 
   function scanBgImage(element) {
     const bgUrl = extractBgImageUrl(element);
+    const diagItemId = getDiagItemId(element, 'bg');
     if (!bgUrl) return;
+    logChosenSrc('bg', diagItemId, 'bg', bgUrl);
     if (element.dataset.mwBgScanned === 'true' && element.dataset.mwLastBg === bgUrl) return;
     
     element.dataset.mwBgScanned = 'true';
     element.dataset.mwLastBg = bgUrl;
     element.dataset.mwBgSrc = bgUrl;
     
-    if (queueForScan(bgUrl, element, 'bg-image')) {
+    if (queueForScan(bgUrl, element, 'bg-image', diagItemId)) {
       state.stats.bgImages++;
     }
   }
@@ -1927,6 +2554,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     
     console.log('[MW] ========== FULL PAGE SCAN ==========');
     scanNode(document.body);
+    emitCoverageSummary('full_scan');
     console.log('[MW] Stats:', JSON.stringify(state.stats));
   }
 
@@ -1985,6 +2613,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         });
       } catch (e) {}
     });
+    emitCoverageSummary('youtube_scan');
   }
 
   function setupMutationObserver(root) {
@@ -2198,13 +2827,24 @@ export function generateModerationScript(config: InjectionConfig): string {
       cleanupExpiredSafeResolved();
       pruneDisconnectedPending('debug_summary');
       console.log(
+        '[MW-DIAG][SUMMARY]',
+        'epoch=' + state.pageEpoch,
+        'queued=' + diagWindow.queued,
+        'cap=' + diagWindow.skippedCap,
+        'cooldown=' + diagWindow.skippedCooldown,
+        'dedupe=' + diagWindow.skippedDedupe,
+        'applyFail=' + diagWindow.applyFailLogsEmitted,
+        'timeouts=' + state.stats.timeouts,
+        'rejects=' + state.stats.nonceRejected
+      );
+      console.log(
         '[MW][Summary]',
         'pending=' + state.pending.size,
         'blurred=' + state.blurred.size,
         'safeResolved=' + state.safeResolved.size,
         'activeTimers=' + countActiveTimerHandles()
       );
-    }, 5000);
+    }, 2000);
     timerLog('start', 'debugSummaryInterval:' + reason);
   }
 
@@ -2236,6 +2876,10 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       .mw-correction-overlay {
         pointer-events: auto !important;
+      }
+      .mw-timeout-reveal-overlay {
+        border: 0 !important;
+        outline: none !important;
       }
       ytd-thumbnail, ytd-rich-item-renderer, yt-img-shadow, #shorts-player,
       [class*="DivVideoContainer"], [class*="DivPlayerContainer"], .video-card {

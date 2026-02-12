@@ -16,6 +16,7 @@ final class ContentFilterEngine {
     private var currentFps: Double = 1.0
     private var isRunning = false
     private var isProcessing = false
+    private var snapshotFailureCount = 0
 
     private weak var targetWebView: WKWebView?
     private var appIsActive = true
@@ -201,14 +202,28 @@ final class ContentFilterEngine {
         snapshotConfig.afterScreenUpdates = false
         snapshotConfig.rect = webView.bounds
 
-        webView.takeSnapshot(with: snapshotConfig) { [weak self] image, _ in
+        webView.takeSnapshot(with: snapshotConfig) { [weak self] image, error in
             guard let self else { return }
+            guard let image else {
+                self.snapshotFailureCount += 1
+                let reason = error?.localizedDescription ?? "snapshot_nil_image"
+                print("[CF-DIAG][FRAME] ok=0 reason=\(reason) failCount=\(self.snapshotFailureCount)")
+                self.isProcessing = false
+                return
+            }
             guard let cgImage = self.cgImage(from: image) else {
+                self.snapshotFailureCount += 1
+                print("[CF-DIAG][FRAME] ok=0 reason=cgimage_nil failCount=\(self.snapshotFailureCount)")
                 self.isProcessing = false
                 return
             }
 
             self.processingQueue.async {
+                let frameProbe = self.makeFrameProbe(cgImage: cgImage)
+                print(
+                    "[CF-DIAG][FRAME] ok=1 w=\(cgImage.width) h=\(cgImage.height) " +
+                    "avgLuma=\(String(format: "%.4f", frameProbe.avgLuma)) checksum=\(frameProbe.checksum)"
+                )
                 let frameDelta = self.computeFrameDelta(cgImage: cgImage)
                 let shouldSkipHeavyWork = self.shouldSkipForTier0(frameDelta: frameDelta)
                 let features: SegmentationFeatures
@@ -243,6 +258,44 @@ final class ContentFilterEngine {
                 }
             }
         }
+    }
+
+    private func makeFrameProbe(cgImage: CGImage) -> (avgLuma: Double, checksum: UInt64) {
+        let sampleSize = 32
+        let bytesPerPixel = 4
+        let bytesPerRow = sampleSize * bytesPerPixel
+        let bitsPerComponent = 8
+        var data = [UInt8](repeating: 0, count: sampleSize * sampleSize * bytesPerPixel)
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let context = CGContext(
+            data: &data,
+            width: sampleSize,
+            height: sampleSize,
+            bitsPerComponent: bitsPerComponent,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return (0, 0)
+        }
+        context.interpolationQuality = .low
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: sampleSize, height: sampleSize))
+
+        var lumaSum: UInt64 = 0
+        var checksum: UInt64 = 1469598103934665603
+        let pixelCount = sampleSize * sampleSize
+        for i in 0 ..< pixelCount {
+            let idx = i * bytesPerPixel
+            let r = UInt64(data[idx])
+            let g = UInt64(data[idx + 1])
+            let b = UInt64(data[idx + 2])
+            let luma = (77 * r + 150 * g + 29 * b) >> 8
+            lumaSum += luma
+            checksum ^= (luma + UInt64(i & 0xff))
+            checksum = checksum &* 1099511628211
+        }
+        let avgLuma = (Double(lumaSum) / Double(pixelCount)) / 255.0
+        return (avgLuma, checksum)
     }
 
     private func resolveWebViewForScanning() -> WKWebView? {

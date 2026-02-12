@@ -1,0 +1,1347 @@
+From 48d5a8775df73a9f66803988f7ccbcfd9236d0e5 Mon Sep 17 00:00:00 2001
+From: Cody Groves <codygroves@Codys-MacBook-Air.local>
+Date: Wed, 11 Feb 2026 21:29:51 -0600
+Subject: [PATCH] stable: capgo bridge + ack/req/timeout instrumentation;
+ working blur pipeline
+
+---
+ eslint.config.js                              |  11 +-
+ package.json                                  |   2 +-
+ .../browser/NativeWebViewBrowser.tsx          | 428 ++++++++++--------
+ src/hooks/useNativeWebView.ts                 |  45 +-
+ src/lib/webview-injection-script.ts           | 345 ++++++++++----
+ src/plugins/ContentFilter.ts                  |   1 +
+ src/plugins/ModerationBridge.ts               |   2 +-
+ 7 files changed, 534 insertions(+), 300 deletions(-)
+
+diff --git a/eslint.config.js b/eslint.config.js
+index 40f72cc..897bc7c 100644
+--- a/eslint.config.js
++++ b/eslint.config.js
+@@ -5,7 +5,16 @@ import reactRefresh from "eslint-plugin-react-refresh";
+ import tseslint from "typescript-eslint";
+ 
+ export default tseslint.config(
+-  { ignores: ["dist"] },
++  {
++    ignores: [
++      "ios/**",
++      "**/.build/**",
++      "**/DerivedData/**",
++      "plugins/**/ios/**",
++      "plugins/**/android/**",
++      "dist/**",
++    ],
++  },
+   {
+     extends: [js.configs.recommended, ...tseslint.configs.recommended],
+     files: ["**/*.{ts,tsx}"],
+diff --git a/package.json b/package.json
+index 97a36ed..99f8a6d 100644
+--- a/package.json
++++ b/package.json
+@@ -7,7 +7,7 @@
+     "dev": "vite",
+     "build": "vite build",
+     "build:dev": "vite build --mode development",
+-    "lint": "eslint .",
++    "lint": "eslint",
+     "preview": "vite preview",
+     "test": "vitest run",
+     "test:watch": "vitest"
+diff --git a/src/components/browser/NativeWebViewBrowser.tsx b/src/components/browser/NativeWebViewBrowser.tsx
+index b361961..cce822b 100644
+--- a/src/components/browser/NativeWebViewBrowser.tsx
++++ b/src/components/browser/NativeWebViewBrowser.tsx
+@@ -122,7 +122,13 @@ export const NativeWebViewBrowser = () => {
+   // Hooks
+   const { checkBlockedSite, isChecking } = useContentProtection();
+   const { settings } = useSettings();
+-  const { settings: localSettings, getModerationConfig, isModerationEnabled, getNonce } = useLocalSettings();
++  const {
++    settings: localSettings,
++    isLoaded: settingsLoaded,
++    getModerationConfig,
++    isModerationEnabled,
++    getNonce,
++  } = useLocalSettings();
+   const deviceId = useDeviceId();
+ 
+   // Central blur source-of-truth with hysteresis to avoid flicker.
+@@ -241,11 +247,12 @@ export const NativeWebViewBrowser = () => {
+   const lastInjectedUrlRef = useRef('');
+   const lastInjectionAtRef = useRef(0);
+   const duplicateInjectionSkipsRef = useRef(0);
+-  const injectionSentinelFailuresRef = useRef(0);
++  const didInjectAfterSettingsLoadedRef = useRef(false);
+   const loadEndInjectTimerRef = useRef<NodeJS.Timeout | null>(null);
+   const navigationSeqRef = useRef(0);
+   const activeNavIdRef = useRef(0);
+   const currentUrlRef = useRef('');
++  const messageFromWebViewHandlerRef = useRef<((payload: unknown) => void) | null>(null);
+   
+   const {
+     currentView,
+@@ -353,6 +360,10 @@ export const NativeWebViewBrowser = () => {
+     if (!ENABLE_SIGNAL_PIPELINE) {
+       return;
+     }
++    if (!settingsLoaded) {
++      console.log('[MW-Inject][Gate] settings not loaded; skipping inject', 'reason=' + reason);
++      return;
++    }
+     if (!isModerationEnabled()) {
+       console.log('[MW-Bridge] Moderation disabled, skipping injection');
+       return;
+@@ -380,75 +391,38 @@ export const NativeWebViewBrowser = () => {
+     }
+ 
+     injectionInFlightRef.current = true;
+-    const sentinelProbeScript = `(function(){ return window.__MW_ACTIVE__ === true ? 'MW_ALREADY_ACTIVE' : 'MW_MISSING'; })();`;
+     const config = {
+       ...getModerationConfig(),
+       pageEpoch: webViewPageEpochRef.current,
+     };
+-    console.log('[MW-Inject][Probe]', 'navId=' + navId, 'reason=' + reason, 'targetUrl=' + (targetUrl || 'unknown'));
+-    
++    console.log(
++      '[MW-Inject][Config]',
++      'enabled=' + config.enabled,
++      'sensitivity=' + config.sensitivity,
++      'blockingMode=' + config.blockingMode,
++      'nonce=' + String(config.nonce || '').substring(0, 10),
++      'settingsLoaded=' + settingsLoaded,
++      'reason=' + reason,
++    );
+     // Full moderation script: request scanning + host bridge + DOM blur/reveal behavior.
+     const mainScript = generateModerationScript(config);
+     try {
+-      const probeResult = await scriptExecutor(sentinelProbeScript);
+-      if (probeResult === 'MW_ALREADY_ACTIVE') {
+-        injectionDoneRef.current = true;
+-        lastInjectedUrlRef.current = targetUrl;
+-        lastInjectionAtRef.current = Date.now();
+-        duplicateInjectionSkipsRef.current += 1;
+-        console.log(
+-          '[MW-Inject][Skip] already active',
+-          'navId=' + navId,
+-          'reason=' + reason,
+-          'targetUrl=' + (targetUrl || 'unknown'),
+-          'skipCount=' + duplicateInjectionSkipsRef.current,
+-        );
+-        return;
+-      } else if (probeResult === 'MW_MISSING') {
+-        // proceed to guarded injection
+-      } else {
+-        console.warn(
+-          '[MW-Inject][Warn] unexpected probe; attempting injection once',
+-          'navId=' + navId,
+-          'reason=' + reason,
+-          'targetUrl=' + (targetUrl || 'unknown'),
+-          'value=' + String(probeResult),
+-        );
+-      }
+-
+-      const injectionResult = await scriptExecutor(mainScript);
++      await scriptExecutor(mainScript);
+       injectionDoneRef.current = true;
+       lastInjectedUrlRef.current = targetUrl;
+       lastInjectionAtRef.current = Date.now();
+-      if (injectionResult === 'MW_ALREADY_ACTIVE') {
+-        duplicateInjectionSkipsRef.current += 1;
+-        console.log(
+-          '[MW-Inject][Skip]',
+-          'navId=' + navId,
+-          'reason=' + reason,
+-          'targetUrl=' + (targetUrl || 'unknown'),
+-          'result=MW_ALREADY_ACTIVE',
+-          'skipCount=' + duplicateInjectionSkipsRef.current,
+-        );
+-      } else if (injectionResult === 'MW_INJECTED') {
+-        console.log('[MW-Inject][Injected]', 'navId=' + navId, 'reason=' + reason, 'targetUrl=' + (targetUrl || 'unknown'));
+-      } else {
+-        injectionSentinelFailuresRef.current += 1;
+-        console.warn(
+-          '[MW-Inject][Warn] Unexpected injection sentinel',
+-          'navId=' + navId,
+-          'reason=' + reason,
+-          'value=' + String(injectionResult),
+-          'targetUrl=' + (targetUrl || 'unknown'),
+-          'failures=' + injectionSentinelFailuresRef.current,
+-        );
+-      }
++      console.log(
++        '[MW-Inject][InjectedDispatch]',
++        'navId=' + navId,
++        'reason=' + reason,
++        'targetUrl=' + (targetUrl || 'unknown'),
++      );
+     } catch (error) {
+       console.error('[MW-Bridge] Moderation script injection failed:', error);
+     } finally {
+       injectionInFlightRef.current = false;
+     }
+-  }, [ENABLE_SIGNAL_PIPELINE, isModerationEnabled, getModerationConfig]);
++  }, [ENABLE_SIGNAL_PIPELINE, settingsLoaded, isModerationEnabled, getModerationConfig]);
+ 
+   const {
+     state: webViewState,
+@@ -457,6 +431,7 @@ export const NativeWebViewBrowser = () => {
+     goBack: webViewGoBack,
+     goForward: webViewGoForward,
+     reload: webViewReload,
++    postMessageToWebView,
+     executeScript,
+   } = useNativeWebView({
+     onLoadStart: (url) => {
+@@ -545,6 +520,12 @@ export const NativeWebViewBrowser = () => {
+       setCentralBlurState(false, 'webview_closed');
+       navigate('home', '', '');
+     },
++    onMessageFromWebview: (payload) => {
++      if (isDebugMode) {
++        console.log('[MW-Host][Capgo] messageFromWebview received');
++      }
++      messageFromWebViewHandlerRef.current?.(payload);
++    },
+   });
+ 
+   useEffect(() => {
+@@ -574,8 +555,27 @@ export const NativeWebViewBrowser = () => {
+   }, [isNative, executeScript, webViewState.currentUrl]);
+ 
+   useEffect(() => {
+-    if (!isNative) return;
+-    if (!webViewState.isOpen) {
++    const moderationEnabled = isModerationEnabled();
++    const gate =
++      settingsLoaded &&
++      isNative &&
++      webViewState.isOpen &&
++      moderationEnabled &&
++      localSettings.shield_active &&
++      localSettings.blur_dial > 0;
++
++    if (!gate) {
++      console.log(
++            '[MW][NativeScan] stop gate=' +
++          JSON.stringify({
++            settingsLoaded,
++            isNative,
++            webViewOpen: webViewState.isOpen,
++            moderationEnabled,
++            shieldActive: localSettings.shield_active,
++            blurDialActive: localSettings.blur_dial > 0,
++          }),
++      );
+       riskDecisionListenerRef.current?.remove();
+       riskDecisionListenerRef.current = null;
+       stopNativeContentFilter().catch(() => undefined);
+@@ -585,9 +585,21 @@ export const NativeWebViewBrowser = () => {
+     let cancelled = false;
+     const attach = async () => {
+       try {
++        console.log(
++          '[MW][NativeScan] start gate=' +
++            JSON.stringify({
++              settingsLoaded,
++              isNative,
++              webViewOpen: webViewState.isOpen,
++              moderationEnabled,
++              shieldActive: localSettings.shield_active,
++              blurDialActive: localSettings.blur_dial > 0,
++            }),
++        );
+         const startPayload = await startNativeContentFilter({
+           preset: 'balanced',
+           kidMode: false,
++          debug: isDebugMode,
+           fps: 1.0,
+           allowRevealDuringHardBlur: false,
+         });
+@@ -604,11 +616,22 @@ export const NativeWebViewBrowser = () => {
+ 
+     return () => {
+       cancelled = true;
++      console.log(
++        '[MW][NativeScan] stop gate=' +
++          JSON.stringify({
++            settingsLoaded,
++            isNative,
++            webViewOpen: webViewState.isOpen,
++            moderationEnabled,
++            shieldActive: localSettings.shield_active,
++            blurDialActive: localSettings.blur_dial > 0,
++          }),
++      );
+       riskDecisionListenerRef.current?.remove();
+       riskDecisionListenerRef.current = null;
+       stopNativeContentFilter().catch(() => undefined);
+     };
+-  }, [isNative, webViewState.isOpen]);
++  }, [settingsLoaded, isNative, webViewState.isOpen, debugLog, isDebugMode, isModerationEnabled, localSettings.shield_active, localSettings.blur_dial, localSettings.blocking_mode]);
+ 
+   const requestBlurHandshake = useCallback(async (source: string) => {
+     if (!ENABLE_DOM_BLUR) return;
+@@ -625,7 +648,7 @@ export const NativeWebViewBrowser = () => {
+     `);
+   }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, executeScript]);
+ 
+-  const flushBlurStateToWebView = useCallback(async (attempt: number = 0) => {
++  const flushBlurStateToWebView = useCallback(async () => {
+     if (!ENABLE_DOM_BLUR) return;
+     if (!isNative || !webViewState.isOpen || !executeScript) return;
+     if (!blurReadyRef.current) return;
+@@ -646,22 +669,9 @@ export const NativeWebViewBrowser = () => {
+       })();
+     `;
+ 
+-    const result = await executeScript(script);
+-    if (result) {
+-      blurPendingRef.current = null;
+-      return;
+-    }
+-
+-    if (attempt >= 3) {
+-      return;
+-    }
+-
+-    if (blurRetryTimerRef.current) {
+-      clearTimeout(blurRetryTimerRef.current);
+-    }
+-    blurRetryTimerRef.current = setTimeout(() => {
+-      flushBlurStateToWebView(attempt + 1);
+-    }, Math.min(200 * (attempt + 1), 1000));
++    await executeScript(script);
++    blurPendingRef.current = null;
++    return;
+   }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, executeScript]);
+ 
+   useEffect(() => {
+@@ -692,13 +702,14 @@ export const NativeWebViewBrowser = () => {
+   useEffect(() => {
+     if (!ENABLE_SIGNAL_PIPELINE) return;
+     if (!isNative || !webViewState.isOpen || !executeScript) return;
+-    if (!webViewState.currentUrl) return;
++
++    const urlHint = webViewState.currentUrl || currentUrlRef.current || 'about:blank';
+ 
+     debugLog(
+       '[MW-DIAG][HOST] pipeline state',
+       'domOverlay=' + (ENABLE_DOM_BLUR ? 'on' : 'off'),
+       'signalPipeline=' + (ENABLE_SIGNAL_PIPELINE ? 'on' : 'off'),
+-      'url=' + (webViewState.currentUrl || 'unknown'),
++      'url=' + (urlHint || 'unknown'),
+     );
+ 
+     if (ENABLE_DOM_BLUR) {
+@@ -706,9 +717,9 @@ export const NativeWebViewBrowser = () => {
+     }
+ 
+     const reinjectAndPing = async () => {
+-      await injectModerationScript(executeScript, 'url_change_reinject', webViewState.currentUrl);
++      await injectModerationScript(executeScript, 'settings_loaded_reinject_or_urlchange', urlHint);
+       if (ENABLE_DOM_BLUR) {
+-        await requestBlurHandshake('url_change_reinject');
++        await requestBlurHandshake('settings_loaded_reinject_or_urlchange');
+       }
+     };
+ 
+@@ -717,7 +728,7 @@ export const NativeWebViewBrowser = () => {
+       '[MW-Host][Timer] start',
+       'name=reinjectTimer',
+       'navId=' + activeNavIdRef.current,
+-      'url=' + (webViewState.currentUrl || 'unknown'),
++      'url=' + (urlHint || 'unknown'),
+     );
+     return () => {
+       clearTimeout(timer);
+@@ -725,7 +736,7 @@ export const NativeWebViewBrowser = () => {
+         '[MW-Host][Timer] stop',
+         'name=reinjectTimer',
+         'navId=' + activeNavIdRef.current,
+-        'url=' + (webViewState.currentUrl || 'unknown'),
++        'url=' + (urlHint || 'unknown'),
+       );
+     };
+   }, [
+@@ -740,6 +751,35 @@ export const NativeWebViewBrowser = () => {
+     clearLoadEndInjectTimer,
+   ]);
+ 
++  useEffect(() => {
++    if (webViewState.isOpen) return;
++    didInjectAfterSettingsLoadedRef.current = false;
++  }, [webViewState.isOpen]);
++
++  useEffect(() => {
++    if (!ENABLE_SIGNAL_PIPELINE) return;
++    if (!settingsLoaded || !isNative || !webViewState.isOpen || !executeScript) return;
++    if (didInjectAfterSettingsLoadedRef.current) return;
++
++    const urlHint = webViewState.currentUrl || currentUrlRef.current || 'about:blank';
++    didInjectAfterSettingsLoadedRef.current = true;
++    console.log(
++      '[MW-Inject][SettingsLoadedReinject]',
++      'settingsLoaded=' + settingsLoaded,
++      'isOpen=' + webViewState.isOpen,
++      'url=' + urlHint.substring(0, 80),
++    );
++    injectModerationScript(executeScript, 'settings_loaded_reinject', urlHint).catch(() => undefined);
++  }, [
++    ENABLE_SIGNAL_PIPELINE,
++    settingsLoaded,
++    isNative,
++    webViewState.isOpen,
++    webViewState.currentUrl,
++    executeScript,
++    injectModerationScript,
++  ]);
++
+   useEffect(() => {
+     if (!ENABLE_DOM_BLUR) return;
+     if (!isNative || !webViewState.isOpen) return;
+@@ -803,28 +843,11 @@ export const NativeWebViewBrowser = () => {
+         severity: 'safe' as ModerationSeverity,
+       }));
+ 
+-      if (executeScript) {
+-        try {
+-          const staleMessage = createResultMessage(requestId, staleResults, nonce, requestEpoch ?? undefined);
+-          const escapedJson = JSON.stringify(staleMessage)
+-            .replace(/\\/g, '\\\\')
+-            .replace(/'/g, "\\'")
+-            .replace(/</g, '\\u003c')
+-            .replace(/>/g, '\\u003e');
+-          await executeScript(`
+-            (function() {
+-              try {
+-                var msg = JSON.parse('${escapedJson}');
+-                window.postMessage(msg, '*');
+-                return 'OK';
+-              } catch (e) {
+-                return 'ERR';
+-              }
+-            })();
+-          `);
+-        } catch {
+-          // Fail-open by design for stale requests.
+-        }
++      try {
++        const staleMessage = createResultMessage(requestId, staleResults, nonce, requestEpoch ?? undefined);
++        await postMessageToWebView(staleMessage as unknown as Record<string, unknown>);
++      } catch {
++        // Fail-open by design for stale requests.
+       }
+ 
+       pendingRequestsRef.current.delete(requestId);
+@@ -1031,69 +1054,24 @@ export const NativeWebViewBrowser = () => {
+     // Post results back to the WebView with nonce for security
+     console.log('[MW-Host] posting results back', requestId, 'count=' + results.length, 'nonce=' + nonce.substring(0, 10));
+     
+-    if (executeScript) {
+-      try {
+-        const resultMessage = createResultMessage(requestId, results, nonce, requestEpoch ?? undefined);
+-        const messageJson = JSON.stringify(resultMessage);
+-        // Escape for safe injection
+-        const escapedJson = messageJson
+-          .replace(/\\/g, '\\\\')
+-          .replace(/'/g, "\\'")
+-          .replace(/</g, '\\u003c')
+-          .replace(/>/g, '\\u003e');
+-        
+-        const postResultScript = `
+-          (function() {
+-            try {
+-              var msg = JSON.parse('${escapedJson}');
+-              window.postMessage(msg, '*');
+-              console.log('[MW] Host posted result:', '${requestId}');
+-              return 'OK';
+-            } catch (e) {
+-              console.error('[MW] Failed to parse result:', e);
+-              return 'ERROR: ' + e.message;
+-            }
+-          })();
+-        `;
+-        
+-        await executeScript(postResultScript);
+-        console.log('[MW-Host] Results posted successfully for', requestId);
+-      } catch (error) {
+-        console.log('[MW-Host] Failed to post results:', error);
+-        
+-        // Fallback: Push to legacy results queue
+-        try {
+-          for (const result of results) {
+-            const escapedSrc = escapeForJs(result.src);
+-            const pushLegacyScript = `
+-              (function() {
+-                if (!window.__GC_SCAN_RESULTS__) window.__GC_SCAN_RESULTS__ = [];
+-                window.__GC_SCAN_RESULTS__.push({
+-                  src: '${escapedSrc}',
+-                  shouldBlur: ${result.shouldBlur},
+-                  category: '${result.category}',
+-                  confidence: ${result.confidence},
+-                  blurStrengthPx: ${localSettings.blur_strength_px || 16}
+-                });
+-                return 'OK';
+-              })();
+-            `;
+-            await executeScript(pushLegacyScript);
+-          }
+-          console.log('[MW-Host] Results pushed to legacy queue for', requestId);
+-        } catch (legacyError) {
+-          console.log('[MW-Host] Legacy fallback also failed:', legacyError);
+-        }
++    try {
++      const resultMessage = createResultMessage(requestId, results, nonce, requestEpoch ?? undefined);
++      const posted = await postMessageToWebView(resultMessage as unknown as Record<string, unknown>);
++      if (posted) {
++        console.log('[MW-Host] Results posted via postMessage for', requestId);
++      } else {
++        console.warn('[MW-Host] Results postMessage returned false for', requestId);
+       }
++    } catch (error) {
++      console.log('[MW-Host] Failed to post results via postMessage:', error);
+     }
+     
+     pendingRequestsRef.current.delete(requestId);
+   }, [
+     moderationBridge,
+-    executeScript,
++    postMessageToWebView,
+     debugLog,
+     isDebugMode,
+-    localSettings.blur_strength_px,
+     localSettings.hard_overlay_confidence_threshold,
+     localSettings.soft_overlay_ratio_threshold,
+     localSettings.soft_overlay_min_hits,
+@@ -1106,70 +1084,108 @@ export const NativeWebViewBrowser = () => {
+   ]);
+ 
+   /**
+-   * Handle messages from WebView via window.postMessage
+-   * This is the primary communication channel
++   * Handle messages from WebView via Capgo `messageFromWebview`.
++   * Keep window.postMessage listener as fallback for non-Capgo contexts.
+    */
+   useEffect(() => {
+     if (!ENABLE_SIGNAL_PIPELINE) return;
+-    // Get session nonce from local settings hook
+     const sessionNonce = getNonce();
+-    
+-    const handleMessage = async (event: MessageEvent) => {
+-      const message = event.data;
++
++    const unwrapPayload = (payload: unknown): unknown => {
++      if (!payload || typeof payload !== 'object') return payload;
++      const withDetail = payload as { detail?: unknown };
++      if (typeof withDetail.detail === 'object' && withDetail.detail !== null) {
++        return withDetail.detail;
++      }
++      if (Object.keys(payload).length === 1 && 'detail' in withDetail) {
++        return withDetail.detail;
++      }
++      return payload;
++    };
++
++    const handleIncomingMessage = async (rawPayload: unknown, source: 'capgo' | 'window') => {
++      const message = unwrapPayload(rawPayload);
++      if (!message || typeof message !== 'object') return;
++
++      const typedMessage = message as Record<string, unknown>;
++      if (typedMessage.type === 'MW_INJECTED_ACK') {
++        console.log(
++          '[MW-Host][ACK] MW_INJECTED_ACK',
++          'source=' + source,
++          'navId=' + String(typedMessage.navId ?? 'none'),
++          'pageEpoch=' + String(typedMessage.pageEpoch ?? 'none'),
++          'noncePrefix=' + String(typedMessage.noncePrefix ?? 'none'),
++          'url=' + String(typedMessage.url ?? 'unknown'),
++        );
++        return;
++      }
++      if (typedMessage.type === 'MW_REQ_SENT') {
++        console.log(
++          '[MW-Host][REQ] MW_REQ_SENT',
++          'source=' + source,
++          'requestId=' + String(typedMessage.requestId ?? 'none'),
++          'navId=' + String(typedMessage.navId ?? 'none'),
++          'pageEpoch=' + String(typedMessage.pageEpoch ?? 'none'),
++          'noncePrefix=' + String(typedMessage.noncePrefix ?? 'none'),
++          'items=' + String(typedMessage.itemCount ?? '0'),
++        );
++        return;
++      }
++      if (typedMessage.type === 'MW_REQ_TIMEOUT') {
++        console.warn(
++          '[MW-Host][REQ] MW_REQ_TIMEOUT',
++          'source=' + source,
++          'requestId=' + String(typedMessage.requestId ?? 'none'),
++          'navId=' + String(typedMessage.navId ?? 'none'),
++          'pageEpoch=' + String(typedMessage.pageEpoch ?? 'none'),
++          'noncePrefix=' + String(typedMessage.noncePrefix ?? 'none'),
++          'items=' + String(typedMessage.itemCount ?? '0'),
++        );
++        return;
++      }
+ 
+       if (ENABLE_DOM_BLUR && isBlurOverlayReadyMessage(message)) {
+         blurReadyRef.current = true;
+-        console.log('[MW-Host] Blur overlay READY:', message.reason || 'ready', message.url || '');
++        console.log('[MW-Host] Blur overlay READY:', String(typedMessage.reason || 'ready'), String(typedMessage.url || ''));
+         queueCurrentBlurState('webview_ready_sync');
+         await flushBlurStateToWebView();
+         return;
+       }
+       
+-      // Handle new postMessage protocol with nonce validation
+       if (isValidModerationRequest(message)) {
+-        // Validate nonce
+         if (message.nonce !== sessionNonce) {
+-          console.warn('[MW-Host] NONCE MISMATCH - rejecting request:', message.requestId);
++          console.warn('[MW-Host] NONCE MISMATCH - rejecting request:', message.requestId, 'source=' + source);
+           console.warn('[MW-Host] Expected:', sessionNonce.substring(0, 10), 'Got:', (message.nonce || 'none').substring(0, 10));
+           return;
+         }
+-        console.log('[MW-Host] Received postMessage request:', message.requestId, 'nonce valid');
++        console.log(
++          '[MW-Host] Received moderation request:',
++          message.requestId,
++          'noncePrefix=' + String(message.nonce || '').substring(0, 6),
++          'pageEpoch=' + String(message.pageEpoch ?? 'none'),
++          'source=' + source,
++        );
+         await processModerationRequest(message, message.nonce);
+         return;
+       }
+       
+-      // Handle legacy format (backward compatibility)
+-      if (message?.type === 'gc-moderation-request' && message?.action === 'scan') {
++      if (typedMessage.type === 'gc-moderation-request' && typedMessage.action === 'scan') {
+         console.log('[MW-Host] Received legacy moderation request via postMessage');
+         const result = await moderationBridge.handleWebViewMessage(message);
+         
+-        if (result && executeScript) {
+-          const escapedSrc = escapeForJs(result.src);
+-          const messageId = (result as any).messageId || 0;
+-          const responseScript = `
+-            (function() {
+-              if (window.__GC_MODERATION_RESULT__) {
+-                window.__GC_MODERATION_RESULT__({
+-                  messageId: ${messageId},
+-                  src: '${escapedSrc}',
+-                  shouldBlur: ${result.shouldBlur},
+-                  category: '${result.category}',
+-                  confidence: ${result.confidence}
+-                });
+-              }
+-              window.postMessage({
+-                type: 'gc-moderation-result',
+-                messageId: ${messageId},
+-                src: '${escapedSrc}',
+-                shouldBlur: ${result.shouldBlur},
+-                category: '${result.category}',
+-                confidence: ${result.confidence}
+-              }, '*');
+-            })();
+-          `;
++        if (result) {
++          const rawSrc = String(result.src || '');
++          const messageId = 'messageId' in result && typeof result.messageId === 'number' ? result.messageId : 0;
+           try {
+-            await executeScript(responseScript);
+-            console.log('[MW-Host] Sent legacy moderation result for:', escapedSrc.substring(0, 50));
++            await postMessageToWebView({
++              type: 'gc-moderation-result',
++              messageId,
++              src: rawSrc,
++              shouldBlur: result.shouldBlur,
++              category: result.category,
++              confidence: result.confidence,
++            });
++            console.log('[MW-Host] Sent legacy moderation result for:', rawSrc.substring(0, 50));
+           } catch (error) {
+             console.debug('[MW-Host] Failed to send legacy moderation result:', error);
+           }
+@@ -1177,9 +1193,19 @@ export const NativeWebViewBrowser = () => {
+       }
+     };
+ 
+-    window.addEventListener('message', handleMessage);
+-    return () => window.removeEventListener('message', handleMessage);
+-  }, [ENABLE_SIGNAL_PIPELINE, ENABLE_DOM_BLUR, processModerationRequest, moderationBridge, executeScript, getNonce, queueCurrentBlurState, flushBlurStateToWebView]);
++    messageFromWebViewHandlerRef.current = (payload: unknown) => {
++      void handleIncomingMessage(payload, 'capgo');
++    };
++    const handleWindowMessage = (event: MessageEvent) => {
++      void handleIncomingMessage(event.data, 'window');
++    };
++
++    window.addEventListener('message', handleWindowMessage);
++    return () => {
++      messageFromWebViewHandlerRef.current = null;
++      window.removeEventListener('message', handleWindowMessage);
++    };
++  }, [ENABLE_SIGNAL_PIPELINE, ENABLE_DOM_BLUR, processModerationRequest, moderationBridge, postMessageToWebView, getNonce, queueCurrentBlurState, flushBlurStateToWebView]);
+ 
+   /**
+    * Fallback: Poll for moderation requests from legacy global queue
+diff --git a/src/hooks/useNativeWebView.ts b/src/hooks/useNativeWebView.ts
+index 6838aaf..f0c4206 100644
+--- a/src/hooks/useNativeWebView.ts
++++ b/src/hooks/useNativeWebView.ts
+@@ -1,5 +1,5 @@
+ import { useState, useCallback, useRef, useEffect } from 'react';
+-import { Capacitor } from '@capacitor/core';
++import { Capacitor, type PluginListenerHandle } from '@capacitor/core';
+ import { InAppBrowser, OpenWebViewOptions, ToolBarType, BackgroundColor } from '@capgo/inappbrowser';
+ 
+ export type WebViewEvent = 
+@@ -32,6 +32,7 @@ export interface UseNativeWebViewOptions {
+   onUrlChange?: (url: string) => void;
+   onNavigationRequest?: (url: string) => Promise<boolean> | boolean; // Return false to block navigation
+   onClose?: () => void;
++  onMessageFromWebview?: (payload: unknown) => void;
+ }
+ 
+ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
+@@ -42,6 +43,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
+     onUrlChange,
+     onNavigationRequest,
+     onClose,
++    onMessageFromWebview,
+   } = options;
+ 
+   const [state, setState] = useState<WebViewState>({
+@@ -93,6 +95,8 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
+   useEffect(() => {
+     if (!isNative || listenersSetupRef.current) return;
+     listenersSetupRef.current = true;
++    let messageFromWebviewHandle: PluginListenerHandle | null = null;
++    let disposed = false;
+ 
+     // URL change listener
+     InAppBrowser.addListener('urlChangeEvent', (event) => {
+@@ -176,11 +180,36 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
+       onClose?.();
+     });
+ 
++    void InAppBrowser.addListener('messageFromWebview', (event) => {
++      const payload = (
++        event &&
++        typeof event === 'object' &&
++        'detail' in event &&
++        (event as { detail?: unknown }).detail !== undefined
++      )
++        ? (event as { detail?: unknown }).detail
++        : event;
++      onMessageFromWebview?.(payload);
++    }).then((handle) => {
++      if (disposed) {
++        void handle.remove();
++        return;
++      }
++      messageFromWebviewHandle = handle;
++    }).catch((error) => {
++      console.error('[NativeWebView] Failed to add messageFromWebview listener:', error);
++    });
++
+     return () => {
++      disposed = true;
++      if (messageFromWebviewHandle) {
++        void messageFromWebviewHandle.remove();
++        messageFromWebviewHandle = null;
++      }
+       InAppBrowser.removeAllListeners();
+       listenersSetupRef.current = false;
+     };
+-  }, [isNative, onUrlChange, onLoadEnd, onLoadError, onClose, markClosed]);
++  }, [isNative, onUrlChange, onLoadEnd, onLoadError, onClose, onMessageFromWebview, markClosed]);
+ 
+   // Open URL in native WebView
+   const open = useCallback(async (url: string, inApp: boolean = true) => {
+@@ -367,6 +396,17 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
+     }
+   }, [isNative]);
+ 
++  const postMessageToWebView = useCallback(async (detail: Record<string, unknown>): Promise<boolean> => {
++    if (!isNative) return false;
++    try {
++      await InAppBrowser.postMessage({ detail });
++      return true;
++    } catch (error) {
++      console.error('[NativeWebView] postMessage error:', error);
++      return false;
++    }
++  }, [isNative]);
++
+   // Execute JavaScript in the WebView
+   const executeScript = useCallback(async (script: string): Promise<string | null> => {
+     if (!isNative) return null;
+@@ -434,6 +474,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
+     goForward,
+     reload,
+     setUrl,
++    postMessageToWebView,
+     executeScript,
+   };
+ };
+diff --git a/src/lib/webview-injection-script.ts b/src/lib/webview-injection-script.ts
+index fa6792d..dfb1f65 100644
+--- a/src/lib/webview-injection-script.ts
++++ b/src/lib/webview-injection-script.ts
+@@ -310,6 +310,14 @@ export function generateModerationScript(config: InjectionConfig): string {
+   window.__MW_BLUR_STATE__ = overlayState;
+ 
+   function postToHost(payload) {
++    let delivered = false;
++    try {
++      if (window.mobileApp && typeof window.mobileApp.postMessage === 'function') {
++        window.mobileApp.postMessage({ detail: payload });
++        delivered = true;
++      }
++    } catch (e) {}
++    if (delivered) return;
+     try {
+       window.postMessage(payload, '*');
+     } catch (e) {}
+@@ -320,6 +328,13 @@ export function generateModerationScript(config: InjectionConfig): string {
+     } catch (e) {}
+   }
+ 
++  function readHostEventPayload(eventLike) {
++    if (!eventLike || typeof eventLike !== 'object') return null;
++    if (eventLike.detail && typeof eventLike.detail === 'object') return eventLike.detail;
++    if (eventLike.data && typeof eventLike.data === 'object') return eventLike.data;
++    return null;
++  }
++
+   function ensureOverlayStyle() {
+     if (document.getElementById(OVERLAY_STYLE_ID)) return;
+     const style = document.createElement('style');
+@@ -419,9 +434,11 @@ export function generateModerationScript(config: InjectionConfig): string {
+ 
+   if (!window.__MW_BLUR_LISTENER__) {
+     window.__MW_BLUR_LISTENER__ = true;
+-    window.addEventListener('message', function(event) {
+-      handleBlurCommand(event && event.data ? event.data : null);
+-    });
++    const onBlurCommandEvent = function(event) {
++      handleBlurCommand(readHostEventPayload(event));
++    };
++    window.addEventListener('message', onBlurCommandEvent);
++    window.addEventListener('messageFromNative', onBlurCommandEvent);
+   }
+ 
+   if (!window.__MW_BLUR_NAV_HOOKED__) {
+@@ -531,6 +548,23 @@ export function generateModerationScript(config: InjectionConfig): string {
+   let batchQueue = [];
+   let batchTimer = null;
+   const NAV_ID = window.__MW_NAV_ID__ || ('mw_' + Date.now().toString(36));
++  window.__MW_NAV_ID__ = NAV_ID;
++  const NONCE_PREFIX = String(CONFIG.nonce || '').substring(0, 6);
++  postToHost({
++    type: 'MW_INJECTED_ACK',
++    navId: NAV_ID,
++    pageEpoch: CONFIG.pageEpoch,
++    noncePrefix: NONCE_PREFIX,
++    url: window.location.href,
++    timestamp: Date.now(),
++  });
++  console.log(
++    '[MW][ACK] MW_INJECTED_ACK',
++    'navId=' + NAV_ID,
++    'pageEpoch=' + CONFIG.pageEpoch,
++    'noncePrefix=' + NONCE_PREFIX,
++    'url=' + window.location.href,
++  );
+   const timerState = {
+     legacyResultsInterval: null,
+     urlChangeInterval: null,
+@@ -831,6 +865,9 @@ export function generateModerationScript(config: InjectionConfig): string {
+    */
+   function removeSoftBlur(element, src) {
+     try {
++      const beforeState = element.dataset.mwModerated || '';
++      const beforeFilter = element.style.getPropertyValue('filter') || element.style.filter || '';
++      const beforeHasBlur = beforeFilter.toLowerCase().includes('blur(');
+       if (element.dataset.mwModerated === 'softblur' || element.classList.contains('mw-softblur')) {
+         element.style.filter = 'none';
+         element.dataset.mwModerated = 'safe';
+@@ -840,6 +877,14 @@ export function generateModerationScript(config: InjectionConfig): string {
+           console.log('[MW] soft blur removed (safe):', src.substring(0, 50));
+         }
+       }
++      console.log(
++        '[MW][JSBlur][AutoRemoveCheck]',
++        'src=' + String(src || '').substring(0, 120),
++        'beforeState=' + beforeState,
++        'beforeHasBlur=' + beforeHasBlur,
++        'afterState=' + (element.dataset.mwModerated || ''),
++        'afterFilter=' + (element.style.getPropertyValue('filter') || element.style.filter || '')
++      );
+     } catch (e) {}
+   }
+ 
+@@ -856,22 +901,60 @@ export function generateModerationScript(config: InjectionConfig): string {
+     return label === 'porn' || label === 'hentai';
+   }
+ 
++  function normalizePolicyCategory(label) {
++    return String(label || '').trim().toLowerCase();
++  }
++
+   function isMvpAllowedCategory(label) {
+-    const normalized = normalizeLabel(label);
+-    return FORCE_UNSAFE_CATEGORIES.has(normalized) || isExplicitUnsafeLabel(normalized);
+-  }
+-
+-  function applyFailOpenAndModePolicy(rawShouldBlur, normalizedCategory, predictedLabel, isErrorResult) {
+-    return applyFailOpenAndModePolicyDecision({
+-      rawShouldBlur: !!rawShouldBlur,
+-      normalizedCategory: normalizedCategory || '',
+-      predictedLabel: predictedLabel || '',
+-      isErrorResult: !!isErrorResult,
+-      failClosed: CONFIG.failClosed,
+-      enabled: CONFIG.enabled,
+-      sensitivity: CONFIG.sensitivity,
+-      blockingMode: CONFIG.blockingMode,
+-    });
++    const raw = normalizePolicyCategory(label);
++    return FORCE_UNSAFE_CATEGORIES.has(raw) || isExplicitUnsafeLabel(raw);
++  }
++
++  function applyFailOpenAndModePolicy(rawShouldBlur, rawCategory, predictedLabel, isErrorResult) {
++    const normalizedCategory = normalizePolicyCategory(rawCategory);
++    const normalizedPredicted = normalizePolicyCategory(predictedLabel);
++    const enabledAndActive = CONFIG.enabled && CONFIG.sensitivity > 0;
++
++    if (isErrorResult) {
++      if (CONFIG.failClosed && enabledAndActive) {
++        return { shouldBlur: true, reason: 'failClosed/' + normalizedCategory };
++      }
++      return { shouldBlur: false, reason: 'failOpen/' + normalizedCategory };
++    }
++
++    if (CONFIG.blockingMode === 'mvp') {
++      const categoryAllowed = isMvpAllowedCategory(normalizedCategory);
++      const predictedAllowed = isMvpAllowedCategory(normalizedPredicted);
++      if (!!rawShouldBlur && !categoryAllowed && !predictedAllowed) {
++        return { shouldBlur: false, reason: 'mvp_filter/' + (normalizedCategory || normalizedPredicted || 'unknown') };
++      }
++    }
++
++    return { shouldBlur: !!rawShouldBlur, reason: null };
++  }
++
++  function applyAnatomicalThreshold(shouldApplyBlur, predictedLabel, unsafeScores, forceUnsafe) {
++    const normalizedPredicted = normalizePolicyCategory(predictedLabel);
++    if (!shouldApplyBlur || forceUnsafe) {
++      return { shouldBlur: !!shouldApplyBlur, reason: null };
++    }
++    if (normalizedPredicted !== 'sexy' && normalizedPredicted !== 'porn') {
++      return { shouldBlur: !!shouldApplyBlur, reason: null };
++    }
++
++    const score = normalizedPredicted === 'sexy' ? unsafeScores.sexy : unsafeScores.porn;
++    if (score === null || !Number.isFinite(score)) {
++      if (CONFIG.failClosed && CONFIG.enabled && CONFIG.sensitivity > 0) {
++        return { shouldBlur: true, reason: normalizedPredicted + '_scoreNaN/failClosed' };
++      }
++      return { shouldBlur: false, reason: normalizedPredicted + '_scoreNaN/failOpen' };
++    }
++
++    if (score < CONFIG.anatomicalThreshold) {
++      return { shouldBlur: false, reason: normalizedPredicted + '<anatomicalThreshold' };
++    }
++
++    return { shouldBlur: true, reason: null };
+   }
+ 
+   /**
+@@ -903,6 +986,15 @@ export function generateModerationScript(config: InjectionConfig): string {
+       state.stats.blurred++;
+       
+       createRevealOverlay(element, src, category, itemId);
++      const appliedFilter = element.style.getPropertyValue('filter') || element.style.filter || '';
++      const filterPriority = element.style.getPropertyPriority('filter') || 'none';
++      console.log(
++        '[MW][JSBlur][Apply]',
++        'itemId=' + (itemId || 'N/A'),
++        'src=' + String(src || '').substring(0, 120),
++        'filter=' + appliedFilter,
++        'priority=' + filterPriority
++      );
+       console.log('[MW] applied blur [' + category + '] itemId=' + (itemId || 'N/A') + ':', src.substring(0, 60));
+     } catch (e) {
+       console.error('[MW] Failed to apply blur:', e.message);
+@@ -1013,12 +1105,7 @@ export function generateModerationScript(config: InjectionConfig): string {
+           modelPrediction: { category: category, confidence: null }
+         };
+         console.log('[MW] posting gc-label-request', labelItemId);
+-        window.postMessage(labelRequest, '*');
+-        
+-        // Also post to parent if in iframe
+-        if (window.parent && window.parent !== window) {
+-          try { window.parent.postMessage(labelRequest, '*'); } catch(err) {}
+-        }
++        postToHost(labelRequest);
+         
+         // Show brief correction overlay
+         showCorrectionOverlay(element, src, category, labelItemId);
+@@ -1080,10 +1167,7 @@ export function generateModerationScript(config: InjectionConfig): string {
+           platform: PLATFORM,
+         };
+         console.log('[MW] posting correction feedback:', isCorrect ? 'correct' : 'incorrect');
+-        window.postMessage(correctionEvent, '*');
+-        if (window.parent && window.parent !== window) {
+-          try { window.parent.postMessage(correctionEvent, '*'); } catch(err) {}
+-        }
++        postToHost(correctionEvent);
+         
+         // Remove the overlay
+         correctionDiv.style.opacity = '0';
+@@ -1146,17 +1230,26 @@ export function generateModerationScript(config: InjectionConfig): string {
+     state.stats.requestsSent++;
+     
+     console.log('[MW] request sent', requestId, 'items=' + items.length, items.map(i => i.src.substring(0, 40)));
++    console.log(
++      '[MW][REQ] MW_REQ_SENT',
++      'requestId=' + requestId,
++      'navId=' + NAV_ID,
++      'pageEpoch=' + state.pageEpoch,
++      'noncePrefix=' + NONCE_PREFIX,
++      'items=' + items.length,
++    );
++    postToHost({
++      type: 'MW_REQ_SENT',
++      requestId: requestId,
++      navId: NAV_ID,
++      pageEpoch: state.pageEpoch,
++      noncePrefix: NONCE_PREFIX,
++      itemCount: items.length,
++      timestamp: timestamp,
++    });
+     console.log('[MW] waiting response', requestId, 'ts=' + timestamp);
+     
+-    // Post to parent (host app)
+-    window.postMessage(message, '*');
+-    
+-    // Also try posting to parent window if in iframe
+-    if (window.parent && window.parent !== window) {
+-      try {
+-        window.parent.postMessage(message, '*');
+-      } catch (e) {}
+-    }
++    postToHost(message);
+   }
+ 
+   /**
+@@ -1175,6 +1268,23 @@ export function generateModerationScript(config: InjectionConfig): string {
+     pendingRequest.state = 'timeout';
+     
+     console.log('[MW] timeout', requestId, 'items=' + pendingRequest.items.length);
++    console.warn(
++      '[MW][REQ] MW_REQ_TIMEOUT',
++      'requestId=' + requestId,
++      'navId=' + NAV_ID,
++      'pageEpoch=' + state.pageEpoch,
++      'noncePrefix=' + NONCE_PREFIX,
++      'items=' + pendingRequest.items.length,
++    );
++    postToHost({
++      type: 'MW_REQ_TIMEOUT',
++      requestId: requestId,
++      navId: NAV_ID,
++      pageEpoch: state.pageEpoch,
++      noncePrefix: NONCE_PREFIX,
++      itemCount: pendingRequest.items.length,
++      timestamp: Date.now(),
++    });
+     state.stats.timeouts += pendingRequest.items.length;
+     
+     const timeoutPolicy = applyFailOpenAndModePolicy(false, 'timeout', 'timeout', true);
+@@ -1220,40 +1330,56 @@ export function generateModerationScript(config: InjectionConfig): string {
+    * Implements HIGH-CONFIDENCE BYPASS and ANATOMICAL LOGIC
+    */
+   function handleModerationResult(message) {
+-    const { requestId, results, nonce } = message;
+-    const resultEpoch = Number.isFinite(message.pageEpoch) ? Number(message.pageEpoch) : null;
+-    if (resultEpoch !== null && resultEpoch !== state.pageEpoch) {
+-      state.stats.staleEpochDiscarded++;
+-      if (CONFIG.debug) {
+-        console.log('[MW][Epoch] dropping stale result', 'requestId=' + requestId, 'resultEpoch=' + resultEpoch, 'activeEpoch=' + state.pageEpoch);
++    try {
++      const { requestId, results, nonce } = message;
++      const resultEpoch = Number.isFinite(message.pageEpoch) ? Number(message.pageEpoch) : null;
++      const expectedNoncePrefix = String(CONFIG.nonce || '').substring(0, 6);
++      const receivedNoncePrefix = String(nonce || 'none').substring(0, 6);
++      if (resultEpoch !== null && resultEpoch !== state.pageEpoch) {
++        state.stats.staleEpochDiscarded++;
++        console.warn(
++          '[MW][RejectResult]',
++          'reason=epoch',
++          'requestId=' + requestId,
++          'expectedNonce=' + expectedNoncePrefix,
++          'gotNonce=' + receivedNoncePrefix,
++          'resultEpoch=' + resultEpoch,
++          'activeEpoch=' + state.pageEpoch
++        );
++        return;
+       }
+-      return;
+-    }
+-    
+-    if (!requestId || !Array.isArray(results)) {
+-      console.log('[MW] Invalid result message:', message);
+-      return;
+-    }
+-    
+-    // SECURITY: Validate nonce
+-    if (nonce !== CONFIG.nonce) {
+-      console.warn('[MW] NONCE MISMATCH - rejecting result:', requestId);
+-      console.warn('[MW] Expected:', CONFIG.nonce.substring(0, 10), 'Got:', (nonce || 'none').substring(0, 10));
+-      state.stats.nonceRejected++;
+-      return;
+-    }
+-    
+-    const pendingRequest = state.pendingRequests.get(requestId);
+-    if (pendingRequest) {
+-      clearTimeout(pendingRequest.timeoutId);
+-      pendingRequest.state = 'handled';
+-      state.pendingRequests.delete(requestId);
+-    }
+-    
+-    state.stats.responsesReceived++;
+-    console.log('[MW] received result', requestId, 'count=' + results.length);
+-    
+-    results.forEach(result => {
++      
++      if (!requestId || !Array.isArray(results)) {
++        console.log('[MW] Invalid result message:', message);
++        return;
++      }
++      
++      // SECURITY: Validate nonce
++      if (nonce !== CONFIG.nonce) {
++        state.stats.nonceRejected++;
++        console.warn(
++          '[MW][RejectResult]',
++          'reason=nonce',
++          'requestId=' + requestId,
++          'expectedNonce=' + expectedNoncePrefix,
++          'gotNonce=' + receivedNoncePrefix,
++          'resultEpoch=' + (resultEpoch === null ? 'none' : resultEpoch),
++          'activeEpoch=' + state.pageEpoch
++        );
++        return;
++      }
++      
++      const pendingRequest = state.pendingRequests.get(requestId);
++      if (pendingRequest) {
++        clearTimeout(pendingRequest.timeoutId);
++        pendingRequest.state = 'handled';
++        state.pendingRequests.delete(requestId);
++      }
++      
++      state.stats.responsesReceived++;
++      console.log('[MW] received result', requestId, 'count=' + results.length);
++      
++      results.forEach(result => {
+       const { itemId, src, shouldBlur, category, confidence, reason } = result;
+       const rawPredictions = result && typeof result === 'object'
+         ? (result.predictions || result.scores || result.probabilities || null)
+@@ -1264,6 +1390,7 @@ export function generateModerationScript(config: InjectionConfig): string {
+         const keys = rawPredictions && typeof rawPredictions === 'object' ? Object.keys(rawPredictions) : [];
+         console.log('[MW] prediction keys:', keys.length ? keys.join(',') : '(none)');
+       }
++      const rawCategory = normalizePolicyCategory(category);
+       const normalizedCategory = normalizeLabel(category);
+       const topPrediction = getTopPredictionLabel(normalizedPredictions);
+       const unsafeScores = {
+@@ -1319,7 +1446,7 @@ export function generateModerationScript(config: InjectionConfig): string {
+       // Only maintain blur if Sexy or Porn > 0.60
+       let shouldApplyBlur = shouldBlur;
+       let decisionReason = reason || '';
+-      const forceUnsafe = FORCE_UNSAFE_CATEGORIES.has(normalizeLabel(category));
++      const forceUnsafe = FORCE_UNSAFE_CATEGORIES.has(rawCategory);
+ 
+       // Prefer explicit threshold evaluation when label + score are available.
+       // Directionality: score > threshold => blur.
+@@ -1333,7 +1460,7 @@ export function generateModerationScript(config: InjectionConfig): string {
+         decisionReason = 'host_safe_preserved';
+       } else if (forceUnsafe && shouldBlur) {
+         shouldApplyBlur = true;
+-        decisionReason = 'forceUnsafeCategory/' + normalizeLabel(category);
++        decisionReason = 'forceUnsafeCategory/' + rawCategory;
+       } else if (thresholdComparable) {
+         shouldApplyBlur = !!thresholdHit;
+         decisionReason = thresholdHit ? (predictedLabel + '>=thr') : (predictedLabel + '<thr');
+@@ -1342,17 +1469,12 @@ export function generateModerationScript(config: InjectionConfig): string {
+         decisionReason = 'NaN/default';
+       }
+ 
+-      const anatomicalDecision = applyAnatomicalThresholdDecision({
+-        shouldApplyBlur: shouldApplyBlur,
+-        predictedLabel: predictedLabel || '',
+-        sexyScore: unsafeScores.sexy,
+-        pornScore: unsafeScores.porn,
+-        anatomicalThreshold: CONFIG.anatomicalThreshold,
+-        forceUnsafe: forceUnsafe,
+-        failClosed: CONFIG.failClosed,
+-        enabled: CONFIG.enabled,
+-        sensitivity: CONFIG.sensitivity,
+-      });
++      const anatomicalDecision = applyAnatomicalThreshold(
++        shouldApplyBlur,
++        predictedLabel || '',
++        unsafeScores,
++        forceUnsafe,
++      );
+       shouldApplyBlur = anatomicalDecision.shouldBlur;
+       if (anatomicalDecision.reason) {
+         decisionReason = anatomicalDecision.reason;
+@@ -1363,10 +1485,11 @@ export function generateModerationScript(config: InjectionConfig): string {
+       }
+       
+       // FAIL-OPEN: Handle errors gracefully
+-      const isError = normalizedCategory === 'error' || normalizedCategory === 'timeout' || normalizedCategory === 'error_fail_closed';
++      const errorCategory = rawCategory || normalizedCategory;
++      const isError = errorCategory === 'error' || errorCategory === 'timeout' || errorCategory === 'error_fail_closed';
+       const policyDecision = applyFailOpenAndModePolicy(
+         shouldApplyBlur,
+-        normalizedCategory,
++        rawCategory,
+         predictedLabel,
+         isError
+       );
+@@ -1398,7 +1521,15 @@ export function generateModerationScript(config: InjectionConfig): string {
+       const dims = element ? getElementDimensions(element) : { width: 0, height: 0 };
+       
+       if (element && element.isConnected) {
++        const preDecisionState = element.dataset.mwModerated || '';
++        const preDecisionFilter = element.style.getPropertyValue('filter') || element.style.filter || '';
++        const preDecisionHasBlur = preDecisionFilter.toLowerCase().includes('blur(');
+         if (finalBlur) {
++          console.log(
++            '[MW][JSBlur] applied reason=' + (decisionReason || 'unknown'),
++            'src=' + String(src || '').substring(0, 120),
++            'itemId=' + String(itemId || ''),
++          );
+           clearSafeResolved(src);
+           logBlurTraceOncePerElement({
+             urlPrefix: (src || '').substring(0, 60),
+@@ -1412,6 +1543,16 @@ export function generateModerationScript(config: InjectionConfig): string {
+           // Apply strong blur
+           applyBlur(element, src, predictedLabel || category || 'flagged', CONFIG.blurStrength, itemId);
+         } else {
++          if (preDecisionState === 'blurred' || element.classList.contains('mw-blurred') || preDecisionHasBlur) {
++            console.log(
++              '[MW][JSBlur][SafeOnPreviouslyBlurred]',
++              'itemId=' + (itemId || 'N/A'),
++              'src=' + String(src || '').substring(0, 120),
++              'decisionReason=' + (decisionReason || 'none'),
++              'state=' + preDecisionState,
++              'hasBlurFilter=' + preDecisionHasBlur
++            );
++          }
+           markSafeResolved(src);
+           // Remove soft blur if result is safe
+           removeSoftBlur(element, src);
+@@ -1430,9 +1571,13 @@ export function generateModerationScript(config: InjectionConfig): string {
+         // Remove soft blur from all matching elements
+         findAndRemoveSoftBlur(src);
+       }
+-    });
+-    if (DEBUG_SKIP_DOMAIN_BLUR) {
+-      console.log('[MW] classification counts (kill-switch active):', JSON.stringify(state.stats.classificationCounts), 'blurSkipped=' + state.stats.blurSkippedByKillSwitch);
++      });
++      if (DEBUG_SKIP_DOMAIN_BLUR) {
++        console.log('[MW] classification counts (kill-switch active):', JSON.stringify(state.stats.classificationCounts), 'blurSkipped=' + state.stats.blurSkippedByKillSwitch);
++      }
++    } catch (err) {
++      const message = err && err.message ? err.message : String(err);
++      console.error('[MW][InjectError]', message);
+     }
+   }
+ 
+@@ -1492,14 +1637,16 @@ export function generateModerationScript(config: InjectionConfig): string {
+ 
+   // ==================== MESSAGE LISTENER ====================
+ 
+-  window.addEventListener('message', function(event) {
+-    const message = event.data;
++  const onModerationResultEvent = function(event) {
++    const message = readHostEventPayload(event);
+     if (!message || typeof message !== 'object') return;
+     
+     if (message.type === 'gc-moderation-result') {
+       handleModerationResult(message);
+     }
+-  });
++  };
++  window.addEventListener('message', onModerationResultEvent);
++  window.addEventListener('messageFromNative', onModerationResultEvent);
+ 
+   // ==================== BATCH QUEUE MANAGEMENT ====================
+ 
+@@ -1962,7 +2109,7 @@ export function generateModerationScript(config: InjectionConfig): string {
+     const results = window.__GC_SCAN_RESULTS__.splice(0, window.__GC_SCAN_RESULTS__.length);
+     
+     results.forEach(result => {
+-      const { src, shouldBlur, category, blurStrengthPx, nonce } = result;
++      const { src, shouldBlur, category, blurStrengthPx, nonce, pageEpoch, epoch } = result;
+       
+       // SECURITY: Validate nonce if provided
+       if (nonce && nonce !== CONFIG.nonce) {
+@@ -1974,10 +2121,20 @@ export function generateModerationScript(config: InjectionConfig): string {
+       console.log('[MW] legacy result:', src.substring(0, 50), '-> blur:', shouldBlur, 'cat:', category);
+       
+       state.scanned.add(src);
++      const rawCategory = normalizePolicyCategory(category);
+       const normalizedCategory = normalizeLabel(category);
+-      const isError = normalizedCategory === 'error' || normalizedCategory === 'timeout' || normalizedCategory === 'error_fail_closed';
+-      const policyDecision = applyFailOpenAndModePolicy(!!shouldBlur, normalizedCategory, normalizedCategory, isError);
++      const errorCategory = rawCategory || normalizedCategory;
++      const isError = errorCategory === 'error' || errorCategory === 'timeout' || errorCategory === 'error_fail_closed';
++      const policyDecision = applyFailOpenAndModePolicy(!!shouldBlur, rawCategory, rawCategory, isError);
+       let shouldApplyBlur = CONFIG.forcedBlur || (policyDecision.shouldBlur && CONFIG.enabled && CONFIG.sensitivity > 0);
++      const hasEpoch = Number.isFinite(pageEpoch) || Number.isFinite(epoch);
++      console.log(
++        '[MW][LegacyResult][Decision]',
++        'src=' + String(src || '').substring(0, 120),
++        'applyBlur=' + shouldApplyBlur,
++        'hasNonce=' + (!!nonce),
++        'hasEpoch=' + hasEpoch
++      );
+       if (shouldApplyBlur && isSafeResolvedActive(src)) {
+         shouldApplyBlur = false;
+         if (CONFIG.debug) {
+diff --git a/src/plugins/ContentFilter.ts b/src/plugins/ContentFilter.ts
+index 2a527bb..8076977 100644
+--- a/src/plugins/ContentFilter.ts
++++ b/src/plugins/ContentFilter.ts
+@@ -25,6 +25,7 @@ export interface ContentFilterPlugin {
+   startScanning(options?: {
+     preset?: 'balanced' | 'strict' | 'relaxed';
+     kidMode?: boolean;
++    debug?: boolean;
+     fps?: number;
+     hysteresisOnMs?: number;
+     hysteresisOffMs?: number;
+diff --git a/src/plugins/ModerationBridge.ts b/src/plugins/ModerationBridge.ts
+index 4368bc1..2876a92 100644
+--- a/src/plugins/ModerationBridge.ts
++++ b/src/plugins/ModerationBridge.ts
+@@ -119,7 +119,7 @@ export function calculateCategory(predictions: Record<string, number>): Moderati
+   if (sexy > 0.8) return 'sexy';
+   if (sexy > 0.6) return 'suggestive';
+   if (sexy > 0.4) return 'partial_nudity';
+-  if (sexy > 0.6) return 'swimwear';
++  if (sexy > 0.35) return 'swimwear';
+   
+   // Safe content
+   if (neutral > 0.8) return 'neutral';
+-- 
+2.50.1
+
