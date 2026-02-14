@@ -147,14 +147,271 @@ export const NativeWebViewBrowser = () => {
   const webViewPageEpochRef = useRef(0);
   const ackDiagSeenRef = useRef<Set<string>>(new Set());
   const readyDiagSeenRef = useRef<Set<string>>(new Set());
+  const modernHealthDiagSeenRef = useRef<Set<string>>(new Set());
+  const modernAckRef = useRef<{ at: number; epoch: number | null }>({ at: 0, epoch: null });
+  const modernReadyRef = useRef<{ at: number; epoch: number | null }>({ at: 0, epoch: null });
+  const modernHealthyRef = useRef(false);
+  const modernTransportActiveUntilRef = useRef(0);
+  const modernTransportReasonRef = useRef('none');
+  const legacyPollSuppressedUntilRef = useRef(0);
+  const legacyPollSuppressionReasonRef = useRef('none');
+  const legacyExecBackoffUntilRef = useRef(0);
+  const legacyExecBackoffMsRef = useRef(300);
+  const legacyPollTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const legacyPollOwnerRef = useRef('');
+  const legacyPollGenerationRef = useRef(0);
+  const legacyPollInFlightRef = useRef(false);
+  const legacyExecRecentAtRef = useRef<number[]>([]);
+  const legacyExecCooldownUntilRef = useRef(0);
+  const legacyPollCrashCooldownUntilRef = useRef(0);
+  const legacyLastExecuteAtRef = useRef(0);
+  const crashReinjectTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const crashReinjectEpochRef = useRef<number | null>(null);
+  const [nativeScanProfile, setNativeScanProfile] = useState<'balanced' | 'video_boost'>('balanced');
+  const resultQueueRef = useRef<Array<{
+    requestId: string;
+    payload: Record<string, unknown>;
+    queuedAt: number;
+    attempts: number;
+  }>>([]);
+  const resultQueueFlushTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const resultQueueFlushCountRef = useRef(0);
+  const nativeScanSessionRef = useRef<{
+    running: boolean;
+    profile: 'balanced' | 'video_boost' | null;
+    configKey: string;
+    lastRestartAt: number;
+    pendingRestartTimer: NodeJS.Timeout | null;
+  }>({
+    running: false,
+    profile: null,
+    configKey: '',
+    lastRestartAt: 0,
+    pendingRestartTimer: null,
+  });
+  const videoBoostRef = useRef<{ active: boolean; minHoldTimer: NodeJS.Timeout | null; idleTimer: NodeJS.Timeout | null; lastOnAt: number; lastOffAt: number }>({
+    active: false,
+    minHoldTimer: null,
+    idleTimer: null,
+    lastOnAt: 0,
+    lastOffAt: 0,
+  });
 
   const UNSAFE_STREAK_REQUIRED = 2;
   const SAFE_STREAK_REQUIRED = 2;
+  const MODERN_STALE_MS = 15000;
+  const MODERN_LEGACY_SUPPRESS_MS = 12000;
+  const MODERN_TRANSPORT_SUPPRESS_MS = 18000;
+  const LEGACY_EXEC_BACKOFF_MAX_MS = 4000;
+  const VIDEO_BOOST_FPS = 2.0;
+  const VIDEO_BALANCED_FPS = 1.0;
+  const VIDEO_MIN_ON_MS = 4000;
+  const VIDEO_MIN_OFF_MS = 2500;
+  const VIDEO_IDLE_RESET_MS = 7000;
+  const NATIVE_SCAN_RESTART_DEBOUNCE_MS = 3500;
   const isDebugMode = localSettings.debug_mode === true;
   const debugLog = useCallback((...args: unknown[]) => {
     if (!isDebugMode) return;
     console.log(...args);
   }, [isDebugMode]);
+
+  const normalizeShouldBlur = useCallback((value: unknown): boolean => {
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'number') return value === 1;
+    if (typeof value === 'string') {
+      const lowered = value.trim().toLowerCase();
+      return lowered === '1' || lowered === 'true';
+    }
+    return false;
+  }, []);
+
+  const normalizeSeverity = useCallback((severity: unknown, category: string): ModerationSeverity => {
+    const normalized = String(severity || '').trim().toLowerCase();
+    if (normalized === 'hard' || normalized === 'soft' || normalized === 'safe') {
+      return normalized as ModerationSeverity;
+    }
+    return mapModerationCategoryToSeverity(category);
+  }, []);
+
+  const markModernTransportActive = useCallback((reason: string, sourceEpoch?: number) => {
+    const now = Date.now();
+    const activeEpoch = webViewPageEpochRef.current;
+    if (Number.isFinite(sourceEpoch) && Number(sourceEpoch) !== activeEpoch) return;
+    modernTransportActiveUntilRef.current = Math.max(
+      modernTransportActiveUntilRef.current,
+      now + MODERN_TRANSPORT_SUPPRESS_MS,
+    );
+    modernTransportReasonRef.current = reason;
+    legacyPollSuppressedUntilRef.current = Math.max(
+      legacyPollSuppressedUntilRef.current,
+      modernTransportActiveUntilRef.current,
+    );
+    legacyPollSuppressionReasonRef.current = 'modern_transport:' + reason;
+    if (isDebugMode) {
+      console.log(
+        '[MW-DIAG][HOST][ModernTransport]',
+        'activeUntil=' + modernTransportActiveUntilRef.current,
+        'reason=' + modernTransportReasonRef.current,
+      );
+    }
+  }, [MODERN_TRANSPORT_SUPPRESS_MS, isDebugMode]);
+
+  const resetModernHealthForNavigation = useCallback((reason: string) => {
+    modernAckRef.current = { at: 0, epoch: null };
+    modernReadyRef.current = { at: 0, epoch: null };
+    modernHealthyRef.current = false;
+    modernTransportActiveUntilRef.current = 0;
+    modernTransportReasonRef.current = reason;
+    legacyPollSuppressedUntilRef.current = 0;
+    legacyPollSuppressionReasonRef.current = reason;
+    legacyExecBackoffUntilRef.current = 0;
+    legacyExecBackoffMsRef.current = 300;
+    if (legacyPollTimerRef.current) {
+      clearTimeout(legacyPollTimerRef.current);
+      legacyPollTimerRef.current = null;
+    }
+    legacyPollOwnerRef.current = '';
+    legacyPollInFlightRef.current = false;
+    legacyExecRecentAtRef.current = [];
+    legacyExecCooldownUntilRef.current = 0;
+    legacyPollCrashCooldownUntilRef.current = 0;
+    legacyLastExecuteAtRef.current = 0;
+    crashReinjectEpochRef.current = null;
+    if (crashReinjectTimerRef.current) {
+      clearTimeout(crashReinjectTimerRef.current);
+      crashReinjectTimerRef.current = null;
+    }
+    if (resultQueueFlushTimerRef.current) {
+      clearTimeout(resultQueueFlushTimerRef.current);
+      resultQueueFlushTimerRef.current = null;
+    }
+    resultQueueRef.current = [];
+    resultQueueFlushCountRef.current = 0;
+  }, []);
+
+  const evaluateModernHealth = useCallback((reason: string) => {
+    const now = Date.now();
+    const activeNavId = activeNavIdRef.current;
+    const activeEpoch = webViewPageEpochRef.current;
+    const ack = modernAckRef.current;
+    const ready = modernReadyRef.current;
+    const ackAgeMs = ack.at > 0 ? now - ack.at : -1;
+    const readyAgeMs = ready.at > 0 ? now - ready.at : -1;
+    const ackFresh = ack.epoch === activeEpoch && ackAgeMs >= 0 && ackAgeMs <= MODERN_STALE_MS;
+    const readyFresh = ready.epoch === activeEpoch && readyAgeMs >= 0 && readyAgeMs <= MODERN_STALE_MS;
+    const transportActive = now < modernTransportActiveUntilRef.current;
+    const nextHealthy = ackFresh && readyFresh;
+    const prevHealthy = modernHealthyRef.current;
+
+    modernHealthyRef.current = nextHealthy;
+    if (nextHealthy || transportActive) {
+      const suppressUntil = nextHealthy
+        ? now + MODERN_LEGACY_SUPPRESS_MS
+        : modernTransportActiveUntilRef.current;
+      legacyPollSuppressedUntilRef.current = Math.max(
+        legacyPollSuppressedUntilRef.current,
+        suppressUntil,
+      );
+      legacyPollSuppressionReasonRef.current = nextHealthy ? reason : ('modern_transport:' + modernTransportReasonRef.current);
+    } else if (prevHealthy && !nextHealthy && !transportActive) {
+      legacyPollSuppressedUntilRef.current = 0;
+      legacyPollSuppressionReasonRef.current = reason;
+    }
+
+    const diagKey = activeNavId + '|' + activeEpoch;
+    const hasSignalAges = ackAgeMs >= 0 || readyAgeMs >= 0;
+    if (isDebugMode && hasSignalAges && !modernHealthDiagSeenRef.current.has(diagKey)) {
+      modernHealthDiagSeenRef.current.add(diagKey);
+      console.log(
+        '[MW-DIAG][HOST][ModernHealth]',
+        'activeNavId=' + activeNavId,
+        'activePageEpoch=' + activeEpoch,
+        'ackAgeMs=' + ackAgeMs,
+        'readyAgeMs=' + readyAgeMs,
+        'transportActive=' + transportActive,
+        'transportUntil=' + modernTransportActiveUntilRef.current,
+        'modernHealthy=' + nextHealthy,
+        'legacyPollingSuppressedUntil=' + legacyPollSuppressedUntilRef.current,
+        'reason=' + legacyPollSuppressionReasonRef.current,
+      );
+    }
+  }, [MODERN_STALE_MS, MODERN_LEGACY_SUPPRESS_MS, isDebugMode]);
+
+  const clearVideoBoostTimers = useCallback(() => {
+    if (videoBoostRef.current.minHoldTimer) {
+      clearTimeout(videoBoostRef.current.minHoldTimer);
+      videoBoostRef.current.minHoldTimer = null;
+    }
+    if (videoBoostRef.current.idleTimer) {
+      clearTimeout(videoBoostRef.current.idleTimer);
+      videoBoostRef.current.idleTimer = null;
+    }
+  }, []);
+
+  const setVideoBoost = useCallback((enabled: boolean, reason: string) => {
+    clearVideoBoostTimers();
+    const now = Date.now();
+    const active = videoBoostRef.current.active;
+    if (enabled) {
+      if (active) {
+        videoBoostRef.current.idleTimer = setTimeout(() => {
+          setVideoBoost(false, 'idle_timeout');
+        }, VIDEO_IDLE_RESET_MS);
+        return;
+      }
+      const sinceOff = now - videoBoostRef.current.lastOffAt;
+      const waitMs = Math.max(0, VIDEO_MIN_OFF_MS - Math.max(sinceOff, 0));
+      if (waitMs > 0) {
+        videoBoostRef.current.minHoldTimer = setTimeout(() => {
+          setVideoBoost(true, 'min_off_elapsed');
+        }, waitMs);
+        return;
+      }
+      videoBoostRef.current.active = true;
+      videoBoostRef.current.lastOnAt = now;
+      setNativeScanProfile(prev => {
+        if (prev === 'video_boost') {
+          console.log('[MW-Host][VideoBoost] suppressed', 'reason=same_config', 'profile=video_boost');
+          return prev;
+        }
+        return 'video_boost';
+      });
+      console.log('[MW-Host][VideoBoost] on', 'fps=' + VIDEO_BOOST_FPS, 'preset=strict', 'reason=' + reason);
+      videoBoostRef.current.idleTimer = setTimeout(() => {
+        setVideoBoost(false, 'idle_timeout');
+      }, VIDEO_IDLE_RESET_MS);
+      return;
+    }
+
+    if (!active) {
+      setNativeScanProfile(prev => {
+        if (prev === 'balanced') {
+          console.log('[MW-Host][VideoBoost] suppressed', 'reason=same_config', 'profile=balanced');
+          return prev;
+        }
+        return 'balanced';
+      });
+      return;
+    }
+    const sinceOn = now - videoBoostRef.current.lastOnAt;
+    const waitMs = Math.max(0, VIDEO_MIN_ON_MS - Math.max(sinceOn, 0));
+    if (waitMs > 0) {
+      videoBoostRef.current.minHoldTimer = setTimeout(() => {
+        setVideoBoost(false, 'min_on_elapsed');
+      }, waitMs);
+      return;
+    }
+    videoBoostRef.current.active = false;
+    videoBoostRef.current.lastOffAt = now;
+    setNativeScanProfile(prev => {
+      if (prev === 'balanced') {
+        console.log('[MW-Host][VideoBoost] suppressed', 'reason=same_config', 'profile=balanced');
+        return prev;
+      }
+      return 'balanced';
+    });
+    console.log('[MW-Host][VideoBoost] off', 'fps=' + VIDEO_BALANCED_FPS, 'preset=balanced', 'reason=' + reason);
+  }, [VIDEO_BALANCED_FPS, VIDEO_BOOST_FPS, VIDEO_IDLE_RESET_MS, VIDEO_MIN_OFF_MS, VIDEO_MIN_ON_MS, clearVideoBoostTimers]);
 
   const queueCurrentBlurState = useCallback((reason: string) => {
     blurPendingRef.current = {
@@ -346,13 +603,15 @@ export const NativeWebViewBrowser = () => {
     navigationSeqRef.current += 1;
     activeNavIdRef.current = navigationSeqRef.current;
     webViewPageEpochRef.current = activeNavIdRef.current;
+    resetModernHealthForNavigation('nav:' + reason);
+    setVideoBoost(false, 'navigation_change');
     console.log(
       '[MW-Inject][Nav]',
       'navId=' + activeNavIdRef.current,
       'reason=' + reason,
       'targetUrl=' + (url || 'unknown'),
     );
-  }, []);
+  }, [resetModernHealthForNavigation, setVideoBoost]);
 
   const injectModerationScript = useCallback(async (
     scriptExecutor: (script: string) => Promise<string | null>,
@@ -446,6 +705,7 @@ export const NativeWebViewBrowser = () => {
       injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
       blurReadyRef.current = false;
+      resetModernHealthForNavigation('load_start');
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       setCentralBlurState(false, 'navigation_load_start');
     },
@@ -489,6 +749,68 @@ export const NativeWebViewBrowser = () => {
       console.error('[Browser] Error:', error);
       setIsLoading(false);
       clearLoadEndInjectTimer();
+      const loweredError = String(error || '').toLowerCase();
+      const crashSignal =
+        loweredError.includes('pageloaderror') ||
+        loweredError.includes('webprocess') ||
+        loweredError.includes('web process') ||
+        loweredError.includes('terminated') ||
+        loweredError.includes('crash');
+      if (crashSignal) {
+        modernHealthyRef.current = false;
+        modernAckRef.current = { at: 0, epoch: webViewPageEpochRef.current };
+        modernReadyRef.current = { at: 0, epoch: webViewPageEpochRef.current };
+        legacyPollSuppressedUntilRef.current = 0;
+        legacyPollSuppressionReasonRef.current = 'webprocess_crash';
+        const crashCooldownUntil = Date.now() + 5000;
+        legacyExecBackoffUntilRef.current = crashCooldownUntil;
+        legacyExecCooldownUntilRef.current = crashCooldownUntil;
+        legacyPollCrashCooldownUntilRef.current = crashCooldownUntil;
+        legacyPollInFlightRef.current = false;
+        legacyExecRecentAtRef.current = [];
+        legacyLastExecuteAtRef.current = 0;
+        if (legacyPollTimerRef.current) {
+          clearTimeout(legacyPollTimerRef.current);
+          legacyPollTimerRef.current = null;
+          console.log(
+            '[MW-Host][Timer] stop',
+            'name=legacyPollTimer',
+            'navId=' + activeNavIdRef.current,
+            'url=' + (url || 'unknown'),
+            'reason=webprocess_crash',
+          );
+        }
+        legacyPollOwnerRef.current = '';
+        injectionDoneRef.current = false;
+        injectionInFlightRef.current = false;
+        blurReadyRef.current = false;
+        if (crashReinjectTimerRef.current) {
+          clearTimeout(crashReinjectTimerRef.current);
+          crashReinjectTimerRef.current = null;
+        }
+        if (crashReinjectEpochRef.current !== webViewPageEpochRef.current) {
+          crashReinjectEpochRef.current = webViewPageEpochRef.current;
+          const backoffMs = 900;
+          crashReinjectTimerRef.current = setTimeout(() => {
+            crashReinjectTimerRef.current = null;
+            if (!executeScript || !webViewState.isOpen) return;
+            injectModerationScript(executeScript, 'webprocess_crash_reinject', url).catch(() => undefined);
+            evaluateModernHealth('webprocess_crash_reinject');
+            console.log(
+              '[MW-Host][CrashRecovery] reinject_attempt',
+              'activeNavId=' + activeNavIdRef.current,
+              'activePageEpoch=' + webViewPageEpochRef.current,
+              'backoffMs=' + backoffMs,
+            );
+          }, backoffMs);
+          console.log(
+            '[MW-Host][CrashRecovery] detected',
+            'activeNavId=' + activeNavIdRef.current,
+            'activePageEpoch=' + webViewPageEpochRef.current,
+            'action=single_reinject_scheduled',
+          );
+        }
+      }
       injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
       setFallbackUrl(url);
@@ -505,6 +827,7 @@ export const NativeWebViewBrowser = () => {
       injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
       blurReadyRef.current = false;
+      resetModernHealthForNavigation('url_change');
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       setCentralBlurState(false, 'url_change_safe_reset');
     },
@@ -518,6 +841,8 @@ export const NativeWebViewBrowser = () => {
       injectionInFlightRef.current = false;
       blurReadyRef.current = false;
       blurPendingRef.current = null;
+      resetModernHealthForNavigation('webview_closed');
+      setVideoBoost(false, 'webview_closed');
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       setCentralBlurState(false, 'webview_closed');
       navigate('home', '', '');
@@ -556,7 +881,23 @@ export const NativeWebViewBrowser = () => {
     );
   }, [isNative, executeScript, webViewState.currentUrl]);
 
-  useEffect(() => {
+  const stopNativeScanSession = useCallback((reason: string) => {
+    const session = nativeScanSessionRef.current;
+    if (session.pendingRestartTimer) {
+      clearTimeout(session.pendingRestartTimer);
+      session.pendingRestartTimer = null;
+    }
+    riskDecisionListenerRef.current?.remove();
+    riskDecisionListenerRef.current = null;
+    if (!session.running) return;
+    session.running = false;
+    session.profile = null;
+    session.configKey = '';
+    console.log('[MW][NativeScan] stop', 'reason=' + reason);
+    stopNativeContentFilter().catch(() => undefined);
+  }, []);
+
+  const syncNativeScanSession = useCallback(async (reason: string) => {
     const moderationEnabled = isModerationEnabled();
     const gate =
       settingsLoaded &&
@@ -567,73 +908,87 @@ export const NativeWebViewBrowser = () => {
       localSettings.blur_dial > 0;
 
     if (!gate) {
-      console.log(
-            '[MW][NativeScan] stop gate=' +
-          JSON.stringify({
-            settingsLoaded,
-            isNative,
-            webViewOpen: webViewState.isOpen,
-            moderationEnabled,
-            shieldActive: localSettings.shield_active,
-            blurDialActive: localSettings.blur_dial > 0,
-          }),
-      );
-      riskDecisionListenerRef.current?.remove();
-      riskDecisionListenerRef.current = null;
-      stopNativeContentFilter().catch(() => undefined);
+      stopNativeScanSession('gate_false:' + reason);
       return;
     }
 
-    let cancelled = false;
-    const attach = async () => {
-      try {
-        console.log(
-          '[MW][NativeScan] start gate=' +
-            JSON.stringify({
-              settingsLoaded,
-              isNative,
-              webViewOpen: webViewState.isOpen,
-              moderationEnabled,
-              shieldActive: localSettings.shield_active,
-              blurDialActive: localSettings.blur_dial > 0,
-            }),
-        );
-        const startPayload = await startNativeContentFilter({
-          preset: 'balanced',
-          kidMode: false,
-          debug: isDebugMode,
-          fps: 1.0,
-          allowRevealDuringHardBlur: false,
-        });
-        console.debug('[ContentFilter] startScanning resolved', startPayload);
-        if (cancelled) return;
-        riskDecisionListenerRef.current = await onNativeRiskDecision((decision) => {
-          console.debug('[ContentFilter] decision', decision.state, decision.riskScore);
-        });
-      } catch (error) {
-        console.debug('[ContentFilter] setup failed', error);
-      }
-    };
-    attach();
+    const desiredPreset = nativeScanProfile === 'video_boost' ? 'strict' : 'balanced';
+    const desiredFps = nativeScanProfile === 'video_boost' ? VIDEO_BOOST_FPS : VIDEO_BALANCED_FPS;
+    const desiredConfigKey = `${desiredPreset}|${desiredFps}|${isDebugMode ? 1 : 0}`;
+    const session = nativeScanSessionRef.current;
 
-    return () => {
-      cancelled = true;
-      console.log(
-        '[MW][NativeScan] stop gate=' +
-          JSON.stringify({
-            settingsLoaded,
-            isNative,
-            webViewOpen: webViewState.isOpen,
-            moderationEnabled,
-            shieldActive: localSettings.shield_active,
-            blurDialActive: localSettings.blur_dial > 0,
-          }),
-      );
+    if (session.running && session.configKey === desiredConfigKey) {
+      console.log('[MW-Host][VideoBoost] suppressed', 'reason=same_config', 'config=' + desiredConfigKey);
+      return;
+    }
+
+    const now = Date.now();
+    const sinceRestartMs = now - session.lastRestartAt;
+    if (session.running && sinceRestartMs < NATIVE_SCAN_RESTART_DEBOUNCE_MS) {
+      const waitMs = Math.max(50, NATIVE_SCAN_RESTART_DEBOUNCE_MS - sinceRestartMs);
+      if (!session.pendingRestartTimer) {
+        session.pendingRestartTimer = setTimeout(() => {
+          nativeScanSessionRef.current.pendingRestartTimer = null;
+          syncNativeScanSession('debounce_flush').catch(() => undefined);
+        }, waitMs);
+      }
+      console.log('[MW-Host][VideoBoost] suppressed', 'reason=debounce', 'waitMs=' + waitMs, 'config=' + desiredConfigKey);
+      return;
+    }
+
+    if (session.running) {
       riskDecisionListenerRef.current?.remove();
       riskDecisionListenerRef.current = null;
-      stopNativeContentFilter().catch(() => undefined);
+      await stopNativeContentFilter().catch(() => undefined);
+      session.running = false;
+      session.profile = null;
+      session.configKey = '';
+    }
+
+    try {
+      console.log('[MW][NativeScan] start', 'reason=' + reason, 'preset=' + desiredPreset, 'fps=' + desiredFps);
+      const startPayload = await startNativeContentFilter({
+        preset: desiredPreset,
+        kidMode: false,
+        debug: isDebugMode,
+        fps: desiredFps,
+        allowRevealDuringHardBlur: false,
+      });
+      console.debug('[ContentFilter] startScanning resolved', startPayload);
+      riskDecisionListenerRef.current = await onNativeRiskDecision((decision) => {
+        console.debug('[ContentFilter] decision', decision.state, decision.riskScore);
+      });
+      session.running = true;
+      session.profile = nativeScanProfile;
+      session.configKey = desiredConfigKey;
+      session.lastRestartAt = Date.now();
+    } catch (error) {
+      console.debug('[ContentFilter] setup failed', error);
+    }
+  }, [
+    settingsLoaded,
+    isNative,
+    webViewState.isOpen,
+    isModerationEnabled,
+    localSettings.shield_active,
+    localSettings.blur_dial,
+    nativeScanProfile,
+    VIDEO_BOOST_FPS,
+    VIDEO_BALANCED_FPS,
+    isDebugMode,
+    NATIVE_SCAN_RESTART_DEBOUNCE_MS,
+    stopNativeScanSession,
+  ]);
+
+  useEffect(() => {
+    syncNativeScanSession('state_change').catch(() => undefined);
+  }, [syncNativeScanSession]);
+
+  useEffect(() => {
+    return () => {
+      stopNativeScanSession('effect_unmount');
     };
-  }, [settingsLoaded, isNative, webViewState.isOpen, debugLog, isDebugMode, isModerationEnabled, localSettings.shield_active, localSettings.blur_dial, localSettings.blocking_mode]);
+  }, [stopNativeScanSession]);
 
   const requestBlurHandshake = useCallback(async (source: string) => {
     if (!ENABLE_DOM_BLUR) return;
@@ -799,8 +1154,13 @@ export const NativeWebViewBrowser = () => {
       if (blurRetryTimerRef.current) {
         clearTimeout(blurRetryTimerRef.current);
       }
+      if (crashReinjectTimerRef.current) {
+        clearTimeout(crashReinjectTimerRef.current);
+        crashReinjectTimerRef.current = null;
+      }
+      clearVideoBoostTimers();
     };
-  }, [clearLoadEndInjectTimer]);
+  }, [clearLoadEndInjectTimer, clearVideoBoostTimers]);
 
   // ==================== MODERATION MESSAGE HANDLING ====================
   // 
@@ -812,6 +1172,93 @@ export const NativeWebViewBrowser = () => {
   // ==================== 
 
   const pendingRequestsRef = useRef<Set<string>>(new Set());
+  const flushQueuedResultMessages = useCallback(async (reason: string) => {
+    if (resultQueueRef.current.length === 0) return;
+    const pending = [...resultQueueRef.current];
+    resultQueueRef.current = [];
+    let delivered = 0;
+    let failed = 0;
+
+    for (const entry of pending) {
+      try {
+        const posted = await postMessageToWebView(entry.payload);
+        if (posted) {
+          delivered += 1;
+          markModernTransportActive('result_queue_flush', Number(entry.payload.pageEpoch));
+        } else {
+          failed += 1;
+          entry.attempts += 1;
+          resultQueueRef.current.push(entry);
+        }
+      } catch {
+        failed += 1;
+        entry.attempts += 1;
+        resultQueueRef.current.push(entry);
+      }
+    }
+
+    resultQueueFlushCountRef.current += 1;
+    console.log(
+      '[MW-Host][ResultQueue] flush',
+      'reason=' + reason,
+      'flushCount=' + resultQueueFlushCountRef.current,
+      'attempted=' + pending.length,
+      'delivered=' + delivered,
+      'failed=' + failed,
+      'queuedResultsCount=' + resultQueueRef.current.length,
+    );
+
+    if (resultQueueRef.current.length > 0 && !resultQueueFlushTimerRef.current) {
+      resultQueueFlushTimerRef.current = setTimeout(() => {
+        resultQueueFlushTimerRef.current = null;
+        flushQueuedResultMessages('retry_timer').catch(() => undefined);
+      }, 250);
+    }
+  }, [postMessageToWebView, markModernTransportActive]);
+
+  const scheduleResultQueueFlush = useCallback((reason: string) => {
+    if (resultQueueFlushTimerRef.current) return;
+    resultQueueFlushTimerRef.current = setTimeout(() => {
+      resultQueueFlushTimerRef.current = null;
+      flushQueuedResultMessages(reason).catch(() => undefined);
+    }, 100);
+  }, [flushQueuedResultMessages]);
+
+  const postModerationResultToWebView = useCallback(async (
+    requestId: string,
+    payload: Record<string, unknown>,
+    requestEpoch: number | null,
+  ) => {
+    try {
+      const posted = await postMessageToWebView(payload);
+      console.log(
+        '[MW-Host][ResultDelivery]',
+        'requestId=' + requestId,
+        'delivered_to_js=' + posted,
+        'queuedResultsCount=' + resultQueueRef.current.length,
+      );
+      if (posted) {
+        markModernTransportActive('result_posted', requestEpoch ?? undefined);
+        return true;
+      }
+    } catch (error) {
+      console.log('[MW-Host] Failed to post results via postMessage:', error);
+    }
+
+    resultQueueRef.current.push({
+      requestId,
+      payload,
+      queuedAt: Date.now(),
+      attempts: 1,
+    });
+    console.warn(
+      '[MW-Host][ResultQueue] queued',
+      'requestId=' + requestId,
+      'queuedResultsCount=' + resultQueueRef.current.length,
+    );
+    scheduleResultQueueFlush('delivery_failed');
+    return false;
+  }, [postMessageToWebView, markModernTransportActive, scheduleResultQueueFlush]);
   
   /**
    * Process a moderation request from the WebView
@@ -885,16 +1332,18 @@ export const NativeWebViewBrowser = () => {
             return label.toLowerCase() === scanResult.category.toLowerCase() ? value : -1;
           }, -1);
           const effectiveConfidence = categoryConfidence >= 0 ? categoryConfidence : scanResult.confidence;
+          const normalizedShouldBlur = normalizeShouldBlur(scanResult.shouldBlur);
+          const normalizedSeverity = normalizeSeverity(scanResult.severity, scanResult.category);
           results.push({
             itemId: item.itemId,
             src: item.src,
-            shouldBlur: scanResult.shouldBlur,
+            shouldBlur: normalizedShouldBlur,
             category: scanResult.category,
             confidence: effectiveConfidence,
-            severity: scanResult.severity || mapModerationCategoryToSeverity(scanResult.category),
+            severity: normalizedSeverity,
             predictions: scanResult.predictions,
           });
-          console.log('[MW-Host] scan result', item.itemId, ':', scanResult.category, 'blur=' + scanResult.shouldBlur, 'conf=' + effectiveConfidence.toFixed(3));
+          console.log('[MW-Host] scan result', item.itemId, ':', scanResult.category, 'blur=' + normalizedShouldBlur, 'conf=' + effectiveConfidence.toFixed(3), 'severity=' + normalizedSeverity);
         } else {
           const shouldBlurOnFailure = localSettings.fail_closed === true;
           results.push({
@@ -983,16 +1432,29 @@ export const NativeWebViewBrowser = () => {
     const denominator = eligibleResults.length > 0 ? eligibleResults.length : results.length;
     const tinyExcludedCount = Math.max(results.length - eligibleResults.length, 0);
 
-    const hardResults = eligibleResults.filter(item => item.shouldBlur && item.severity === 'hard');
+    const normalizedResults = eligibleResults.map((item) => {
+      const normalizedShouldBlur = normalizeShouldBlur(item.shouldBlur);
+      const normalizedSeverity = normalizeSeverity(item.severity, item.category);
+      return {
+        ...item,
+        shouldBlur: normalizedShouldBlur,
+        severity: normalizedSeverity,
+      };
+    });
+
+    const hardResults = normalizedResults.filter(item => item.shouldBlur && item.severity === 'hard');
     const hardStrongHits = hardResults.filter(item => item.confidence >= hardConfThreshold);
     const hardLowHits = hardResults.filter(item => item.confidence >= modePolicy.hardMultiConfFloor);
+    const hardAnyHits = hardResults.length;
     const hardUnsafeMaxConf = hardResults.reduce((max, item) => Math.max(max, item.confidence), 0);
 
-    const softResults = eligibleResults.filter(item => item.shouldBlur && item.severity === 'soft');
+    const softResults = normalizedResults.filter(item => item.shouldBlur && item.severity === 'soft');
     const softQualifiedHits = softResults.filter(item => item.confidence >= softConfidenceFloor);
     const softRatio = denominator > 0 ? softQualifiedHits.length / denominator : 0;
 
     const hardOverlayDecision =
+      hardAnyHits > 0 ||
+      hardUnsafeMaxConf >= hardConfThreshold ||
       hardStrongHits.length >= 1 ||
       hardLowHits.length >= modePolicy.hardMultiMinHits;
     const softOverlayDecision =
@@ -1002,7 +1464,11 @@ export const NativeWebViewBrowser = () => {
 
     let overlayDecision = hardOverlayDecision;
     let decisionReason = 'no_hard_signal';
-    if (hardStrongHits.length > 0) {
+    if (hardAnyHits > 0) {
+      decisionReason = 'hard_signal_present';
+    } else if (hardUnsafeMaxConf >= hardConfThreshold) {
+      decisionReason = 'hard_threshold_hit';
+    } else if (hardStrongHits.length > 0) {
       decisionReason = 'hard_confidence_hit';
     } else if (hardLowHits.length >= modePolicy.hardMultiMinHits) {
       decisionReason = 'hard_multi_hit';
@@ -1021,7 +1487,16 @@ export const NativeWebViewBrowser = () => {
         }
       })();
       console.log(
-        `[MW-Host][ScanSummary] url=${shortUrl} req=${requestId} total=${results.length} eligible=${denominator} tinyExcluded=${tinyExcludedCount} hardHits=${hardStrongHits.length} softHits=${softQualifiedHits.length} safeHits=${Math.max(denominator - hardStrongHits.length - softQualifiedHits.length, 0)} hardMax=${hardUnsafeMaxConf.toFixed(3)} softMax=${softQualifiedHits.reduce((max, item) => Math.max(max, item.confidence), 0).toFixed(3)} softRatio=${softRatio.toFixed(3)} mode=${blurMode} decision=${overlayDecision ? 'ON' : 'OFF'} reason=${decisionReason}`
+        `[MW-Host][ScanSummary] url=${shortUrl} req=${requestId} total=${results.length} eligible=${denominator} tinyExcluded=${tinyExcludedCount} hardHits=${hardAnyHits} hardStrongHits=${hardStrongHits.length} softHits=${softQualifiedHits.length} safeHits=${Math.max(denominator - hardAnyHits - softQualifiedHits.length, 0)} hardMax=${hardUnsafeMaxConf.toFixed(3)} softMax=${softQualifiedHits.reduce((max, item) => Math.max(max, item.confidence), 0).toFixed(3)} softRatio=${softRatio.toFixed(3)} anyHard=${hardAnyHits > 0} mode=${blurMode} decision=${overlayDecision ? 'ON' : 'OFF'} reason=${decisionReason}`
+      );
+      console.log(
+        '[MW-DIAG][HOST][NormalizedSummary]',
+        'req=' + requestId,
+        'hardHits=' + hardAnyHits,
+        'hardMax=' + hardUnsafeMaxConf.toFixed(3),
+        'anyHard=' + (hardAnyHits > 0),
+        'decision=' + (overlayDecision ? 'ON' : 'OFF'),
+        'reason=' + decisionReason,
       );
     }
 
@@ -1112,6 +1587,7 @@ export const NativeWebViewBrowser = () => {
       const typedMessage = message as Record<string, unknown>;
       if (typedMessage.type === 'MW_INJECTED_ACK') {
         const ackNavId = String(typedMessage.navId ?? 'none');
+        const ackEpochNum = Number(typedMessage.pageEpoch);
         const ackEpoch = String(typedMessage.pageEpoch ?? 'none');
         const ackKey = ackNavId + '|' + ackEpoch;
         if (isDebugMode && !ackDiagSeenRef.current.has(ackKey)) {
@@ -1132,6 +1608,10 @@ export const NativeWebViewBrowser = () => {
           'noncePrefix=' + String(typedMessage.noncePrefix ?? 'none'),
           'url=' + String(typedMessage.url ?? 'unknown'),
         );
+        if (Number.isFinite(ackEpochNum) && ackEpochNum === webViewPageEpochRef.current) {
+          modernAckRef.current = { at: Date.now(), epoch: ackEpochNum };
+          evaluateModernHealth('ack_active_epoch');
+        }
         return;
       }
       if (typedMessage.type === 'MW_REQ_SENT') {
@@ -1159,7 +1639,12 @@ export const NativeWebViewBrowser = () => {
         return;
       }
 
-      if (ENABLE_DOM_BLUR && isBlurOverlayReadyMessage(message)) {
+      if (isBlurOverlayReadyMessage(message)) {
+        const readyEpochNum = Number(typedMessage.pageEpoch);
+        if (Number.isFinite(readyEpochNum) && readyEpochNum === webViewPageEpochRef.current) {
+          modernReadyRef.current = { at: Date.now(), epoch: readyEpochNum };
+          evaluateModernHealth('ready_active_epoch');
+        }
         const readyNavId = String(activeNavIdRef.current || 'none');
         const readyEpoch = String(webViewPageEpochRef.current || 'none');
         const readyKey = readyNavId + '|' + readyEpoch;
@@ -1173,10 +1658,22 @@ export const NativeWebViewBrowser = () => {
             'url=' + String(typedMessage.url || 'unknown'),
           );
         }
-        blurReadyRef.current = true;
-        console.log('[MW-Host] Blur overlay READY:', String(typedMessage.reason || 'ready'), String(typedMessage.url || ''));
-        queueCurrentBlurState('webview_ready_sync');
-        await flushBlurStateToWebView();
+        if (ENABLE_DOM_BLUR) {
+          blurReadyRef.current = true;
+          console.log('[MW-Host] Blur overlay READY:', String(typedMessage.reason || 'ready'), String(typedMessage.url || ''));
+          queueCurrentBlurState('webview_ready_sync');
+          await flushBlurStateToWebView();
+        }
+        return;
+      }
+
+      if (typedMessage.type === 'MW_VIDEO_ACTIVITY') {
+        const state = String(typedMessage.state || '');
+        if (state === 'playing') {
+          setVideoBoost(true, 'video_playing');
+        } else if (state === 'paused' || state === 'ended') {
+          setVideoBoost(false, 'video_paused_or_ended');
+        }
         return;
       }
       
@@ -1233,7 +1730,7 @@ export const NativeWebViewBrowser = () => {
       messageFromWebViewHandlerRef.current = null;
       window.removeEventListener('message', handleWindowMessage);
     };
-  }, [ENABLE_SIGNAL_PIPELINE, ENABLE_DOM_BLUR, isDebugMode, processModerationRequest, moderationBridge, postMessageToWebView, getNonce, queueCurrentBlurState, flushBlurStateToWebView]);
+  }, [ENABLE_SIGNAL_PIPELINE, ENABLE_DOM_BLUR, isDebugMode, processModerationRequest, moderationBridge, postMessageToWebView, getNonce, queueCurrentBlurState, flushBlurStateToWebView, evaluateModernHealth, setVideoBoost]);
 
   /**
    * Fallback: Poll for moderation requests from legacy global queue
@@ -1247,6 +1744,8 @@ export const NativeWebViewBrowser = () => {
     console.log('[MW-Host] Starting adaptive legacy queue polling (fallback)...');
     const MIN_POLL_MS = 300;
     const MAX_POLL_MS = 3000;
+    const UNKNOWN_MIN_POLL_MS = 1500;
+    const UNKNOWN_MAX_POLL_MS = 12000;
     const EMPTY_BACKOFF_MS = 250;
     const HIDDEN_POLL_MS = 2000;
     const IDLE_EMPTY_POLLS = 10;
@@ -1254,10 +1753,17 @@ export const NativeWebViewBrowser = () => {
     const IDLE_MIN_POLL_MS = 2000;
     const IDLE_MAX_POLL_MS = 5000;
     const IDLE_BACKOFF_MS = 500;
+    const LEGACY_EXEC_MIN_INTERVAL_MS = 1200;
+    const LEGACY_EXEC_BURST_WINDOW_MS = 15000;
+    const LEGACY_EXEC_BURST_MAX = 14;
+    const LEGACY_EXEC_COOLDOWN_MS = 8000;
+    const navIdAtStart = activeNavIdRef.current;
+    const epochAtStart = webViewPageEpochRef.current;
+    legacyPollGenerationRef.current += 1;
+    const pollOwner = `${navIdAtStart}|${epochAtStart}|${legacyPollGenerationRef.current}`;
+    legacyPollOwnerRef.current = pollOwner;
     let pollDelayMs = MIN_POLL_MS;
     let cancelled = false;
-    let pollTimer: NodeJS.Timeout | null = null;
-    let pollInFlight = false;
     let consecutiveEmptyPolls = 0;
     let lastActivityAt = Date.now();
     let idleMode = false;
@@ -1299,12 +1805,23 @@ export const NativeWebViewBrowser = () => {
     window.addEventListener('hashchange', onHashChange);
     document.addEventListener('visibilitychange', onVisibilityChange);
 
+    const hasPollOwnership = () => legacyPollOwnerRef.current === pollOwner;
+
+    const recordLegacyExec = () => {
+      const now = Date.now();
+      legacyLastExecuteAtRef.current = now;
+      legacyExecRecentAtRef.current = legacyExecRecentAtRef.current
+        .filter((ts) => now - ts <= LEGACY_EXEC_BURST_WINDOW_MS)
+        .concat(now);
+    };
+
     const scheduleNextPoll = (delayMs: number) => {
       if (cancelled) return;
-      if (pollTimer) {
-        clearTimeout(pollTimer);
+      if (!hasPollOwnership()) return;
+      if (legacyPollTimerRef.current) {
+        clearTimeout(legacyPollTimerRef.current);
       }
-      pollTimer = setTimeout(runPollLoop, delayMs);
+      legacyPollTimerRef.current = setTimeout(runPollLoop, delayMs);
       console.log(
         '[MW-Host][Timer] start',
         'name=legacyPollTimer',
@@ -1316,10 +1833,37 @@ export const NativeWebViewBrowser = () => {
 
     const pollForRequests = async (): Promise<boolean> => {
       if (!executeScript) return false;
-      if (pollInFlight) return false;
-      pollInFlight = true;
+      if (!hasPollOwnership()) return false;
+      if (legacyPollInFlightRef.current) return false;
+      evaluateModernHealth('legacy_poll_tick');
+      const now = Date.now();
+      if (now < legacyPollCrashCooldownUntilRef.current) {
+        return false;
+      }
+      const transportActive = now < modernTransportActiveUntilRef.current;
+      const suppressLegacy =
+        now < legacyPollSuppressedUntilRef.current &&
+        (modernHealthyRef.current || transportActive);
+      if (suppressLegacy) {
+        return false;
+      }
+      if (now < legacyExecBackoffUntilRef.current || now < legacyExecCooldownUntilRef.current) {
+        return false;
+      }
+      const sinceLastExec = now - legacyLastExecuteAtRef.current;
+      if (legacyLastExecuteAtRef.current > 0 && sinceLastExec < LEGACY_EXEC_MIN_INTERVAL_MS) {
+        return false;
+      }
+      const recentExecs = legacyExecRecentAtRef.current.filter((ts) => now - ts <= LEGACY_EXEC_BURST_WINDOW_MS);
+      legacyExecRecentAtRef.current = recentExecs;
+      if (recentExecs.length >= LEGACY_EXEC_BURST_MAX) {
+        legacyExecCooldownUntilRef.current = now + LEGACY_EXEC_COOLDOWN_MS;
+        return false;
+      }
+      legacyPollInFlightRef.current = true;
       
       try {
+        if (!hasPollOwnership()) return false;
         if (document.visibilityState !== 'visible') {
           return false;
         }
@@ -1334,7 +1878,10 @@ export const NativeWebViewBrowser = () => {
           })();
         `;
         
+        recordLegacyExec();
         const result = await executeScript(getQueueScript);
+        legacyExecBackoffMsRef.current = 300;
+        legacyExecBackoffUntilRef.current = 0;
         
         if (!result || result === 'EMPTY' || result === 'null') {
           return false;
@@ -1352,7 +1899,14 @@ export const NativeWebViewBrowser = () => {
         }
         
         console.log('[MW-Host] Legacy poll: found', items.length, 'items in queue');
-        
+        const resultsToPush: Array<{
+          src: string;
+          shouldBlur: boolean;
+          category: string;
+          confidence: number;
+          blurStrengthPx: number;
+        }> = [];
+
         // Process each scan request
         for (const item of items) {
           const { src, thresholds } = item;
@@ -1365,70 +1919,107 @@ export const NativeWebViewBrowser = () => {
           
           if (scanResult) {
             console.log('[MW-Host] Legacy scan result:', scanResult.shouldBlur, scanResult.category);
-            
-            // Push result back to WebView's results queue
-            const escapedSrc = escapeForJs(src);
-            const pushResultScript = `
-              (function() {
-                if (!window.__GC_SCAN_RESULTS__) window.__GC_SCAN_RESULTS__ = [];
-                window.__GC_SCAN_RESULTS__.push({
-                  src: '${escapedSrc}',
-                  shouldBlur: ${scanResult.shouldBlur},
-                  category: '${scanResult.category}',
-                  confidence: ${scanResult.confidence},
-                  blurStrengthPx: ${localSettings.blur_strength_px || 16}
-                });
-                return 'OK';
-              })();
-            `;
-            
-            try {
-              await executeScript(pushResultScript);
-              console.log('[MW-Host] Legacy result pushed for:', src.substring(0, 50));
-            } catch (e) {
-              console.debug('[MW-Host] Failed to push legacy result:', e);
-            }
+            resultsToPush.push({
+              src,
+              shouldBlur: !!scanResult.shouldBlur,
+              category: String(scanResult.category || 'neutral'),
+              confidence: Number(scanResult.confidence || 0),
+              blurStrengthPx: localSettings.blur_strength_px || 16,
+            });
+          }
+        }
+        if (resultsToPush.length > 0) {
+          const payload = escapeForJs(JSON.stringify(resultsToPush));
+          const pushResultScript = `
+            (function() {
+              if (!window.__GC_SCAN_RESULTS__) window.__GC_SCAN_RESULTS__ = [];
+              var items = JSON.parse('${payload}');
+              if (Array.isArray(items) && items.length > 0) {
+                for (var i = 0; i < items.length; i++) {
+                  window.__GC_SCAN_RESULTS__.push(items[i]);
+                }
+              }
+              return 'OK';
+            })();
+          `;
+          try {
+            recordLegacyExec();
+            await executeScript(pushResultScript);
+            legacyExecBackoffMsRef.current = 300;
+            legacyExecBackoffUntilRef.current = 0;
+            console.log('[MW-Host] Legacy results pushed count=' + resultsToPush.length);
+          } catch (e) {
+            console.debug('[MW-Host] Failed to push legacy results batch:', e);
+            legacyExecBackoffUntilRef.current = Date.now() + legacyExecBackoffMsRef.current;
+            legacyExecBackoffMsRef.current = Math.min(legacyExecBackoffMsRef.current * 2, LEGACY_EXEC_BACKOFF_MAX_MS);
           }
         }
         return true;
       } catch (e) {
         // Polling errors are expected and ignored in some cases
         console.debug('[MW-Host] Legacy poll error:', e);
+        legacyExecBackoffUntilRef.current = Date.now() + legacyExecBackoffMsRef.current;
+        legacyExecBackoffMsRef.current = Math.min(legacyExecBackoffMsRef.current * 2, LEGACY_EXEC_BACKOFF_MAX_MS);
         return false;
       } finally {
-        pollInFlight = false;
+        legacyPollInFlightRef.current = false;
       }
     };
 
     const runPollLoop = async () => {
       if (cancelled) return;
+      if (!hasPollOwnership()) return;
+      evaluateModernHealth('legacy_poll_loop');
+      const now = Date.now();
+      if (now < legacyPollCrashCooldownUntilRef.current) {
+        const waitMs = Math.max(UNKNOWN_MIN_POLL_MS, legacyPollCrashCooldownUntilRef.current - now);
+        scheduleNextPoll(waitMs);
+        return;
+      }
+      const transportActive = now < modernTransportActiveUntilRef.current;
+      const suppressLegacy =
+        now < legacyPollSuppressedUntilRef.current &&
+        (modernHealthyRef.current || transportActive);
+      if (suppressLegacy) {
+        const waitMs = Math.max(1200, legacyPollSuppressedUntilRef.current - now);
+        scheduleNextPoll(waitMs);
+        return;
+      }
       const hadWork = await pollForRequests();
+      const hasModernSignal = modernAckRef.current.at > 0 || modernReadyRef.current.at > 0;
       if (document.visibilityState !== 'visible') {
         pollDelayMs = HIDDEN_POLL_MS;
       } else if (hadWork) {
         lastActivityAt = Date.now();
         consecutiveEmptyPolls = 0;
         exitIdleMode('request');
-        pollDelayMs = MIN_POLL_MS;
+        pollDelayMs = hasModernSignal ? MIN_POLL_MS : UNKNOWN_MIN_POLL_MS;
       } else {
         consecutiveEmptyPolls += 1;
         maybeEnterIdleMode();
         if (idleMode) {
           idlePollMs = Math.min(idlePollMs + IDLE_BACKOFF_MS, IDLE_MAX_POLL_MS);
           pollDelayMs = idlePollMs;
+        } else if (!hasModernSignal) {
+          const baseline = Math.max(pollDelayMs + EMPTY_BACKOFF_MS, Math.floor(Math.max(UNKNOWN_MIN_POLL_MS, pollDelayMs) * 1.8));
+          pollDelayMs = Math.min(baseline, UNKNOWN_MAX_POLL_MS);
         } else {
           pollDelayMs = Math.min(pollDelayMs + EMPTY_BACKOFF_MS, MAX_POLL_MS);
         }
       }
       scheduleNextPoll(pollDelayMs);
     };
-    scheduleNextPoll(MIN_POLL_MS);
+    const initialDelay = (modernAckRef.current.at > 0 || modernReadyRef.current.at > 0) ? MIN_POLL_MS : UNKNOWN_MIN_POLL_MS;
+    scheduleNextPoll(initialDelay);
 
     return () => {
       cancelled = true;
-      if (pollTimer) {
-        clearTimeout(pollTimer);
-        pollTimer = null;
+      if (hasPollOwnership()) {
+        legacyPollOwnerRef.current = '';
+      }
+      if (legacyPollTimerRef.current) {
+        clearTimeout(legacyPollTimerRef.current);
+        legacyPollTimerRef.current = null;
         console.log(
           '[MW-Host][Timer] stop',
           'name=legacyPollTimer',
@@ -1441,7 +2032,7 @@ export const NativeWebViewBrowser = () => {
       window.removeEventListener('hashchange', onHashChange);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [ENABLE_SIGNAL_PIPELINE, isNative, webViewState.isOpen, isModerationEnabled, executeScript, moderationBridge, localSettings.blur_strength_px, webViewState.currentUrl]);
+  }, [ENABLE_SIGNAL_PIPELINE, isNative, webViewState.isOpen, isModerationEnabled, executeScript, moderationBridge, localSettings.blur_strength_px, webViewState.currentUrl, evaluateModernHealth, LEGACY_EXEC_BACKOFF_MAX_MS]);
 
   // Search handler - redirects to Google search immediately
   const handleSearch = useCallback(async (query: string) => {
@@ -1826,11 +2417,13 @@ export const NativeWebViewBrowser = () => {
       // Reset injection flag to re-inject moderation script
       injectionDoneRef.current = false;
       blurReadyRef.current = false;
+      resetModernHealthForNavigation('manual_reload');
+      setVideoBoost(false, 'manual_reload');
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       setCentralBlurState(false, 'manual_reload');
       return;
     }
-  }, [readerContent, currentView, searchQuery, isNative, webViewState.isOpen, handleReaderMode, handleSearch, webViewReload, setCentralBlurState]);
+  }, [readerContent, currentView, searchQuery, isNative, webViewState.isOpen, handleReaderMode, handleSearch, webViewReload, setCentralBlurState, resetModernHealthForNavigation, setVideoBoost]);
 
   const handleHome = useCallback(async () => {
     teardownWebViewScheduling('home_reset', webViewState.currentUrl).catch(() => undefined);
@@ -1841,6 +2434,8 @@ export const NativeWebViewBrowser = () => {
     injectionDoneRef.current = false;
     blurReadyRef.current = false;
     blurPendingRef.current = null;
+    resetModernHealthForNavigation('home_reset');
+    setVideoBoost(false, 'home_reset');
     blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
     setCentralBlurState(false, 'home_reset');
     setReaderContent(null);
@@ -1853,7 +2448,7 @@ export const NativeWebViewBrowser = () => {
     setUrlInput('');
     setFallbackUrl('');
     goHome();
-  }, [isNative, webViewState.isOpen, webViewState.currentUrl, closeWebView, goHome, moderationBridge, setCentralBlurState, teardownWebViewScheduling]);
+  }, [isNative, webViewState.isOpen, webViewState.currentUrl, closeWebView, goHome, moderationBridge, setCentralBlurState, teardownWebViewScheduling, resetModernHealthForNavigation, setVideoBoost]);
 
   // Manual scan trigger for current page
   const handleScanPage = useCallback(async () => {
