@@ -161,6 +161,25 @@ export function generateModerationScript(config: InjectionConfig): string {
         window.__MW_BLUR_OVERLAY_API__.sendReady('reinject');
       }
     } catch (e) {}
+    try {
+      const ackPayload = {
+        type: 'MW_INJECTED_ACK',
+        navId: String(window.__MW_NAV_ID__ || 'unknown'),
+        pageEpoch: Number.isFinite(window.__MW_PAGE_EPOCH__) ? Number(window.__MW_PAGE_EPOCH__) : Number(${pageEpoch}),
+        noncePrefix: String('${nonce}').substring(0, 6),
+        url: window.location.href,
+        reason: 'already_active',
+        timestamp: Date.now(),
+      };
+      if (window.mobileApp && typeof window.mobileApp.postMessage === 'function') {
+        window.mobileApp.postMessage({ detail: ackPayload });
+      } else {
+        window.postMessage(ackPayload, '*');
+        if (window.parent && window.parent !== window) {
+          window.parent.postMessage(ackPayload, '*');
+        }
+      }
+    } catch (e) {}
     return 'MW_ALREADY_ACTIVE';
   }
   window.__MW_ACTIVE__ = true;
@@ -403,10 +422,12 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function sendBlurReady(reason) {
+    const activeEpoch = Number.isFinite(window.__MW_PAGE_EPOCH__) ? Number(window.__MW_PAGE_EPOCH__) : Number(CONFIG.pageEpoch);
     postToHost({
       type: 'MW_BLUR_READY',
+      navId: String(window.__MW_NAV_ID__ || 'unknown'),
+      pageEpoch: activeEpoch,
       reason: reason || 'ready',
-      url: window.location.href,
       timestamp: Date.now(),
     });
   }
@@ -557,6 +578,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   let batchTimer = null;
   const NAV_ID = window.__MW_NAV_ID__ || ('mw_' + Date.now().toString(36));
   window.__MW_NAV_ID__ = NAV_ID;
+  window.__MW_PAGE_EPOCH__ = state.pageEpoch;
   const NONCE_PREFIX = String(CONFIG.nonce || '').substring(0, 6);
   postToHost({
     type: 'MW_INJECTED_ACK',
@@ -768,6 +790,78 @@ export function generateModerationScript(config: InjectionConfig): string {
   const PLATFORM = detectPlatform();
   const IS_YOUTUBE = PLATFORM === 'youtube' || PLATFORM === 'youtube-shorts';
   console.log('[MW] Platform detected:', PLATFORM, 'isYouTube:', IS_YOUTUBE);
+  const videoActivityState = {
+    playing: false,
+    lastEventAt: 0,
+    lastStateSent: '',
+    rapidSourceWindowStart: 0,
+    rapidSourceChanges: 0,
+    playbackListener: null,
+  };
+
+  function postVideoActivity(state, reason) {
+    const now = Date.now();
+    if (videoActivityState.lastStateSent === state && now - videoActivityState.lastEventAt < 500) return;
+    videoActivityState.lastStateSent = state;
+    videoActivityState.lastEventAt = now;
+    postToHost({
+      type: 'MW_VIDEO_ACTIVITY',
+      state: state,
+      reason: reason || 'none',
+      timestamp: now,
+    });
+  }
+
+  function queueVideoMediaTargets(video, sourceTypePrefix) {
+    if (!video) return;
+    const sourceType = sourceTypePrefix || 'video';
+    const poster = video.poster || video.getAttribute('poster');
+    if (poster) {
+      queueForScan(poster, video, sourceType + '-poster');
+    }
+    const currentSrc = video.currentSrc || video.src;
+    if (currentSrc) {
+      queueForScan(currentSrc, video, sourceType + '-currentSrc');
+    }
+    const thumb =
+      video.getAttribute('thumbnail') ||
+      video.getAttribute('data-thumbnail') ||
+      video.dataset.thumb ||
+      video.dataset.thumbnail;
+    if (thumb) {
+      queueForScan(thumb, video, sourceType + '-thumbnail');
+    }
+  }
+
+  function isShortsOrReelsStyle(video) {
+    const path = String(window.location.pathname || '').toLowerCase();
+    if (path.includes('/shorts') || path.includes('/reel') || path.includes('/reels')) return true;
+    const fullscreenElement = document.fullscreenElement;
+    if (fullscreenElement && (fullscreenElement === video || (fullscreenElement.contains && fullscreenElement.contains(video)))) {
+      return true;
+    }
+    try {
+      const rect = video.getBoundingClientRect();
+      const videoArea = Math.max(rect.width * rect.height, 0);
+      const viewportArea = Math.max(window.innerWidth * window.innerHeight, 1);
+      return videoArea >= viewportArea * 0.65;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function noteVideoSourceChange(video, reason) {
+    const now = Date.now();
+    if (!videoActivityState.rapidSourceWindowStart || (now - videoActivityState.rapidSourceWindowStart) > 8000) {
+      videoActivityState.rapidSourceWindowStart = now;
+      videoActivityState.rapidSourceChanges = 0;
+    }
+    videoActivityState.rapidSourceChanges += 1;
+    queueVideoMediaTargets(video, 'video-source-change');
+    if (videoActivityState.rapidSourceChanges >= 3 && isShortsOrReelsStyle(video)) {
+      postVideoActivity('playing', reason || 'rapid_source_change');
+    }
+  }
 
   // ==================== URL UTILITIES ====================
 
@@ -1856,6 +1950,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (queueForScan(poster, video, 'video-poster')) {
       state.stats.videoPosters++;
     }
+    queueVideoMediaTargets(video, 'video-scan');
   }
 
   function scanBgImage(element) {
@@ -2039,6 +2134,17 @@ export function generateModerationScript(config: InjectionConfig): string {
           
           if (attr === 'poster' && target.tagName === 'VIDEO') {
             queueMutationScan(target);
+            noteVideoSourceChange(target, 'poster_change');
+          }
+
+          if (attr === 'src' && target.tagName === 'VIDEO') {
+            queueMutationScan(target);
+            noteVideoSourceChange(target, 'video_src_change');
+          }
+
+          if (attr === 'src' && target.tagName === 'SOURCE' && target.parentElement && target.parentElement.tagName === 'VIDEO') {
+            queueMutationScan(target.parentElement);
+            noteVideoSourceChange(target.parentElement, 'source_child_change');
           }
           
           if (attr === 'data-src' || attr === 'data-lazy-src') {
@@ -2100,6 +2206,41 @@ export function generateModerationScript(config: InjectionConfig): string {
     window.addEventListener('scroll', timerState.youtubeScrollHandler, { passive: true });
     
     console.log('[MW] YouTube scroll handler initialized');
+  }
+
+  function hasAnyPlayingVideo() {
+    const videos = document.querySelectorAll('video');
+    for (const video of videos) {
+      if (!video.paused && !video.ended && video.readyState > 1) return true;
+    }
+    return false;
+  }
+
+  function setupVideoActivityListeners() {
+    if (videoActivityState.playbackListener) return;
+    const onVideoEvent = function(event) {
+      const target = event.target;
+      if (!target || target.tagName !== 'VIDEO') return;
+      const video = target;
+      if (event.type === 'play' || event.type === 'playing') {
+        videoActivityState.playing = true;
+        queueVideoMediaTargets(video, 'video-playing');
+        postVideoActivity('playing', event.type);
+        return;
+      }
+      if (event.type === 'pause' || event.type === 'ended') {
+        queueVideoMediaTargets(video, 'video-paused');
+        if (!hasAnyPlayingVideo()) {
+          videoActivityState.playing = false;
+          postVideoActivity('paused', event.type);
+        }
+      }
+    };
+    videoActivityState.playbackListener = onVideoEvent;
+    document.addEventListener('play', onVideoEvent, true);
+    document.addEventListener('playing', onVideoEvent, true);
+    document.addEventListener('pause', onVideoEvent, true);
+    document.addEventListener('ended', onVideoEvent, true);
   }
 
   // ==================== LEGACY QUEUE SUPPORT ====================
@@ -2264,6 +2405,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   
   // YouTube-specific: Set up scroll handler for infinite scroll
   setupYouTubeScrollHandler();
+  setupVideoActivityListeners();
 
   function scheduleInitTimeout(label, fn, delayMs) {
     const id = setTimeout(() => {
@@ -2332,6 +2474,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       console.log('[MW] SPA navigation detected:', lastUrl, '->', window.location.href);
       lastUrl = window.location.href;
       state.pageEpoch += 1;
+      window.__MW_PAGE_EPOCH__ = state.pageEpoch;
       if (CONFIG.debug) {
         console.log('[MW][Epoch] incremented pageEpoch=' + state.pageEpoch);
       }
@@ -2441,6 +2584,13 @@ export function generateModerationScript(config: InjectionConfig): string {
       try { observer.disconnect(); } catch (e) {}
     });
     state.mutationObservers = [];
+    if (videoActivityState.playbackListener) {
+      document.removeEventListener('play', videoActivityState.playbackListener, true);
+      document.removeEventListener('playing', videoActivityState.playbackListener, true);
+      document.removeEventListener('pause', videoActivityState.playbackListener, true);
+      document.removeEventListener('ended', videoActivityState.playbackListener, true);
+      videoActivityState.playbackListener = null;
+    }
     window.__MW_ACTIVE__ = false;
   }
 
