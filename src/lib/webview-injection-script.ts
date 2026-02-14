@@ -197,6 +197,14 @@ export function generateModerationScript(config: InjectionConfig): string {
     batchDelay: 100,
     requestTimeout: 8000,
   };
+  if (CONFIG.debug) {
+    console.log(
+      '[MW][VERSION]',
+      'tag=mw_stable_blur_pipeline_v1',
+      'commit=48d5a87',
+      'epoch=' + CONFIG.pageEpoch
+    );
+  }
 
   // Threshold mappings for blur dial levels.
   const THRESHOLDS = {
