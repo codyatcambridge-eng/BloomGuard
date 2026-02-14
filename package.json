@@ -10,7 +10,8 @@
     "lint": "eslint",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "postinstall": "patch-package"
   },
   "dependencies": {
     "@capacitor/cli": "^8.0.2",

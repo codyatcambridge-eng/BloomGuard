@@ -45,6 +45,13 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     onClose,
     onMessageFromWebview,
   } = options;
+  const onLoadStartRef = useRef(onLoadStart);
+  const onLoadEndRef = useRef(onLoadEnd);
+  const onLoadErrorRef = useRef(onLoadError);
+  const onUrlChangeRef = useRef(onUrlChange);
+  const onNavigationRequestRef = useRef(onNavigationRequest);
+  const onCloseRef = useRef(onClose);
+  const onMessageFromWebviewRef = useRef(onMessageFromWebview);
 
   const [state, setState] = useState<WebViewState>({
     isOpen: false,
@@ -70,6 +77,11 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
   const closeCountRef = useRef(0);
   const executeScript60sWindowStartRef = useRef(0);
   const executeScript60sCountRef = useRef(0);
+  const executeScript10sWindowStartRef = useRef(0);
+  const executeScript10sCountRef = useRef(0);
+  const executeScript10sCallsiteCountsRef = useRef<Record<string, number>>({});
+  const executeScript10sPeakRef = useRef(0);
+  const executeScript10sAvgSamplesRef = useRef<{ total: number; samples: number }>({ total: 0, samples: 0 });
   const pageLoadErrorRecoveryRef = useRef<{ url: string; count: number; at: number }>({
     url: '',
     count: 0,
@@ -91,22 +103,47 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     isOpenRef.current = false;
   }, []);
 
+  useEffect(() => {
+    onLoadStartRef.current = onLoadStart;
+    onLoadEndRef.current = onLoadEnd;
+    onLoadErrorRef.current = onLoadError;
+    onUrlChangeRef.current = onUrlChange;
+    onNavigationRequestRef.current = onNavigationRequest;
+    onCloseRef.current = onClose;
+    onMessageFromWebviewRef.current = onMessageFromWebview;
+  }, [onLoadStart, onLoadEnd, onLoadError, onUrlChange, onNavigationRequest, onClose, onMessageFromWebview]);
+
   // Set up event listeners
   useEffect(() => {
     if (!isNative || listenersSetupRef.current) return;
     listenersSetupRef.current = true;
-    let messageFromWebviewHandle: PluginListenerHandle | null = null;
+    const listenerHandles: PluginListenerHandle[] = [];
     let disposed = false;
 
-    // URL change listener
-    InAppBrowser.addListener('urlChangeEvent', (event) => {
-      const url = event.url;
+    const attachListener = async (
+      eventName: string,
+      handler: (event: Record<string, unknown>) => void,
+    ) => {
+      try {
+        const handle = await InAppBrowser.addListener(eventName, handler);
+        if (disposed) {
+          await handle.remove();
+          return;
+        }
+        listenerHandles.push(handle);
+      } catch (error) {
+        console.error('[NativeWebView] Failed to add listener:', eventName, error);
+      }
+    };
+
+    void attachListener('urlChangeEvent', (event) => {
+      const url = String(event.url || '');
       console.log('[NativeWebView] URL changed:', url);
       currentUrlRef.current = url;
-      
+
       setState(prev => ({ ...prev, currentUrl: url }));
-      onUrlChange?.(url);
-      
+      onUrlChangeRef.current?.(url);
+
       // Update history
       if (historyIndexRef.current === historyStackRef.current.length - 1) {
         historyStackRef.current.push(url);
@@ -117,7 +154,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
         historyStackRef.current.push(url);
         historyIndexRef.current = historyStackRef.current.length - 1;
       }
-      
+
       // Update navigation state
       setState(prev => ({
         ...prev,
@@ -126,8 +163,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
       }));
     });
 
-    // Page load complete listener
-    InAppBrowser.addListener('browserPageLoaded', () => {
+    void attachListener('browserPageLoaded', () => {
       console.log('[NativeWebView] Page loaded');
       pageLoadErrorRecoveryRef.current = {
         url: currentUrlRef.current || pageLoadErrorRecoveryRef.current.url,
@@ -136,11 +172,11 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
       };
       setState(prev => ({ ...prev, isLoading: false, error: null }));
       if (currentUrlRef.current) {
-        onLoadEnd?.(currentUrlRef.current);
+        onLoadEndRef.current?.(currentUrlRef.current);
       }
     });
 
-    InAppBrowser.addListener('pageLoadError', () => {
+    void attachListener('pageLoadError', () => {
       const failedUrl = currentUrlRef.current || '';
       const now = Date.now();
       const previous = pageLoadErrorRecoveryRef.current;
@@ -158,7 +194,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
           })
           .catch(() => {
             setState(prev => ({ ...prev, isLoading: false, error: 'pageLoadError' }));
-            onLoadError?.(failedUrl, 'pageLoadError');
+            onLoadErrorRef.current?.(failedUrl, 'pageLoadError');
           });
         return;
       }
@@ -169,18 +205,17 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
         at: now,
       };
       setState(prev => ({ ...prev, isLoading: false, error: 'pageLoadError' }));
-      onLoadError?.(failedUrl, 'pageLoadError');
+      onLoadErrorRef.current?.(failedUrl, 'pageLoadError');
     });
 
-    // Close listener
-    InAppBrowser.addListener('closeEvent', () => {
+    void attachListener('closeEvent', () => {
       console.log('[NativeWebView] Browser closed');
       markClosed('closeEvent');
       setState(prev => ({ ...prev, isOpen: false }));
-      onClose?.();
+      onCloseRef.current?.();
     });
 
-    void InAppBrowser.addListener('messageFromWebview', (event) => {
+    void attachListener('messageFromWebview', (event) => {
       const payload = (
         event &&
         typeof event === 'object' &&
@@ -189,27 +224,17 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
       )
         ? (event as { detail?: unknown }).detail
         : event;
-      onMessageFromWebview?.(payload);
-    }).then((handle) => {
-      if (disposed) {
-        void handle.remove();
-        return;
-      }
-      messageFromWebviewHandle = handle;
-    }).catch((error) => {
-      console.error('[NativeWebView] Failed to add messageFromWebview listener:', error);
+      onMessageFromWebviewRef.current?.(payload);
     });
 
     return () => {
       disposed = true;
-      if (messageFromWebviewHandle) {
-        void messageFromWebviewHandle.remove();
-        messageFromWebviewHandle = null;
+      for (const handle of listenerHandles) {
+        void handle.remove();
       }
-      InAppBrowser.removeAllListeners();
       listenersSetupRef.current = false;
     };
-  }, [isNative, onUrlChange, onLoadEnd, onLoadError, onClose, onMessageFromWebview, markClosed]);
+  }, [isNative, markClosed]);
 
   // Open URL in native WebView
   const open = useCallback(async (url: string, inApp: boolean = true) => {
@@ -220,8 +245,8 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     }
 
     // Check if navigation should be blocked
-    if (onNavigationRequest) {
-      const allowed = await Promise.resolve(onNavigationRequest(url));
+    if (onNavigationRequestRef.current) {
+      const allowed = await Promise.resolve(onNavigationRequestRef.current(url));
       if (!allowed) {
         console.log('[NativeWebView] Navigation blocked by handler:', url);
         return false;
@@ -240,7 +265,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     }
 
     setState(prev => ({ ...prev, isLoading: true, error: null }));
-    onLoadStart?.(url);
+    onLoadStartRef.current?.(url);
     pageLoadErrorRecoveryRef.current = { url, count: 0, at: Date.now() };
 
     try {
@@ -280,6 +305,11 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
       openCountRef.current += 1;
       executeScript60sWindowStartRef.current = Date.now();
       executeScript60sCountRef.current = 0;
+      executeScript10sWindowStartRef.current = Date.now();
+      executeScript10sCountRef.current = 0;
+      executeScript10sCallsiteCountsRef.current = {};
+      executeScript10sPeakRef.current = 0;
+      executeScript10sAvgSamplesRef.current = { total: 0, samples: 0 };
       console.log(
         '[NativeWebView][Lifecycle]',
         'openCount=' + openCountRef.current,
@@ -293,10 +323,10 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
       const errorMsg = error instanceof Error ? error.message : 'Failed to open WebView';
       console.error('[NativeWebView] Open error:', error);
       setState(prev => ({ ...prev, isLoading: false, error: errorMsg }));
-      onLoadError?.(url, errorMsg);
+      onLoadErrorRef.current?.(url, errorMsg);
       return false;
     }
-  }, [isNative, onLoadStart, onLoadError, onNavigationRequest]);
+  }, [isNative, markClosed]);
 
   // Close the WebView
   const close = useCallback(async () => {
@@ -408,17 +438,27 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
   }, [isNative]);
 
   // Execute JavaScript in the WebView
-  const executeScript = useCallback(async (script: string): Promise<string | null> => {
+  const executeScript = useCallback(async (
+    script: string,
+    callsiteTag: string = 'unknown',
+  ): Promise<string | null> => {
     if (!isNative) return null;
 
     const run = async (): Promise<string | null> => {
       try {
+        const callsite = String(callsiteTag || 'unknown');
         const now = Date.now();
         if (executeScript60sWindowStartRef.current === 0) {
           executeScript60sWindowStartRef.current = now;
         }
+        if (executeScript10sWindowStartRef.current === 0) {
+          executeScript10sWindowStartRef.current = now;
+        }
         executeScript60sCountRef.current += 1;
+        executeScript10sCountRef.current += 1;
+        executeScript10sCallsiteCountsRef.current[callsite] = (executeScript10sCallsiteCountsRef.current[callsite] || 0) + 1;
         const elapsed = now - executeScript60sWindowStartRef.current;
+        const elapsed10s = now - executeScript10sWindowStartRef.current;
         if (elapsed >= 60000) {
           console.log(
             '[NativeWebView][Metrics]',
@@ -428,6 +468,32 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
           );
           executeScript60sWindowStartRef.current = now;
           executeScript60sCountRef.current = 0;
+        }
+        if (elapsed10s >= 10000) {
+          executeScript10sPeakRef.current = Math.max(executeScript10sPeakRef.current, executeScript10sCountRef.current);
+          executeScript10sAvgSamplesRef.current.total += executeScript10sCountRef.current;
+          executeScript10sAvgSamplesRef.current.samples += 1;
+          const avg10s = executeScript10sAvgSamplesRef.current.samples > 0
+            ? (executeScript10sAvgSamplesRef.current.total / executeScript10sAvgSamplesRef.current.samples)
+            : 0;
+          const callsites = Object.entries(executeScript10sCallsiteCountsRef.current)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 5)
+            .map(([site, count]) => site + ':' + count)
+            .join(',');
+          console.log(
+            '[NativeWebView][Metrics]',
+            'executeScript10sCount=' + executeScript10sCountRef.current,
+            'windowMs=' + elapsed10s,
+            'executeScript10sPeak=' + executeScript10sPeakRef.current,
+            'executeScript10sAvg=' + avg10s.toFixed(2),
+            'callsites=' + (callsites || 'none'),
+            'activeInstanceId=' + (activeInstanceIdRef.current ?? 'none'),
+            'url=' + (currentUrlRef.current || 'unknown'),
+          );
+          executeScript10sWindowStartRef.current = now;
+          executeScript10sCountRef.current = 0;
+          executeScript10sCallsiteCountsRef.current = {};
         }
 
         const raw = await InAppBrowser.executeScript({ code: script }) as unknown;

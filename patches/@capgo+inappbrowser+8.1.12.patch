@@ -1,0 +1,201 @@
+diff --git a/node_modules/@capgo/inappbrowser/.swiftpm/xcode/xcuserdata/codygroves.xcuserdatad/xcschemes/xcschememanagement.plist b/node_modules/@capgo/inappbrowser/.swiftpm/xcode/xcuserdata/codygroves.xcuserdatad/xcschemes/xcschememanagement.plist
+new file mode 100644
+index 0000000..972b556
+--- /dev/null
++++ b/node_modules/@capgo/inappbrowser/.swiftpm/xcode/xcuserdata/codygroves.xcuserdatad/xcschemes/xcschememanagement.plist
+@@ -0,0 +1,14 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0">
++<dict>
++	<key>SchemeUserState</key>
++	<dict>
++		<key>CapgoInappbrowser.xcscheme_^#shared#^_</key>
++		<dict>
++			<key>orderHint</key>
++			<integer>1</integer>
++		</dict>
++	</dict>
++</dict>
++</plist>
+diff --git a/node_modules/@capgo/inappbrowser/ios/Sources/InAppBrowserPlugin/InAppBrowserPlugin.swift b/node_modules/@capgo/inappbrowser/ios/Sources/InAppBrowserPlugin/InAppBrowserPlugin.swift
+index 90647c4..6b528a7 100644
+--- a/node_modules/@capgo/inappbrowser/ios/Sources/InAppBrowserPlugin/InAppBrowserPlugin.swift
++++ b/node_modules/@capgo/inappbrowser/ios/Sources/InAppBrowserPlugin/InAppBrowserPlugin.swift
+@@ -893,9 +893,34 @@ public class InAppBrowserPlugin: CAPPlugin, CAPBridgedPlugin {
+             call.reject("Cannot get script to execute")
+             return
+         }
++        let callsite = call.getString("callsite") ?? "unknown"
+         DispatchQueue.main.async {
+-            self.webViewController?.executeScript(script: script)
+-            call.resolve()
++            guard let webViewController = self.webViewController else {
++                call.reject("WebView not available")
++                return
++            }
++            webViewController.executeScript(script: script) { result, error in
++                if let error = error {
++                    let preview = String(
++                        script
++                            .replacingOccurrences(of: "\n", with: " ")
++                            .replacingOccurrences(of: "\r", with: " ")
++                            .prefix(140)
++                    )
++                    print("[MW-DIAG][Plugin][executeScript] callsite=\(callsite) error=\(error.localizedDescription) scriptPreview=\(preview)")
++                    call.reject("executeScript failed: \(error.localizedDescription)")
++                    return
++                }
++                if let stringResult = result as? String {
++                    call.resolve(["result": stringResult])
++                    return
++                }
++                if let result = result {
++                    call.resolve(["result": String(describing: result)])
++                    return
++                }
++                call.resolve(["result": "null"])
++            }
+         }
+     }
+ 
+
+diff --git a/node_modules/@capgo/inappbrowser/ios/Sources/InAppBrowserPlugin/InAppBrowserPlugin.swift b/node_modules/@capgo/inappbrowser/ios/Sources/InAppBrowserPlugin/InAppBrowserPlugin.swift
+@@ -43,6 +43,8 @@
+         CAPPluginMethod(name: "setUrl", returnType: CAPPluginReturnPromise),
+         CAPPluginMethod(name: "show", returnType: CAPPluginReturnPromise),
+         CAPPluginMethod(name: "hide", returnType: CAPPluginReturnPromise),
++        CAPPluginMethod(name: "showShield", returnType: CAPPluginReturnPromise),
++        CAPPluginMethod(name: "hideShield", returnType: CAPPluginReturnPromise),
+         CAPPluginMethod(name: "close", returnType: CAPPluginReturnPromise),
+         CAPPluginMethod(name: "executeScript", returnType: CAPPluginReturnPromise),
+         CAPPluginMethod(name: "postMessage", returnType: CAPPluginReturnPromise),
+@@ -888,6 +890,35 @@
+         self.setHiddenState(false, call: call)
+     }
+ 
++    @objc func showShield(_ call: CAPPluginCall) {
++        DispatchQueue.main.async {
++            guard let webViewController = self.webViewController else {
++                call.reject("WebView not available")
++                return
++            }
++            let quoteText = call.getString("quoteText") ?? "Algorithms are noisy, real life is quiet."
++            let reason = call.getString("reason") ?? "none"
++            let currentUrl = webViewController.url?.absoluteString ?? "unknown"
++            print("[MW-DIAG][Shield] show reason=\(reason) url=\(currentUrl)")
++            webViewController.mwShowShield(quoteText: quoteText)
++            call.resolve()
++        }
++    }
++
++    @objc func hideShield(_ call: CAPPluginCall) {
++        DispatchQueue.main.async {
++            guard let webViewController = self.webViewController else {
++                call.reject("WebView not available")
++                return
++            }
++            let reason = call.getString("reason") ?? "none"
++            let currentUrl = webViewController.url?.absoluteString ?? "unknown"
++            print("[MW-DIAG][Shield] hide reason=\(reason) url=\(currentUrl)")
++            webViewController.mwHideShield()
++            call.resolve()
++        }
++    }
++
+     @objc func executeScript(_ call: CAPPluginCall) {
+         guard let script = call.getString("code") else {
+             call.reject("Cannot get script to execute")
+
+diff --git a/node_modules/@capgo/inappbrowser/ios/Sources/InAppBrowserPlugin/WKWebViewController.swift b/node_modules/@capgo/inappbrowser/ios/Sources/InAppBrowserPlugin/WKWebViewController.swift
+@@ -283,6 +283,8 @@
+ 
+     fileprivate var webView: WKWebView?
+     fileprivate var progressView: UIProgressView?
++    fileprivate var mwShieldView: UIView?
++    fileprivate var mwShieldLabel: UILabel?
+ 
+     fileprivate var previousNavigationBarState: (tintColor: UIColor, hidden: Bool) = (.black, false)
+     fileprivate var previousToolbarState: (tintColor: UIColor, hidden: Bool) = (.black, false)
+@@ -1037,12 +1039,80 @@
+         // Also clean progress bar view if present
+         progressView?.removeFromSuperview()
+         progressView = nil
++        mwShieldView?.removeFromSuperview()
++        mwShieldView = nil
++        mwShieldLabel = nil
+         self.webView = nil
+     }
+ }
+ 
+ // MARK: - Fileprivate Methods
+-fileprivate extension WKWebViewController {
++extension WKWebViewController {
++    func mwEnsureShieldView() {
++        if mwShieldView == nil {
++            let shieldView = UIView()
++            shieldView.translatesAutoresizingMaskIntoConstraints = false
++            shieldView.backgroundColor = .white
++            shieldView.isOpaque = true
++            shieldView.isHidden = true
++
++            let quoteLabel = UILabel()
++            quoteLabel.translatesAutoresizingMaskIntoConstraints = false
++            quoteLabel.numberOfLines = 0
++            quoteLabel.textAlignment = .center
++            quoteLabel.textColor = UIColor(white: 0.2, alpha: 1)
++            quoteLabel.font = UIFont.systemFont(ofSize: 18, weight: .semibold)
++            quoteLabel.text = "Algorithms are noisy, real life is quiet."
++
++            shieldView.addSubview(quoteLabel)
++            NSLayoutConstraint.activate([
++                quoteLabel.centerXAnchor.constraint(equalTo: shieldView.centerXAnchor),
++                quoteLabel.centerYAnchor.constraint(equalTo: shieldView.centerYAnchor),
++                quoteLabel.leadingAnchor.constraint(greaterThanOrEqualTo: shieldView.leadingAnchor, constant: 24),
++                quoteLabel.trailingAnchor.constraint(lessThanOrEqualTo: shieldView.trailingAnchor, constant: -24)
++            ])
++
++            view.addSubview(shieldView)
++            let bottomAnchor = enabledSafeBottomMargin
++                ? view.safeAreaLayoutGuide.bottomAnchor
++                : view.bottomAnchor
++            NSLayoutConstraint.activate([
++                shieldView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
++                shieldView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
++                shieldView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
++                shieldView.bottomAnchor.constraint(equalTo: bottomAnchor)
++            ])
++
++            view.bringSubviewToFront(shieldView)
++            mwShieldView = shieldView
++            mwShieldLabel = quoteLabel
++            return
++        }
++
++        guard let shieldView = mwShieldView else {
++            return
++        }
++        if shieldView.superview == nil {
++            view.addSubview(shieldView)
++        }
++        view.bringSubviewToFront(shieldView)
++    }
++
++    func mwShowShield(quoteText: String) {
++        DispatchQueue.main.async {
++            self.mwEnsureShieldView()
++            let text = quoteText.isEmpty ? "Algorithms are noisy, real life is quiet." : quoteText
++            self.mwShieldLabel?.text = text
++            self.mwShieldView?.isHidden = false
++        }
++    }
++
++    func mwHideShield() {
++        DispatchQueue.main.async {
++            self.mwShieldView?.isHidden = true
++        }
++    }
++
+     var availableCookies: [HTTPCookie]? {
+         return cookies?.filter {
+             cookie in

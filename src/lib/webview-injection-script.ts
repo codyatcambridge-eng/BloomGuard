@@ -32,6 +32,7 @@ export interface InjectionConfig {
   nonce: string; // Security nonce for message validation
   blockingMode?: 'mvp' | 'full';
   pageEpoch?: number;
+  hostNavId?: number;
 }
 
 export interface FailOpenModePolicyInput {
@@ -146,6 +147,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   const buildVersion = Date.now();
   const buildCommit = 'ce87d1f';
   const pageEpoch = Number.isFinite(config.pageEpoch) ? Number(config.pageEpoch) : Date.now();
+  const hostNavId = Number.isFinite(config.hostNavId) ? Number(config.hostNavId) : -1;
   
   return `
 (function() {
@@ -188,6 +190,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     nonce: '${nonce}',
     blockingMode: '${config.blockingMode || 'mvp'}',
     pageEpoch: ${pageEpoch},
+    hostNavId: ${hostNavId},
     minImageSize: 80, // Minimum image dimension (fail-open below this - 80x80)
     semanticDelayMs: 200, // Delay before applying blur (200ms)
     // Neutral fast-pass removed for strict/YouTube mode
@@ -331,8 +334,44 @@ export function generateModerationScript(config: InjectionConfig): string {
     reason: 'init',
   };
   window.__MW_BLUR_STATE__ = overlayState;
+  const DIAG_ENABLED = !!CONFIG.debug;
+  const REQUEUE_MILESTONES = new Set([1, 3, 10, 25, 50, 100, 200]);
+  const REQUEUE_COUNT_MAX = 250;
+  const elementDebugIdByNode = new WeakMap();
+  const revealOverlayTargetByNode = new WeakMap();
+  const moderatedStateByNode = new WeakMap();
+  const requeueCounts = new Map();
+  let requeueLastLogAt = 0;
+  let fallbackElementDebugSeq = 0;
+  let perfLastLogAt = 0;
+  const perfCounters = {
+    mutationObserverCallbacks: 0,
+    scanPassesObserver: 0,
+    scanPassesScroll: 0,
+    scanPassesTimer: 0,
+    scanPassesManual: 0,
+    scanTriggers: 0,
+    scanCoalesced: 0,
+    elementsProcessedInScans: 0,
+    styleWrites: 0,
+    overlayInserts: 0,
+    postMessageSent: 0,
+    postMessageReceived: 0,
+    releasesApplied: 0,
+    reblurAfterSafe: 0,
+    overlaysInserted: 0,
+    revealHandlersAttached: 0,
+    revealTapReceived: 0,
+    revealActionApplied: 0,
+    revealTapIgnoredMissingTarget: 0,
+    revealTapIgnoredStaleEpoch: 0,
+    revealTapIgnoredMissingSrc: 0,
+    revealTapIgnoredAlreadyRevealed: 0,
+    revealTapIgnoredPolicyBlocked: 0,
+  };
 
   function postToHost(payload) {
+    if (DIAG_ENABLED) perfCounters.postMessageSent += 1;
     let delivered = false;
     try {
       if (window.mobileApp && typeof window.mobileApp.postMessage === 'function') {
@@ -349,6 +388,12 @@ export function generateModerationScript(config: InjectionConfig): string {
         window.parent.postMessage(payload, '*');
       }
     } catch (e) {}
+  }
+
+  function isRevealAllowed() {
+    const allowReveal = (typeof CONFIG.allowReveal === 'boolean') ? CONFIG.allowReveal : true;
+    const kidMode = (typeof CONFIG.kidMode === 'boolean') ? CONFIG.kidMode : false;
+    return !!allowReveal && !kidMode;
   }
 
   function readHostEventPayload(eventLike) {
@@ -381,6 +426,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       '}',
     ].join('');
     (document.head || document.documentElement).appendChild(style);
+    if (DIAG_ENABLED) perfCounters.overlayInserts += 1;
   }
 
   function ensureOverlayElement() {
@@ -390,6 +436,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       overlay.id = OVERLAY_ID;
       overlay.setAttribute('aria-hidden', 'true');
       (document.body || document.documentElement).appendChild(overlay);
+      if (DIAG_ENABLED) perfCounters.overlayInserts += 1;
     }
     return overlay;
   }
@@ -408,6 +455,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       overlay.classList.add('mw-enabled');
     } else {
       overlay.classList.remove('mw-enabled');
+      if (DIAG_ENABLED) perfCounters.releasesApplied += 1;
     }
     if (CONFIG.debug && prevEnabled !== overlayState.enabled) {
       console.log('[MW][Overlay] enabled=' + overlayState.enabled, 'reason=' + overlayState.reason);
@@ -421,6 +469,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     postToHost({
       type: 'MW_BLUR_READY',
       reason: reason || 'ready',
+      navId: Number.isFinite(CONFIG.hostNavId) ? Number(CONFIG.hostNavId) : null,
+      hostNavId: CONFIG.hostNavId,
+      pageEpoch: CONFIG.pageEpoch,
       url: window.location.href,
       timestamp: Date.now(),
     });
@@ -458,6 +509,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   if (!window.__MW_BLUR_LISTENER__) {
     window.__MW_BLUR_LISTENER__ = true;
     const onBlurCommandEvent = function(event) {
+      if (DIAG_ENABLED) perfCounters.postMessageReceived += 1;
       handleBlurCommand(readHostEventPayload(event));
     };
     window.addEventListener('message', onBlurCommandEvent);
@@ -586,6 +638,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   postToHost({
     type: 'MW_INJECTED_ACK',
     navId: NAV_ID,
+    hostNavId: CONFIG.hostNavId,
     pageEpoch: CONFIG.pageEpoch,
     noncePrefix: NONCE_PREFIX,
     url: window.location.href,
@@ -628,6 +681,8 @@ export function generateModerationScript(config: InjectionConfig): string {
   const mutationScanQueue = [];
   const mutationScanSet = new Set();
   let mutationScanTimer = null;
+  let scanInFlight = false;
+  let scanQueued = false;
 
   function allowPerSecond(bucket, maxPerSecond) {
     const nowSec = Math.floor(Date.now() / 1000);
@@ -638,6 +693,121 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (bucket.count >= maxPerSecond) return false;
     bucket.count += 1;
     return true;
+  }
+
+  function getElementDebugId(element, src, sourceType) {
+    if (!element) return 'mw_missing';
+    const existing = elementDebugIdByNode.get(element);
+    if (existing) return existing;
+    const srcPrefix = String(src || '').substring(0, 80);
+    const tagName = String((element.tagName || sourceType || 'el')).toLowerCase();
+    const rawW = Number(element.naturalWidth || element.videoWidth || element.width || 0);
+    const rawH = Number(element.naturalHeight || element.videoHeight || element.height || 0);
+    const hasDims = Number.isFinite(rawW) && Number.isFinite(rawH) && rawW > 0 && rawH > 0;
+    const suffix = hasDims ? (String(rawW) + 'x' + String(rawH)) : ('seq' + String(++fallbackElementDebugSeq));
+    const id = 'mw_' + tagName + '_' + srcPrefix + '_' + suffix;
+    elementDebugIdByNode.set(element, id);
+    return id;
+  }
+
+  function trackRequeue(debugId, src, reason) {
+    if (!DIAG_ENABLED) return;
+    if (!debugId) return;
+    const nextCount = (requeueCounts.get(debugId) || 0) + 1;
+    requeueCounts.set(debugId, nextCount);
+    if (requeueCounts.size > REQUEUE_COUNT_MAX) {
+      const oldest = requeueCounts.keys().next();
+      if (!oldest.done) requeueCounts.delete(oldest.value);
+    }
+    const now = Date.now();
+    const shouldLog =
+      REQUEUE_MILESTONES.has(nextCount) || (now - requeueLastLogAt) >= 2000;
+    if (!shouldLog) return;
+    requeueLastLogAt = now;
+    console.log(
+      '[MW-DIAG][ELEM]',
+      'REQUEUE',
+      'id=' + String(debugId),
+      'count=' + nextCount,
+      'why=' + String(reason || 'unknown'),
+      'src=' + String(src || '').substring(0, 120),
+    );
+  }
+
+  function trackScanPass(reason) {
+    if (!DIAG_ENABLED) return;
+    if (reason === 'observer') perfCounters.scanPassesObserver += 1;
+    else if (reason === 'scroll') perfCounters.scanPassesScroll += 1;
+    else if (reason === 'manual') perfCounters.scanPassesManual += 1;
+    else perfCounters.scanPassesTimer += 1;
+  }
+
+  function maybeLogPerfSummary(reason) {
+    if (!DIAG_ENABLED) return;
+    const now = Date.now();
+    if ((now - perfLastLogAt) < 10000) return;
+    perfLastLogAt = now;
+    let revealOverlayCount = 0;
+    try {
+      revealOverlayCount = document.querySelectorAll('.mw-reveal-overlay').length;
+    } catch (e) {}
+    console.log(
+      '[MW-DIAG][PERF10S]',
+      'reason=' + String(reason || 'periodic'),
+      'mutObs=' + perfCounters.mutationObserverCallbacks,
+      'scanObserver=' + perfCounters.scanPassesObserver,
+      'scanScroll=' + perfCounters.scanPassesScroll,
+      'scanTimer=' + perfCounters.scanPassesTimer,
+      'scanManual=' + perfCounters.scanPassesManual,
+      'scanTriggers=' + perfCounters.scanTriggers,
+      'scanCoalesced=' + perfCounters.scanCoalesced,
+      'elements=' + perfCounters.elementsProcessedInScans,
+      'styleWrites=' + perfCounters.styleWrites,
+      'overlayInserts=' + perfCounters.overlayInserts,
+      'postMsgSent=' + perfCounters.postMessageSent,
+      'postMsgRecv=' + perfCounters.postMessageReceived,
+      'releasesApplied=' + perfCounters.releasesApplied,
+      'reblurAfterSafe=' + perfCounters.reblurAfterSafe,
+      'overlaysInserted=' + perfCounters.overlaysInserted,
+      'revealHandlersAttached=' + perfCounters.revealHandlersAttached,
+      'revealTapReceived=' + perfCounters.revealTapReceived,
+      'revealActionApplied=' + perfCounters.revealActionApplied,
+      'revealTapIgnored=' + [
+        'missingTarget:' + perfCounters.revealTapIgnoredMissingTarget,
+        'staleEpoch:' + perfCounters.revealTapIgnoredStaleEpoch,
+        'missingSrc:' + perfCounters.revealTapIgnoredMissingSrc,
+        'alreadyRevealed:' + perfCounters.revealTapIgnoredAlreadyRevealed,
+        'policyBlocked:' + perfCounters.revealTapIgnoredPolicyBlocked,
+      ].join(','),
+      'batchQueue=' + batchQueue.length,
+      'pending=' + state.pending.size,
+      'pendingReq=' + state.pendingRequests.size,
+      'mutationQueue=' + mutationScanQueue.length,
+      'overlayCount=' + revealOverlayCount
+    );
+    perfCounters.mutationObserverCallbacks = 0;
+    perfCounters.scanPassesObserver = 0;
+    perfCounters.scanPassesScroll = 0;
+    perfCounters.scanPassesTimer = 0;
+    perfCounters.scanPassesManual = 0;
+    perfCounters.scanTriggers = 0;
+    perfCounters.scanCoalesced = 0;
+    perfCounters.elementsProcessedInScans = 0;
+    perfCounters.styleWrites = 0;
+    perfCounters.overlayInserts = 0;
+    perfCounters.postMessageSent = 0;
+    perfCounters.postMessageReceived = 0;
+    perfCounters.releasesApplied = 0;
+    perfCounters.reblurAfterSafe = 0;
+    perfCounters.overlaysInserted = 0;
+    perfCounters.revealHandlersAttached = 0;
+    perfCounters.revealTapReceived = 0;
+    perfCounters.revealActionApplied = 0;
+    perfCounters.revealTapIgnoredMissingTarget = 0;
+    perfCounters.revealTapIgnoredStaleEpoch = 0;
+    perfCounters.revealTapIgnoredMissingSrc = 0;
+    perfCounters.revealTapIgnoredAlreadyRevealed = 0;
+    perfCounters.revealTapIgnoredPolicyBlocked = 0;
   }
 
   function timerLog(action, name) {
@@ -1242,6 +1412,45 @@ export function generateModerationScript(config: InjectionConfig): string {
     } catch (e) {}
   }
 
+  function clearHardBlurForSafe(element, src) {
+    if (!element) return false;
+    const moderated = String(element.dataset.mwModerated || '');
+    const srcMatch = !element.dataset.mwSrc || element.dataset.mwSrc === src;
+    let currentSrcMatch = true;
+    try {
+      const tag = String(element.tagName || '').toUpperCase();
+      if (tag === 'IMG') {
+        const candidate = extractImgSourceCandidate(element);
+        if (candidate.src) currentSrcMatch = candidate.src === src;
+      } else if (tag === 'VIDEO') {
+        const poster = element.poster || element.dataset.poster || element.getAttribute('data-poster');
+        if (poster) currentSrcMatch = poster === src;
+      } else {
+        const bg = element.dataset.mwBgSrc || extractBgImageUrl(element);
+        if (bg) currentSrcMatch = bg === src;
+      }
+    } catch (e) {}
+    if (moderated !== 'blurred' || !srcMatch || !currentSrcMatch) return false;
+    try {
+      element.style.removeProperty('filter');
+      element.style.removeProperty('-webkit-filter');
+      element.style.removeProperty('backdrop-filter');
+      element.style.removeProperty('-webkit-backdrop-filter');
+      element.dataset.mwModerated = 'safe';
+      element.classList.remove('mw-blurred');
+      element.classList.remove('mw-softblur');
+      if (DIAG_ENABLED) perfCounters.releasesApplied += 1;
+      console.log(
+        '[MW][SAFE_RELEASE]',
+        'src=' + String(src || '').substring(0, 120),
+        'state=' + moderated,
+      );
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
   function removeTimeoutRevealOverlay(element, itemId) {
     try {
       if (!element || !element.parentElement) return;
@@ -1253,6 +1462,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function createTimeoutRevealOverlay(element, src, itemId) {
+    if (!isRevealAllowed()) return;
     if (!element || !element.parentElement) return;
     const parent = element.parentElement;
     removeTimeoutRevealOverlay(element, itemId);
@@ -1286,6 +1496,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     ].join(';');
 
     overlay.addEventListener('click', function(e) {
+      if (!isRevealAllowed()) {
+        if (DIAG_ENABLED) perfCounters.revealTapIgnoredPolicyBlocked += 1;
+        return;
+      }
       e.preventDefault();
       e.stopPropagation();
       state.revealed.add(src);
@@ -1436,6 +1650,16 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function createRevealOverlay(element, src, category, itemId) {
+    if (!isRevealAllowed()) {
+      if (element && element.parentElement) {
+        element.parentElement.querySelectorAll('.mw-reveal-overlay').forEach(overlay => {
+          if (!overlay || overlay.dataset.mwFor !== src) return;
+          overlay.remove();
+        });
+      }
+      element.dataset.mwHasOverlay = 'false';
+      return;
+    }
     if (element.dataset.mwHasOverlay === 'true') return;
     
     const parent = element.parentElement;
@@ -1490,10 +1714,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     ].join(';');
     
     btn.addEventListener('click', function(e) {
-      e.preventDefault();
-      e.stopPropagation();
-      
       if (state.revealed.has(src)) {
+        e.preventDefault();
+        e.stopPropagation();
         // Re-blur
         state.revealed.delete(src);
         element.dataset.mwRevealed = 'false';
@@ -1501,6 +1724,12 @@ export function generateModerationScript(config: InjectionConfig): string {
         btn.textContent = '👁 Reveal';
         overlay.style.display = 'flex';
       } else {
+        if (!isRevealAllowed()) {
+          if (DIAG_ENABLED) perfCounters.revealTapIgnoredPolicyBlocked += 1;
+          return;
+        }
+        e.preventDefault();
+        e.stopPropagation();
         // Reveal and trigger feedback
         state.revealed.add(src);
         element.dataset.mwRevealed = 'true'; // Persistence
@@ -1518,7 +1747,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           platform: PLATFORM,
           modelPrediction: { category: category, confidence: null }
         };
-        console.log('[MW] posting gc-label-request', labelItemId);
+        if (DIAG_ENABLED) console.log('[MW] posting gc-label-request', labelItemId);
         postToHost(labelRequest);
         
         // Show brief correction overlay
@@ -1673,6 +1902,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       type: 'MW_REQ_SENT',
       requestId: requestId,
       navId: NAV_ID,
+      hostNavId: CONFIG.hostNavId,
       pageEpoch: state.pageEpoch,
       noncePrefix: NONCE_PREFIX,
       itemCount: items.length,
@@ -1957,7 +2187,9 @@ export function generateModerationScript(config: InjectionConfig): string {
         return;
       }
       
+      const pendingBySrcBeforeClear = state.pendingBySrc.get(src);
       clearPendingItem(itemId, 'result');
+      const pendingBySrcAfterClear = state.pendingBySrc.get(src);
       state.scanned.add(src);
       
       // Check if result came fast enough to skip blur (semantic delay saved)
@@ -2104,6 +2336,14 @@ export function generateModerationScript(config: InjectionConfig): string {
           }
           if (!keepSoftBlur) {
             markSafeResolved(src);
+            const canReleaseHardBlurForSafe =
+              resultEpoch === state.pageEpoch &&
+              pendingBySrcBeforeClear === itemId &&
+              !pendingBySrcAfterClear &&
+              element.dataset.mwRevealed !== 'true';
+            if (canReleaseHardBlurForSafe) {
+              clearHardBlurForSafe(element, src);
+            }
             // Remove soft blur if result is safe
             removeSoftBlur(element, src);
             if (wasInSoftBlur && !finalBlur) {
@@ -2219,6 +2459,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   // ==================== MESSAGE LISTENER ====================
 
   const onModerationResultEvent = function(event) {
+    if (DIAG_ENABLED) perfCounters.postMessageReceived += 1;
     const message = readHostEventPayload(event);
     if (!message || typeof message !== 'object') return;
     
@@ -2546,16 +2787,37 @@ export function generateModerationScript(config: InjectionConfig): string {
     } catch (e) {}
   }
 
-  function scanFullPage() {
+  function runFullPageScan(reason) {
     if (!CONFIG.enabled || CONFIG.sensitivity === 0) {
       console.log('[MW] Scanning disabled (sensitivity: ' + CONFIG.sensitivity + ')');
       return;
     }
     
+    trackScanPass(reason || 'timer');
+    if (DIAG_ENABLED) perfCounters.scanTriggers += 1;
     console.log('[MW] ========== FULL PAGE SCAN ==========');
     scanNode(document.body);
     emitCoverageSummary('full_scan');
+    maybeLogPerfSummary('scan:' + String(reason || 'timer'));
     console.log('[MW] Stats:', JSON.stringify(state.stats));
+  }
+
+  function scanFullPage(reason) {
+    if (scanInFlight) {
+      scanQueued = true;
+      if (DIAG_ENABLED) perfCounters.scanCoalesced += 1;
+      return;
+    }
+    scanInFlight = true;
+    try {
+      runFullPageScan(reason || 'timer');
+    } finally {
+      scanInFlight = false;
+    }
+    if (scanQueued) {
+      scanQueued = false;
+      scanFullPage('coalesced');
+    }
   }
 
   // ==================== MUTATION OBSERVER ====================
@@ -2728,6 +2990,20 @@ export function generateModerationScript(config: InjectionConfig): string {
   // Keep legacy queues for backward compatibility with polling approach
   window.__GC_SCAN_QUEUE__ = window.__GC_SCAN_QUEUE__ || [];
   window.__GC_SCAN_RESULTS__ = window.__GC_SCAN_RESULTS__ || [];
+  window.__MW_PULL_LEGACY_QUEUE__ = function(maxItems) {
+    if (!window.__GC_SCAN_QUEUE__) {
+      return { state: 'QUEUE_MISSING', items: [] };
+    }
+    if (!Array.isArray(window.__GC_SCAN_QUEUE__)) {
+      return { state: 'QUEUE_MISSING', items: [] };
+    }
+    if (window.__GC_SCAN_QUEUE__.length === 0) {
+      return { state: 'QUEUE_EMPTY', items: [] };
+    }
+    const limit = Number.isFinite(Number(maxItems)) ? Math.max(1, Math.min(20, Number(maxItems))) : 5;
+    const items = window.__GC_SCAN_QUEUE__.splice(0, limit);
+    return { state: 'QUEUE_ITEMS', items: items };
+  };
   
   // Poll legacy results queue (fallback if postMessage doesn't work)
   function processLegacyResults() {
@@ -2891,7 +3167,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   // Expose targeted rescan hooks for the host (NativeWebViewBrowser)
-  window.__MW_SCAN_FULL__ = scanFullPage;
+  window.__MW_SCAN_FULL__ = function() { scanFullPage('manual'); };
   window.__MW_SCAN_YT__ = scanYouTubeThumbnails;
 
   // Set up observers
@@ -2913,14 +3189,14 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   // Initial scan
   if (document.readyState === 'complete') {
-    scanFullPage();
+    scanFullPage('timer');
     if (isYouTube()) {
       scheduleInitTimeout('initialYouTubeScan', scanYouTubeThumbnails, 200);
     }
   } else {
     const onLoadScan = () => {
       if (timerState.teardownDone) return;
-      scanFullPage();
+      scanFullPage('timer');
       if (isYouTube()) {
         scheduleInitTimeout('loadYouTubeScan', scanYouTubeThumbnails, 200);
       }
@@ -2930,9 +3206,9 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   // Periodic rescans (more aggressive for YouTube)
   const isYT = isYouTube();
-  scheduleInitTimeout('initialFullScan', scanFullPage, 500);
-  scheduleInitTimeout('initialFullScan', scanFullPage, 1500);
-  scheduleInitTimeout('initialFullScan', scanFullPage, 3000);
+  scheduleInitTimeout('initialFullScan', function() { scanFullPage('timer'); }, 500);
+  scheduleInitTimeout('initialFullScan', function() { scanFullPage('timer'); }, 1500);
+  scheduleInitTimeout('initialFullScan', function() { scanFullPage('timer'); }, 3000);
   
   if (isYT) {
     scheduleInitTimeout('initialYouTubeScan', scanYouTubeThumbnails, 800);
@@ -2952,7 +3228,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (timerState.paused) return;
     clearNamedTimeout('mainScrollTimeout', 'reschedule');
     timerState.mainScrollTimeout = setTimeout(() => {
-      scanFullPage();
+      scanFullPage('scroll');
       if (isYouTube()) {
         scanYouTubeThumbnails();
       }
@@ -3111,7 +3387,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       console.log('[MW] Forced blur:', enabled);
       if (enabled) {
         console.log('[MW] DEV MODE: All images will be blurred without AI scan');
-        scanFullPage();
+        scanFullPage('manual');
       }
     },
   };

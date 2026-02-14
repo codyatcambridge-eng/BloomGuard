@@ -294,9 +294,25 @@ export const NativeWebViewBrowser = () => {
   const legacyPollExecuteScriptCallsRef = useRef<number[]>([]);
   const legacyPollDegradedUntilRef = useRef(0);
   const legacyPollLastDegradeLogAtRef = useRef(0);
+  const legacyQueueMissingStreakRef = useRef(0);
+  const legacyQueueMissingBackoffUntilRef = useRef(0);
+  const ackSeenForNavRef = useRef(false);
+  const blurReadySeenForNavRef = useRef(false);
+  const ackHostNavIdRef = useRef<number | null>(null);
+  const blurReadyHostNavIdRef = useRef<number | null>(null);
+  const blurReadyEpochRef = useRef<number | null>(null);
+  const blurReadyReceivedAtRef = useRef(0);
+  const injectSignalMismatchCountsRef = useRef({ ack: 0, blurReady: 0 });
+  const legacyQueueStateCountsRef = useRef({ missing: 0, empty: 0, items: 0 });
+  const legacyQueueBackoffCountRef = useRef(0);
+  const legacyPollDiagStateRef = useRef<{ navId: number; queueState: string }>({ navId: 0, queueState: '' });
+  const legacyPollTickTimestampsRef = useRef<number[]>([]);
+  const legacyPollRateLogAtRef = useRef(0);
+  const legacyQueueStateLogAtRef = useRef(0);
   const currentUrlRef = useRef('');
   const messageFromWebViewHandlerRef = useRef<((payload: unknown) => void) | null>(null);
   const LEGACY_ACK_WINDOW_MS = 12_000;
+  const MODERN_HEALTH_WINDOW_MS = 12_000;
   
   const {
     currentView,
@@ -390,8 +406,22 @@ export const NativeWebViewBrowser = () => {
     webViewPageEpochRef.current = activeNavIdRef.current;
     ackedPageEpochRef.current = null;
     ackReceivedAtRef.current = 0;
+    ackSeenForNavRef.current = false;
+    blurReadySeenForNavRef.current = false;
+    ackHostNavIdRef.current = null;
+    blurReadyHostNavIdRef.current = null;
+    blurReadyEpochRef.current = null;
+    blurReadyReceivedAtRef.current = 0;
     injectionAliveNavIdRef.current = null;
     legacyPollSuppressedUntilRef.current = 0;
+    legacyQueueMissingStreakRef.current = 0;
+    legacyQueueMissingBackoffUntilRef.current = 0;
+    legacyQueueStateCountsRef.current = { missing: 0, empty: 0, items: 0 };
+    legacyQueueBackoffCountRef.current = 0;
+    legacyPollDiagStateRef.current = { navId: activeNavIdRef.current, queueState: '' };
+    legacyPollTickTimestampsRef.current = [];
+    legacyPollRateLogAtRef.current = 0;
+    legacyQueueStateLogAtRef.current = 0;
     console.log(
       '[MW-Inject][Nav]',
       'navId=' + activeNavIdRef.current,
@@ -403,9 +433,9 @@ export const NativeWebViewBrowser = () => {
   const markInjectionAliveForNav = useCallback((signalType: string, source: 'capgo' | 'window') => {
     const now = Date.now();
     injectionAliveNavIdRef.current = activeNavIdRef.current;
-    ackedPageEpochRef.current = webViewPageEpochRef.current;
-    ackReceivedAtRef.current = now;
     legacyPollSuppressedUntilRef.current = now + LEGACY_ACK_WINDOW_MS;
+    legacyQueueMissingStreakRef.current = 0;
+    legacyQueueMissingBackoffUntilRef.current = 0;
     console.log(
       '[MW-Host][InjectAlive]',
       'signal=' + signalType,
@@ -415,8 +445,13 @@ export const NativeWebViewBrowser = () => {
     );
   }, [LEGACY_ACK_WINDOW_MS]);
 
+  const toFiniteIntOrNull = useCallback((value: unknown): number | null => {
+    const n = Number(value);
+    return Number.isFinite(n) ? Number(n) : null;
+  }, []);
+
   const injectModerationScript = useCallback(async (
-    scriptExecutor: (script: string) => Promise<string | null>,
+    scriptExecutor: (script: string, callsite?: string) => Promise<string | null>,
     reason: string,
     urlHint?: string,
   ) => {
@@ -457,6 +492,7 @@ export const NativeWebViewBrowser = () => {
     const config = {
       ...getModerationConfig(),
       pageEpoch: webViewPageEpochRef.current,
+      hostNavId: navId,
     };
     console.log(
       '[MW-Inject][Config]',
@@ -471,7 +507,7 @@ export const NativeWebViewBrowser = () => {
     // Full moderation script: request scanning + host bridge + DOM blur/reveal behavior.
     const mainScript = generateModerationScript(config);
     try {
-      await scriptExecutor(mainScript);
+      await scriptExecutor(mainScript, 'inject:' + reason);
       injectionDoneRef.current = true;
       lastInjectedUrlRef.current = targetUrl;
       lastInjectionAtRef.current = Date.now();
@@ -533,7 +569,7 @@ export const NativeWebViewBrowser = () => {
                   return 'ERR';
                 }
               })();
-            `);
+            `, 'host:onLoadEnd:blurPing');
           }
           loadEndInjectTimerRef.current = null;
         }, 500);
@@ -609,7 +645,7 @@ export const NativeWebViewBrowser = () => {
           return 'ERR';
         }
       })();
-    `);
+    `, 'host:teardown:' + reason);
     console.log(
       '[MW-Host][Timer] teardown',
       'reason=' + reason,
@@ -709,7 +745,7 @@ export const NativeWebViewBrowser = () => {
           return 'ERR';
         }
       })();
-    `);
+    `, 'host:blurHandshake:' + source);
   }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, executeScript]);
 
   const flushBlurStateToWebView = useCallback(async () => {
@@ -733,7 +769,7 @@ export const NativeWebViewBrowser = () => {
       })();
     `;
 
-    await executeScript(script);
+    await executeScript(script, 'host:flushBlurState');
     blurPendingRef.current = null;
     return;
   }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, executeScript]);
@@ -1206,19 +1242,36 @@ export const NativeWebViewBrowser = () => {
 
       const typedMessage = message as Record<string, unknown>;
       if (typedMessage.type === 'MW_INJECTED_ACK') {
-        markInjectionAliveForNav('MW_INJECTED_ACK', source);
-        const ackEpoch = Number(typedMessage.pageEpoch);
-        const currentNavEpoch = webViewPageEpochRef.current;
-        const ackForCurrentNav = Number.isFinite(ackEpoch) && ackEpoch === currentNavEpoch;
-        if (ackForCurrentNav) {
-          ackedPageEpochRef.current = ackEpoch;
-          ackReceivedAtRef.current = Date.now();
+        const ackEpoch = toFiniteIntOrNull(typedMessage.pageEpoch);
+        const ackHostNavId = toFiniteIntOrNull(typedMessage.hostNavId ?? typedMessage.navId);
+        const currentNavId = activeNavIdRef.current;
+        const currentEpoch = webViewPageEpochRef.current;
+        const navMatch = ackHostNavId !== null && ackHostNavId === currentNavId;
+        const epochMatch = ackEpoch !== null && ackEpoch === currentEpoch;
+        const ackForCurrentNav = navMatch && epochMatch;
+        if (!ackForCurrentNav) {
+          injectSignalMismatchCountsRef.current.ack += 1;
+          console.warn(
+            '[MW-Host][ACK_MISMATCH] MW_INJECTED_ACK',
+            'source=' + source,
+            'msgHostNavId=' + String(ackHostNavId ?? 'none'),
+            'msgPageEpoch=' + String(ackEpoch ?? 'none'),
+            'activeNavId=' + currentNavId,
+            'activePageEpoch=' + currentEpoch,
+            'count=' + injectSignalMismatchCountsRef.current.ack,
+          );
+          return;
         }
+        ackSeenForNavRef.current = true;
+        ackHostNavIdRef.current = ackHostNavId;
+        ackedPageEpochRef.current = ackEpoch;
+        ackReceivedAtRef.current = Date.now();
+        markInjectionAliveForNav('MW_INJECTED_ACK', source);
         console.log(
           '[MW-Host][ACK] MW_INJECTED_ACK',
           'source=' + source,
-          'navId=' + String(typedMessage.navId ?? 'none'),
-          'pageEpoch=' + String(typedMessage.pageEpoch ?? 'none'),
+          'hostNavId=' + String(ackHostNavId ?? 'none'),
+          'pageEpoch=' + String(ackEpoch ?? 'none'),
           'ackForCurrentNav=' + String(ackForCurrentNav),
           'noncePrefix=' + String(typedMessage.noncePrefix ?? 'none'),
           'url=' + String(typedMessage.url ?? 'unknown'),
@@ -1226,13 +1279,31 @@ export const NativeWebViewBrowser = () => {
         return;
       }
       if (typedMessage.type === 'MW_REQ_SENT') {
+        const reqEpoch = toFiniteIntOrNull(typedMessage.pageEpoch);
+        const reqHostNavId = toFiniteIntOrNull(typedMessage.hostNavId ?? typedMessage.navId);
+        const reqForCurrentNav =
+          reqHostNavId !== null &&
+          reqHostNavId === activeNavIdRef.current &&
+          reqEpoch !== null &&
+          reqEpoch === webViewPageEpochRef.current;
+        if (!reqForCurrentNav) {
+          console.warn(
+            '[MW-Host][REQ_MISMATCH] MW_REQ_SENT',
+            'source=' + source,
+            'msgHostNavId=' + String(reqHostNavId ?? 'none'),
+            'msgPageEpoch=' + String(reqEpoch ?? 'none'),
+            'activeNavId=' + activeNavIdRef.current,
+            'activePageEpoch=' + webViewPageEpochRef.current,
+          );
+          return;
+        }
         markInjectionAliveForNav('MW_REQ_SENT', source);
         console.log(
           '[MW-Host][REQ] MW_REQ_SENT',
           'source=' + source,
           'requestId=' + String(typedMessage.requestId ?? 'none'),
-          'navId=' + String(typedMessage.navId ?? 'none'),
-          'pageEpoch=' + String(typedMessage.pageEpoch ?? 'none'),
+          'hostNavId=' + String(reqHostNavId ?? 'none'),
+          'pageEpoch=' + String(reqEpoch ?? 'none'),
           'noncePrefix=' + String(typedMessage.noncePrefix ?? 'none'),
           'items=' + String(typedMessage.itemCount ?? '0'),
         );
@@ -1251,7 +1322,38 @@ export const NativeWebViewBrowser = () => {
         return;
       }
       if (typedMessage.type === 'MW_BLUR_READY') {
+        const readyEpoch = toFiniteIntOrNull(typedMessage.pageEpoch);
+        const readyHostNavId = toFiniteIntOrNull(typedMessage.hostNavId ?? typedMessage.navId);
+        const currentNavId = activeNavIdRef.current;
+        const currentEpoch = webViewPageEpochRef.current;
+        const navMatch = readyHostNavId !== null && readyHostNavId === currentNavId;
+        const epochMatch = readyEpoch !== null && readyEpoch === currentEpoch;
+        const readyForCurrentNav = navMatch && epochMatch;
+        if (!readyForCurrentNav) {
+          injectSignalMismatchCountsRef.current.blurReady += 1;
+          console.warn(
+            '[MW-Host][ACK_MISMATCH] MW_BLUR_READY',
+            'source=' + source,
+            'msgHostNavId=' + String(readyHostNavId ?? 'none'),
+            'msgPageEpoch=' + String(readyEpoch ?? 'none'),
+            'activeNavId=' + currentNavId,
+            'activePageEpoch=' + currentEpoch,
+            'count=' + injectSignalMismatchCountsRef.current.blurReady,
+          );
+          return;
+        }
+        blurReadySeenForNavRef.current = true;
+        blurReadyHostNavIdRef.current = readyHostNavId;
+        blurReadyEpochRef.current = readyEpoch;
+        blurReadyReceivedAtRef.current = Date.now();
         markInjectionAliveForNav('MW_BLUR_READY', source);
+        console.log(
+          '[MW-Host][ACK] MW_BLUR_READY',
+          'source=' + source,
+          'hostNavId=' + String(readyHostNavId ?? 'none'),
+          'pageEpoch=' + String(readyEpoch ?? 'none'),
+          'reason=' + String(typedMessage.reason ?? 'none'),
+        );
       }
 
       if (ENABLE_DOM_BLUR && isBlurOverlayReadyMessage(message)) {
@@ -1315,7 +1417,7 @@ export const NativeWebViewBrowser = () => {
       messageFromWebViewHandlerRef.current = null;
       window.removeEventListener('message', handleWindowMessage);
     };
-  }, [ENABLE_SIGNAL_PIPELINE, ENABLE_DOM_BLUR, processModerationRequest, moderationBridge, postMessageToWebView, getNonce, queueCurrentBlurState, flushBlurStateToWebView, markInjectionAliveForNav]);
+  }, [ENABLE_SIGNAL_PIPELINE, ENABLE_DOM_BLUR, processModerationRequest, moderationBridge, postMessageToWebView, getNonce, queueCurrentBlurState, flushBlurStateToWebView, markInjectionAliveForNav, toFiniteIntOrNull]);
 
   /**
    * Fallback: Poll for moderation requests from legacy global queue
@@ -1339,6 +1441,9 @@ export const NativeWebViewBrowser = () => {
     const IDLE_MIN_POLL_MS = 2000;
     const IDLE_MAX_POLL_MS = 5000;
     const IDLE_BACKOFF_MS = 500;
+    const QUEUE_MISSING_BACKOFF_AFTER = 3;
+    const QUEUE_MISSING_BACKOFF_MS = 15_000;
+    const QUEUE_MISSING_POLL_MS = 4_000;
     let pollDelayMs = MIN_POLL_MS;
     let cancelled = false;
     let pollTimer: NodeJS.Timeout | null = null;
@@ -1349,8 +1454,14 @@ export const NativeWebViewBrowser = () => {
     let idlePollMs = IDLE_MIN_POLL_MS;
 
     const hasRecentAckForCurrentNav = () =>
+      ackHostNavIdRef.current === activeNavIdRef.current &&
       ackedPageEpochRef.current === webViewPageEpochRef.current &&
-      (Date.now() - ackReceivedAtRef.current) <= LEGACY_ACK_WINDOW_MS;
+      (Date.now() - ackReceivedAtRef.current) <= MODERN_HEALTH_WINDOW_MS;
+    const hasRecentReadyForCurrentNav = () =>
+      blurReadyHostNavIdRef.current === activeNavIdRef.current &&
+      blurReadyEpochRef.current === webViewPageEpochRef.current &&
+      (Date.now() - blurReadyReceivedAtRef.current) <= MODERN_HEALTH_WINDOW_MS;
+    const hasHealthyModernChannel = () => hasRecentAckForCurrentNav() && hasRecentReadyForCurrentNav();
     const shouldSuppressPollForInjectAlive = () =>
       injectionAliveNavIdRef.current === activeNavIdRef.current &&
       Date.now() < legacyPollSuppressedUntilRef.current;
@@ -1358,10 +1469,14 @@ export const NativeWebViewBrowser = () => {
       const now = Date.now();
       const hasRecentAck = hasRecentAckForCurrentNav();
       const ackAgeMs = ackReceivedAtRef.current > 0 ? Math.max(0, now - ackReceivedAtRef.current) : -1;
+      const readyAgeMs = blurReadyReceivedAtRef.current > 0 ? Math.max(0, now - blurReadyReceivedAtRef.current) : -1;
       return {
         now,
         hasRecentAck,
+        hasRecentReady: hasRecentReadyForCurrentNav(),
+        hasHealthyModernChannel: hasHealthyModernChannel(),
         ackAgeMs,
+        readyAgeMs,
         navId: activeNavIdRef.current,
         url: webViewState.currentUrl || currentUrlRef.current || 'unknown',
         injectAliveNavId: injectionAliveNavIdRef.current,
@@ -1382,6 +1497,31 @@ export const NativeWebViewBrowser = () => {
         'now=' + diag.now,
         'hasRecentAck=' + diag.hasRecentAck,
         'ackAgeMs=' + diag.ackAgeMs,
+        'hasRecentReady=' + diag.hasRecentReady,
+        'readyAgeMs=' + diag.readyAgeMs,
+        'modernHealthy=' + diag.hasHealthyModernChannel,
+      );
+    };
+    const emitLegacyNavDiag = (queueState: string, source: string) => {
+      const navId = activeNavIdRef.current;
+      const last = legacyPollDiagStateRef.current;
+      if (last.navId === navId && last.queueState === queueState) return;
+      legacyPollDiagStateRef.current = { navId, queueState };
+      const now = Date.now();
+      const backoffRemainingMs = Math.max(0, legacyQueueMissingBackoffUntilRef.current - now);
+      console.log(
+        '[MW-Host][NavDiag]',
+        'source=' + source,
+        'navId=' + navId,
+        'pageEpoch=' + webViewPageEpochRef.current,
+        'queueState=' + queueState,
+        'ackSeen=' + String(ackSeenForNavRef.current),
+        'blurReadySeen=' + String(blurReadySeenForNavRef.current),
+        'hasRecentAck=' + String(hasRecentAckForCurrentNav()),
+        'hasRecentReady=' + String(hasRecentReadyForCurrentNav()),
+        'modernHealthy=' + String(hasHealthyModernChannel()),
+        'missingStreak=' + legacyQueueMissingStreakRef.current,
+        'missingBackoffRemainingMs=' + backoffRemainingMs,
       );
     };
     const evaluateLegacyPollGate = (callsite: string) => {
@@ -1398,10 +1538,17 @@ export const NativeWebViewBrowser = () => {
         injectionAliveNavIdRef.current !== activeNavIdRef.current
       ) {
         gateReason = 'nav_mismatch';
+      } else if (hasHealthyModernChannel()) {
+        gateReason = 'modern_channel_healthy';
       } else if (hasRecentAckForCurrentNav()) {
         gateReason = 'fresh_ack';
       } else if (shouldSuppressPollForInjectAlive()) {
         gateReason = 'injection_alive_window';
+      } else if (
+        legacyQueueMissingBackoffUntilRef.current > Date.now() &&
+        !hasRecentAckForCurrentNav()
+      ) {
+        gateReason = 'queue_missing_backoff';
       }
       const allow = gateReason === 'allow';
       logLegacyPollGate('start_or_skip', callsite, gateReason);
@@ -1433,6 +1580,35 @@ export const NativeWebViewBrowser = () => {
         activateLegacyPollDegrade('executeScript_rate_limit', LEGACY_POLL_DEGRADE_MS, fresh.length);
       }
       return fresh.length;
+    };
+    const trackPollLoopRate = (reason: string) => {
+      const now = Date.now();
+      const recent = legacyPollTickTimestampsRef.current.filter(ts => (now - ts) <= 10_000);
+      recent.push(now);
+      legacyPollTickTimestampsRef.current = recent;
+      if (now - legacyPollRateLogAtRef.current >= 10_000) {
+        legacyPollRateLogAtRef.current = now;
+        console.log(
+          '[MW-Host][LegacyPollRate]',
+          'navId=' + activeNavIdRef.current,
+          'pageEpoch=' + webViewPageEpochRef.current,
+          'loopsPer10s=' + recent.length,
+          'reason=' + reason,
+        );
+      }
+      if (now - legacyQueueStateLogAtRef.current >= 10_000) {
+        legacyQueueStateLogAtRef.current = now;
+        console.log(
+          '[MW-Host][LegacyQueueStats]',
+          'navId=' + activeNavIdRef.current,
+          'pageEpoch=' + webViewPageEpochRef.current,
+          'missing=' + legacyQueueStateCountsRef.current.missing,
+          'empty=' + legacyQueueStateCountsRef.current.empty,
+          'items=' + legacyQueueStateCountsRef.current.items,
+          'backoffTriggers=' + legacyQueueBackoffCountRef.current,
+        );
+        legacyQueueStateCountsRef.current = { missing: 0, empty: 0, items: 0 };
+      }
     };
 
     const clearPollTimer = (reason: string) => {
@@ -1488,6 +1664,43 @@ export const NativeWebViewBrowser = () => {
     const scheduleNextPoll = (delayMs: number, reason: string) => {
       const gate = evaluateLegacyPollGate('scheduleNextPoll:' + reason);
       if (!gate.allow) {
+        const now = Date.now();
+        const maybeScheduleRecheck = (ms: number, recheckReason: string) => {
+          if (pollTimer) clearPollTimer('recheck_reschedule');
+          pollTimer = setTimeout(() => {
+            pollTimer = null;
+            legacyPollTimerActiveRef.current = false;
+            void runPollLoop();
+          }, ms);
+          legacyPollTimerActiveRef.current = true;
+          logLegacyPollGate('scheduled', 'scheduleNextPoll:' + reason, recheckReason);
+        };
+        if (gate.gateReason === 'queue_missing_backoff') {
+          if (pollTimer) clearPollTimer('queue_missing_backoff_reschedule');
+          pollTimer = setTimeout(() => {
+            pollTimer = null;
+            legacyPollTimerActiveRef.current = false;
+            void runPollLoop();
+          }, QUEUE_MISSING_POLL_MS);
+          legacyPollTimerActiveRef.current = true;
+          logLegacyPollGate('scheduled', 'scheduleNextPoll:' + reason, 'queue_missing_backoff');
+          emitLegacyNavDiag('QUEUE_MISSING_BACKOFF', 'scheduleNextPoll:' + reason);
+          return;
+        }
+        if (gate.gateReason === 'modern_channel_healthy') {
+          maybeScheduleRecheck(Math.max(1_000, MODERN_HEALTH_WINDOW_MS / 2), 'modern_health_recheck');
+          return;
+        }
+        if (gate.gateReason === 'fresh_ack') {
+          const ackRemainingMs = Math.max(1_000, MODERN_HEALTH_WINDOW_MS - Math.max(0, now - ackReceivedAtRef.current));
+          maybeScheduleRecheck(ackRemainingMs, 'fresh_ack_recheck');
+          return;
+        }
+        if (gate.gateReason === 'injection_alive_window') {
+          const suppressRemainingMs = Math.max(1_000, legacyPollSuppressedUntilRef.current - now);
+          maybeScheduleRecheck(suppressRemainingMs, 'inject_alive_recheck');
+          return;
+        }
         if (Date.now() < legacyPollDegradedUntilRef.current) {
           const count = legacyPollExecuteScriptCallsRef.current.length;
           activateLegacyPollDegrade('executeScript_rate_limit', Math.max(legacyPollDegradedUntilRef.current - Date.now(), 0), count);
@@ -1540,40 +1753,94 @@ export const NativeWebViewBrowser = () => {
         if (document.visibilityState !== 'visible') {
           return false;
         }
-        // Get and clear pending requests from WebView's global queue
+        // Get and clear pending requests via injected helper (state-aware)
         const getQueueScript = `
           (function() {
-            if (!window.__GC_SCAN_QUEUE__ || window.__GC_SCAN_QUEUE__.length === 0) {
-              return 'EMPTY';
+            if (typeof window.__MW_PULL_LEGACY_QUEUE__ === 'function') {
+              try {
+                return JSON.stringify(window.__MW_PULL_LEGACY_QUEUE__(5));
+              } catch (e) {
+                return JSON.stringify({ state: 'QUEUE_MISSING', items: [] });
+              }
+            }
+            if (!window.__GC_SCAN_QUEUE__) {
+              return JSON.stringify({ state: 'QUEUE_MISSING', items: [] });
+            }
+            if (window.__GC_SCAN_QUEUE__.length === 0) {
+              return JSON.stringify({ state: 'QUEUE_EMPTY', items: [] });
             }
             var items = window.__GC_SCAN_QUEUE__.splice(0, 5);
-            return JSON.stringify(items);
+            return JSON.stringify({ state: 'QUEUE_ITEMS', items: items });
           })();
         `;
         
         trackExecuteScriptRate();
-        const result = await executeScript(getQueueScript);
+        const result = await executeScript(getQueueScript, 'legacy_poll:get_queue');
         
-        if (!result || result === 'EMPTY' || result === 'null') {
+        if (!result || result === 'null') {
+          legacyQueueStateCountsRef.current.empty += 1;
+          emitLegacyNavDiag('QUEUE_EMPTY', 'legacy_poll:result_null');
+          legacyQueueMissingStreakRef.current = 0;
           return false;
         }
-        
-        let items;
+        let queuePayload: unknown = null;
         try {
-          items = JSON.parse(result);
+          queuePayload = JSON.parse(result);
         } catch (e) {
           return false;
         }
-        
-        if (!Array.isArray(items) || items.length === 0) {
+
+        const queuePayloadObject = (queuePayload && typeof queuePayload === 'object')
+          ? queuePayload as { state?: unknown; items?: unknown }
+          : null;
+        const queueState = String(queuePayloadObject?.state || '');
+        if (queueState === 'QUEUE_MISSING') {
+          legacyQueueStateCountsRef.current.missing += 1;
+          legacyQueueMissingStreakRef.current += 1;
+          emitLegacyNavDiag('QUEUE_MISSING', 'legacy_poll:get_queue');
+          if (legacyQueueMissingStreakRef.current >= QUEUE_MISSING_BACKOFF_AFTER) {
+            legacyQueueMissingBackoffUntilRef.current = Date.now() + QUEUE_MISSING_BACKOFF_MS;
+            legacyQueueBackoffCountRef.current += 1;
+            emitLegacyNavDiag('QUEUE_MISSING_BACKOFF', 'legacy_poll:queue_missing_threshold');
+            console.log(
+              '[MW-Host][LegacyBackoff]',
+              'reason=queue_missing_streak',
+              'streak=' + legacyQueueMissingStreakRef.current,
+              'backoffMs=' + QUEUE_MISSING_BACKOFF_MS,
+              'navId=' + activeNavIdRef.current,
+            );
+          }
           return false;
         }
+        if (queueState === 'QUEUE_EMPTY') {
+          legacyQueueStateCountsRef.current.empty += 1;
+          legacyQueueMissingStreakRef.current = 0;
+          emitLegacyNavDiag('QUEUE_EMPTY', 'legacy_poll:get_queue');
+          return false;
+        }
+
+        let items = Array.isArray(queuePayloadObject?.items) ? queuePayloadObject?.items : null;
+        if (!items && Array.isArray(queuePayload)) {
+          items = queuePayload;
+        }
+        
+        if (!Array.isArray(items) || items.length === 0) {
+          legacyQueueStateCountsRef.current.empty += 1;
+          legacyQueueMissingStreakRef.current = 0;
+          emitLegacyNavDiag('QUEUE_EMPTY', 'legacy_poll:items_not_array');
+          return false;
+        }
+        legacyQueueStateCountsRef.current.items += 1;
+        legacyQueueMissingStreakRef.current = 0;
+        legacyQueueMissingBackoffUntilRef.current = 0;
+        emitLegacyNavDiag('QUEUE_ITEMS(' + items.length + ')', 'legacy_poll:get_queue');
         
         console.log('[MW-Host] Legacy poll: found', items.length, 'items in queue');
         
         // Process each scan request
-        for (const item of items) {
-          const { src, thresholds } = item;
+        for (const item of items as Array<Record<string, unknown>>) {
+          const src = typeof item.src === 'string' ? item.src : '';
+          const thresholds = item.thresholds;
           
           if (!src) continue;
           
@@ -1602,7 +1869,7 @@ export const NativeWebViewBrowser = () => {
             
             try {
               trackExecuteScriptRate();
-              await executeScript(pushResultScript);
+              await executeScript(pushResultScript, 'legacy_poll:push_result');
               console.log('[MW-Host] Legacy result pushed for:', src.substring(0, 50));
             } catch (e) {
               const text = String(e || '');
@@ -1630,8 +1897,18 @@ export const NativeWebViewBrowser = () => {
     };
 
     const runPollLoop = async () => {
+      trackPollLoopRate('runPollLoop');
       const gate = evaluateLegacyPollGate('runPollLoop');
       if (!gate.allow) {
+        if (gate.gateReason === 'queue_missing_backoff') {
+          emitLegacyNavDiag('QUEUE_MISSING_BACKOFF', 'runPollLoop');
+          scheduleNextPoll(QUEUE_MISSING_POLL_MS, 'queue_missing_backoff');
+          return;
+        }
+        if (gate.gateReason === 'modern_channel_healthy' || gate.gateReason === 'fresh_ack' || gate.gateReason === 'injection_alive_window') {
+          scheduleNextPoll(MIN_POLL_MS, gate.gateReason);
+          return;
+        }
         clearPollTimer(gate.gateReason);
         return;
       }
@@ -1657,6 +1934,31 @@ export const NativeWebViewBrowser = () => {
     };
     const initialGate = evaluateLegacyPollGate('effect_start');
     if (!initialGate.allow) {
+      if (initialGate.gateReason === 'queue_missing_backoff') {
+        emitLegacyNavDiag('QUEUE_MISSING_BACKOFF', 'effect_start');
+        scheduleNextPoll(QUEUE_MISSING_POLL_MS, 'queue_missing_backoff');
+        return () => {
+          cancelled = true;
+          clearPollTimer('effect_cleanup');
+          legacyPollTimerActiveRef.current = false;
+          window.removeEventListener('scroll', onScroll);
+          window.removeEventListener('popstate', onPopState);
+          window.removeEventListener('hashchange', onHashChange);
+          document.removeEventListener('visibilitychange', onVisibilityChange);
+        };
+      }
+      if (initialGate.gateReason === 'modern_channel_healthy' || initialGate.gateReason === 'fresh_ack' || initialGate.gateReason === 'injection_alive_window') {
+        scheduleNextPoll(MIN_POLL_MS, 'initial_gate_recheck');
+        return () => {
+          cancelled = true;
+          clearPollTimer('effect_cleanup');
+          legacyPollTimerActiveRef.current = false;
+          window.removeEventListener('scroll', onScroll);
+          window.removeEventListener('popstate', onPopState);
+          window.removeEventListener('hashchange', onHashChange);
+          document.removeEventListener('visibilitychange', onVisibilityChange);
+        };
+      }
       if (Date.now() < legacyPollDegradedUntilRef.current) {
         const count = legacyPollExecuteScriptCallsRef.current.length;
         activateLegacyPollDegrade('executeScript_rate_limit', Math.max(legacyPollDegradedUntilRef.current - Date.now(), 0), count);
@@ -2121,7 +2423,7 @@ export const NativeWebViewBrowser = () => {
     `;
     
     try {
-      await executeScript(rescanScript);
+      await executeScript(rescanScript, 'host:manualRescan');
       console.log('[Browser] Manual scan triggered');
     } catch (error) {
       console.error('[Browser] Manual scan failed:', error);
