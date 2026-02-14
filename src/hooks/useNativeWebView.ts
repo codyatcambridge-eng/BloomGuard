@@ -482,6 +482,12 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
             .map(([site, count]) => site + ':' + count)
             .join(',');
           console.log(
+            '[MW-Host][ExecScript10s]',
+            'count=' + executeScript10sCountRef.current,
+            'windowMs=' + elapsed10s,
+            'topCallsites=' + (callsites || 'none'),
+          );
+          console.log(
             '[NativeWebView][Metrics]',
             'executeScript10sCount=' + executeScript10sCountRef.current,
             'windowMs=' + elapsed10s,
