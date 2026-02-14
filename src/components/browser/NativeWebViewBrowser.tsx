@@ -145,6 +145,8 @@ export const NativeWebViewBrowser = () => {
   const riskDecisionListenerRef = useRef<PluginListenerHandle | null>(null);
   const lastNsfwSignalAtRef = useRef(0);
   const webViewPageEpochRef = useRef(0);
+  const ackDiagSeenRef = useRef<Set<string>>(new Set());
+  const readyDiagSeenRef = useRef<Set<string>>(new Set());
 
   const UNSAFE_STREAK_REQUIRED = 2;
   const SAFE_STREAK_REQUIRED = 2;
@@ -1109,6 +1111,19 @@ export const NativeWebViewBrowser = () => {
 
       const typedMessage = message as Record<string, unknown>;
       if (typedMessage.type === 'MW_INJECTED_ACK') {
+        const ackNavId = String(typedMessage.navId ?? 'none');
+        const ackEpoch = String(typedMessage.pageEpoch ?? 'none');
+        const ackKey = ackNavId + '|' + ackEpoch;
+        if (isDebugMode && !ackDiagSeenRef.current.has(ackKey)) {
+          ackDiagSeenRef.current.add(ackKey);
+          console.log(
+            '[MW-Host][ACK]',
+            'navId=' + ackNavId,
+            'pageEpoch=' + ackEpoch,
+            'url=' + String(typedMessage.url ?? 'unknown'),
+            'source=' + source,
+          );
+        }
         console.log(
           '[MW-Host][ACK] MW_INJECTED_ACK',
           'source=' + source,
@@ -1145,6 +1160,19 @@ export const NativeWebViewBrowser = () => {
       }
 
       if (ENABLE_DOM_BLUR && isBlurOverlayReadyMessage(message)) {
+        const readyNavId = String(activeNavIdRef.current || 'none');
+        const readyEpoch = String(webViewPageEpochRef.current || 'none');
+        const readyKey = readyNavId + '|' + readyEpoch;
+        if (isDebugMode && !readyDiagSeenRef.current.has(readyKey)) {
+          readyDiagSeenRef.current.add(readyKey);
+          console.log(
+            '[MW-Host][READY]',
+            'navId=' + readyNavId,
+            'pageEpoch=' + readyEpoch,
+            'reason=' + String(typedMessage.reason || 'ready'),
+            'url=' + String(typedMessage.url || 'unknown'),
+          );
+        }
         blurReadyRef.current = true;
         console.log('[MW-Host] Blur overlay READY:', String(typedMessage.reason || 'ready'), String(typedMessage.url || ''));
         queueCurrentBlurState('webview_ready_sync');
@@ -1205,7 +1233,7 @@ export const NativeWebViewBrowser = () => {
       messageFromWebViewHandlerRef.current = null;
       window.removeEventListener('message', handleWindowMessage);
     };
-  }, [ENABLE_SIGNAL_PIPELINE, ENABLE_DOM_BLUR, processModerationRequest, moderationBridge, postMessageToWebView, getNonce, queueCurrentBlurState, flushBlurStateToWebView]);
+  }, [ENABLE_SIGNAL_PIPELINE, ENABLE_DOM_BLUR, isDebugMode, processModerationRequest, moderationBridge, postMessageToWebView, getNonce, queueCurrentBlurState, flushBlurStateToWebView]);
 
   /**
    * Fallback: Poll for moderation requests from legacy global queue
