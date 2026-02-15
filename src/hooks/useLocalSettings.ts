@@ -43,6 +43,7 @@ export interface LocalProtectionSettings {
   soft_overlay_ratio_threshold: number;
   soft_overlay_min_hits: number;
   blur_mode: BlurMode;
+  kid_safe_profile: boolean;
 }
 
 const SETTINGS_KEY = 'iron_watch_local_settings';
@@ -66,6 +67,7 @@ const DEFAULT_SETTINGS: LocalProtectionSettings = {
   soft_overlay_ratio_threshold: 0.5,
   soft_overlay_min_hits: 4,
   blur_mode: 'balanced',
+  kid_safe_profile: false,
 };
 
 export const useLocalSettings = () => {
@@ -112,6 +114,27 @@ export const useLocalSettings = () => {
   const resetSettings = useCallback(() => {
     saveSettings(DEFAULT_SETTINGS);
   }, [saveSettings]);
+
+  const setKidSafeProfile = useCallback((enabled: boolean) => {
+    const next: LocalProtectionSettings = enabled
+      ? {
+          ...settings,
+          kid_safe_profile: true,
+          shield_active: true,
+          blur_dial: settings.blur_dial >= 3 ? settings.blur_dial : 3,
+          fail_closed: true,
+          blocking_mode: 'full',
+          blur_mode: 'strict',
+        }
+      : {
+          ...settings,
+          kid_safe_profile: false,
+          fail_closed: false,
+          blocking_mode: 'mvp',
+          blur_mode: 'balanced',
+        };
+    saveSettings(next);
+  }, [settings, saveSettings]);
 
   // Get AI thresholds based on sensitivity
   const getAIThresholds = useCallback(() => {
@@ -175,9 +198,10 @@ export const useLocalSettings = () => {
       nonce: sessionNonceRef.current,
       blockingMode: settings.blocking_mode,
       prototypeMode: settings.prototype_mode,
+      kidSafeProfile: settings.kid_safe_profile,
       triggers: triggers || {},
     };
-  }, [settings.shield_active, settings.blur_dial, settings.blur_strength_px, settings.fail_closed, settings.debug_mode, settings.blocking_mode, settings.prototype_mode]);
+  }, [settings.shield_active, settings.blur_dial, settings.blur_strength_px, settings.fail_closed, settings.debug_mode, settings.blocking_mode, settings.prototype_mode, settings.kid_safe_profile]);
 
   // Check if a category should be blocked based on MVP mode
   const shouldBlockCategory = useCallback((category: string): boolean => {
@@ -207,5 +231,6 @@ export const useLocalSettings = () => {
     getModerationConfig,
     getNonce,
     shouldBlockCategory,
+    setKidSafeProfile,
   };
 };

@@ -33,6 +33,8 @@ export interface InjectionConfig {
   blockingMode?: 'mvp' | 'full';
   enableVideoFrameSnapshots?: boolean;
   pageEpoch?: number;
+  kidSafeProfile?: boolean;
+  domainContextAdult?: boolean;
 }
 
 export interface FailOpenModePolicyInput {
@@ -44,6 +46,7 @@ export interface FailOpenModePolicyInput {
   enabled: boolean;
   sensitivity: number;
   blockingMode?: 'mvp' | 'full';
+  domainContextAdult?: boolean;
 }
 
 export interface AnatomicalPolicyInput {
@@ -56,6 +59,8 @@ export interface AnatomicalPolicyInput {
   failClosed: boolean;
   enabled: boolean;
   sensitivity: number;
+  kidSafeProfile?: boolean;
+  domainContextAdult?: boolean;
 }
 
 const MVP_UNSAFE_CATEGORIES = new Set([
@@ -88,7 +93,7 @@ export function applyFailOpenAndModePolicyDecision(input: FailOpenModePolicyInpu
     return { shouldBlur: false, reason: 'failOpen/' + normalizedCategory };
   }
 
-  if (input.blockingMode === 'mvp') {
+  if (input.blockingMode === 'mvp' && input.domainContextAdult !== true) {
     const categoryAllowed = isMvpAllowedPolicyLabel(normalizedCategory);
     const predictedAllowed = isMvpAllowedPolicyLabel(predictedLabel);
     if (input.rawShouldBlur && !categoryAllowed && !predictedAllowed) {
@@ -105,6 +110,9 @@ export function applyAnatomicalThresholdDecision(input: AnatomicalPolicyInput): 
   }
   if (input.predictedLabel !== 'sexy' && input.predictedLabel !== 'porn') {
     return { shouldBlur: !!input.shouldApplyBlur, reason: null };
+  }
+  if (input.kidSafeProfile === true && input.domainContextAdult === true) {
+    return { shouldBlur: true, reason: null };
   }
 
   const score = input.predictedLabel === 'sexy' ? input.sexyScore : input.pornScore;
@@ -208,6 +216,8 @@ export function generateModerationScript(config: InjectionConfig): string {
     nonce: '${nonce}',
     blockingMode: '${config.blockingMode || 'mvp'}',
     enableVideoFrameSnapshots: ${config.enableVideoFrameSnapshots === true},
+    kidSafeProfile: ${config.kidSafeProfile === true},
+    domainContextAdult: ${config.domainContextAdult === true},
     pageEpoch: ${pageEpoch},
     minImageSize: 80, // Minimum image dimension (fail-open below this - 80x80)
     semanticDelayMs: 200, // Delay before applying blur (200ms)
@@ -1114,7 +1124,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       return { shouldBlur: false, reason: 'failOpen/' + normalizedCategory };
     }
 
-    if (CONFIG.blockingMode === 'mvp') {
+    if (CONFIG.blockingMode === 'mvp' && CONFIG.domainContextAdult !== true) {
       const categoryAllowed = isMvpAllowedCategory(normalizedCategory);
       const predictedAllowed = isMvpAllowedCategory(normalizedPredicted);
       if (!!rawShouldBlur && !categoryAllowed && !predictedAllowed) {
@@ -1132,6 +1142,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     if (normalizedPredicted !== 'sexy' && normalizedPredicted !== 'porn') {
       return { shouldBlur: !!shouldApplyBlur, reason: null };
+    }
+    if (CONFIG.kidSafeProfile === true && CONFIG.domainContextAdult === true) {
+      return { shouldBlur: true, reason: null };
     }
 
     const score = normalizedPredicted === 'sexy' ? unsafeScores.sexy : unsafeScores.porn;

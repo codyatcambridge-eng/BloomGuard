@@ -60,6 +60,38 @@ describe('webview injection blur policy', () => {
     expect(mvpAllowed.shouldBlur).toBe(true);
   });
 
+  it('allows sexy blur on adult-domain context even in MVP', () => {
+    const decision = applyFailOpenAndModePolicyDecision({
+      rawShouldBlur: true,
+      normalizedCategory: 'sexy',
+      predictedLabel: 'sexy',
+      isErrorResult: false,
+      failClosed: false,
+      enabled: true,
+      sensitivity: 2,
+      blockingMode: 'mvp',
+      domainContextAdult: true,
+    });
+    expect(decision.shouldBlur).toBe(true);
+  });
+
+  it('kid-safe bypasses anatomical suppression on adult-domain context', () => {
+    const anatomical = applyAnatomicalThresholdDecision({
+      shouldApplyBlur: true,
+      predictedLabel: 'sexy',
+      sexyScore: 0.5,
+      pornScore: 0,
+      anatomicalThreshold: 0.6,
+      forceUnsafe: false,
+      failClosed: true,
+      enabled: true,
+      sensitivity: 3,
+      kidSafeProfile: true,
+      domainContextAdult: true,
+    });
+    expect(anatomical.shouldBlur).toBe(true);
+  });
+
   it('timeout is fail-open when failClosed=false', () => {
     const timeoutDecision = applyFailOpenAndModePolicyDecision({
       rawShouldBlur: false,

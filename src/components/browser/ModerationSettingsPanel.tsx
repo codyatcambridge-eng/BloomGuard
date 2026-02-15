@@ -18,7 +18,7 @@ interface ModerationSettingsPanelProps {
 }
 
 export const ModerationSettingsPanel = ({ compact = false }: ModerationSettingsPanelProps) => {
-  const { settings, updateSetting, isModerationEnabled } = useLocalSettings();
+  const { settings, updateSetting, isModerationEnabled, setKidSafeProfile } = useLocalSettings();
   
   const currentLevel = SENSITIVITY_LABELS[settings.blur_dial];
   const isEnabled = isModerationEnabled();
@@ -62,6 +62,17 @@ export const ModerationSettingsPanel = ({ compact = false }: ModerationSettingsP
         <Switch
           checked={settings.shield_active}
           onCheckedChange={(checked) => updateSetting('shield_active', checked)}
+        />
+      </div>
+
+      <div className="flex items-center justify-between py-3 border-b border-border">
+        <div>
+          <Label className="text-sm font-medium">Kid Safe Profile</Label>
+          <p className="text-xs text-muted-foreground">Strict kid-safe settings with fail-closed behavior</p>
+        </div>
+        <Switch
+          checked={settings.kid_safe_profile}
+          onCheckedChange={(checked) => setKidSafeProfile(checked)}
         />
       </div>
 

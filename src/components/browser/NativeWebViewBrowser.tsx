@@ -7,6 +7,7 @@ import { useContentProtection } from '@/hooks/useContentProtection';
 import { useSettings } from '@/hooks/useSettings';
 import { useLocalSettings } from '@/hooks/useLocalSettings';
 import { useDeviceId } from '@/hooks/useDeviceId';
+import { useLocalBlocklist } from '@/hooks/useLocalBlocklist';
 import { useBrowserNavigation } from '@/hooks/useBrowserNavigation';
 import { useCapacitor } from '@/hooks/useCapacitor';
 import { useModerationBridge } from '@/hooks/useModerationBridge';
@@ -120,6 +121,7 @@ export const NativeWebViewBrowser = () => {
   
   // Hooks
   const { checkBlockedSite, isChecking } = useContentProtection();
+  const { isBlocked: isLocallyBlocked } = useLocalBlocklist();
   const { settings } = useSettings();
   const {
     settings: localSettings,
@@ -175,6 +177,7 @@ export const NativeWebViewBrowser = () => {
   }>>([]);
   const resultQueueFlushTimerRef = useRef<NodeJS.Timeout | null>(null);
   const resultQueueFlushCountRef = useRef(0);
+  const domainAdultContextRef = useRef(false);
   const nativeScanSessionRef = useRef<{
     running: boolean;
     profile: 'balanced' | 'video_boost' | null;
@@ -210,7 +213,7 @@ export const NativeWebViewBrowser = () => {
   const NATIVE_SCAN_RESTART_DEBOUNCE_MS = 3500;
   const isDebugMode = localSettings.debug_mode === true;
   const ENABLE_DOM_BLUR =
-    localSettings.prototype_mode === true &&
+    (localSettings.prototype_mode === true || localSettings.kid_safe_profile === true) &&
     import.meta.env.VITE_ENABLE_DOM_BLUR_OVERLAY === 'true';
   const isRevealAllowed = useCallback(() => {
     if (localSettings.prototype_mode !== true) return false;
@@ -556,6 +559,46 @@ export const NativeWebViewBrowser = () => {
     return urlString.toLowerCase().endsWith('.pdf');
   };
 
+  const resolveBlockDecision = useCallback(async (url: string) => {
+    const local = isLocallyBlocked(url);
+    const localCategory = local.category || null;
+    const localAdult = local.blocked && localCategory === 'adult';
+
+    if (local.blocked && settings.block_adult_sites) {
+      return {
+        isBlocked: true,
+        category: localCategory,
+        reason: `This site is blocked under the "${localCategory || 'blocked'}" category.`,
+        isAdultDomain: localAdult,
+      };
+    }
+
+    if (!settings.block_adult_sites) {
+      return {
+        isBlocked: false,
+        category: null,
+        reason: '',
+        isAdultDomain: localAdult,
+      };
+    }
+
+    const timeoutMs = 1200;
+    const remote = await Promise.race([
+      checkBlockedSite(url, deviceId),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs)),
+    ]);
+    const remoteBlocked = !!remote?.isBlocked;
+    const remoteCategory = remote?.category || null;
+    const remoteAdult = remoteBlocked && remoteCategory === 'adult';
+
+    return {
+      isBlocked: remoteBlocked,
+      category: remoteCategory,
+      reason: remote?.reason || 'This site is blocked.',
+      isAdultDomain: localAdult || remoteAdult,
+    };
+  }, [isLocallyBlocked, settings.block_adult_sites, checkBlockedSite, deviceId]);
+
   const logEvent = useCallback(async (eventType: string, domain: string, action: string) => {
     if (!deviceId) return;
     try {
@@ -575,22 +618,19 @@ export const NativeWebViewBrowser = () => {
   // Native WebView handlers
   const handleNavigationRequest = useCallback(async (url: string): Promise<boolean> => {
     const domain = extractDomain(url);
-    
-    // Check blocklist
-    if (settings.block_adult_sites) {
-      const result = await checkBlockedSite(url, deviceId);
-      if (result?.isBlocked) {
-        setBlockedReason(result.reason);
-        setBlockedCategory(result.category || 'blocked');
-        navigate('blocked', '', url);
-        await logEvent('blocked', domain, 'blocked');
-        return false;
-      }
+    const decision = await resolveBlockDecision(url);
+    domainAdultContextRef.current = decision.isAdultDomain;
+    if (decision.isBlocked) {
+      setBlockedReason(decision.reason);
+      setBlockedCategory(decision.category || 'blocked');
+      navigate('blocked', '', url);
+      await logEvent('blocked', domain, 'blocked');
+      return false;
     }
     
     // All navigation allowed in native WebView (including social platforms)
     return true;
-  }, [settings, checkBlockedSite, deviceId, navigate, logEvent]);
+  }, [navigate, logEvent, resolveBlockDecision]);
 
   // Inject moderation script into WebView
   const clearLoadEndInjectTimer = useCallback(() => {
@@ -662,8 +702,10 @@ export const NativeWebViewBrowser = () => {
     const config = {
       ...getModerationConfig(),
       enableVideoFrameSnapshots:
-        localSettings.prototype_mode === true &&
+        (localSettings.prototype_mode === true || localSettings.kid_safe_profile === true) &&
         import.meta.env.VITE_ENABLE_VIDEO_FRAME_SNAPSHOTS === 'true',
+      kidSafeProfile: localSettings.kid_safe_profile === true,
+      domainContextAdult: domainAdultContextRef.current === true,
       pageEpoch: webViewPageEpochRef.current,
     };
     console.log(
@@ -693,7 +735,7 @@ export const NativeWebViewBrowser = () => {
     } finally {
       injectionInFlightRef.current = false;
     }
-  }, [ENABLE_SIGNAL_PIPELINE, settingsLoaded, isModerationEnabled, getModerationConfig, localSettings.prototype_mode]);
+  }, [ENABLE_SIGNAL_PIPELINE, settingsLoaded, isModerationEnabled, getModerationConfig, localSettings.prototype_mode, localSettings.kid_safe_profile]);
 
   const {
     state: webViewState,
@@ -924,7 +966,7 @@ export const NativeWebViewBrowser = () => {
 
     const desiredPreset = nativeScanProfile === 'video_boost' ? 'strict' : 'balanced';
     const desiredFps = nativeScanProfile === 'video_boost' ? VIDEO_BOOST_FPS : VIDEO_BALANCED_FPS;
-    const kidMode = false;
+    const kidMode = localSettings.kid_safe_profile === true;
     const allowRevealDuringHardBlur = isRevealAllowed() && !kidMode;
     const desiredConfigKey = `${desiredPreset}|${desiredFps}|${isDebugMode ? 1 : 0}|${allowRevealDuringHardBlur ? 1 : 0}|${kidMode ? 1 : 0}`;
     const session = nativeScanSessionRef.current;
@@ -984,6 +1026,7 @@ export const NativeWebViewBrowser = () => {
     isModerationEnabled,
     localSettings.shield_active,
     localSettings.blur_dial,
+    localSettings.kid_safe_profile,
     nativeScanProfile,
     VIDEO_BOOST_FPS,
     VIDEO_BALANCED_FPS,
@@ -2059,6 +2102,7 @@ export const NativeWebViewBrowser = () => {
     
     // Build Google search URL
     const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query.trim())}`;
+    domainAdultContextRef.current = false;
     
     // IMMEDIATELY set view to browse and navigate - fail-open approach
     navigate('browse', searchUrl, searchUrl);
@@ -2156,6 +2200,16 @@ export const NativeWebViewBrowser = () => {
     const domain = extractDomain(urlToNavigate);
     setUrlInput(normalizedUrl);
 
+    const preflight = await resolveBlockDecision(normalizedUrl);
+    domainAdultContextRef.current = preflight.isAdultDomain;
+    if (preflight.isBlocked) {
+      setBlockedReason(preflight.reason);
+      setBlockedCategory(preflight.category || 'blocked');
+      navigate('blocked', '', normalizedUrl);
+      await logEvent('blocked', domain, 'blocked');
+      return;
+    }
+
     // Reset states
     setReaderContent(null);
     setReaderError(null);
@@ -2168,21 +2222,6 @@ export const NativeWebViewBrowser = () => {
     // Moderation runs in background via injection script
     navigate('browse', normalizedUrl, normalizedUrl);
     setIsLoading(true);
-
-    // Check blocklist asynchronously (non-blocking)
-    if (settings.block_adult_sites) {
-      checkBlockedSite(normalizedUrl, deviceId).then(result => {
-        if (result?.isBlocked) {
-          setBlockedReason(result.reason);
-          setBlockedCategory(result.category || 'blocked');
-          navigate('blocked', '', normalizedUrl);
-          logEvent('blocked', domain, 'blocked');
-          setIsLoading(false);
-        }
-      }).catch(err => {
-        console.warn('[Browser] Blocklist check failed (fail-open):', err);
-      });
-    }
 
     // Handle PDFs
     if (isPdfUrl(normalizedUrl)) {
@@ -2221,7 +2260,7 @@ export const NativeWebViewBrowser = () => {
     }
     
     setIsLoading(false);
-  }, [urlInput, settings, checkBlockedSite, deviceId, isNative, openWebView, handleSearch, navigate, logEvent, isUrlInput]);
+  }, [urlInput, isNative, openWebView, handleSearch, navigate, logEvent, isUrlInput, resolveBlockDecision]);
 
   // Reader Mode handler
   const handleReaderMode = useCallback(async () => {
@@ -2464,6 +2503,7 @@ export const NativeWebViewBrowser = () => {
     setSearchQuery('');
     setUrlInput('');
     setFallbackUrl('');
+    domainAdultContextRef.current = false;
     goHome();
   }, [isNative, webViewState.isOpen, webViewState.currentUrl, closeWebView, goHome, moderationBridge, setCentralBlurState, teardownWebViewScheduling, resetModernHealthForNavigation, setVideoBoost]);
 
