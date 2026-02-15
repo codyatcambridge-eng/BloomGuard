@@ -91,7 +91,6 @@ interface SocialContent {
  */
 export const NativeWebViewBrowser = () => {
   const { isNative } = useCapacitor();
-  const ENABLE_DOM_BLUR = false;
   const ENABLE_SIGNAL_PIPELINE = true;
   
   const [urlInput, setUrlInput] = useState('');
@@ -210,6 +209,14 @@ export const NativeWebViewBrowser = () => {
   const VIDEO_IDLE_RESET_MS = 7000;
   const NATIVE_SCAN_RESTART_DEBOUNCE_MS = 3500;
   const isDebugMode = localSettings.debug_mode === true;
+  const ENABLE_DOM_BLUR =
+    localSettings.prototype_mode === true &&
+    import.meta.env.VITE_ENABLE_DOM_BLUR_OVERLAY === 'true';
+  const isRevealAllowed = useCallback(() => {
+    if (localSettings.prototype_mode !== true) return false;
+    if (localSettings.blur_mode === 'strict') return false;
+    return true;
+  }, [localSettings.prototype_mode, localSettings.blur_mode]);
   const debugLog = useCallback((...args: unknown[]) => {
     if (!isDebugMode) return;
     console.log(...args);
@@ -654,6 +661,9 @@ export const NativeWebViewBrowser = () => {
     injectionInFlightRef.current = true;
     const config = {
       ...getModerationConfig(),
+      enableVideoFrameSnapshots:
+        localSettings.prototype_mode === true &&
+        import.meta.env.VITE_ENABLE_VIDEO_FRAME_SNAPSHOTS === 'true',
       pageEpoch: webViewPageEpochRef.current,
     };
     console.log(
@@ -683,7 +693,7 @@ export const NativeWebViewBrowser = () => {
     } finally {
       injectionInFlightRef.current = false;
     }
-  }, [ENABLE_SIGNAL_PIPELINE, settingsLoaded, isModerationEnabled, getModerationConfig]);
+  }, [ENABLE_SIGNAL_PIPELINE, settingsLoaded, isModerationEnabled, getModerationConfig, localSettings.prototype_mode]);
 
   const {
     state: webViewState,
@@ -914,7 +924,9 @@ export const NativeWebViewBrowser = () => {
 
     const desiredPreset = nativeScanProfile === 'video_boost' ? 'strict' : 'balanced';
     const desiredFps = nativeScanProfile === 'video_boost' ? VIDEO_BOOST_FPS : VIDEO_BALANCED_FPS;
-    const desiredConfigKey = `${desiredPreset}|${desiredFps}|${isDebugMode ? 1 : 0}`;
+    const kidMode = false;
+    const allowRevealDuringHardBlur = isRevealAllowed() && !kidMode;
+    const desiredConfigKey = `${desiredPreset}|${desiredFps}|${isDebugMode ? 1 : 0}|${allowRevealDuringHardBlur ? 1 : 0}|${kidMode ? 1 : 0}`;
     const session = nativeScanSessionRef.current;
 
     if (session.running && session.configKey === desiredConfigKey) {
@@ -949,10 +961,10 @@ export const NativeWebViewBrowser = () => {
       console.log('[MW][NativeScan] start', 'reason=' + reason, 'preset=' + desiredPreset, 'fps=' + desiredFps);
       const startPayload = await startNativeContentFilter({
         preset: desiredPreset,
-        kidMode: false,
+        kidMode,
         debug: isDebugMode,
         fps: desiredFps,
-        allowRevealDuringHardBlur: false,
+        allowRevealDuringHardBlur,
       });
       console.debug('[ContentFilter] startScanning resolved', startPayload);
       riskDecisionListenerRef.current = await onNativeRiskDecision((decision) => {
@@ -976,6 +988,7 @@ export const NativeWebViewBrowser = () => {
     VIDEO_BOOST_FPS,
     VIDEO_BALANCED_FPS,
     isDebugMode,
+    isRevealAllowed,
     NATIVE_SCAN_RESTART_DEBOUNCE_MS,
     stopNativeScanSession,
   ]);

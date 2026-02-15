@@ -31,6 +31,7 @@ export interface InjectionConfig {
   debug?: boolean; // Verbose logging
   nonce: string; // Security nonce for message validation
   blockingMode?: 'mvp' | 'full';
+  enableVideoFrameSnapshots?: boolean;
   pageEpoch?: number;
 }
 
@@ -206,6 +207,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     debug: ${config.debug || false},
     nonce: '${nonce}',
     blockingMode: '${config.blockingMode || 'mvp'}',
+    enableVideoFrameSnapshots: ${config.enableVideoFrameSnapshots === true},
     pageEpoch: ${pageEpoch},
     minImageSize: 80, // Minimum image dimension (fail-open below this - 80x80)
     semanticDelayMs: 200, // Delay before applying blur (200ms)
@@ -789,6 +791,17 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   const PLATFORM = detectPlatform();
   const IS_YOUTUBE = PLATFORM === 'youtube' || PLATFORM === 'youtube-shorts';
+  const ENABLE_VIDEO_FRAME_SNAPSHOTS = CONFIG.enableVideoFrameSnapshots === true;
+  const VIDEO_SNAPSHOT_PER_VIDEO_MIN_INTERVAL_MS = 1800;
+  const VIDEO_SNAPSHOT_GLOBAL_MIN_INTERVAL_MS = 900;
+  const VIDEO_SNAPSHOT_MAX_LONG_SIDE = 192;
+  const VIDEO_SNAPSHOT_JPEG_QUALITY = 0.42;
+  const VIDEO_SNAPSHOT_MAX_DATA_URL_CHARS = 120000;
+  const VIDEO_SNAPSHOT_SURFACE_PLATFORMS = new Set(['youtube-shorts', 'tiktok', 'instagram']);
+  let videoSnapshotInFlight = false;
+  let videoSnapshotLastGlobalAt = 0;
+  let videoSnapshotCanvas = null;
+  let videoSnapshotContext = null;
   console.log('[MW] Platform detected:', PLATFORM, 'isYouTube:', IS_YOUTUBE);
   const videoActivityState = {
     playing: false,
@@ -830,6 +843,83 @@ export function generateModerationScript(config: InjectionConfig): string {
       video.dataset.thumbnail;
     if (thumb) {
       queueForScan(thumb, video, sourceType + '-thumbnail');
+    }
+    queueVideoFrameSnapshot(video, sourceType);
+  }
+
+  function isVideoSnapshotSurface(video) {
+    if (VIDEO_SNAPSHOT_SURFACE_PLATFORMS.has(PLATFORM)) return true;
+    if (isShortsOrReelsStyle(video)) return true;
+    if (state.blurred.size > 0 || overlayState.enabled) return true;
+    return false;
+  }
+
+  function isVideoSnapshotEligible(video) {
+    if (!ENABLE_VIDEO_FRAME_SNAPSHOTS) return false;
+    if (!video) return false;
+    if (document.visibilityState !== 'visible') return false;
+    if (video.paused || video.ended || video.readyState < 2) return false;
+    if (videoSnapshotInFlight) return false;
+    if (!isElementVisible(video)) return false;
+    if (!isVideoSnapshotSurface(video)) return false;
+    if (state.pending.size >= MAX_PENDING_ITEMS - 4) return false;
+    if (batchQueue.length >= MAX_BATCH_QUEUE_ITEMS - 4) return false;
+
+    const now = Date.now();
+    if (now - videoSnapshotLastGlobalAt < VIDEO_SNAPSHOT_GLOBAL_MIN_INTERVAL_MS) return false;
+    const lastPerVideoAt = Number(video.dataset.mwLastFrameCaptureAt || '0');
+    if (now - lastPerVideoAt < VIDEO_SNAPSHOT_PER_VIDEO_MIN_INTERVAL_MS) return false;
+    return true;
+  }
+
+  function getVideoSnapshotCanvas(targetWidth, targetHeight) {
+    if (!videoSnapshotCanvas) {
+      videoSnapshotCanvas = document.createElement('canvas');
+    }
+    if (videoSnapshotCanvas.width !== targetWidth) videoSnapshotCanvas.width = targetWidth;
+    if (videoSnapshotCanvas.height !== targetHeight) videoSnapshotCanvas.height = targetHeight;
+    if (!videoSnapshotContext) {
+      videoSnapshotContext = videoSnapshotCanvas.getContext('2d', { alpha: false, willReadFrequently: false });
+    }
+    return videoSnapshotCanvas;
+  }
+
+  function queueVideoFrameSnapshot(video, sourceTypePrefix) {
+    if (!isVideoSnapshotEligible(video)) return;
+
+    const sourceType = sourceTypePrefix || 'video';
+    const srcKey = video.currentSrc || video.src || '';
+    const naturalWidth = Number(video.videoWidth || 0);
+    const naturalHeight = Number(video.videoHeight || 0);
+    if (naturalWidth < CONFIG.minImageSize || naturalHeight < CONFIG.minImageSize) return;
+
+    const longSide = Math.max(naturalWidth, naturalHeight);
+    const scale = longSide > VIDEO_SNAPSHOT_MAX_LONG_SIDE ? (VIDEO_SNAPSHOT_MAX_LONG_SIDE / longSide) : 1;
+    const targetWidth = Math.max(1, Math.round(naturalWidth * scale));
+    const targetHeight = Math.max(1, Math.round(naturalHeight * scale));
+
+    try {
+      videoSnapshotInFlight = true;
+      const now = Date.now();
+      const canvas = getVideoSnapshotCanvas(targetWidth, targetHeight);
+      if (!canvas || !videoSnapshotContext) return;
+
+      videoSnapshotContext.clearRect(0, 0, targetWidth, targetHeight);
+      videoSnapshotContext.drawImage(video, 0, 0, targetWidth, targetHeight);
+      const frameDataUrl = canvas.toDataURL('image/jpeg', VIDEO_SNAPSHOT_JPEG_QUALITY);
+      if (!frameDataUrl || frameDataUrl.length > VIDEO_SNAPSHOT_MAX_DATA_URL_CHARS) return;
+
+      if (queueForScan(frameDataUrl, video, sourceType + '-frame')) {
+        videoSnapshotLastGlobalAt = now;
+        video.dataset.mwLastFrameCaptureAt = String(now);
+        if (srcKey) {
+          video.dataset.mwLastFrameCaptureSrc = srcKey;
+        }
+      }
+    } catch (e) {
+      // Safe failure: skip frame snapshots on draw/encode errors.
+    } finally {
+      videoSnapshotInFlight = false;
     }
   }
 
@@ -2507,6 +2597,12 @@ export function generateModerationScript(config: InjectionConfig): string {
 
     if (videoActivityState.playing) {
       if (hasAnyPlayingVideo()) {
+        const activeVideo = Array.from(document.querySelectorAll('video')).find(video =>
+          !video.paused && !video.ended && video.readyState > 1
+        );
+        if (activeVideo) {
+          queueVideoFrameSnapshot(activeVideo, 'video-heartbeat');
+        }
         postVideoActivity('playing', 'heartbeat');
       } else {
         videoActivityState.playing = false;
