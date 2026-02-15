@@ -2504,6 +2504,15 @@ export function generateModerationScript(config: InjectionConfig): string {
         scheduleInitTimeout('spaYouTubeScan', scanYouTubeThumbnails, 500);
       }
     }
+
+    if (videoActivityState.playing) {
+      if (hasAnyPlayingVideo()) {
+        postVideoActivity('playing', 'heartbeat');
+      } else {
+        videoActivityState.playing = false;
+        postVideoActivity('paused', 'heartbeat');
+      }
+    }
   };
 
   function startUrlChangePoll(reason) {

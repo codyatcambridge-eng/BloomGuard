@@ -1294,7 +1294,11 @@ export const NativeWebViewBrowser = () => {
 
       try {
         const staleMessage = createResultMessage(requestId, staleResults, nonce, requestEpoch ?? undefined);
-        await postMessageToWebView(staleMessage as unknown as Record<string, unknown>);
+        await postModerationResultToWebView(
+          requestId,
+          staleMessage as unknown as Record<string, unknown>,
+          requestEpoch,
+        );
       } catch {
         // Fail-open by design for stale requests.
       }
@@ -1533,12 +1537,11 @@ export const NativeWebViewBrowser = () => {
     
     try {
       const resultMessage = createResultMessage(requestId, results, nonce, requestEpoch ?? undefined);
-      const posted = await postMessageToWebView(resultMessage as unknown as Record<string, unknown>);
-      if (posted) {
-        console.log('[MW-Host] Results posted via postMessage for', requestId);
-      } else {
-        console.warn('[MW-Host] Results postMessage returned false for', requestId);
-      }
+      await postModerationResultToWebView(
+        requestId,
+        resultMessage as unknown as Record<string, unknown>,
+        requestEpoch,
+      );
     } catch (error) {
       console.log('[MW-Host] Failed to post results via postMessage:', error);
     }
@@ -1547,6 +1550,7 @@ export const NativeWebViewBrowser = () => {
   }, [
     moderationBridge,
     postMessageToWebView,
+    postModerationResultToWebView,
     debugLog,
     isDebugMode,
     localSettings.hard_overlay_confidence_threshold,
