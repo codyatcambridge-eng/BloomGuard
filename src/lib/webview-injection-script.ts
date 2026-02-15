@@ -991,6 +991,39 @@ export function generateModerationScript(config: InjectionConfig): string {
     return normalized;
   }
 
+  function toCanonicalUrl(url) {
+    const normalized = normalizeUrl(url);
+    if (!normalized) return '';
+    if (normalized.startsWith('data:')) return normalized;
+    try {
+      return new URL(normalized, window.location.href).href;
+    } catch (e) {
+      return normalized;
+    }
+  }
+
+  function buildSrcMatchKey(url) {
+    const canonical = toCanonicalUrl(url);
+    if (!canonical) return '';
+    if (canonical.startsWith('data:')) return canonical;
+    try {
+      const parsed = new URL(canonical);
+      if (parsed.hostname.toLowerCase() === 'i.ytimg.com') {
+        return parsed.origin + parsed.pathname;
+      }
+      return parsed.href;
+    } catch (e) {
+      return canonical;
+    }
+  }
+
+  function conservativeSrcMatch(left, right) {
+    const leftKey = buildSrcMatchKey(left);
+    const rightKey = buildSrcMatchKey(right);
+    if (!leftKey || !rightKey) return false;
+    return leftKey === rightKey;
+  }
+
   function extractBgImageUrl(element) {
     try {
       const style = window.getComputedStyle(element);
@@ -1810,11 +1843,18 @@ export function generateModerationScript(config: InjectionConfig): string {
   function findAndBlur(src, category, blurStrengthPx, shouldBlur) {
     if (!shouldBlur) return;
     if (state.revealed.has(src)) return;
+    const targetSrcKey = buildSrcMatchKey(src);
     
     try {
       // Images
       document.querySelectorAll('img').forEach(img => {
-        if ((img.src === src || img.dataset.mwOrigSrc === src) && !state.revealed.has(src)) {
+        const matchesSrc =
+          img.src === src ||
+          img.dataset.mwOrigSrc === src ||
+          (targetSrcKey && img.dataset.mwSrcKey === targetSrcKey) ||
+          conservativeSrcMatch(img.currentSrc || img.src, src) ||
+          conservativeSrcMatch(img.dataset.mwOrigSrc || '', src);
+        if (matchesSrc && !state.revealed.has(src)) {
           if (img.dataset.mwModerated !== 'blurred' && img.dataset.mwRevealed !== 'true') {
             applyBlur(img, src, category, blurStrengthPx);
           }
@@ -1823,7 +1863,13 @@ export function generateModerationScript(config: InjectionConfig): string {
       
       // Video posters
       document.querySelectorAll('video').forEach(video => {
-        if ((video.poster === src || video.dataset.mwOrigPoster === src) && !state.revealed.has(src)) {
+        const matchesSrc =
+          video.poster === src ||
+          video.dataset.mwOrigPoster === src ||
+          (targetSrcKey && video.dataset.mwSrcKey === targetSrcKey) ||
+          conservativeSrcMatch(video.poster || '', src) ||
+          conservativeSrcMatch(video.dataset.mwOrigPoster || '', src);
+        if (matchesSrc && !state.revealed.has(src)) {
           if (video.dataset.mwModerated !== 'blurred' && video.dataset.mwRevealed !== 'true') {
             applyBlur(video, src, category, blurStrengthPx);
           }
@@ -1832,7 +1878,11 @@ export function generateModerationScript(config: InjectionConfig): string {
       
       // Background images
       document.querySelectorAll('[data-mw-bg-src]').forEach(el => {
-        if (el.dataset.mwBgSrc === src && !state.revealed.has(src)) {
+        const matchesSrc =
+          el.dataset.mwBgSrc === src ||
+          (targetSrcKey && el.dataset.mwSrcKey === targetSrcKey) ||
+          conservativeSrcMatch(el.dataset.mwBgSrc || '', src);
+        if (matchesSrc && !state.revealed.has(src)) {
           if (el.dataset.mwModerated !== 'blurred' && el.dataset.mwRevealed !== 'true') {
             applyBlur(el, src, category, blurStrengthPx);
           }
@@ -1939,6 +1989,13 @@ export function generateModerationScript(config: InjectionConfig): string {
     
     const itemId = generateItemId();
     const { width, height } = getElementDimensions(element);
+    const srcKey = buildSrcMatchKey(url);
+
+    if (srcKey) {
+      try {
+        element.dataset.mwSrcKey = srcKey;
+      } catch (e) {}
+    }
     
     // Store element reference
     state.elements.set(itemId, element);
@@ -2076,6 +2133,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     img.dataset.mwScanned = 'true';
     img.dataset.mwLastScanSrc = src;
     img.dataset.mwOrigSrc = src;
+    const imgSrcKey = buildSrcMatchKey(src);
+    if (imgSrcKey) {
+      img.dataset.mwSrcKey = imgSrcKey;
+    }
     
     if (queueForScan(src, img, 'img')) {
       state.stats.imgTags++;
@@ -2093,6 +2154,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     video.dataset.mwPosterScanned = 'true';
     video.dataset.mwLastPoster = poster;
     video.dataset.mwOrigPoster = poster;
+    const posterSrcKey = buildSrcMatchKey(poster);
+    if (posterSrcKey) {
+      video.dataset.mwSrcKey = posterSrcKey;
+    }
     
     if (queueForScan(poster, video, 'video-poster')) {
       state.stats.videoPosters++;
@@ -2108,6 +2173,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     element.dataset.mwBgScanned = 'true';
     element.dataset.mwLastBg = bgUrl;
     element.dataset.mwBgSrc = bgUrl;
+    const bgSrcKey = buildSrcMatchKey(bgUrl);
+    if (bgSrcKey) {
+      element.dataset.mwSrcKey = bgSrcKey;
+    }
     
     if (queueForScan(bgUrl, element, 'bg-image')) {
       state.stats.bgImages++;
@@ -2375,8 +2444,12 @@ export function generateModerationScript(config: InjectionConfig): string {
         postVideoActivity('playing', event.type);
         return;
       }
-      if (event.type === 'pause' || event.type === 'ended') {
+      if (event.type === 'pause') {
         queueVideoMediaTargets(video, 'video-paused');
+        return;
+      }
+      if (event.type === 'ended') {
+        queueVideoMediaTargets(video, 'video-ended');
         if (!hasAnyPlayingVideo()) {
           videoActivityState.playing = false;
           postVideoActivity('paused', event.type);

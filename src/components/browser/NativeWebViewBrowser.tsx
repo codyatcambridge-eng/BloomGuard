@@ -152,6 +152,7 @@ export const NativeWebViewBrowser = () => {
   const modernAckRef = useRef<{ at: number; epoch: number | null }>({ at: 0, epoch: null });
   const modernReadyRef = useRef<{ at: number; epoch: number | null }>({ at: 0, epoch: null });
   const modernHealthyRef = useRef(false);
+  const modernProvenEpochRef = useRef<number | null>(null);
   const modernTransportActiveUntilRef = useRef(0);
   const modernTransportReasonRef = useRef('none');
   const legacyPollSuppressedUntilRef = useRef(0);
@@ -267,6 +268,7 @@ export const NativeWebViewBrowser = () => {
   }, [MODERN_TRANSPORT_SUPPRESS_MS, isDebugMode]);
 
   const resetModernHealthForNavigation = useCallback((reason: string) => {
+    modernProvenEpochRef.current = null;
     modernAckRef.current = { at: 0, epoch: null };
     modernReadyRef.current = { at: 0, epoch: null };
     modernHealthyRef.current = false;
@@ -522,6 +524,8 @@ export const NativeWebViewBrowser = () => {
   const activeNavIdRef = useRef(0);
   const currentUrlRef = useRef('');
   const messageFromWebViewHandlerRef = useRef<((payload: unknown) => void) | null>(null);
+  const lastLoadStartUrlRef = useRef('');
+  const lastLoadStartAtRef = useRef(0);
   
   const {
     currentView,
@@ -544,6 +548,34 @@ export const NativeWebViewBrowser = () => {
       normalized = 'https://' + normalized;
     }
     return normalized;
+  };
+
+  const normalizeUrlForNavComparison = (value: string): URL | null => {
+    if (!value) return null;
+    try {
+      return new URL(value);
+    } catch {
+      try {
+        return new URL(normalizeUrl(value));
+      } catch {
+        return null;
+      }
+    }
+  };
+
+  const isLikelySameDocumentUrlChange = (previousUrl: string, nextUrl: string): boolean => {
+    const prev = normalizeUrlForNavComparison(previousUrl);
+    const next = normalizeUrlForNavComparison(nextUrl);
+    if (!prev || !next) return false;
+    if (prev.origin !== next.origin) return false;
+    if (prev.pathname === next.pathname) return true;
+
+    const host = next.hostname.toLowerCase();
+    if (host.endsWith('youtube.com') && prev.pathname.startsWith('/shorts/') && next.pathname.startsWith('/shorts/')) {
+      return true;
+    }
+
+    return false;
   };
 
   const extractDomain = (urlString: string): string => {
@@ -751,13 +783,14 @@ export const NativeWebViewBrowser = () => {
       console.log('[Browser] ======= LOAD START =======');
       console.log('[Browser] URL:', url);
       markNavigation('onLoadStart', url);
+      lastLoadStartUrlRef.current = url || '';
+      lastLoadStartAtRef.current = Date.now();
       teardownWebViewScheduling('navigation_start', url).catch(() => undefined);
       setIsLoading(true);
       clearLoadEndInjectTimer();
       injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
       blurReadyRef.current = false;
-      resetModernHealthForNavigation('load_start');
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       setCentralBlurState(false, 'navigation_load_start');
     },
@@ -810,6 +843,7 @@ export const NativeWebViewBrowser = () => {
         loweredError.includes('crash');
       if (crashSignal) {
         modernHealthyRef.current = false;
+        modernProvenEpochRef.current = null;
         modernAckRef.current = { at: 0, epoch: webViewPageEpochRef.current };
         modernReadyRef.current = { at: 0, epoch: webViewPageEpochRef.current };
         legacyPollSuppressedUntilRef.current = 0;
@@ -871,17 +905,26 @@ export const NativeWebViewBrowser = () => {
     onUrlChange: (url) => {
       console.log('[Browser] ======= URL CHANGE =======');
       console.log('[Browser] New URL:', url);
-      markNavigation('onUrlChange', url);
+      const previousUrl = currentUrlRef.current || webViewState.currentUrl || '';
+      const sameDocumentUrlChange = isLikelySameDocumentUrlChange(previousUrl, url);
+      const recentLoadStartForUrl =
+        !!lastLoadStartUrlRef.current &&
+        lastLoadStartUrlRef.current === url &&
+        Date.now() - lastLoadStartAtRef.current < 8000;
+      if (!sameDocumentUrlChange && !recentLoadStartForUrl) {
+        markNavigation('onUrlChange', url);
+      }
       setUrlInput(url);
       navigate('browse', url, url);
-      // Reset injection for new page navigation
-      clearLoadEndInjectTimer();
-      injectionDoneRef.current = false;
-      injectionInFlightRef.current = false;
-      blurReadyRef.current = false;
-      resetModernHealthForNavigation('url_change');
-      blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
-      setCentralBlurState(false, 'url_change_safe_reset');
+      if (!sameDocumentUrlChange) {
+        // Reset injection for new page navigation
+        clearLoadEndInjectTimer();
+        injectionDoneRef.current = false;
+        injectionInFlightRef.current = false;
+        blurReadyRef.current = false;
+        blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
+        setCentralBlurState(false, 'url_change_safe_reset');
+      }
     },
     onNavigationRequest: handleNavigationRequest,
     onClose: () => {
@@ -1363,6 +1406,18 @@ export const NativeWebViewBrowser = () => {
       return;
     }
 
+    if (modernProvenEpochRef.current !== activeEpoch) {
+      modernProvenEpochRef.current = activeEpoch;
+      legacyPollSuppressedUntilRef.current = Number.MAX_SAFE_INTEGER;
+      legacyPollSuppressionReasonRef.current = 'modern_proven_epoch';
+      if (legacyPollTimerRef.current) {
+        clearTimeout(legacyPollTimerRef.current);
+        legacyPollTimerRef.current = null;
+      }
+      legacyPollOwnerRef.current = '';
+      legacyPollInFlightRef.current = false;
+    }
+
     markModernTransportActive('request_received', requestEpoch ?? activeEpoch);
     
     const startTime = performance.now();
@@ -1803,6 +1858,9 @@ export const NativeWebViewBrowser = () => {
     if (!ENABLE_SIGNAL_PIPELINE || !isNative || !webViewState.isOpen || !isModerationEnabled()) {
       return;
     }
+    if (modernProvenEpochRef.current === webViewPageEpochRef.current) {
+      return;
+    }
 
     console.log('[MW-Host] Starting adaptive legacy queue polling (fallback)...');
     const MIN_POLL_MS = 300;
@@ -1899,6 +1957,9 @@ export const NativeWebViewBrowser = () => {
       if (!hasPollOwnership()) return false;
       if (legacyPollInFlightRef.current) return false;
       evaluateModernHealth('legacy_poll_tick');
+      if (modernProvenEpochRef.current === webViewPageEpochRef.current) {
+        return false;
+      }
       const now = Date.now();
       if (now < legacyPollCrashCooldownUntilRef.current) {
         return false;
@@ -2033,6 +2094,14 @@ export const NativeWebViewBrowser = () => {
       if (cancelled) return;
       if (!hasPollOwnership()) return;
       evaluateModernHealth('legacy_poll_loop');
+      if (modernProvenEpochRef.current === webViewPageEpochRef.current) {
+        legacyPollOwnerRef.current = '';
+        if (legacyPollTimerRef.current) {
+          clearTimeout(legacyPollTimerRef.current);
+          legacyPollTimerRef.current = null;
+        }
+        return;
+      }
       const now = Date.now();
       if (now < legacyPollCrashCooldownUntilRef.current) {
         const waitMs = Math.max(UNKNOWN_MIN_POLL_MS, legacyPollCrashCooldownUntilRef.current - now);
