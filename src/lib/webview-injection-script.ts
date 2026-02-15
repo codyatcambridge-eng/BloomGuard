@@ -166,6 +166,24 @@ export function generateModerationScript(config: InjectionConfig): string {
   if (window.__MW_ACTIVE__) {
     console.log('[MW] Already injected, skipping');
     try {
+      const hostEpoch = Number(${pageEpoch});
+      if (Number.isFinite(hostEpoch) && hostEpoch > 0) {
+        window.__MW_PAGE_EPOCH__ = hostEpoch;
+      }
+      const debugApi = window.__MW_DEBUG__ && typeof window.__MW_DEBUG__ === 'object' ? window.__MW_DEBUG__ : null;
+      const activeState = debugApi && debugApi.state && typeof debugApi.state === 'object' ? debugApi.state : null;
+      if (activeState && Number.isFinite(hostEpoch) && hostEpoch > 0) {
+        activeState.pageEpoch = hostEpoch;
+      }
+      const activeConfig = debugApi && debugApi.config && typeof debugApi.config === 'object' ? debugApi.config : null;
+      if (activeConfig) {
+        if (Number.isFinite(hostEpoch) && hostEpoch > 0) activeConfig.pageEpoch = hostEpoch;
+        activeConfig.kidSafeProfile = ${config.kidSafeProfile === true};
+        activeConfig.domainContextAdult = ${config.domainContextAdult === true};
+        activeConfig.blockingMode = '${config.blockingMode || 'mvp'}';
+      }
+    } catch (e) {}
+    try {
       if (window.__MW_BLUR_OVERLAY_API__ && typeof window.__MW_BLUR_OVERLAY_API__.sendReady === 'function') {
         window.__MW_BLUR_OVERLAY_API__.sendReady('reinject');
       }
@@ -2006,8 +2024,26 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   // ==================== SCANNING FUNCTIONS ====================
 
+  function getFirstSrcsetUrl(srcsetValue) {
+    if (!srcsetValue) return '';
+    const parts = srcsetValue.split(',');
+    if (parts.length === 0) return '';
+    return (parts[0].trim().split(' ')[0] || '').trim();
+  }
+
+  function isPlaceholderImageSrc(value) {
+    if (!value) return true;
+    const trimmed = String(value).trim();
+    if (!trimmed) return true;
+    const lower = trimmed.toLowerCase();
+    if (lower.startsWith('data:') || lower.startsWith('blob:')) return true;
+    return trimmed.length < 12;
+  }
+
   function scanImgElement(img) {
-    let src = img.src ||
+    const srcsetUrl = getFirstSrcsetUrl(img.srcset || '');
+    const currentSrc = (img.currentSrc || '').trim();
+    let src = (img.src || '').trim() ||
               img.dataset.src ||
               img.dataset.lazySrc ||
               img.dataset.thumbSrc ||
@@ -2015,12 +2051,20 @@ export function generateModerationScript(config: InjectionConfig): string {
               img.getAttribute('data-lazy-src') ||
               img.getAttribute('data-thumb');
     
-    // Handle srcset
-    if (!src && img.srcset) {
-      const parts = img.srcset.split(',');
-      if (parts.length > 0) {
-        src = parts[0].trim().split(' ')[0];
+    if (isPlaceholderImageSrc(src)) {
+      if (currentSrc && !isPlaceholderImageSrc(currentSrc)) {
+        src = currentSrc;
+      } else if (srcsetUrl && !isPlaceholderImageSrc(srcsetUrl)) {
+        src = srcsetUrl;
       }
+    }
+
+    if (!src && currentSrc) {
+      src = currentSrc;
+    }
+
+    if (!src && srcsetUrl) {
+      src = srcsetUrl;
     }
     
     if (!src) {
@@ -2576,7 +2620,15 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (window.location.href !== lastUrl) {
       console.log('[MW] SPA navigation detected:', lastUrl, '->', window.location.href);
       lastUrl = window.location.href;
-      state.pageEpoch += 1;
+      const hostManagedEpoch = !!(window.mobileApp && typeof window.mobileApp.postMessage === 'function');
+      if (hostManagedEpoch) {
+        const hostEpoch = Number(window.__MW_PAGE_EPOCH__);
+        if (Number.isFinite(hostEpoch) && hostEpoch > 0) {
+          state.pageEpoch = hostEpoch;
+        }
+      } else {
+        state.pageEpoch += 1;
+      }
       window.__MW_PAGE_EPOCH__ = state.pageEpoch;
       if (CONFIG.debug) {
         console.log('[MW][Epoch] incremented pageEpoch=' + state.pageEpoch);

@@ -1362,6 +1362,8 @@ export const NativeWebViewBrowser = () => {
       pendingRequestsRef.current.delete(requestId);
       return;
     }
+
+    markModernTransportActive('request_received', requestEpoch ?? activeEpoch);
     
     const startTime = performance.now();
     console.log('[MW-Host] request received', requestId, 'items=' + items.length, 'epoch=' + (requestEpoch ?? 'n/a'));
@@ -1618,6 +1620,7 @@ export const NativeWebViewBrowser = () => {
     currentUrl,
     processModerationSafetySignal,
     setCentralBlurState,
+    markModernTransportActive,
   ]);
 
   /**
