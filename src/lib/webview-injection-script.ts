@@ -7,7 +7,7 @@
  * 3. Dynamic content via MutationObserver
  * 4. Communication with native app via postMessage protocol
  * 5. Blur application and reveal toggles
- * 6. Fail-open policy (default safe, no blur on timeout/error)
+ * 6. Fail-open policy (default safe, timeout is fail-safe while moderation is active)
  * 7. Semantic delay with soft blur while scanning
  * 
  * Communication Flow (postMessage-based with nonce security):
@@ -1886,7 +1886,7 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   /**
    * Handle timeout for pending request
-   * FAIL-OPEN by default: Do NOT apply blur on timeout
+   * FAIL-SAFE while moderation is active: timed-out items stay protected.
    */
   function handleRequestTimeout(requestId) {
     const pendingRequest = state.pendingRequests.get(requestId);
@@ -1919,28 +1919,20 @@ export function generateModerationScript(config: InjectionConfig): string {
     });
     state.stats.timeouts += pendingRequest.items.length;
     
-    const timeoutPolicy = applyFailOpenAndModePolicy(false, 'timeout', 'timeout', true);
     const moderationActive = CONFIG.enabled && CONFIG.sensitivity > 0;
-    if (CONFIG.debug) {
-      console.log(
-        '[MW-DIAG][INJECT] source=timeout',
-        'requestId=' + requestId,
-        'policy=' + (timeoutPolicy.shouldBlur ? 'failClosed_blur' : 'failOpen_safe'),
-        'reason=' + (timeoutPolicy.reason || 'none')
-      );
-    }
-    if (moderationActive || timeoutPolicy.shouldBlur) {
+    if (moderationActive) {
       if (CONFIG.debug) {
-        console.log('[MW] FAIL-CLOSED: Applying blur to timed-out items');
+        console.log('[MW] FAIL-SAFE: keeping timed-out items protected');
       }
       pendingRequest.items.forEach(item => {
-        clearPendingItem(item.itemId, 'timeout_failClosed');
+        clearPendingItem(item.itemId, 'timeout_failSafe');
         const element = state.elements.get(item.itemId);
         if (element && element.isConnected) {
           if (!markShieldUnsafe(element)) {
             applyBlur(element, item.src, 'timeout', CONFIG.blurStrength, item.itemId);
           }
         }
+        clearSafeResolved(item.src);
         state.scanned.add(item.src);
       });
     } else {
@@ -2011,6 +2003,13 @@ export function generateModerationScript(config: InjectionConfig): string {
         if (CONFIG.debug) {
           console.log('[MW][DropResult] request not pending, ignoring requestId=' + requestId);
         }
+        return;
+      }
+      if (pendingRequest.state === 'timeout') {
+        if (CONFIG.debug) {
+          console.log('[MW][DropResult] request timed out, ignoring late result requestId=' + requestId);
+        }
+        state.pendingRequests.delete(requestId);
         return;
       }
       clearTimeout(pendingRequest.timeoutId);

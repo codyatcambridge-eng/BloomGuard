@@ -34,12 +34,13 @@ final class ContentProtectionOverlayView {
         let overlay = UIView(frame: webView.frame)
         overlay.translatesAutoresizingMaskIntoConstraints = false
         overlay.backgroundColor = UIColor.clear
-        overlay.isUserInteractionEnabled = true
+        overlay.isUserInteractionEnabled = false
         overlay.isHidden = true
         overlay.alpha = 0
 
         let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemThinMaterialDark))
         blur.translatesAutoresizingMaskIntoConstraints = false
+        blur.isUserInteractionEnabled = false
         blur.alpha = 0.85
         overlay.addSubview(blur)
         NSLayoutConstraint.activate([
@@ -52,6 +53,7 @@ final class ContentProtectionOverlayView {
         let dim = UIView()
         dim.translatesAutoresizingMaskIntoConstraints = false
         dim.backgroundColor = UIColor.black.withAlphaComponent(0.26)
+        dim.isUserInteractionEnabled = false
         overlay.addSubview(dim)
         NSLayoutConstraint.activate([
             dim.topAnchor.constraint(equalTo: overlay.topAnchor),

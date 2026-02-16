@@ -406,12 +406,9 @@ export const NativeWebViewBrowser = () => {
     if (flashShieldEpochRef.current !== activeEpoch) return;
 
     const applyConfirmed = flashShieldApplyConfirmedEpochRef.current === activeEpoch;
-    const fallbackReady =
-      modernProvenEpochRef.current === activeEpoch &&
-      flashShieldBlurReadyEpochRef.current === activeEpoch &&
-      flashShieldNativeReadyEpochRef.current === activeEpoch;
+    const ackConfirmed = modernAckRef.current.epoch === activeEpoch;
 
-    if (applyConfirmed || fallbackReady) {
+    if (applyConfirmed || ackConfirmed) {
       setFlashShieldVisible(false);
     }
   }, [flashShieldVisible, localSettings.transition_flash_shield]);
@@ -1534,7 +1531,6 @@ export const NativeWebViewBrowser = () => {
     }
 
     markModernEpochProven('request_received', requestEpoch ?? activeEpoch);
-    maybeClearFlashShield('request_received');
 
     markModernTransportActive('request_received', requestEpoch ?? activeEpoch);
     
@@ -1773,6 +1769,10 @@ export const NativeWebViewBrowser = () => {
         resultMessage as unknown as Record<string, unknown>,
         requestEpoch,
       );
+      if ((requestEpoch ?? activeEpoch) === webViewPageEpochRef.current) {
+        flashShieldApplyConfirmedEpochRef.current = webViewPageEpochRef.current;
+        maybeClearFlashShield('decision_active_epoch');
+      }
     } catch (error) {
       console.log('[MW-Host] Failed to post results via postMessage:', error);
     }
@@ -1877,6 +1877,7 @@ export const NativeWebViewBrowser = () => {
           'noncePrefix=' + String(typedMessage.noncePrefix ?? 'none'),
           'items=' + String(typedMessage.itemCount ?? '0'),
         );
+        // Timeouts are never a flash-shield clear/confirm signal.
         return;
       }
 
@@ -1886,7 +1887,6 @@ export const NativeWebViewBrowser = () => {
           modernReadyRef.current = { at: Date.now(), epoch: readyEpochNum };
           flashShieldBlurReadyEpochRef.current = readyEpochNum;
           markModernEpochProven('ready_active_epoch', readyEpochNum);
-          maybeClearFlashShield('ready_active_epoch');
           evaluateModernHealth('ready_active_epoch');
         }
         const readyNavId = String(activeNavIdRef.current || 'none');
