@@ -262,7 +262,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
   }, [isNative, markClosed]);
 
   // Open URL in native WebView
-  const open = useCallback(async (url: string, inApp: boolean = true) => {
+  const open = useCallback(async (url: string, inApp: boolean = true, preShowScript?: string) => {
     if (!isNative) {
       console.log('[NativeWebView] Not running natively, falling back to window.open');
       window.open(url, '_blank');
@@ -297,6 +297,8 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
       const options: OpenWebViewOptions = {
         url,
         isPresentAfterPageLoad: true,
+        preShowScript: preShowScript || undefined,
+        preShowScriptInjectionTime: preShowScript ? 'documentStart' : undefined,
         preventDeeplink: false,
         closeModal: true,
         closeModalTitle: 'Close',

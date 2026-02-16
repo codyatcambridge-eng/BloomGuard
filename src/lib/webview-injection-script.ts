@@ -144,6 +144,163 @@ export function getCategoryThresholds(dialLevel: number): { porn: number; sexy: 
   }
 }
 
+export function generatePreShieldBootScript(): string {
+  return `
+(function() {
+  'use strict';
+  if (window.__MW_PRESHIELD_BOOT__ === true) return 'MW_PRESHIELD_BOOT_EXISTS';
+  window.__MW_PRESHIELD_BOOT__ = true;
+
+  const PRE_SCAN_SHIELD_MIN_SIDE = 120;
+  const PRE_SCAN_SHIELD_MIN_AREA = 24000;
+
+  function getElementRect(element) {
+    try {
+      if (!element || typeof element.getBoundingClientRect !== 'function') return { width: 0, height: 0 };
+      return element.getBoundingClientRect();
+    } catch (e) {
+      return { width: 0, height: 0 };
+    }
+  }
+
+  function isLikelyAvatarLikeElement(element, width, height) {
+    if (!element) return false;
+    if (width <= 0 || height <= 0) return false;
+    if (width <= 160 && height <= 160) {
+      const ratio = width / Math.max(height, 1);
+      const nearSquare = ratio > 0.75 && ratio < 1.35;
+      const radius = String(window.getComputedStyle(element).borderRadius || '');
+      const circular = radius.includes('%') || parseFloat(radius) >= Math.min(width, height) * 0.35;
+      if (nearSquare && circular) return true;
+    }
+    const hint = (
+      String(element.className || '') + ' ' +
+      String(element.id || '') + ' ' +
+      String(element.getAttribute('alt') || '')
+    ).toLowerCase();
+    if (hint.includes('avatar') || hint.includes('profile') || hint.includes('userpic') || hint.includes('channel')) {
+      return true;
+    }
+    return false;
+  }
+
+  function isEligible(element) {
+    if (!element || !element.isConnected || element.tagName !== 'IMG') return false;
+    const rect = getElementRect(element);
+    const width = rect.width || element.offsetWidth || element.naturalWidth || 0;
+    const height = rect.height || element.offsetHeight || element.naturalHeight || 0;
+    const area = width * height;
+    if (width < PRE_SCAN_SHIELD_MIN_SIDE || height < PRE_SCAN_SHIELD_MIN_SIDE) return false;
+    if (area < PRE_SCAN_SHIELD_MIN_AREA) return false;
+    if (isLikelyAvatarLikeElement(element, width, height)) return false;
+    return true;
+  }
+
+  function ensureStyles() {
+    if (document.getElementById('mw-preshield-boot-style')) return;
+    const style = document.createElement('style');
+    style.id = 'mw-preshield-boot-style';
+    style.textContent = [
+      '.mw-pre-scan-shield{position:absolute!important;inset:0!important;display:flex!important;align-items:center!important;justify-content:center!important;background:rgba(10,10,10,.88)!important;color:rgba(255,255,255,.92)!important;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important;font-size:11px!important;font-weight:600!important;letter-spacing:.02em!important;z-index:9997!important;pointer-events:none!important;}',
+      '[data-mw-shield="1"][data-mw-shield-state="pending"],[data-mw-shield="1"][data-mw-shield-state="unsafe"]{opacity:0!important;visibility:hidden!important;}'
+    ].join('');
+    const root = document.head || document.documentElement;
+    if (root) root.appendChild(style);
+  }
+
+  function getShieldIdForElement(element) {
+    if (element.dataset.mwShieldId) return element.dataset.mwShieldId;
+    const id = 'mw-shield-' + Math.random().toString(36).slice(2, 10);
+    element.dataset.mwShieldId = id;
+    return id;
+  }
+
+  function ensureOverlay(element) {
+    const parent = element.parentElement;
+    if (!parent) return;
+    const shieldId = getShieldIdForElement(element);
+    const selector = '[data-mw-shield-overlay-for="' + shieldId + '"]';
+    let overlay = parent.querySelector(selector);
+    if (!overlay) {
+      const parentPos = window.getComputedStyle(parent).position;
+      if (parentPos === 'static') {
+        parent.style.position = 'relative';
+      }
+      overlay = document.createElement('div');
+      overlay.className = 'mw-pre-scan-shield';
+      overlay.dataset.mwShieldOverlayFor = shieldId;
+      parent.appendChild(overlay);
+    }
+    overlay.dataset.mwShieldOverlayState = 'pending';
+    overlay.textContent = 'Shielding...';
+  }
+
+  function applyPreShield(element) {
+    if (!isEligible(element)) return false;
+    if (typeof element.dataset.mwShieldPrevOpacity === 'undefined') {
+      element.dataset.mwShieldPrevOpacity = element.style.getPropertyValue('opacity') || '';
+      element.dataset.mwShieldPrevOpacityPriority = element.style.getPropertyPriority('opacity') || '';
+    }
+    if (typeof element.dataset.mwShieldPrevVisibility === 'undefined') {
+      element.dataset.mwShieldPrevVisibility = element.style.getPropertyValue('visibility') || '';
+      element.dataset.mwShieldPrevVisibilityPriority = element.style.getPropertyPriority('visibility') || '';
+    }
+
+    // Hide first in the same synchronous call; overlay work comes after.
+    element.style.setProperty('opacity', '0', 'important');
+    element.style.setProperty('visibility', 'hidden', 'important');
+    element.dataset.mwShield = '1';
+    element.dataset.mwShieldState = 'pending';
+    getShieldIdForElement(element);
+    ensureOverlay(element);
+    return true;
+  }
+
+  function installSharedImageSourceHooks() {
+    if (window.__MW_IMG_SRC_HOOKS_INSTALLED__ === true) return;
+    window.__MW_IMG_SRC_HOOKS_INSTALLED__ = true;
+    try {
+      const srcDescriptor = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
+      if (srcDescriptor && typeof srcDescriptor.get === 'function' && typeof srcDescriptor.set === 'function') {
+        Object.defineProperty(HTMLImageElement.prototype, 'src', {
+          configurable: srcDescriptor.configurable !== false,
+          enumerable: srcDescriptor.enumerable === true,
+          get: function() {
+            return srcDescriptor.get.call(this);
+          },
+          set: function(value) {
+            try { applyPreShield(this); } catch (e) {}
+            srcDescriptor.set.call(this, value);
+          },
+        });
+      }
+    } catch (e) {}
+
+    try {
+      const imageSetAttribute = HTMLImageElement.prototype.setAttribute;
+      HTMLImageElement.prototype.setAttribute = function(name, value) {
+        try {
+          if (String(name || '').toLowerCase() === 'src') {
+            applyPreShield(this);
+          }
+        } catch (e) {}
+        return imageSetAttribute.call(this, name, value);
+      };
+    } catch (e) {}
+  }
+
+  ensureStyles();
+  installSharedImageSourceHooks();
+  try {
+    document.querySelectorAll('img').forEach(function(img) {
+      applyPreShield(img);
+    });
+  } catch (e) {}
+  return 'MW_PRESHIELD_BOOT_READY';
+})();
+`;
+}
+
 /**
  * Generate the JavaScript code to inject into WebView
  */
@@ -1087,6 +1244,219 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
   }
 
+  const PRE_SCAN_SHIELD_MIN_SIDE = 120;
+  const PRE_SCAN_SHIELD_MIN_AREA = 24000;
+  const PRE_SCAN_SHIELD_AVATAR_MAX_SIDE = 160;
+  let shieldIdCounter = 0;
+
+  function getElementRect(element) {
+    try {
+      return element.getBoundingClientRect();
+    } catch (e) {
+      return { width: 0, height: 0, top: 0, left: 0, right: 0, bottom: 0 };
+    }
+  }
+
+  function isLikelyAvatarLikeElement(element, width, height) {
+    const minSide = Math.min(width, height);
+    const maxSide = Math.max(width, height);
+    if (maxSide <= 96) return true;
+    if (maxSide > PRE_SCAN_SHIELD_AVATAR_MAX_SIDE) return false;
+    const aspect = maxSide / Math.max(minSide, 1);
+    const nearSquare = aspect <= 1.3;
+    const style = window.getComputedStyle(element);
+    const radiusRaw = style.borderTopLeftRadius || style.borderRadius || '';
+    const radiusStr = String(radiusRaw || '').trim();
+    let circular = false;
+    if (radiusStr.endsWith('%')) {
+      const radiusPct = Number(radiusStr.replace('%', ''));
+      circular = Number.isFinite(radiusPct) && radiusPct >= 45;
+    } else {
+      const radiusPx = Number.parseFloat(radiusStr);
+      circular = Number.isFinite(radiusPx) && (radiusPx >= minSide * 0.35 || radiusPx >= 999);
+    }
+    if (nearSquare && circular) return true;
+
+    const hint = (
+      String(element.className || '') + ' ' +
+      String(element.id || '') + ' ' +
+      String(element.getAttribute('alt') || '')
+    ).toLowerCase();
+    if (hint.includes('avatar') || hint.includes('profile') || hint.includes('userpic') || hint.includes('channel')) {
+      return true;
+    }
+    return false;
+  }
+
+  function isPreScanShieldEligible(element, sourceType) {
+    if (!element || !element.isConnected) return false;
+    if (!CONFIG.enabled || CONFIG.sensitivity === 0) return false;
+    const source = String(sourceType || '').toLowerCase();
+    if (element.tagName === 'VIDEO') return false;
+    if (source.includes('video-currentsrc') || source.includes('video-frame')) return false;
+
+    const rect = getElementRect(element);
+    const width = rect.width || element.offsetWidth || element.naturalWidth || 0;
+    const height = rect.height || element.offsetHeight || element.naturalHeight || 0;
+    const area = width * height;
+    if (width < PRE_SCAN_SHIELD_MIN_SIDE || height < PRE_SCAN_SHIELD_MIN_SIDE) return false;
+    if (area < PRE_SCAN_SHIELD_MIN_AREA) return false;
+    if (isLikelyAvatarLikeElement(element, width, height)) return false;
+    return true;
+  }
+
+  function getShieldIdForElement(element) {
+    const existing = element.dataset.mwShieldId;
+    if (existing) return existing;
+    shieldIdCounter += 1;
+    const id = 'mw-shield-' + shieldIdCounter;
+    element.dataset.mwShieldId = id;
+    return id;
+  }
+
+  function ensurePreScanShieldOverlay(element, shieldState) {
+    const parent = element.parentElement;
+    if (!parent) return;
+    const shieldId = getShieldIdForElement(element);
+    const selector = '[data-mw-shield-overlay-for="' + shieldId + '"]';
+    let overlay = parent.querySelector(selector);
+
+    if (!overlay) {
+      const parentPos = window.getComputedStyle(parent).position;
+      if (parentPos === 'static') {
+        parent.style.position = 'relative';
+      }
+      overlay = document.createElement('div');
+      overlay.className = 'mw-pre-scan-shield';
+      overlay.dataset.mwShieldOverlayFor = shieldId;
+      parent.appendChild(overlay);
+    }
+
+    overlay.dataset.mwShieldOverlayState = shieldState;
+    if (shieldState === 'unsafe') {
+      overlay.textContent = 'Shielded';
+    } else {
+      overlay.textContent = 'Shielding...';
+    }
+  }
+
+  function shouldSkipBlurForShield(element) {
+    if (!element || element.dataset.mwShield !== '1') return false;
+    const shieldState = element.dataset.mwShieldState;
+    return shieldState === 'pending' || shieldState === 'unsafe';
+  }
+
+  function applyPreScanShieldIfEligible(element, sourceType) {
+    if (!isPreScanShieldEligible(element, sourceType)) return false;
+    if (element.dataset.mwShieldState === 'unsafe') return true;
+
+    if (typeof element.dataset.mwShieldPrevOpacity === 'undefined') {
+      element.dataset.mwShieldPrevOpacity = element.style.getPropertyValue('opacity') || '';
+      element.dataset.mwShieldPrevOpacityPriority = element.style.getPropertyPriority('opacity') || '';
+    }
+    if (typeof element.dataset.mwShieldPrevVisibility === 'undefined') {
+      element.dataset.mwShieldPrevVisibility = element.style.getPropertyValue('visibility') || '';
+      element.dataset.mwShieldPrevVisibilityPriority = element.style.getPropertyPriority('visibility') || '';
+    }
+
+    // Hide first in the same synchronous call; overlay work comes after.
+    element.style.setProperty('opacity', '0', 'important');
+    element.style.setProperty('visibility', 'hidden', 'important');
+    element.dataset.mwShield = '1';
+    element.dataset.mwShieldState = 'pending';
+    getShieldIdForElement(element);
+    ensurePreScanShieldOverlay(element, 'pending');
+    return true;
+  }
+
+  function installImageSourcePreShieldHooks() {
+    if (window.__MW_IMG_SRC_HOOKS_INSTALLED__ === true) return;
+    window.__MW_IMG_SRC_HOOKS_INSTALLED__ = true;
+
+    try {
+      const srcDescriptor = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
+      if (srcDescriptor && typeof srcDescriptor.get === 'function' && typeof srcDescriptor.set === 'function') {
+        Object.defineProperty(HTMLImageElement.prototype, 'src', {
+          configurable: srcDescriptor.configurable !== false,
+          enumerable: srcDescriptor.enumerable === true,
+          get: function() {
+            return srcDescriptor.get.call(this);
+          },
+          set: function(value) {
+            try { applyPreScanShieldIfEligible(this, 'img-src-setter'); } catch (e) {}
+            srcDescriptor.set.call(this, value);
+          },
+        });
+      }
+    } catch (e) {}
+
+    try {
+      const imageSetAttribute = HTMLImageElement.prototype.setAttribute;
+      HTMLImageElement.prototype.setAttribute = function(name, value) {
+        try {
+          if (String(name || '').toLowerCase() === 'src') {
+            applyPreScanShieldIfEligible(this, 'img-setattribute-src');
+          }
+        } catch (e) {}
+        return imageSetAttribute.call(this, name, value);
+      };
+    } catch (e) {}
+  }
+
+  function removePreScanShield(element) {
+    if (!element) return;
+    const shieldId = element.dataset.mwShieldId;
+    if (shieldId && element.parentElement) {
+      const overlay = element.parentElement.querySelector('[data-mw-shield-overlay-for="' + shieldId + '"]');
+      if (overlay) overlay.remove();
+    }
+
+    const prevOpacity = element.dataset.mwShieldPrevOpacity;
+    const prevOpacityPriority = element.dataset.mwShieldPrevOpacityPriority || '';
+    const prevVisibility = element.dataset.mwShieldPrevVisibility;
+    const prevVisibilityPriority = element.dataset.mwShieldPrevVisibilityPriority || '';
+
+    if (typeof prevOpacity !== 'undefined') {
+      if (prevOpacity) {
+        element.style.setProperty('opacity', prevOpacity, prevOpacityPriority);
+      } else {
+        element.style.removeProperty('opacity');
+      }
+      delete element.dataset.mwShieldPrevOpacity;
+      delete element.dataset.mwShieldPrevOpacityPriority;
+    }
+    if (typeof prevVisibility !== 'undefined') {
+      if (prevVisibility) {
+        element.style.setProperty('visibility', prevVisibility, prevVisibilityPriority);
+      } else {
+        element.style.removeProperty('visibility');
+      }
+      delete element.dataset.mwShieldPrevVisibility;
+      delete element.dataset.mwShieldPrevVisibilityPriority;
+    }
+
+    element.dataset.mwShieldState = 'safe';
+    element.dataset.mwShield = '0';
+  }
+
+  function markShieldUnsafe(element) {
+    if (!element) return false;
+    if (element.dataset.mwShield !== '1' && !applyPreScanShieldIfEligible(element, 'unsafe-result')) {
+      return false;
+    }
+    element.dataset.mwShield = '1';
+    element.dataset.mwShieldState = 'unsafe';
+    element.dataset.mwModerated = 'shielded';
+    element.classList.remove('mw-softblur');
+    element.classList.remove('mw-blurred');
+    element.style.setProperty('filter', 'none', 'important');
+    element.style.setProperty('-webkit-filter', 'none', 'important');
+    element.style.setProperty('opacity', '0', 'important');
+    element.style.setProperty('visibility', 'hidden', 'important');
+    ensurePreScanShieldOverlay(element, 'unsafe');
+    return true;
+  }
+
   // ==================== BLUR MANAGEMENT ====================
 
   /**
@@ -1098,6 +1468,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (state.revealed.has(src)) return;
     if (element.dataset.mwRevealed === 'true') return;
     if (element.dataset.mwModerated === 'blurred') return; // Already hard blurred
+    if (shouldSkipBlurForShield(element)) return;
     
     try {
       element.style.filter = 'blur(' + CONFIG.softBlurStrength + 'px)';
@@ -1138,6 +1509,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         'afterState=' + (element.dataset.mwModerated || ''),
         'afterFilter=' + (element.style.getPropertyValue('filter') || element.style.filter || '')
       );
+      removePreScanShield(element);
     } catch (e) {}
   }
 
@@ -1221,6 +1593,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     // Check persistence
     if (state.revealed.has(src)) return;
     if (element.dataset.mwRevealed === 'true') return;
+    if (shouldSkipBlurForShield(element)) {
+      markShieldUnsafe(element);
+      return;
+    }
     
     const blurPx = (IS_YOUTUBE ? 40 : (blurStrengthPx || CONFIG.blurStrength || 30));
     
@@ -1558,7 +1934,9 @@ export function generateModerationScript(config: InjectionConfig): string {
         clearPendingItem(item.itemId, 'timeout_failClosed');
         const element = state.elements.get(item.itemId);
         if (element && element.isConnected) {
-          applyBlur(element, item.src, 'timeout', CONFIG.blurStrength, item.itemId);
+          if (!markShieldUnsafe(element)) {
+            applyBlur(element, item.src, 'timeout', CONFIG.blurStrength, item.itemId);
+          }
         }
         state.scanned.add(item.src);
       });
@@ -1797,7 +2175,9 @@ export function generateModerationScript(config: InjectionConfig): string {
             decisionReason: decisionReason,
           });
           // Apply strong blur
-          applyBlur(element, src, predictedLabel || category || 'flagged', CONFIG.blurStrength, itemId);
+          if (!markShieldUnsafe(element)) {
+            applyBlur(element, src, predictedLabel || category || 'flagged', CONFIG.blurStrength, itemId);
+          }
         } else {
           if (preDecisionState === 'blurred' || element.classList.contains('mw-blurred') || preDecisionHasBlur) {
             console.log(
@@ -1812,6 +2192,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           markSafeResolved(src);
           // Remove soft blur if result is safe
           removeSoftBlur(element, src);
+          removePreScanShield(element);
           if (wasInSoftBlur && !finalBlur) {
             state.stats.semanticDelaySaved++;
           }
@@ -1856,7 +2237,9 @@ export function generateModerationScript(config: InjectionConfig): string {
           conservativeSrcMatch(img.dataset.mwOrigSrc || '', src);
         if (matchesSrc && !state.revealed.has(src)) {
           if (img.dataset.mwModerated !== 'blurred' && img.dataset.mwRevealed !== 'true') {
-            applyBlur(img, src, category, blurStrengthPx);
+            if (!markShieldUnsafe(img)) {
+              applyBlur(img, src, category, blurStrengthPx);
+            }
           }
         }
       });
@@ -1871,7 +2254,9 @@ export function generateModerationScript(config: InjectionConfig): string {
           conservativeSrcMatch(video.dataset.mwOrigPoster || '', src);
         if (matchesSrc && !state.revealed.has(src)) {
           if (video.dataset.mwModerated !== 'blurred' && video.dataset.mwRevealed !== 'true') {
-            applyBlur(video, src, category, blurStrengthPx);
+            if (!markShieldUnsafe(video)) {
+              applyBlur(video, src, category, blurStrengthPx);
+            }
           }
         }
       });
@@ -1884,7 +2269,9 @@ export function generateModerationScript(config: InjectionConfig): string {
           conservativeSrcMatch(el.dataset.mwBgSrc || '', src);
         if (matchesSrc && !state.revealed.has(src)) {
           if (el.dataset.mwModerated !== 'blurred' && el.dataset.mwRevealed !== 'true') {
-            applyBlur(el, src, category, blurStrengthPx);
+            if (!markShieldUnsafe(el)) {
+              applyBlur(el, src, category, blurStrengthPx);
+            }
           }
         }
       });
@@ -1898,11 +2285,13 @@ export function generateModerationScript(config: InjectionConfig): string {
     try {
       document.querySelectorAll('[data-mw-src="' + src + '"]').forEach(el => {
         removeSoftBlur(el, src);
+        removePreScanShield(el);
       });
       
       document.querySelectorAll('img').forEach(img => {
         if (img.src === src || img.dataset.mwOrigSrc === src) {
           removeSoftBlur(img, src);
+          removePreScanShield(img);
         }
       });
     } catch (e) {}
@@ -1999,6 +2388,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     
     // Store element reference
     state.elements.set(itemId, element);
+    applyPreScanShieldIfEligible(element, sourceType);
     
     // SEMANTIC DELAY: only apply soft blur after semanticDelayMs if still pending.
     // Fast safe results will cancel this timer before any blur is shown.
@@ -2605,6 +2995,26 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       .mw-correction-overlay {
         pointer-events: auto !important;
+      }
+      .mw-pre-scan-shield {
+        position: absolute !important;
+        inset: 0 !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        background: rgba(10, 10, 10, 0.88) !important;
+        color: rgba(255, 255, 255, 0.92) !important;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
+        font-size: 11px !important;
+        font-weight: 600 !important;
+        letter-spacing: 0.02em !important;
+        z-index: 9997 !important;
+        pointer-events: none !important;
+      }
+      [data-mw-shield="1"][data-mw-shield-state="pending"],
+      [data-mw-shield="1"][data-mw-shield-state="unsafe"] {
+        opacity: 0 !important;
+        visibility: hidden !important;
       }
       ytd-thumbnail, ytd-rich-item-renderer, yt-img-shadow, #shorts-player,
       [class*="DivVideoContainer"], [class*="DivPlayerContainer"], .video-card {

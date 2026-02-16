@@ -12,7 +12,7 @@ import { useBrowserNavigation } from '@/hooks/useBrowserNavigation';
 import { useCapacitor } from '@/hooks/useCapacitor';
 import { useModerationBridge } from '@/hooks/useModerationBridge';
 import { supabase } from '@/integrations/supabase/client';
-import { generateModerationScript } from '@/lib/webview-injection-script';
+import { generateModerationScript, generatePreShieldBootScript } from '@/lib/webview-injection-script';
 import {
   isValidModerationRequest,
   createResultMessage,
@@ -42,6 +42,7 @@ import { YouTubePreviewView } from './YouTubePreviewView';
 import { SocialPreviewView, SocialPlatform } from './SocialPreviewView';
 import { ExternalLinkWarning } from './ExternalLinkWarning';
 import { AIStatusBar } from './AIStatusBar';
+import { AIStatusIndicator } from './AIStatusIndicator';
 import { toast } from 'sonner';
 
 interface SearchResult {
@@ -84,6 +85,16 @@ interface SocialContent {
   thumbnailUrl: string;
   sourceUrl: string;
 }
+
+const isBlankLikeNavigationUrl = (value: string): boolean => {
+  const normalized = String(value || '').trim().toLowerCase();
+  return (
+    normalized === '' ||
+    normalized === 'about:blank' ||
+    normalized.startsWith('about:blank#') ||
+    normalized.startsWith('about:blank?')
+  );
+};
 
 /**
  * NativeWebViewBrowser - Unified browser component
@@ -143,6 +154,7 @@ export const NativeWebViewBrowser = () => {
   const blurRetryTimerRef = useRef<NodeJS.Timeout | null>(null);
   const blurSignalRef = useRef({ unsafeStreak: 0, safeStreak: 0 });
   const [blurSyncVersion, setBlurSyncVersion] = useState(0);
+  const [flashShieldVisible, setFlashShieldVisible] = useState(false);
   const riskDecisionListenerRef = useRef<PluginListenerHandle | null>(null);
   const lastNsfwSignalAtRef = useRef(0);
   const webViewPageEpochRef = useRef(0);
@@ -155,6 +167,10 @@ export const NativeWebViewBrowser = () => {
   const modernProvenEpochRef = useRef<number | null>(null);
   const modernTransportActiveUntilRef = useRef(0);
   const modernTransportReasonRef = useRef('none');
+  const flashShieldEpochRef = useRef<number | null>(null);
+  const flashShieldApplyConfirmedEpochRef = useRef<number | null>(null);
+  const flashShieldBlurReadyEpochRef = useRef<number | null>(null);
+  const flashShieldNativeReadyEpochRef = useRef<number | null>(null);
   const legacyPollSuppressedUntilRef = useRef(0);
   const legacyPollSuppressionReasonRef = useRef('none');
   const legacyExecBackoffUntilRef = useRef(0);
@@ -299,6 +315,26 @@ export const NativeWebViewBrowser = () => {
     }
     resultQueueRef.current = [];
     resultQueueFlushCountRef.current = 0;
+    flashShieldEpochRef.current = null;
+    flashShieldApplyConfirmedEpochRef.current = null;
+    flashShieldBlurReadyEpochRef.current = null;
+    flashShieldNativeReadyEpochRef.current = null;
+  }, []);
+
+  const markModernEpochProven = useCallback((_reason: string, sourceEpoch?: number) => {
+    const activeEpoch = webViewPageEpochRef.current;
+    if (Number.isFinite(sourceEpoch) && Number(sourceEpoch) !== activeEpoch) return;
+    if (modernProvenEpochRef.current === activeEpoch) return;
+
+    modernProvenEpochRef.current = activeEpoch;
+    legacyPollSuppressedUntilRef.current = Number.MAX_SAFE_INTEGER;
+    legacyPollSuppressionReasonRef.current = 'modern_proven_epoch';
+    if (legacyPollTimerRef.current) {
+      clearTimeout(legacyPollTimerRef.current);
+      legacyPollTimerRef.current = null;
+    }
+    legacyPollOwnerRef.current = '';
+    legacyPollInFlightRef.current = false;
   }, []);
 
   const evaluateModernHealth = useCallback((reason: string) => {
@@ -348,6 +384,37 @@ export const NativeWebViewBrowser = () => {
       );
     }
   }, [MODERN_STALE_MS, MODERN_LEGACY_SUPPRESS_MS, isDebugMode]);
+
+  const activateFlashShield = useCallback((_reason: string) => {
+    if (!localSettings.transition_flash_shield) return;
+    const activeEpoch = webViewPageEpochRef.current;
+    flashShieldEpochRef.current = activeEpoch;
+    flashShieldApplyConfirmedEpochRef.current = null;
+    flashShieldBlurReadyEpochRef.current = null;
+    flashShieldNativeReadyEpochRef.current = null;
+    setFlashShieldVisible(true);
+  }, [localSettings.transition_flash_shield]);
+
+  const maybeClearFlashShield = useCallback((_reason: string) => {
+    if (!localSettings.transition_flash_shield) {
+      if (flashShieldVisible) setFlashShieldVisible(false);
+      return;
+    }
+    if (!flashShieldVisible) return;
+
+    const activeEpoch = webViewPageEpochRef.current;
+    if (flashShieldEpochRef.current !== activeEpoch) return;
+
+    const applyConfirmed = flashShieldApplyConfirmedEpochRef.current === activeEpoch;
+    const fallbackReady =
+      modernProvenEpochRef.current === activeEpoch &&
+      flashShieldBlurReadyEpochRef.current === activeEpoch &&
+      flashShieldNativeReadyEpochRef.current === activeEpoch;
+
+    if (applyConfirmed || fallbackReady) {
+      setFlashShieldVisible(false);
+    }
+  }, [flashShieldVisible, localSettings.transition_flash_shield]);
 
   const clearVideoBoostTimers = useCallback(() => {
     if (videoBoostRef.current.minHoldTimer) {
@@ -683,6 +750,7 @@ export const NativeWebViewBrowser = () => {
     activeNavIdRef.current = navigationSeqRef.current;
     webViewPageEpochRef.current = activeNavIdRef.current;
     resetModernHealthForNavigation('nav:' + reason);
+    activateFlashShield('navigation:' + reason);
     setVideoBoost(false, 'navigation_change');
     console.log(
       '[MW-Inject][Nav]',
@@ -690,7 +758,7 @@ export const NativeWebViewBrowser = () => {
       'reason=' + reason,
       'targetUrl=' + (url || 'unknown'),
     );
-  }, [resetModernHealthForNavigation, setVideoBoost]);
+  }, [resetModernHealthForNavigation, activateFlashShield, setVideoBoost]);
 
   const injectModerationScript = useCallback(async (
     scriptExecutor: (script: string) => Promise<string | null>,
@@ -769,6 +837,13 @@ export const NativeWebViewBrowser = () => {
     }
   }, [ENABLE_SIGNAL_PIPELINE, settingsLoaded, isModerationEnabled, getModerationConfig, localSettings.prototype_mode, localSettings.kid_safe_profile]);
 
+  const getPreShieldBootScript = useCallback(() => {
+    if (!settingsLoaded) return undefined;
+    const moderationConfig = getModerationConfig();
+    if (!moderationConfig.enabled || moderationConfig.sensitivity <= 0) return undefined;
+    return generatePreShieldBootScript();
+  }, [settingsLoaded, getModerationConfig]);
+
   const {
     state: webViewState,
     open: openWebView,
@@ -782,6 +857,13 @@ export const NativeWebViewBrowser = () => {
     onLoadStart: (url) => {
       console.log('[Browser] ======= LOAD START =======');
       console.log('[Browser] URL:', url);
+      const closeLifecycleBlankNav =
+        isBlankLikeNavigationUrl(url) &&
+        !!currentUrlRef.current &&
+        !isBlankLikeNavigationUrl(currentUrlRef.current);
+      if (closeLifecycleBlankNav) {
+        return;
+      }
       markNavigation('onLoadStart', url);
       lastLoadStartUrlRef.current = url || '';
       lastLoadStartAtRef.current = Date.now();
@@ -797,6 +879,14 @@ export const NativeWebViewBrowser = () => {
     onLoadEnd: async (url) => {
       console.log('[Browser] ======= LOAD END =======');
       console.log('[Browser] URL:', url);
+      const recentLoadStartForUrl =
+        !!lastLoadStartUrlRef.current &&
+        lastLoadStartUrlRef.current === (url || '') &&
+        Date.now() - lastLoadStartAtRef.current < 8000;
+      if (isBlankLikeNavigationUrl(url || '') && !recentLoadStartForUrl) {
+        setIsLoading(false);
+        return;
+      }
       setIsLoading(false);
       if (!ENABLE_SIGNAL_PIPELINE) return;
       
@@ -842,6 +932,7 @@ export const NativeWebViewBrowser = () => {
         loweredError.includes('terminated') ||
         loweredError.includes('crash');
       if (crashSignal) {
+        activateFlashShield('webprocess_crash');
         modernHealthyRef.current = false;
         modernProvenEpochRef.current = null;
         modernAckRef.current = { at: 0, epoch: webViewPageEpochRef.current };
@@ -905,17 +996,26 @@ export const NativeWebViewBrowser = () => {
     onUrlChange: (url) => {
       console.log('[Browser] ======= URL CHANGE =======');
       console.log('[Browser] New URL:', url);
+      const nextUrl = url || '';
       const previousUrl = currentUrlRef.current || webViewState.currentUrl || '';
-      const sameDocumentUrlChange = isLikelySameDocumentUrlChange(previousUrl, url);
+      const sameDocumentUrlChange = isLikelySameDocumentUrlChange(previousUrl, nextUrl);
       const recentLoadStartForUrl =
         !!lastLoadStartUrlRef.current &&
-        lastLoadStartUrlRef.current === url &&
+        lastLoadStartUrlRef.current === nextUrl &&
         Date.now() - lastLoadStartAtRef.current < 8000;
-      if (!sameDocumentUrlChange && !recentLoadStartForUrl) {
-        markNavigation('onUrlChange', url);
+      const closeLifecycleBlankNav =
+        isBlankLikeNavigationUrl(nextUrl) &&
+        !!previousUrl &&
+        !isBlankLikeNavigationUrl(previousUrl) &&
+        !recentLoadStartForUrl;
+      if (closeLifecycleBlankNav) {
+        return;
       }
-      setUrlInput(url);
-      navigate('browse', url, url);
+      if (!sameDocumentUrlChange && !recentLoadStartForUrl) {
+        markNavigation('onUrlChange', nextUrl);
+      }
+      setUrlInput(nextUrl);
+      navigate('browse', nextUrl, nextUrl);
       if (!sameDocumentUrlChange) {
         // Reset injection for new page navigation
         clearLoadEndInjectTimer();
@@ -940,6 +1040,9 @@ export const NativeWebViewBrowser = () => {
       setVideoBoost(false, 'webview_closed');
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       setCentralBlurState(false, 'webview_closed');
+      flashShieldEpochRef.current = webViewPageEpochRef.current;
+      flashShieldApplyConfirmedEpochRef.current = webViewPageEpochRef.current;
+      maybeClearFlashShield('webview_closed');
       navigate('home', '', '');
     },
     onMessageFromWebview: (payload) => {
@@ -1052,7 +1155,11 @@ export const NativeWebViewBrowser = () => {
         allowRevealDuringHardBlur,
       });
       console.debug('[ContentFilter] startScanning resolved', startPayload);
+      flashShieldNativeReadyEpochRef.current = webViewPageEpochRef.current;
+      maybeClearFlashShield('native_scan_started');
       riskDecisionListenerRef.current = await onNativeRiskDecision((decision) => {
+        flashShieldNativeReadyEpochRef.current = webViewPageEpochRef.current;
+        maybeClearFlashShield('native_risk_decision');
         console.debug('[ContentFilter] decision', decision.state, decision.riskScore);
       });
       session.running = true;
@@ -1077,6 +1184,7 @@ export const NativeWebViewBrowser = () => {
     isRevealAllowed,
     NATIVE_SCAN_RESTART_DEBOUNCE_MS,
     stopNativeScanSession,
+    maybeClearFlashShield,
   ]);
 
   useEffect(() => {
@@ -1160,6 +1268,13 @@ export const NativeWebViewBrowser = () => {
     if (!isNative || !webViewState.isOpen || !executeScript) return;
 
     const urlHint = webViewState.currentUrl || currentUrlRef.current || 'about:blank';
+    const recentLoadStartForUrl =
+      !!lastLoadStartUrlRef.current &&
+      lastLoadStartUrlRef.current === urlHint &&
+      Date.now() - lastLoadStartAtRef.current < 8000;
+    if (isBlankLikeNavigationUrl(urlHint) && !recentLoadStartForUrl) {
+      return;
+    }
 
     debugLog(
       '[MW-DIAG][HOST] pipeline state',
@@ -1218,6 +1333,13 @@ export const NativeWebViewBrowser = () => {
     if (didInjectAfterSettingsLoadedRef.current) return;
 
     const urlHint = webViewState.currentUrl || currentUrlRef.current || 'about:blank';
+    const recentLoadStartForUrl =
+      !!lastLoadStartUrlRef.current &&
+      lastLoadStartUrlRef.current === urlHint &&
+      Date.now() - lastLoadStartAtRef.current < 8000;
+    if (isBlankLikeNavigationUrl(urlHint) && !recentLoadStartForUrl) {
+      return;
+    }
     didInjectAfterSettingsLoadedRef.current = true;
     console.log(
       '[MW-Inject][SettingsLoadedReinject]',
@@ -1246,6 +1368,10 @@ export const NativeWebViewBrowser = () => {
     }, 800);
     return () => clearInterval(timer);
   }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, requestBlurHandshake]);
+
+  useEffect(() => {
+    maybeClearFlashShield('settings_sync');
+  }, [localSettings.transition_flash_shield, maybeClearFlashShield]);
 
   useEffect(() => {
     return () => {
@@ -1406,17 +1532,8 @@ export const NativeWebViewBrowser = () => {
       return;
     }
 
-    if (modernProvenEpochRef.current !== activeEpoch) {
-      modernProvenEpochRef.current = activeEpoch;
-      legacyPollSuppressedUntilRef.current = Number.MAX_SAFE_INTEGER;
-      legacyPollSuppressionReasonRef.current = 'modern_proven_epoch';
-      if (legacyPollTimerRef.current) {
-        clearTimeout(legacyPollTimerRef.current);
-        legacyPollTimerRef.current = null;
-      }
-      legacyPollOwnerRef.current = '';
-      legacyPollInFlightRef.current = false;
-    }
+    markModernEpochProven('request_received', requestEpoch ?? activeEpoch);
+    maybeClearFlashShield('request_received');
 
     markModernTransportActive('request_received', requestEpoch ?? activeEpoch);
     
@@ -1676,6 +1793,8 @@ export const NativeWebViewBrowser = () => {
     processModerationSafetySignal,
     setCentralBlurState,
     markModernTransportActive,
+    markModernEpochProven,
+    maybeClearFlashShield,
   ]);
 
   /**
@@ -1728,6 +1847,8 @@ export const NativeWebViewBrowser = () => {
         );
         if (Number.isFinite(ackEpochNum) && ackEpochNum === webViewPageEpochRef.current) {
           modernAckRef.current = { at: Date.now(), epoch: ackEpochNum };
+          markModernEpochProven('ack_active_epoch', ackEpochNum);
+          maybeClearFlashShield('ack_active_epoch');
           evaluateModernHealth('ack_active_epoch');
         }
         return;
@@ -1745,6 +1866,11 @@ export const NativeWebViewBrowser = () => {
         return;
       }
       if (typedMessage.type === 'MW_REQ_TIMEOUT') {
+        const timeoutEpochNum = Number(typedMessage.pageEpoch);
+        if (Number.isFinite(timeoutEpochNum) && timeoutEpochNum === webViewPageEpochRef.current) {
+          flashShieldApplyConfirmedEpochRef.current = timeoutEpochNum;
+          maybeClearFlashShield('request_timeout');
+        }
         console.warn(
           '[MW-Host][REQ] MW_REQ_TIMEOUT',
           'source=' + source,
@@ -1761,6 +1887,9 @@ export const NativeWebViewBrowser = () => {
         const readyEpochNum = Number(typedMessage.pageEpoch);
         if (Number.isFinite(readyEpochNum) && readyEpochNum === webViewPageEpochRef.current) {
           modernReadyRef.current = { at: Date.now(), epoch: readyEpochNum };
+          flashShieldBlurReadyEpochRef.current = readyEpochNum;
+          markModernEpochProven('ready_active_epoch', readyEpochNum);
+          maybeClearFlashShield('ready_active_epoch');
           evaluateModernHealth('ready_active_epoch');
         }
         const readyNavId = String(activeNavIdRef.current || 'none');
@@ -1848,7 +1977,7 @@ export const NativeWebViewBrowser = () => {
       messageFromWebViewHandlerRef.current = null;
       window.removeEventListener('message', handleWindowMessage);
     };
-  }, [ENABLE_SIGNAL_PIPELINE, ENABLE_DOM_BLUR, isDebugMode, processModerationRequest, moderationBridge, postMessageToWebView, getNonce, queueCurrentBlurState, flushBlurStateToWebView, evaluateModernHealth, setVideoBoost]);
+  }, [ENABLE_SIGNAL_PIPELINE, ENABLE_DOM_BLUR, isDebugMode, processModerationRequest, moderationBridge, postMessageToWebView, getNonce, queueCurrentBlurState, flushBlurStateToWebView, evaluateModernHealth, markModernEpochProven, maybeClearFlashShield, setVideoBoost]);
 
   /**
    * Fallback: Poll for moderation requests from legacy global queue
@@ -1856,6 +1985,14 @@ export const NativeWebViewBrowser = () => {
    */
   useEffect(() => {
     if (!ENABLE_SIGNAL_PIPELINE || !isNative || !webViewState.isOpen || !isModerationEnabled()) {
+      return;
+    }
+    const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
+    const recentLoadStartForUrl =
+      !!lastLoadStartUrlRef.current &&
+      lastLoadStartUrlRef.current === activeUrl &&
+      Date.now() - lastLoadStartAtRef.current < 8000;
+    if (isBlankLikeNavigationUrl(activeUrl) && !recentLoadStartForUrl) {
       return;
     }
     if (modernProvenEpochRef.current === webViewPageEpochRef.current) {
@@ -2186,7 +2323,7 @@ export const NativeWebViewBrowser = () => {
     // Open in native WebView or fallback
     if (isNative) {
       try {
-        const success = await openWebView(searchUrl, true);
+        const success = await openWebView(searchUrl, true, getPreShieldBootScript());
         if (success) {
           await logEvent('allowed', 'google.com', 'native-webview');
         } else {
@@ -2209,7 +2346,7 @@ export const NativeWebViewBrowser = () => {
     }
     
     setIsLoading(false);
-  }, [navigate, logEvent, isNative, openWebView]);
+  }, [navigate, logEvent, isNative, openWebView, getPreShieldBootScript]);
 
   /**
    * Determine if input is a URL vs search query
@@ -2307,7 +2444,7 @@ export const NativeWebViewBrowser = () => {
     // Open in native WebView (for all sites including social platforms)
     if (isNative) {
       try {
-        const success = await openWebView(normalizedUrl, true);
+        const success = await openWebView(normalizedUrl, true, getPreShieldBootScript());
         if (success) {
           await logEvent('allowed', domain, 'native-webview');
         } else {
@@ -2332,7 +2469,7 @@ export const NativeWebViewBrowser = () => {
     }
     
     setIsLoading(false);
-  }, [urlInput, isNative, openWebView, handleSearch, navigate, logEvent, isUrlInput, resolveBlockDecision]);
+  }, [urlInput, isNative, openWebView, handleSearch, navigate, logEvent, isUrlInput, resolveBlockDecision, getPreShieldBootScript]);
 
   // Reader Mode handler
   const handleReaderMode = useCallback(async () => {
@@ -2549,9 +2686,12 @@ export const NativeWebViewBrowser = () => {
       setVideoBoost(false, 'manual_reload');
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       setCentralBlurState(false, 'manual_reload');
+      flashShieldEpochRef.current = webViewPageEpochRef.current;
+      flashShieldApplyConfirmedEpochRef.current = webViewPageEpochRef.current;
+      maybeClearFlashShield('manual_reload');
       return;
     }
-  }, [readerContent, currentView, searchQuery, isNative, webViewState.isOpen, handleReaderMode, handleSearch, webViewReload, setCentralBlurState, resetModernHealthForNavigation, setVideoBoost]);
+  }, [readerContent, currentView, searchQuery, isNative, webViewState.isOpen, handleReaderMode, handleSearch, webViewReload, setCentralBlurState, resetModernHealthForNavigation, setVideoBoost, maybeClearFlashShield]);
 
   const handleHome = useCallback(async () => {
     teardownWebViewScheduling('home_reset', webViewState.currentUrl).catch(() => undefined);
@@ -2566,6 +2706,9 @@ export const NativeWebViewBrowser = () => {
     setVideoBoost(false, 'home_reset');
     blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
     setCentralBlurState(false, 'home_reset');
+    flashShieldEpochRef.current = webViewPageEpochRef.current;
+    flashShieldApplyConfirmedEpochRef.current = webViewPageEpochRef.current;
+    maybeClearFlashShield('home_reset');
     setReaderContent(null);
     setPdfContent(null);
     setYoutubeContent(null);
@@ -2577,7 +2720,7 @@ export const NativeWebViewBrowser = () => {
     setFallbackUrl('');
     domainAdultContextRef.current = false;
     goHome();
-  }, [isNative, webViewState.isOpen, webViewState.currentUrl, closeWebView, goHome, moderationBridge, setCentralBlurState, teardownWebViewScheduling, resetModernHealthForNavigation, setVideoBoost]);
+  }, [isNative, webViewState.isOpen, webViewState.currentUrl, closeWebView, goHome, moderationBridge, setCentralBlurState, teardownWebViewScheduling, resetModernHealthForNavigation, setVideoBoost, maybeClearFlashShield]);
 
   // Manual scan trigger for current page
   const handleScanPage = useCallback(async () => {
@@ -2630,14 +2773,14 @@ export const NativeWebViewBrowser = () => {
 
   const handleOpenInWebView = useCallback(async (url: string) => {
     if (isNative) {
-      await openWebView(url, true);
+      await openWebView(url, true, getPreShieldBootScript());
       navigate('browse', url, url);
       await logEvent('webview_open', extractDomain(url), 'opened');
     } else {
       // On web, open externally with warning
       setExternalWarningUrl(url);
     }
-  }, [isNative, openWebView, navigate, logEvent]);
+  }, [isNative, openWebView, navigate, logEvent, getPreShieldBootScript]);
 
   // Render special views
   if (currentView === 'youtube' && youtubeContent) {
@@ -2902,6 +3045,29 @@ export const NativeWebViewBrowser = () => {
           </div>
         )}
       </main>
+
+      {currentView === 'browse' && localSettings.transition_flash_shield && flashShieldVisible && (
+        <div className="fixed inset-0 z-[80] bg-black/82 flex items-center justify-center px-6">
+          <div className="text-center max-w-sm">
+            <Shield className="w-10 h-10 mx-auto mb-4 text-white/80" />
+            <p className="text-white/90 text-sm font-display tracking-wide">
+              Algorithms are noisy, real life is quiet
+            </p>
+          </div>
+        </div>
+      )}
+
+      {isNative && (
+        <div
+          className="fixed z-[2147483000] pointer-events-auto"
+          style={{
+            top: 'calc(env(safe-area-inset-top, 0px) + 12px)',
+            right: 'calc(env(safe-area-inset-right, 0px) + 12px)',
+          }}
+        >
+          <AIStatusIndicator state={isModerationEnabled() ? moderationBridge.modelState : 'idle'} />
+        </div>
+      )}
 
       {/* External link warning modal */}
       <ExternalLinkWarning

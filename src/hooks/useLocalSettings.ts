@@ -44,6 +44,7 @@ export interface LocalProtectionSettings {
   soft_overlay_min_hits: number;
   blur_mode: BlurMode;
   kid_safe_profile: boolean;
+  transition_flash_shield: boolean;
 }
 
 const SETTINGS_KEY = 'iron_watch_local_settings';
@@ -68,6 +69,7 @@ const DEFAULT_SETTINGS: LocalProtectionSettings = {
   soft_overlay_min_hits: 4,
   blur_mode: 'balanced',
   kid_safe_profile: false,
+  transition_flash_shield: false,
 };
 
 export const useLocalSettings = () => {
@@ -199,9 +201,10 @@ export const useLocalSettings = () => {
       blockingMode: settings.blocking_mode,
       prototypeMode: settings.prototype_mode,
       kidSafeProfile: settings.kid_safe_profile,
+      transitionFlashShield: settings.transition_flash_shield,
       triggers: triggers || {},
     };
-  }, [settings.shield_active, settings.blur_dial, settings.blur_strength_px, settings.fail_closed, settings.debug_mode, settings.blocking_mode, settings.prototype_mode, settings.kid_safe_profile]);
+  }, [settings.shield_active, settings.blur_dial, settings.blur_strength_px, settings.fail_closed, settings.debug_mode, settings.blocking_mode, settings.prototype_mode, settings.kid_safe_profile, settings.transition_flash_shield]);
 
   // Check if a category should be blocked based on MVP mode
   const shouldBlockCategory = useCallback((category: string): boolean => {
