@@ -138,15 +138,18 @@ final class ContentProtectionOverlayView {
         let changes = {
             switch mode {
             case .hidden:
+                overlayView.isUserInteractionEnabled = false
                 overlayView.alpha = 0
                 blurView.effect = UIBlurEffect(style: .systemThinMaterialDark)
                 messageContainer.alpha = 0
             case .soft:
+                overlayView.isUserInteractionEnabled = false
                 overlayView.isHidden = false
                 overlayView.alpha = 1
                 blurView.effect = UIBlurEffect(style: .systemThinMaterialDark)
                 messageContainer.alpha = 0
             case .hard:
+                overlayView.isUserInteractionEnabled = true
                 overlayView.isHidden = false
                 overlayView.alpha = 1
                 blurView.effect = UIBlurEffect(style: .systemChromeMaterialDark)

@@ -1508,13 +1508,14 @@ export const NativeWebViewBrowser = () => {
         'activeEpoch=' + activeEpoch,
       );
 
+      const staleShouldBlur = isModerationEnabled();
       const staleResults = items.map(item => ({
         itemId: item.itemId,
         src: item.src,
-        shouldBlur: false,
-        category: 'safe_epoch_stale',
-        confidence: 0,
-        severity: 'safe' as ModerationSeverity,
+        shouldBlur: staleShouldBlur,
+        category: staleShouldBlur ? 'error_fail_closed_epoch_stale' : 'safe_epoch_stale',
+        confidence: staleShouldBlur ? 1 : 0,
+        severity: staleShouldBlur ? ('hard' as ModerationSeverity) : ('safe' as ModerationSeverity),
       }));
 
       try {
@@ -1525,7 +1526,7 @@ export const NativeWebViewBrowser = () => {
           requestEpoch,
         );
       } catch {
-        // Fail-open by design for stale requests.
+        // Keep stale request handling deterministic even when postback fails.
       }
 
       pendingRequestsRef.current.delete(requestId);
@@ -1790,6 +1791,7 @@ export const NativeWebViewBrowser = () => {
     localSettings.prototype_mode,
     localSettings.show_scan_notifications,
     currentUrl,
+    isModerationEnabled,
     processModerationSafetySignal,
     setCentralBlurState,
     markModernTransportActive,
@@ -1866,11 +1868,6 @@ export const NativeWebViewBrowser = () => {
         return;
       }
       if (typedMessage.type === 'MW_REQ_TIMEOUT') {
-        const timeoutEpochNum = Number(typedMessage.pageEpoch);
-        if (Number.isFinite(timeoutEpochNum) && timeoutEpochNum === webViewPageEpochRef.current) {
-          flashShieldApplyConfirmedEpochRef.current = timeoutEpochNum;
-          maybeClearFlashShield('request_timeout');
-        }
         console.warn(
           '[MW-Host][REQ] MW_REQ_TIMEOUT',
           'source=' + source,

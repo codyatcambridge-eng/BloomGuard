@@ -1920,6 +1920,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     state.stats.timeouts += pendingRequest.items.length;
     
     const timeoutPolicy = applyFailOpenAndModePolicy(false, 'timeout', 'timeout', true);
+    const moderationActive = CONFIG.enabled && CONFIG.sensitivity > 0;
     if (CONFIG.debug) {
       console.log(
         '[MW-DIAG][INJECT] source=timeout',
@@ -1928,8 +1929,10 @@ export function generateModerationScript(config: InjectionConfig): string {
         'reason=' + (timeoutPolicy.reason || 'none')
       );
     }
-    if (timeoutPolicy.shouldBlur) {
-      console.log('[MW] FAIL-CLOSED: Applying blur to timed-out items');
+    if (moderationActive || timeoutPolicy.shouldBlur) {
+      if (CONFIG.debug) {
+        console.log('[MW] FAIL-CLOSED: Applying blur to timed-out items');
+      }
       pendingRequest.items.forEach(item => {
         clearPendingItem(item.itemId, 'timeout_failClosed');
         const element = state.elements.get(item.itemId);
@@ -2004,11 +2007,15 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       
       const pendingRequest = state.pendingRequests.get(requestId);
-      if (pendingRequest) {
-        clearTimeout(pendingRequest.timeoutId);
-        pendingRequest.state = 'handled';
-        state.pendingRequests.delete(requestId);
+      if (!pendingRequest) {
+        if (CONFIG.debug) {
+          console.log('[MW][DropResult] request not pending, ignoring requestId=' + requestId);
+        }
+        return;
       }
+      clearTimeout(pendingRequest.timeoutId);
+      pendingRequest.state = 'handled';
+      state.pendingRequests.delete(requestId);
       
       state.stats.responsesReceived++;
       console.log('[MW] received result', requestId, 'count=' + results.length);
