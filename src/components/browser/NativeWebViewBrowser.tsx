@@ -139,6 +139,7 @@ export const NativeWebViewBrowser = () => {
     isLoaded: settingsLoaded,
     getModerationConfig,
     isModerationEnabled,
+    isRevealAllowed,
     getNonce,
   } = useLocalSettings();
   const deviceId = useDeviceId();
@@ -232,11 +233,6 @@ export const NativeWebViewBrowser = () => {
   const ENABLE_DOM_BLUR =
     (localSettings.prototype_mode === true || localSettings.kid_safe_profile === true) &&
     import.meta.env.VITE_ENABLE_DOM_BLUR_OVERLAY === 'true';
-  const isRevealAllowed = useCallback(() => {
-    if (localSettings.prototype_mode !== true) return false;
-    if (localSettings.blur_mode === 'strict') return false;
-    return true;
-  }, [localSettings.prototype_mode, localSettings.blur_mode]);
   const debugLog = useCallback((...args: unknown[]) => {
     if (!isDebugMode) return;
     console.log(...args);
@@ -405,13 +401,18 @@ export const NativeWebViewBrowser = () => {
     const activeEpoch = webViewPageEpochRef.current;
     if (flashShieldEpochRef.current !== activeEpoch) return;
 
-    const applyConfirmed = flashShieldApplyConfirmedEpochRef.current === activeEpoch;
-    const ackConfirmed = modernAckRef.current.epoch === activeEpoch;
+    const ackAgeMs = modernAckRef.current.at > 0 ? Date.now() - modernAckRef.current.at : -1;
+    const ackConfirmed =
+      modernAckRef.current.epoch === activeEpoch &&
+      modernAckRef.current.at > 0 &&
+      ackAgeMs >= 0 &&
+      ackAgeMs <= MODERN_STALE_MS;
+    const decisionConfirmed = flashShieldApplyConfirmedEpochRef.current === activeEpoch;
 
-    if (applyConfirmed || ackConfirmed) {
+    if (ackConfirmed || decisionConfirmed) {
       setFlashShieldVisible(false);
     }
-  }, [flashShieldVisible, localSettings.transition_flash_shield]);
+  }, [flashShieldVisible, localSettings.transition_flash_shield, MODERN_STALE_MS]);
 
   const clearVideoBoostTimers = useCallback(() => {
     if (videoBoostRef.current.minHoldTimer) {
@@ -590,6 +591,13 @@ export const NativeWebViewBrowser = () => {
   const messageFromWebViewHandlerRef = useRef<((payload: unknown) => void) | null>(null);
   const lastLoadStartUrlRef = useRef('');
   const lastLoadStartAtRef = useRef(0);
+  const remoteBlockCacheRef = useRef(new Map<string, {
+    isBlocked: boolean;
+    category: string | null;
+    reason: string;
+    isAdultDomain: boolean;
+    expiresAt: number;
+  }>());
   
   const {
     currentView,
@@ -651,16 +659,46 @@ export const NativeWebViewBrowser = () => {
     }
   };
 
+  const normalizeHostForLookup = (value: string): string => {
+    const trimmed = String(value || '').trim();
+    if (!trimmed) return '';
+    try {
+      const parsed = new URL(trimmed.includes('://') ? trimmed : `https://${trimmed}`);
+      return parsed.hostname.toLowerCase().replace(/\.+$/, '').replace(/^(www\.|m\.)/, '');
+    } catch {
+      return trimmed.toLowerCase().replace(/\.+$/, '').replace(/^(https?:\/\/)?(www\.|m\.)/, '').split('/')[0];
+    }
+  };
+
   const isPdfUrl = (urlString: string): boolean => {
     return urlString.toLowerCase().endsWith('.pdf');
   };
 
   const resolveBlockDecision = useCallback(async (url: string) => {
+    const moderationEnabled = isModerationEnabled();
+    if (!moderationEnabled) {
+      return {
+        isBlocked: false,
+        category: null,
+        reason: '',
+        isAdultDomain: false,
+      };
+    }
+
+    if (localSettings.block_adult_sites !== true) {
+      return {
+        isBlocked: false,
+        category: null,
+        reason: '',
+        isAdultDomain: false,
+      };
+    }
+
     const local = isLocallyBlocked(url);
     const localCategory = local.category || null;
     const localAdult = local.blocked && localCategory === 'adult';
 
-    if (local.blocked && settings.block_adult_sites) {
+    if (local.blocked) {
       return {
         isBlocked: true,
         category: localCategory,
@@ -669,31 +707,53 @@ export const NativeWebViewBrowser = () => {
       };
     }
 
-    if (!settings.block_adult_sites) {
+    const host = normalizeHostForLookup(url);
+    const now = Date.now();
+    const cached = host ? remoteBlockCacheRef.current.get(host) : undefined;
+    if (cached && cached.expiresAt > now) {
       return {
-        isBlocked: false,
-        category: null,
-        reason: '',
-        isAdultDomain: localAdult,
+        isBlocked: cached.isBlocked,
+        category: cached.category,
+        reason: cached.reason,
+        isAdultDomain: cached.isAdultDomain,
       };
     }
 
     const timeoutMs = 1200;
+    const timeoutSentinel = Symbol('timeout');
     const remote = await Promise.race([
       checkBlockedSite(url, deviceId),
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs)),
+      new Promise<typeof timeoutSentinel>((resolve) => setTimeout(() => resolve(timeoutSentinel), timeoutMs)),
     ]);
-    const remoteBlocked = !!remote?.isBlocked;
-    const remoteCategory = remote?.category || null;
-    const remoteAdult = remoteBlocked && remoteCategory === 'adult';
 
-    return {
+    if (remote === timeoutSentinel || remote == null) {
+      return {
+        isBlocked: true,
+        category: 'safety-check',
+        reason: 'Unable to verify site safety right now. Please try again.',
+        isAdultDomain: false,
+      };
+    }
+
+    const remoteBlocked = !!remote.isBlocked;
+    const remoteCategory = remote.category || null;
+    const remoteAdult = remoteBlocked && remoteCategory === 'adult';
+    const response = {
       isBlocked: remoteBlocked,
       category: remoteCategory,
-      reason: remote?.reason || 'This site is blocked.',
+      reason: remote.reason || (remoteBlocked ? 'This site is blocked.' : 'Site is allowed.'),
       isAdultDomain: localAdult || remoteAdult,
     };
-  }, [isLocallyBlocked, settings.block_adult_sites, checkBlockedSite, deviceId]);
+
+    if (host) {
+      remoteBlockCacheRef.current.set(host, {
+        ...response,
+        expiresAt: Date.now() + (response.isBlocked ? 5 * 60_000 : 60_000),
+      });
+    }
+
+    return response;
+  }, [isLocallyBlocked, checkBlockedSite, deviceId, isModerationEnabled, localSettings.block_adult_sites]);
 
   const logEvent = useCallback(async (eventType: string, domain: string, action: string) => {
     if (!deviceId) return;
@@ -713,6 +773,9 @@ export const NativeWebViewBrowser = () => {
 
   // Native WebView handlers
   const handleNavigationRequest = useCallback(async (url: string): Promise<boolean> => {
+    if (isModerationEnabled()) {
+      activateFlashShield('navigation_guard_pending');
+    }
     const domain = extractDomain(url);
     const decision = await resolveBlockDecision(url);
     domainAdultContextRef.current = decision.isAdultDomain;
@@ -726,7 +789,7 @@ export const NativeWebViewBrowser = () => {
     
     // All navigation allowed in native WebView (including social platforms)
     return true;
-  }, [navigate, logEvent, resolveBlockDecision]);
+  }, [isModerationEnabled, activateFlashShield, navigate, logEvent, resolveBlockDecision]);
 
   // Inject moderation script into WebView
   const clearLoadEndInjectTimer = useCallback(() => {
@@ -798,6 +861,7 @@ export const NativeWebViewBrowser = () => {
     injectionInFlightRef.current = true;
     const config = {
       ...getModerationConfig(),
+      allowReveal: isRevealAllowed() && localSettings.kid_safe_profile !== true,
       enableVideoFrameSnapshots:
         (localSettings.prototype_mode === true || localSettings.kid_safe_profile === true) &&
         import.meta.env.VITE_ENABLE_VIDEO_FRAME_SNAPSHOTS === 'true',
@@ -832,7 +896,7 @@ export const NativeWebViewBrowser = () => {
     } finally {
       injectionInFlightRef.current = false;
     }
-  }, [ENABLE_SIGNAL_PIPELINE, settingsLoaded, isModerationEnabled, getModerationConfig, localSettings.prototype_mode, localSettings.kid_safe_profile]);
+  }, [ENABLE_SIGNAL_PIPELINE, settingsLoaded, isModerationEnabled, getModerationConfig, localSettings.prototype_mode, localSettings.kid_safe_profile, isRevealAllowed]);
 
   const getPreShieldBootScript = useCallback(() => {
     if (!settingsLoaded) return undefined;
@@ -932,8 +996,8 @@ export const NativeWebViewBrowser = () => {
         activateFlashShield('webprocess_crash');
         modernHealthyRef.current = false;
         modernProvenEpochRef.current = null;
-        modernAckRef.current = { at: 0, epoch: webViewPageEpochRef.current };
-        modernReadyRef.current = { at: 0, epoch: webViewPageEpochRef.current };
+        modernAckRef.current = { at: 0, epoch: null };
+        modernReadyRef.current = { at: 0, epoch: null };
         legacyPollSuppressedUntilRef.current = 0;
         legacyPollSuppressionReasonRef.current = 'webprocess_crash';
         const crashCooldownUntil = Date.now() + 5000;
@@ -990,7 +1054,7 @@ export const NativeWebViewBrowser = () => {
       setFallbackUrl(url);
       navigate('fallback', '', url);
     },
-    onUrlChange: (url) => {
+    onUrlChange: async (url) => {
       console.log('[Browser] ======= URL CHANGE =======');
       console.log('[Browser] New URL:', url);
       const nextUrl = url || '';

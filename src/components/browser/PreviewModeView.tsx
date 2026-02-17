@@ -31,11 +31,12 @@ export const PreviewModeView = ({
   const [copied, setCopied] = useState(false);
 
   const { isReady: aiReady, classifyImage, modelState } = useOnDeviceModeration();
-  const { settings, getAIThresholds, getBlurAmount } = useLocalSettings();
+  const { settings, getAIThresholds, getBlurAmount, isRevealAllowed } = useLocalSettings();
 
   const blurAmount = getBlurAmount();
   const thresholds = getAIThresholds();
   const uniqueImages = useMemo(() => [...new Set(images)], [images]);
+  const revealAllowed = isRevealAllowed();
 
   // Scan images
   const scanImages = useCallback(async () => {
@@ -86,6 +87,7 @@ export const PreviewModeView = ({
   };
 
   const toggleImageReveal = useCallback((src: string) => {
+    if (!revealAllowed) return;
     setRevealedImages(prev => {
       const next = new Set(prev);
       if (next.has(src)) {
@@ -95,13 +97,15 @@ export const PreviewModeView = ({
       }
       return next;
     });
-  }, []);
+  }, [revealAllowed]);
 
   const shouldBlurImage = useCallback((src: string): boolean => {
     if (blurAmount === 0) return false;
     const result = imageResults.get(src);
-    return result?.shouldBlur === true && !revealedImages.has(src);
-  }, [imageResults, revealedImages, blurAmount]);
+    if (result?.shouldBlur !== true) return false;
+    if (!revealAllowed) return true;
+    return !revealedImages.has(src);
+  }, [imageResults, revealedImages, blurAmount, revealAllowed]);
 
   // Process HTML to add blur to flagged images
   const processedHtml = useMemo(() => {
@@ -270,7 +274,7 @@ export const PreviewModeView = ({
                         }}
                       />
                       
-                      {isBlurred && !isRevealed && (
+                      {revealAllowed && isBlurred && !isRevealed && (
                         <div className="absolute inset-0 flex items-center justify-center bg-background/60">
                           <button
                             onClick={() => toggleImageReveal(src)}
@@ -282,7 +286,7 @@ export const PreviewModeView = ({
                         </div>
                       )}
                       
-                      {result?.shouldBlur && isRevealed && (
+                      {revealAllowed && result?.shouldBlur && isRevealed && (
                         <button
                           onClick={() => toggleImageReveal(src)}
                           className="absolute top-2 right-2 p-1.5 bg-background/80 rounded-full"

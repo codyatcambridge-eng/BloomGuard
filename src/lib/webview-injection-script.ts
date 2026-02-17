@@ -26,6 +26,7 @@ export interface InjectionConfig {
   sensitivity: number; // 0-4 blur dial
   blurStrength: number; // px
   enabled: boolean;
+  allowReveal?: boolean;
   forcedBlur?: boolean; // Dev mode: blur everything
   failClosed?: boolean; // DEPRECATED: Now fail-open by default
   debug?: boolean; // Verbose logging
@@ -385,6 +386,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     blurStrength: ${config.blurStrength},
     softBlurStrength: 8, // Soft blur for semantic delay
     enabled: ${config.enabled},
+    allowReveal: ${config.allowReveal === true},
     forcedBlur: ${config.forcedBlur || false},
     failClosed: ${failClosed},
     debug: ${config.debug || false},
@@ -1288,6 +1290,77 @@ export function generateModerationScript(config: InjectionConfig): string {
     return false;
   }
 
+  function isLikelyAvatarProfilePic(element, url, sourceType) {
+    if (!element || element.tagName !== 'IMG') return false;
+
+    const source = String(sourceType || '').toLowerCase();
+    if (source.includes('video-poster') || source.includes('video-frame') || source.includes('video-currentsrc')) {
+      return false;
+    }
+
+    const { width, height } = getElementDimensions(element);
+    if (width <= 0 || height <= 0) return false;
+
+    const area = width * height;
+    const minSide = Math.min(width, height);
+    const maxSide = Math.max(width, height);
+    const aspect = maxSide / Math.max(minSide, 1);
+    const isLikelyThumbGeometry = maxSide >= 220 || area >= 45000 || aspect >= 1.45;
+    if (isLikelyThumbGeometry) return false;
+
+    const hintText = (
+      String(element.className || '') + ' ' +
+      String(element.id || '') + ' ' +
+      String(element.getAttribute('alt') || '') + ' ' +
+      String(element.getAttribute('aria-label') || '') + ' ' +
+      String(element.getAttribute('title') || '')
+    ).toLowerCase();
+
+    const srcText = String(
+      url ||
+      element.currentSrc ||
+      element.src ||
+      element.getAttribute('src') ||
+      ''
+    ).toLowerCase();
+
+    const hasSemanticHint = /(avatar|profile(?:\s|-|_)?pic|profile(?:\s|-|_)?photo|user(?:\s|-|_)?pic|user(?:\s|-|_)?photo)/.test(hintText);
+    const hasSrcHint = /(avatar|profile|userpic|profile_pic|profilepic)/.test(srcText);
+    const hasNavContext = !!element.closest('nav,header,aside,[role="navigation"],[role="banner"],[role="complementary"],[aria-label*="navigation" i]');
+    const feedLikeContext = !!element.closest(
+      'article,[role="article"],[class*="feed" i],[id*="feed" i],[class*="reel" i],[id*="reel" i],[class*="short" i],[id*="short" i],[class*="thumb" i],[id*="thumb" i],ytd-thumbnail,ytd-rich-item-renderer,ytd-video-renderer'
+    );
+
+    let circular = false;
+    try {
+      const style = window.getComputedStyle(element);
+      const radiusRaw = style.borderTopLeftRadius || style.borderRadius || '';
+      const radiusStr = String(radiusRaw || '').trim();
+      if (radiusStr.endsWith('%')) {
+        const radiusPct = Number(radiusStr.replace('%', ''));
+        circular = Number.isFinite(radiusPct) && radiusPct >= 45;
+      } else {
+        const radiusPx = Number.parseFloat(radiusStr);
+        circular = Number.isFinite(radiusPx) && (radiusPx >= minSide * 0.35 || radiusPx >= 999);
+      }
+    } catch (e) {}
+
+    const isSmallSquare = maxSide <= 160 && aspect <= 1.3;
+
+    if (feedLikeContext && !hasSemanticHint && !hasSrcHint) return false;
+    if (feedLikeContext && maxSide > 140 && !hasNavContext) return false;
+
+    let score = 0;
+    if (hasSemanticHint) score += 2;
+    if (hasSrcHint) score += 2;
+    if (isLikelyAvatarLikeElement(element, width, height)) score += 2;
+    if (isSmallSquare) score += 1;
+    if (circular && maxSide <= 180) score += 1;
+    if (hasNavContext) score += 1;
+
+    return score >= 4;
+  }
+
   function isPreScanShieldEligible(element, sourceType) {
     if (!element || !element.isConnected) return false;
     if (!CONFIG.enabled || CONFIG.sensitivity === 0) return false;
@@ -1654,6 +1727,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function createRevealOverlay(element, src, category, itemId) {
+    if (!(CONFIG.allowReveal === true && CONFIG.enabled && CONFIG.sensitivity > 0)) return;
     if (element.dataset.mwHasOverlay === 'true') return;
     
     const parent = element.parentElement;
@@ -1710,6 +1784,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     btn.addEventListener('click', function(e) {
       e.preventDefault();
       e.stopPropagation();
+      if (!(CONFIG.allowReveal === true && CONFIG.enabled && CONFIG.sensitivity > 0)) return;
       
       if (state.revealed.has(src)) {
         // Re-blur
@@ -2351,6 +2426,11 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (CONFIG.debug) {
         console.log('[MW] skipped tiny image (fail-open, <80x80):', url.substring(0, 50));
       }
+      return false;
+    }
+
+    if (element && element.tagName === 'IMG' && isLikelyAvatarProfilePic(element, url, sourceType)) {
+      state.stats.skipped++;
       return false;
     }
     

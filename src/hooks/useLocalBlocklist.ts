@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { ADULT_DOMAIN_BLOCKLIST_SNAPSHOT } from '@/lib/domain-blocklist';
 
 export interface BlockedDomain {
   id: string;
@@ -10,40 +11,24 @@ export interface BlockedDomain {
 
 const BLOCKLIST_KEY = 'iron_watch_local_blocklist';
 
-// Built-in blocklist of known adult/inappropriate domains
-const BUILT_IN_BLOCKLIST: Omit<BlockedDomain, 'id' | 'addedAt'>[] = [
-  // Adult sites
-  { domain: 'pornhub.com', category: 'adult', isBuiltIn: true },
-  { domain: 'xvideos.com', category: 'adult', isBuiltIn: true },
-  { domain: 'xnxx.com', category: 'adult', isBuiltIn: true },
-  { domain: 'xhamster.com', category: 'adult', isBuiltIn: true },
-  { domain: 'redtube.com', category: 'adult', isBuiltIn: true },
-  { domain: 'youporn.com', category: 'adult', isBuiltIn: true },
-  { domain: 'tube8.com', category: 'adult', isBuiltIn: true },
-  { domain: 'spankbang.com', category: 'adult', isBuiltIn: true },
-  { domain: 'porntrex.com', category: 'adult', isBuiltIn: true },
-  { domain: 'eporner.com', category: 'adult', isBuiltIn: true },
-  { domain: 'onlyfans.com', category: 'adult', isBuiltIn: true },
-  { domain: 'fansly.com', category: 'adult', isBuiltIn: true },
-  { domain: 'chaturbate.com', category: 'adult', isBuiltIn: true },
-  { domain: 'stripchat.com', category: 'adult', isBuiltIn: true },
-  { domain: 'livejasmin.com', category: 'adult', isBuiltIn: true },
-  { domain: 'cam4.com', category: 'adult', isBuiltIn: true },
-  { domain: 'bongacams.com', category: 'adult', isBuiltIn: true },
-  { domain: 'myfreecams.com', category: 'adult', isBuiltIn: true },
-  // Proxy/VPN sites commonly used for bypass
-  { domain: 'hidemyass.com', category: 'proxy', isBuiltIn: true },
-  { domain: 'hide.me', category: 'proxy', isBuiltIn: true },
-  { domain: 'proxysite.com', category: 'proxy', isBuiltIn: true },
-  { domain: 'kproxy.com', category: 'proxy', isBuiltIn: true },
-  { domain: 'croxyproxy.com', category: 'proxy', isBuiltIn: true },
-  // NSFW Reddit alternatives
-  { domain: 'scrolller.com', category: 'adult', isBuiltIn: true },
-  { domain: 'sexstories.com', category: 'adult', isBuiltIn: true },
-  { domain: 'literotica.com', category: 'adult', isBuiltIn: true },
-];
+const BUILT_IN_BLOCKLIST: Omit<BlockedDomain, 'id' | 'addedAt'>[] = ADULT_DOMAIN_BLOCKLIST_SNAPSHOT.map((domain) => ({
+  domain,
+  category: 'adult',
+  isBuiltIn: true,
+}));
 
 const generateId = () => crypto.randomUUID();
+
+const normalizeHost = (value: string): string => {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) return '';
+  try {
+    const parsed = new URL(trimmed.includes('://') ? trimmed : `https://${trimmed}`);
+    return parsed.hostname.toLowerCase().replace(/\.+$/, '').replace(/^(www\.|m\.)/, '');
+  } catch {
+    return trimmed.toLowerCase().replace(/\.+$/, '').replace(/^(https?:\/\/)?(www\.|m\.)/, '').split('/')[0];
+  }
+};
 
 export const useLocalBlocklist = () => {
   const [customDomains, setCustomDomains] = useState<BlockedDomain[]>([]);
@@ -85,7 +70,8 @@ export const useLocalBlocklist = () => {
   // Add a domain to custom blocklist
   const addDomain = useCallback((domain: string, category: string = 'custom') => {
     // Normalize domain
-    const normalized = domain.toLowerCase().replace(/^(https?:\/\/)?(www\.)?/, '').split('/')[0];
+    const normalized = normalizeHost(domain);
+    if (!normalized) return false;
     
     // Check if already exists
     const allDomains = getAllDomains();
@@ -118,8 +104,8 @@ export const useLocalBlocklist = () => {
   // Check if a URL is blocked
   const isBlocked = useCallback((url: string): { blocked: boolean; domain?: string; category?: string } => {
     try {
-      const urlObj = new URL(url.startsWith('http') ? url : `https://${url}`);
-      const hostname = urlObj.hostname.replace(/^www\./, '');
+      const hostname = normalizeHost(url);
+      if (!hostname) return { blocked: false };
       
       const allDomains = getAllDomains();
       for (const blocked of allDomains) {

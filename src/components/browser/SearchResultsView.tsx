@@ -38,11 +38,13 @@ export const SearchResultsView = ({
   const [revealedImages, setRevealedImages] = useState<Set<string>>(new Set());
 
   const { isReady: aiReady, classifyImage, modelState } = useOnDeviceModeration();
-  const { settings, getAIThresholds, getBlurAmount } = useLocalSettings();
+  const { settings, getAIThresholds, getBlurAmount, isModerationEnabled, isRevealAllowed } = useLocalSettings();
   const { isBlocked } = useLocalBlocklist();
 
   const blurAmount = getBlurAmount();
   const thresholds = getAIThresholds();
+  const revealAllowed = isRevealAllowed();
+  const shouldEnforceAdultBlock = isModerationEnabled() && settings.block_adult_sites === true;
 
   // Extract all unique thumbnails
   const thumbnails = useMemo(() => {
@@ -98,6 +100,7 @@ export const SearchResultsView = ({
   }, [aiReady, settings.auto_scan_images, thumbnails.length, scanThumbnails, isScanning]);
 
   const toggleImageReveal = useCallback((src: string) => {
+    if (!revealAllowed) return;
     setRevealedImages(prev => {
       const next = new Set(prev);
       if (next.has(src)) {
@@ -107,29 +110,32 @@ export const SearchResultsView = ({
       }
       return next;
     });
-  }, []);
+  }, [revealAllowed]);
 
   const shouldBlurImage = useCallback((src: string): boolean => {
     if (blurAmount === 0) return false;
     const result = imageResults.get(src);
-    return result?.shouldBlur === true && !revealedImages.has(src);
-  }, [imageResults, revealedImages, blurAmount]);
+    if (result?.shouldBlur !== true) return false;
+    if (!revealAllowed) return true;
+    return !revealedImages.has(src);
+  }, [imageResults, revealedImages, blurAmount, revealAllowed]);
 
   const handleResultClick = useCallback((url: string) => {
-    // Check blocklist first
-    const blockResult = isBlocked(url);
-    if (blockResult.blocked) {
-      toast.error(`Blocked: ${blockResult.domain} (${blockResult.category})`, {
-        duration: 3000,
-        icon: <AlertTriangle className="w-4 h-4" />,
-      });
-      console.log('[SearchResults] Blocked navigation:', { url, ...blockResult });
-      return;
+    if (shouldEnforceAdultBlock) {
+      const blockResult = isBlocked(url);
+      if (blockResult.blocked) {
+        toast.error(`Blocked: ${blockResult.domain} (${blockResult.category})`, {
+          duration: 3000,
+          icon: <AlertTriangle className="w-4 h-4" />,
+        });
+        console.log('[SearchResults] Blocked navigation:', { url, ...blockResult });
+        return;
+      }
     }
     
     console.log('[SearchResults] Navigating to:', url);
     onNavigate(url);
-  }, [isBlocked, onNavigate]);
+  }, [isBlocked, onNavigate, shouldEnforceAdultBlock]);
 
   const handleNewSearch = (e: React.FormEvent) => {
     e.preventDefault();
@@ -247,7 +253,7 @@ export const SearchResultsView = ({
           <div className="max-w-2xl mx-auto px-4 py-4">
             {results.map((result, idx) => {
               const domain = extractDomain(result.url);
-              const isBlockedSite = isBlocked(result.url).blocked;
+              const isBlockedSite = shouldEnforceAdultBlock ? isBlocked(result.url).blocked : false;
               const hasThumb = !!result.thumbnail;
               const thumbBlurred = hasThumb && shouldBlurImage(result.thumbnail!);
               const thumbResult = hasThumb ? imageResults.get(result.thumbnail!) : null;
@@ -274,7 +280,7 @@ export const SearchResultsView = ({
                         />
                         
                         {/* Blurred overlay */}
-                        {thumbBlurred && !isRevealed && (
+                        {revealAllowed && thumbBlurred && !isRevealed && (
                           <div className="absolute inset-0 flex items-center justify-center bg-background/60">
                             <button
                               onClick={(e) => {
@@ -289,7 +295,7 @@ export const SearchResultsView = ({
                         )}
                         
                         {/* Revealed but flagged */}
-                        {thumbResult?.shouldBlur && isRevealed && (
+                        {revealAllowed && thumbResult?.shouldBlur && isRevealed && (
                           <button
                             onClick={(e) => {
                               e.stopPropagation();

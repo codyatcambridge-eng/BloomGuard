@@ -2,13 +2,24 @@ import { useState } from "react";
 import { Shield, DollarSign, CreditCard, AlertTriangle, Eye, EyeOff, Coffee, Clock, Lock } from "lucide-react";
 import { FrictionUnlockModal } from "@/components/settings/FrictionUnlockModal";
 import { useSettings, BlurLevel } from "@/hooks/useSettings";
+import { useLocalSettings, type BlurDialLevel } from "@/hooks/useLocalSettings";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { UTILITY_PASS_DURATIONS, UTILITY_PASS_REASONS } from "@/logic/utilityPass";
 
 const Settings = () => {
   const { settings, updateSetting, isLoading, deviceId } = useSettings();
+  const { updateSetting: updateLocalSetting } = useLocalSettings();
   const [showFrictionModal, setShowFrictionModal] = useState(false);
+
+  const blurLevelToDial = (level: BlurLevel): BlurDialLevel => {
+    switch (level) {
+      case 'OFF': return 0;
+      case 'LOW': return 2;
+      case 'HIGH':
+      default: return 4;
+    }
+  };
 
   const handleShieldToggle = () => {
     if (settings.shield_active) {
@@ -17,6 +28,7 @@ const Settings = () => {
     } else {
       // Turning ON - no friction
       updateSetting('shield_active', true);
+      updateLocalSetting('shield_active', true);
       toast.success('Shield activated!');
     }
   };
@@ -45,6 +57,7 @@ const Settings = () => {
     });
 
     updateSetting('shield_active', false);
+    updateLocalSetting('shield_active', false);
     setShowFrictionModal(false);
     toast.success('Shield deactivated for 15 minutes');
   };
@@ -53,6 +66,7 @@ const Settings = () => {
 
   const handleBlurChange = (level: BlurLevel) => {
     updateSetting('blur_sensitivity', level);
+    updateLocalSetting('blur_dial', blurLevelToDial(level));
     toast.success(`Blur level set to ${level}`);
   };
 
@@ -171,7 +185,11 @@ const Settings = () => {
                 <p className="text-xs text-muted-foreground">Explicit content domains</p>
               </div>
               <button
-                onClick={() => updateSetting('block_adult_sites', !settings.block_adult_sites)}
+                onClick={() => {
+                  const nextValue = !settings.block_adult_sites;
+                  updateSetting('block_adult_sites', nextValue);
+                  updateLocalSetting('block_adult_sites', nextValue);
+                }}
                 className={`w-12 h-7 rounded-full transition-all duration-300 ${
                   settings.block_adult_sites ? "bg-aqua" : "bg-secondary"
                 }`}
@@ -190,7 +208,11 @@ const Settings = () => {
                 <p className="text-xs text-muted-foreground">Instagram, Twitter, etc.</p>
               </div>
               <button
-                onClick={() => updateSetting('block_social_media', !settings.block_social_media)}
+                onClick={() => {
+                  const nextValue = !settings.block_social_media;
+                  updateSetting('block_social_media', nextValue);
+                  updateLocalSetting('block_social_media', nextValue);
+                }}
                 className={`w-12 h-7 rounded-full transition-all duration-300 ${
                   settings.block_social_media ? "bg-aqua" : "bg-secondary"
                 }`}
@@ -209,7 +231,11 @@ const Settings = () => {
                 <p className="text-xs text-muted-foreground">Ad networks</p>
               </div>
               <button
-                onClick={() => updateSetting('block_ads', !settings.block_ads)}
+                onClick={() => {
+                  const nextValue = !settings.block_ads;
+                  updateSetting('block_ads', nextValue);
+                  updateLocalSetting('block_ads', nextValue);
+                }}
                 className={`w-12 h-7 rounded-full transition-all duration-300 ${
                   settings.block_ads ? "bg-aqua" : "bg-secondary"
                 }`}

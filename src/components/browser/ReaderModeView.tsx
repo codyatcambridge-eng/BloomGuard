@@ -51,10 +51,11 @@ export const ReaderModeView = ({ content, images, title, sourceUrl, onBack }: Re
   const [scanError, setScanError] = useState<string | null>(null);
   
   const { isReady: aiReady, isLoading: aiLoading, classifyImage, modelState } = useOnDeviceModeration();
-  const { settings, getAIThresholds, getBlurAmount } = useLocalSettings();
+  const { settings, getAIThresholds, getBlurAmount, isRevealAllowed } = useLocalSettings();
 
   const blurAmount = getBlurAmount();
   const thresholds = getAIThresholds();
+  const revealAllowed = isRevealAllowed();
 
   // Memoize image list to prevent re-scans
   const uniqueImages = useMemo(() => [...new Set(images)], [images]);
@@ -148,6 +149,7 @@ export const ReaderModeView = ({ content, images, title, sourceUrl, onBack }: Re
   }, [aiReady, settings.auto_scan_images, uniqueImages.length, imageResults.size, scanImages]);
 
   const toggleImageReveal = useCallback((src: string) => {
+    if (!revealAllowed) return;
     setRevealedImages(prev => {
       const next = new Set(prev);
       if (next.has(src)) {
@@ -157,13 +159,15 @@ export const ReaderModeView = ({ content, images, title, sourceUrl, onBack }: Re
       }
       return next;
     });
-  }, []);
+  }, [revealAllowed]);
 
   const shouldBlurImage = useCallback((src: string): boolean => {
     if (blurAmount === 0) return false;
     const result = imageResults.get(src);
-    return result?.shouldBlur === true && !revealedImages.has(src);
-  }, [imageResults, revealedImages, blurAmount]);
+    if (result?.shouldBlur !== true) return false;
+    if (!revealAllowed) return true;
+    return !revealedImages.has(src);
+  }, [imageResults, revealedImages, blurAmount, revealAllowed]);
 
   const getImageStyle = useCallback((src: string): React.CSSProperties => {
     if (shouldBlurImage(src)) {
@@ -381,7 +385,7 @@ export const ReaderModeView = ({ content, images, title, sourceUrl, onBack }: Re
                       />
                       
                       {/* Blurred overlay with reveal option */}
-                      {isBlurred && !isRevealed && (
+                      {revealAllowed && isBlurred && !isRevealed && (
                         <div className="absolute inset-0 flex items-center justify-center bg-background/60">
                           <div className="text-center p-2">
                             <AlertTriangle className="w-6 h-6 text-amber-500 mx-auto mb-1" />
@@ -403,7 +407,7 @@ export const ReaderModeView = ({ content, images, title, sourceUrl, onBack }: Re
                       )}
                       
                       {/* Revealed but flagged - show hide button */}
-                      {result?.shouldBlur && isRevealed && (
+                      {revealAllowed && result?.shouldBlur && isRevealed && (
                         <button
                           onClick={() => toggleImageReveal(src)}
                           className="absolute top-2 right-2 p-1.5 bg-background/80 rounded-full text-muted-foreground hover:text-foreground"

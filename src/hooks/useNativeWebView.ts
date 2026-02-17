@@ -152,29 +152,57 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     // URL change listener
     void attachCapgoListener('urlChangeEvent', (event) => {
       const url = event.url;
+      const previousUrl = currentUrlRef.current;
       console.log('[NativeWebView] URL changed:', url);
-      currentUrlRef.current = url;
-      
-      setState(prev => ({ ...prev, currentUrl: url }));
-      onUrlChangeRef.current?.(url);
-      
-      // Update history
-      if (historyIndexRef.current === historyStackRef.current.length - 1) {
-        historyStackRef.current.push(url);
-        historyIndexRef.current++;
-      } else {
-        // User navigated from middle of history
-        historyStackRef.current = historyStackRef.current.slice(0, historyIndexRef.current + 1);
-        historyStackRef.current.push(url);
-        historyIndexRef.current = historyStackRef.current.length - 1;
+
+      const applyUrlChange = () => {
+        currentUrlRef.current = url;
+        setState(prev => ({ ...prev, currentUrl: url }));
+        onUrlChangeRef.current?.(url);
+
+        // Update history
+        if (historyIndexRef.current === historyStackRef.current.length - 1) {
+          historyStackRef.current.push(url);
+          historyIndexRef.current++;
+        } else {
+          // User navigated from middle of history
+          historyStackRef.current = historyStackRef.current.slice(0, historyIndexRef.current + 1);
+          historyStackRef.current.push(url);
+          historyIndexRef.current = historyStackRef.current.length - 1;
+        }
+
+        // Update navigation state
+        setState(prev => ({
+          ...prev,
+          canGoBack: historyIndexRef.current > 0,
+          canGoForward: historyIndexRef.current < historyStackRef.current.length - 1,
+        }));
+      };
+
+      if (!onNavigationRequestRef.current) {
+        applyUrlChange();
+        return;
       }
-      
-      // Update navigation state
-      setState(prev => ({
-        ...prev,
-        canGoBack: historyIndexRef.current > 0,
-        canGoForward: historyIndexRef.current < historyStackRef.current.length - 1,
-      }));
+
+      void Promise.resolve(onNavigationRequestRef.current(url))
+        .then(async (allowed) => {
+          if (allowed) {
+            applyUrlChange();
+            return;
+          }
+          console.log('[NativeWebView] Navigation blocked by handler (urlChangeEvent):', url);
+          if (previousUrl && previousUrl !== url) {
+            try {
+              await InAppBrowser.setUrl({ url: previousUrl });
+            } catch (error) {
+              console.error('[NativeWebView] Failed to rollback blocked navigation:', error);
+            }
+          }
+        })
+        .catch((error) => {
+          console.error('[NativeWebView] Navigation guard failed, allowing URL change:', error);
+          applyUrlChange();
+        });
     });
 
     // Page load complete listener
@@ -197,6 +225,8 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
       const previous = pageLoadErrorRecoveryRef.current;
       const isSameBurst = previous.url === failedUrl && (now - previous.at) < 15000;
       const attempts = isSameBurst ? previous.count : 0;
+      // Surface every pageLoadError immediately to the host before any reload attempt.
+      onLoadErrorRef.current?.(failedUrl, 'pageLoadError');
       if (attempts < 1 && isOpenRef.current) {
         pageLoadErrorRecoveryRef.current = {
           url: failedUrl,
@@ -209,7 +239,6 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
           })
           .catch(() => {
             setState(prev => ({ ...prev, isLoading: false, error: 'pageLoadError' }));
-            onLoadErrorRef.current?.(failedUrl, 'pageLoadError');
           });
         return;
       }
@@ -220,7 +249,6 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
         at: now,
       };
       setState(prev => ({ ...prev, isLoading: false, error: 'pageLoadError' }));
-      onLoadErrorRef.current?.(failedUrl, 'pageLoadError');
     });
 
     // Close listener

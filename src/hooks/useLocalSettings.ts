@@ -28,6 +28,7 @@ export interface LocalProtectionSettings {
   ai_sensitivity: AISensitivity;
   block_adult_sites: boolean;
   block_social_media: boolean;
+  block_ads: boolean;
   auto_scan_images: boolean;
   show_scan_notifications: boolean;
   // Granular controls
@@ -55,6 +56,7 @@ const DEFAULT_SETTINGS: LocalProtectionSettings = {
   ai_sensitivity: 'moderate',
   block_adult_sites: true,
   block_social_media: false,
+  block_ads: false,
   auto_scan_images: true,
   show_scan_notifications: true,
   blur_dial: 2,
@@ -183,6 +185,13 @@ export const useLocalSettings = () => {
     return settings.shield_active && settings.blur_dial > 0;
   }, [settings.shield_active, settings.blur_dial]);
 
+  const isRevealAllowed = useCallback(() => {
+    if (!settings.shield_active || settings.blur_dial === 0) return false;
+    if (settings.prototype_mode !== true) return false;
+    if (settings.blur_mode === 'strict') return false;
+    return true;
+  }, [settings.shield_active, settings.blur_dial, settings.prototype_mode, settings.blur_mode]);
+
   // Get the current session nonce
   const getNonce = useCallback((): string => {
     return sessionNonceRef.current;
@@ -231,6 +240,7 @@ export const useLocalSettings = () => {
     getBlurStrength,
     getDialThresholds,
     isModerationEnabled,
+    isRevealAllowed,
     getModerationConfig,
     getNonce,
     shouldBlockCategory,
