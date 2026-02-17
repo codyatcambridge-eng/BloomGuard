@@ -953,30 +953,19 @@ export const NativeWebViewBrowser = () => {
       
       // Inject moderation script after page fully loads
       if (!injectionDoneRef.current) {
-        // Small delay to ensure DOM is ready
-        clearLoadEndInjectTimer();
-        loadEndInjectTimerRef.current = setTimeout(async () => {
-          await injectModerationScript(executeScript, 'onLoadEnd', url);
-          if (ENABLE_DOM_BLUR && executeScript) {
-            await executeScript(`
-              (function() {
-                try {
-                  window.postMessage({ type: 'MW_BLUR_COMMAND', command: 'PING', timestamp: Date.now(), reason: 'host_onLoadEnd' }, '*');
-                  return 'OK';
-                } catch (e) {
-                  return 'ERR';
-                }
-              })();
-            `);
-          }
-          loadEndInjectTimerRef.current = null;
-        }, 500);
-        console.log(
-          '[MW-Host][Timer] start',
-          'name=loadEndInjectTimer',
-          'navId=' + activeNavIdRef.current,
-          'url=' + (url || 'unknown'),
-        );
+        await injectModerationScript(executeScript, 'onLoadEnd', url);
+        if (ENABLE_DOM_BLUR && executeScript) {
+          await executeScript(`
+            (function() {
+              try {
+                window.postMessage({ type: 'MW_BLUR_COMMAND', command: 'PING', timestamp: Date.now(), reason: 'host_onLoadEnd' }, '*');
+                return 'OK';
+              } catch (e) {
+                return 'ERR';
+              }
+            })();
+          `);
+        }
       }
     },
     onLoadError: (url, error) => {

@@ -152,8 +152,8 @@ export function generatePreShieldBootScript(): string {
   if (window.__MW_PRESHIELD_BOOT__ === true) return 'MW_PRESHIELD_BOOT_EXISTS';
   window.__MW_PRESHIELD_BOOT__ = true;
 
-  const PRE_SCAN_SHIELD_MIN_SIDE = 120;
-  const PRE_SCAN_SHIELD_MIN_AREA = 24000;
+  const PRE_SCAN_SHIELD_MIN_SIDE = 80;
+  const PRE_SCAN_SHIELD_MIN_AREA = 6400;
 
   function getElementRect(element) {
     try {
@@ -162,6 +162,21 @@ export function generatePreShieldBootScript(): string {
     } catch (e) {
       return { width: 0, height: 0 };
     }
+  }
+
+  function hasRenderableSource(element) {
+    if (!element || element.tagName !== 'IMG') return false;
+    const src = String(
+      element.currentSrc ||
+      element.src ||
+      element.getAttribute('src') ||
+      element.getAttribute('data-src') ||
+      ''
+    ).trim();
+    if (!src) return false;
+    const lower = src.toLowerCase();
+    if (lower.startsWith('data:') && src.length < 1000) return false;
+    return true;
   }
 
   function isLikelyAvatarLikeElement(element, width, height) {
@@ -187,13 +202,17 @@ export function generatePreShieldBootScript(): string {
 
   function isEligible(element) {
     if (!element || !element.isConnected || element.tagName !== 'IMG') return false;
+    if (!hasRenderableSource(element)) return false;
     const rect = getElementRect(element);
     const width = rect.width || element.offsetWidth || element.naturalWidth || 0;
     const height = rect.height || element.offsetHeight || element.naturalHeight || 0;
     const area = width * height;
-    if (width < PRE_SCAN_SHIELD_MIN_SIDE || height < PRE_SCAN_SHIELD_MIN_SIDE) return false;
-    if (area < PRE_SCAN_SHIELD_MIN_AREA) return false;
-    if (isLikelyAvatarLikeElement(element, width, height)) return false;
+    const hasMeasuredSize = width > 0 && height > 0;
+    if (hasMeasuredSize) {
+      if (width < PRE_SCAN_SHIELD_MIN_SIDE || height < PRE_SCAN_SHIELD_MIN_SIDE) return false;
+      if (area < PRE_SCAN_SHIELD_MIN_AREA) return false;
+      if (isLikelyAvatarLikeElement(element, width, height)) return false;
+    }
     return true;
   }
 
@@ -281,7 +300,8 @@ export function generatePreShieldBootScript(): string {
       const imageSetAttribute = HTMLImageElement.prototype.setAttribute;
       HTMLImageElement.prototype.setAttribute = function(name, value) {
         try {
-          if (String(name || '').toLowerCase() === 'src') {
+          const normalized = String(name || '').toLowerCase();
+          if (normalized === 'src' || normalized === 'srcset' || normalized === 'data-src') {
             applyPreShield(this);
           }
         } catch (e) {}
@@ -290,13 +310,59 @@ export function generatePreShieldBootScript(): string {
     } catch (e) {}
   }
 
+  function installPreShieldMutationObserver() {
+    if (window.__MW_PRESHIELD_MUTATION_OBSERVER__ === true) return;
+    window.__MW_PRESHIELD_MUTATION_OBSERVER__ = true;
+    if (typeof MutationObserver !== 'function') return;
+    try {
+      const observer = new MutationObserver(function(mutations) {
+        mutations.forEach(function(mutation) {
+          if (mutation.type === 'attributes') {
+            const target = mutation.target;
+            if (target && target.tagName === 'IMG') {
+              applyPreShield(target);
+            }
+            return;
+          }
+          mutation.addedNodes.forEach(function(node) {
+            if (!node || node.nodeType !== 1) return;
+            if (node.tagName === 'IMG') {
+              applyPreShield(node);
+            }
+            if (typeof node.querySelectorAll === 'function') {
+              node.querySelectorAll('img').forEach(function(img) { applyPreShield(img); });
+            }
+          });
+        });
+      });
+      observer.observe(document.documentElement || document, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['src', 'srcset', 'data-src'],
+      });
+      window.__MW_PRESHIELD_MUTATION_OBSERVER_REF__ = observer;
+    } catch (e) {}
+  }
+
   ensureStyles();
   installSharedImageSourceHooks();
+  installPreShieldMutationObserver();
   try {
     document.querySelectorAll('img').forEach(function(img) {
       applyPreShield(img);
     });
   } catch (e) {}
+  window.addEventListener('load', function() {
+    try {
+      document.querySelectorAll('img').forEach(function(img) { applyPreShield(img); });
+    } catch (e) {}
+  }, { once: true });
+  window.addEventListener('pageshow', function() {
+    try {
+      document.querySelectorAll('img').forEach(function(img) { applyPreShield(img); });
+    } catch (e) {}
+  });
   return 'MW_PRESHIELD_BOOT_READY';
 })();
 `;
@@ -1246,8 +1312,8 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
   }
 
-  const PRE_SCAN_SHIELD_MIN_SIDE = 120;
-  const PRE_SCAN_SHIELD_MIN_AREA = 24000;
+  const PRE_SCAN_SHIELD_MIN_SIDE = 80;
+  const PRE_SCAN_SHIELD_MIN_AREA = 6400;
   const PRE_SCAN_SHIELD_AVATAR_MAX_SIDE = 160;
   let shieldIdCounter = 0;
 
@@ -1324,7 +1390,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       ''
     ).toLowerCase();
 
-    const hasSemanticHint = /(avatar|profile(?:\s|-|_)?pic|profile(?:\s|-|_)?photo|user(?:\s|-|_)?pic|user(?:\s|-|_)?photo)/.test(hintText);
+    const hasSemanticHint = /(avatar|profile(?:\\s|-|_)?pic|profile(?:\\s|-|_)?photo|user(?:\\s|-|_)?pic|user(?:\\s|-|_)?photo)/.test(hintText);
     const hasSrcHint = /(avatar|profile|userpic|profile_pic|profilepic)/.test(srcText);
     const hasNavContext = !!element.closest('nav,header,aside,[role="navigation"],[role="banner"],[role="complementary"],[aria-label*="navigation" i]');
     const feedLikeContext = !!element.closest(
@@ -1361,20 +1427,40 @@ export function generateModerationScript(config: InjectionConfig): string {
     return score >= 4;
   }
 
+  function hasRenderableSource(element) {
+    if (!element || element.tagName !== 'IMG') return false;
+    const src = String(
+      element.currentSrc ||
+      element.src ||
+      element.getAttribute('src') ||
+      element.getAttribute('data-src') ||
+      element.getAttribute('data-lazy-src') ||
+      ''
+    ).trim();
+    if (!src) return false;
+    const lower = src.toLowerCase();
+    if (lower.startsWith('data:') && src.length < 1000) return false;
+    return true;
+  }
+
   function isPreScanShieldEligible(element, sourceType) {
     if (!element || !element.isConnected) return false;
     if (!CONFIG.enabled || CONFIG.sensitivity === 0) return false;
     const source = String(sourceType || '').toLowerCase();
     if (element.tagName === 'VIDEO') return false;
     if (source.includes('video-currentsrc') || source.includes('video-frame')) return false;
+    if (element.tagName === 'IMG' && !hasRenderableSource(element)) return false;
 
     const rect = getElementRect(element);
     const width = rect.width || element.offsetWidth || element.naturalWidth || 0;
     const height = rect.height || element.offsetHeight || element.naturalHeight || 0;
     const area = width * height;
-    if (width < PRE_SCAN_SHIELD_MIN_SIDE || height < PRE_SCAN_SHIELD_MIN_SIDE) return false;
-    if (area < PRE_SCAN_SHIELD_MIN_AREA) return false;
-    if (isLikelyAvatarLikeElement(element, width, height)) return false;
+    const hasMeasuredSize = width > 0 && height > 0;
+    if (hasMeasuredSize) {
+      if (width < PRE_SCAN_SHIELD_MIN_SIDE || height < PRE_SCAN_SHIELD_MIN_SIDE) return false;
+      if (area < PRE_SCAN_SHIELD_MIN_AREA) return false;
+      if (isLikelyAvatarLikeElement(element, width, height)) return false;
+    }
     return true;
   }
 
@@ -1467,7 +1553,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       const imageSetAttribute = HTMLImageElement.prototype.setAttribute;
       HTMLImageElement.prototype.setAttribute = function(name, value) {
         try {
-          if (String(name || '').toLowerCase() === 'src') {
+          const normalized = String(name || '').toLowerCase();
+          if (normalized === 'src' || normalized === 'srcset' || normalized === 'data-src') {
             applyPreScanShieldIfEligible(this, 'img-setattribute-src');
           }
         } catch (e) {}
@@ -2420,8 +2507,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       return false;
     }
     
-    // FAIL-OPEN: Skip tiny images (< 80x80)
+    // FAIL-OPEN: Skip tiny images (< minImageSize), but never leave pre-shield pending forever.
     if (isTinyImage(element)) {
+      removePreScanShield(element);
       state.stats.skippedTiny++;
       if (CONFIG.debug) {
         console.log('[MW] skipped tiny image (fail-open, <80x80):', url.substring(0, 50));
@@ -2430,6 +2518,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
 
     if (element && element.tagName === 'IMG' && isLikelyAvatarProfilePic(element, url, sourceType)) {
+      removePreScanShield(element);
       state.stats.skipped++;
       return false;
     }
@@ -3114,6 +3203,14 @@ export function generateModerationScript(config: InjectionConfig): string {
   // Expose targeted rescan hooks for the host (NativeWebViewBrowser)
   window.__MW_SCAN_FULL__ = scanFullPage;
   window.__MW_SCAN_YT__ = scanYouTubeThumbnails;
+
+  // Install early source hooks and pre-shield any already-present images.
+  installImageSourcePreShieldHooks();
+  try {
+    document.querySelectorAll('img').forEach(img => {
+      applyPreScanShieldIfEligible(img, 'main-init');
+    });
+  } catch (e) {}
 
   // Set up observers
   setupMutationObserver(document.body);

@@ -23,6 +23,7 @@ final class ContentFilterEngine {
     private var pendingOverlayUpdate: DispatchWorkItem?
     private var lastOverlayMode: ContentProtectionOverlayMode = .hidden
     private var lastOverlayAllowReveal = false
+    private var awaitingFirstDecision = false
 
     private var nsfwScore: Double = 0
     private var nsfwTimestamp = Date.distantPast
@@ -87,6 +88,7 @@ final class ContentFilterEngine {
         DispatchQueue.main.async {
             self.config = config
             self.isRunning = true
+            self.awaitingFirstDecision = true
             self.safeStableSince = Date()
             self.currentFps = config.fps
             self.scheduleTimer(fps: config.fps)
@@ -110,6 +112,7 @@ final class ContentFilterEngine {
             self.pendingOverlayUpdate = nil
             self.lastOverlayMode = .hidden
             self.lastOverlayAllowReveal = false
+            self.awaitingFirstDecision = false
             self.overlayView.setMode(.hidden, animated: false, allowReveal: false, onRevealTap: nil)
             self.overlayView.detach()
         }
@@ -156,9 +159,12 @@ final class ContentFilterEngine {
 #if DEBUG
         print("[ContentFilterEngine] handleInAppBrowserDidAttachWebView")
 #endif
+        awaitingFirstDecision = true
         targetWebView = webView
         overlayView.attach(to: webView)
-        queueOverlayUpdate(for: latestDecision, immediate: true)
+        overlayView.setMode(.soft, animated: false, allowReveal: false, onRevealTap: nil)
+        lastOverlayMode = .soft
+        lastOverlayAllowReveal = false
     }
 
     @objc private func handleInAppBrowserDidDetachWebView(_ notification: Notification) {
@@ -169,6 +175,7 @@ final class ContentFilterEngine {
             pendingOverlayUpdate = nil
             lastOverlayMode = .hidden
             lastOverlayAllowReveal = false
+            awaitingFirstDecision = false
             overlayView.setMode(.hidden, animated: false, allowReveal: false, onRevealTap: nil)
             overlayView.detach()
         }
@@ -234,6 +241,7 @@ final class ContentFilterEngine {
 
                 DispatchQueue.main.async {
                     self.onDecision(decision)
+                    self.awaitingFirstDecision = false
                     self.queueOverlayUpdate(for: decision)
                     if abs(targetFps - self.currentFps) > 0.05 {
                         self.currentFps = targetFps
@@ -699,7 +707,10 @@ final class ContentFilterEngine {
     }
 
     private func queueOverlayUpdate(for decision: ContentFilterDecision, immediate: Bool = false) {
-        let presentation = overlayPresentation(for: decision)
+        var presentation = overlayPresentation(for: decision)
+        if awaitingFirstDecision {
+            presentation = (.soft, false)
+        }
         if presentation.mode == lastOverlayMode, presentation.allowReveal == lastOverlayAllowReveal {
             return
         }
@@ -726,7 +737,8 @@ final class ContentFilterEngine {
         }
         pendingOverlayUpdate = update
 
-        if immediate {
+        let shouldApplyImmediately = immediate || presentation.mode != .hidden
+        if shouldApplyImmediately {
             DispatchQueue.main.async(execute: update)
         } else {
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(180), execute: update)
