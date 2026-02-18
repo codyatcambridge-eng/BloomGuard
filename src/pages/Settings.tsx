@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Shield, DollarSign, CreditCard, AlertTriangle, Eye, EyeOff, Coffee, Clock, Lock } from "lucide-react";
 import { FrictionUnlockModal } from "@/components/settings/FrictionUnlockModal";
+import { ShieldsSection } from "@/components/settings/ShieldsSection";
 import { useSettings, BlurLevel } from "@/hooks/useSettings";
 import { useLocalSettings, type BlurDialLevel } from "@/hooks/useLocalSettings";
 import { supabase } from "@/integrations/supabase/client";
@@ -294,6 +295,9 @@ const Settings = () => {
             </p>
           </div>
         </section>
+
+        {/* Shields */}
+        <ShieldsSection />
 
         {/* Focus Fine Warning */}
         <section 

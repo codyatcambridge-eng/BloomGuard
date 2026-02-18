@@ -23,7 +23,7 @@ export interface UseLocalShieldsResult {
   removeProtectedAppId: (shieldId: ShieldId, index: number) => void;
   moveProtectedAppId: (shieldId: ShieldId, index: number, direction: 'up' | 'down') => void;
   dismissOnboardingCta: () => void;
-  applyOnboarding: (answers: OnboardingAnswers) => void;
+  applyOnboarding: (answers: OnboardingAnswers, appIdsByShield?: Partial<Record<ShieldId, string[]>>) => void;
 }
 
 export const useLocalShields = (): UseLocalShieldsResult => {
@@ -171,8 +171,8 @@ export const useLocalShields = (): UseLocalShieldsResult => {
     });
   }, [state, saveState]);
 
-  const applyOnboarding = useCallback((answers: OnboardingAnswers) => {
-    const initialized = applyOnboardingDefaults(answers);
+  const applyOnboarding = useCallback((answers: OnboardingAnswers, appIdsByShield: Partial<Record<ShieldId, string[]>> = {}) => {
+    const initialized = applyOnboardingDefaults(answers, appIdsByShield);
     saveState({
       ...initialized,
       onboardingDismissed: true,

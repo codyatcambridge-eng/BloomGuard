@@ -335,12 +335,19 @@ export function suggestShieldsFromOnboarding(answers: OnboardingAnswers): Shield
   return unique.slice(0, 2);
 }
 
-export function applyOnboardingDefaults(answers: OnboardingAnswers): ShieldsState {
+export function applyOnboardingDefaults(
+  answers: OnboardingAnswers,
+  appIdsByShield: Partial<Record<ShieldId, string[]>> = {},
+): ShieldsState {
   const next = buildDefaultShieldsState();
   const suggested = suggestShieldsFromOnboarding(answers);
 
   for (const shieldId of suggested) {
     next.shields[shieldId].enabled = true;
+    const appIds = Array.isArray(appIdsByShield[shieldId])
+      ? (appIdsByShield[shieldId] || []).filter((value): value is string => typeof value === 'string' && value.trim().length > 0).map(value => value.trim())
+      : [];
+    next.shields[shieldId].protectedAppIds = appIds;
   }
 
   next.configuredAt = new Date().toISOString();
