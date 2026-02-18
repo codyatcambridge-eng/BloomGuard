@@ -1,26 +1,53 @@
-import { useState, useMemo } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { X, AlertTriangle, DollarSign } from "lucide-react";
+import { getCooldownRemaining } from "@/logic/ShieldEngine";
+import type { ShieldId } from "@/logic/shields";
+import type { CooldownType } from "@/storage/cooldownLocal";
 
 interface FrictionUnlockModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onUnlock: () => void;
+  onUnlock?: () => void;
+  mode?: "settings_unlock" | "shield_lock";
+  shieldLock?: {
+    shieldId: ShieldId;
+    targetId: string;
+    type: CooldownType;
+    calmCopy: string;
+    onComplete: () => void;
+    breathingCompanion?: ReactNode;
+  };
 }
 
 const REQUIRED_VERSE = "I will keep my heart with all diligence; for out of it are the issues of life.";
 const VERSE_REFERENCE = "Proverbs 4:23";
 
-export const FrictionUnlockModal = ({ isOpen, onClose, onUnlock }: FrictionUnlockModalProps) => {
+function formatRemaining(seconds: number): string {
+  const safe = Math.max(0, Math.floor(seconds));
+  const mins = Math.floor(safe / 60);
+  const secs = safe % 60;
+  return `${mins}:${secs.toString().padStart(2, "0")}`;
+}
+
+export const FrictionUnlockModal = ({
+  isOpen,
+  onClose,
+  onUnlock,
+  mode = "settings_unlock",
+  shieldLock,
+}: FrictionUnlockModalProps) => {
   const [input, setInput] = useState("");
+  const [remainingSec, setRemainingSec] = useState(0);
+  const [durationSec, setDurationSec] = useState(1);
+  const completedRef = useRef(false);
 
   const isMatch = useMemo(() => input.trim() === REQUIRED_VERSE, [input]);
-
-  if (!isOpen) return null;
+  const isShieldLockMode = mode === "shield_lock";
 
   const handleSubmit = () => {
     if (isMatch) {
       setInput("");
-      onUnlock();
+      onUnlock?.();
     }
   };
 
@@ -28,6 +55,87 @@ export const FrictionUnlockModal = ({ isOpen, onClose, onUnlock }: FrictionUnloc
     setInput("");
     onClose();
   };
+
+  useEffect(() => {
+    if (!isOpen || !isShieldLockMode || !shieldLock) {
+      completedRef.current = false;
+      return;
+    }
+
+    completedRef.current = false;
+
+    const syncRemaining = () => {
+      const status = getCooldownRemaining({
+        shieldId: shieldLock.shieldId,
+        targetId: shieldLock.targetId,
+        type: shieldLock.type,
+      });
+
+      const nextRemaining = status.remainingSec;
+      setRemainingSec(nextRemaining);
+      setDurationSec((prev) => Math.max(1, status.session?.durationSec || prev));
+
+      if (nextRemaining <= 0 && !completedRef.current) {
+        completedRef.current = true;
+        shieldLock.onComplete();
+      }
+    };
+
+    syncRemaining();
+    const intervalId = setInterval(syncRemaining, 500);
+    return () => clearInterval(intervalId);
+  }, [isOpen, isShieldLockMode, shieldLock]);
+
+  if (!isOpen) return null;
+
+  if (isShieldLockMode && shieldLock) {
+    const progress = Math.max(0, Math.min(1, remainingSec / Math.max(1, durationSec)));
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div
+          className="absolute inset-0 bg-cathedral-midnight/98 backdrop-blur-md"
+          style={{
+            background: "radial-gradient(ellipse at center, hsl(220 60% 6%) 0%, hsl(220 70% 3%) 100%)",
+          }}
+        />
+        <div
+          className="relative w-full max-w-md p-6 border border-aqua/30"
+          style={{
+            background: "linear-gradient(145deg, hsl(220 50% 10%) 0%, hsl(220 60% 6%) 100%)",
+            boxShadow: "0 0 48px hsl(194 100% 50% / 0.12), inset 0 1px 0 hsl(220 10% 30% / 0.1)",
+          }}
+        >
+          <div className="flex items-center justify-between mb-5">
+            <div className="flex items-center gap-3">
+              <AlertTriangle className="w-5 h-5 text-aqua" />
+              <h2 className="font-display text-xl tracking-wider text-aqua">SHIELD LOCK</h2>
+            </div>
+            <button
+              onClick={onClose}
+              className="w-8 h-8 flex items-center justify-center text-silver hover:text-foreground transition-colors border border-silver/20 hover:border-silver/40"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+
+          <p className="text-sm text-silver mb-4">{shieldLock.calmCopy}</p>
+
+          <div className="mb-4 p-4 border border-aqua/25 rounded-md bg-aqua/5">
+            <p className="text-xs text-muted-foreground mb-1">Cooldown remaining</p>
+            <p className="font-display text-4xl tracking-wider text-aqua">{formatRemaining(remainingSec)}</p>
+            <div className="mt-3 h-1.5 rounded-full bg-slate-900/80 overflow-hidden">
+              <div
+                className="h-full bg-aqua transition-[width] duration-500"
+                style={{ width: `${Math.max(0, Math.min(100, progress * 100))}%` }}
+              />
+            </div>
+          </div>
+
+          {shieldLock.breathingCompanion}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">

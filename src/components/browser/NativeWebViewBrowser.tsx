@@ -43,6 +43,11 @@ import { SocialPreviewView, SocialPlatform } from './SocialPreviewView';
 import { ExternalLinkWarning } from './ExternalLinkWarning';
 import { AIStatusBar } from './AIStatusBar';
 import { AIStatusIndicator } from './AIStatusIndicator';
+import { FrictionUnlockModal } from '@/components/settings/FrictionUnlockModal';
+import { WaveBreath } from '@/components/lock/WaveBreath';
+import { beginCooldownSession, evaluateProtection, getCooldownRemaining, getFrictionPolicy } from '@/logic/ShieldEngine';
+import type { ShieldId } from '@/logic/shields';
+import type { CooldownType } from '@/storage/cooldownLocal';
 import { toast } from 'sonner';
 
 interface SearchResult {
@@ -96,6 +101,41 @@ const isBlankLikeNavigationUrl = (value: string): boolean => {
   );
 };
 
+function getProtectedTargetIdFromUrl(url: string): string | undefined {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    const normalizedHost = host.startsWith('www.') ? host.slice(4) : host;
+    if (normalizedHost === 'youtube.com' || normalizedHost === 'm.youtube.com' || normalizedHost === 'youtu.be') return 'target.youtube';
+    if (normalizedHost === 'tiktok.com') return 'target.tiktok';
+    if (normalizedHost === 'instagram.com') return 'target.instagram';
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function getShieldCalmCopy(shieldId?: ShieldId): string {
+  if (shieldId === 'sleep') return 'Let your mind settle. Breathe with the tide.';
+  return 'Slow it down. Choose again in a moment.';
+}
+
+interface ShieldInterceptionState {
+  attemptedUrl: string;
+  targetId: string;
+  strictestShield: ShieldId;
+  bucket: 'hard' | 'soft';
+  calmCopy: string;
+}
+
+interface ShieldLockState {
+  attemptedUrl: string;
+  targetId: string;
+  shieldId: ShieldId;
+  type: CooldownType;
+  calmCopy: string;
+}
+
 /**
  * NativeWebViewBrowser - Unified browser component
  * Uses native WebView on mobile, fallback modes on web
@@ -120,6 +160,8 @@ export const NativeWebViewBrowser = () => {
   const [failureError, setFailureError] = useState<string | null>(null);
   const [blockedReason, setBlockedReason] = useState('');
   const [blockedCategory, setBlockedCategory] = useState('');
+  const [shieldInterceptionState, setShieldInterceptionState] = useState<ShieldInterceptionState | null>(null);
+  const [shieldLockState, setShieldLockState] = useState<ShieldLockState | null>(null);
   
   // Search state
   const [searchQuery, setSearchQuery] = useState('');
@@ -196,6 +238,7 @@ export const NativeWebViewBrowser = () => {
   const resultQueueFlushTimerRef = useRef<NodeJS.Timeout | null>(null);
   const resultQueueFlushCountRef = useRef(0);
   const domainAdultContextRef = useRef(false);
+  const shieldBypassUrlRef = useRef<string | null>(null);
   const nativeScanSessionRef = useRef<{
     running: boolean;
     profile: 'balanced' | 'video_boost' | null;
@@ -2441,6 +2484,34 @@ export const NativeWebViewBrowser = () => {
     return false;
   }, []);
 
+  const beginShieldCooldown = useCallback((type: CooldownType) => {
+    const shield = shieldInterceptionState;
+    if (!shield) return;
+
+    const policy = getFrictionPolicy(shield.strictestShield, shield.bucket);
+    const durationSec =
+      type === 'shield_break'
+        ? policy.shieldBreakDurationSeconds || policy.breakDurationSeconds
+        : policy.breakDurationSeconds;
+
+    const status = beginCooldownSession({
+      shieldId: shield.strictestShield,
+      targetId: shield.targetId,
+      type,
+      durationSec,
+    });
+
+    if (!status.session) return;
+
+    setShieldLockState({
+      attemptedUrl: shield.attemptedUrl,
+      targetId: shield.targetId,
+      shieldId: shield.strictestShield,
+      type,
+      calmCopy: shield.calmCopy,
+    });
+  }, [shieldInterceptionState]);
+
   // Main navigation handler - immediately navigate to browse view (fail-open)
   const handleNavigate = useCallback(async (targetUrl?: string, e?: React.FormEvent) => {
     e?.preventDefault();
@@ -2458,6 +2529,48 @@ export const NativeWebViewBrowser = () => {
     const normalizedUrl = normalizeUrl(urlToNavigate);
     const domain = extractDomain(urlToNavigate);
     setUrlInput(normalizedUrl);
+
+    if (shieldBypassUrlRef.current === normalizedUrl) {
+      shieldBypassUrlRef.current = null;
+    } else {
+      const targetId = getProtectedTargetIdFromUrl(normalizedUrl);
+      if (targetId) {
+        const protection = evaluateProtection({ targetId, now: new Date() });
+        if (protection.isProtected && protection.strictestShield && protection.bucket) {
+          const calmCopy = getShieldCalmCopy(protection.strictestShield);
+          const existingCooldown = getCooldownRemaining({
+            shieldId: protection.strictestShield,
+            targetId,
+          });
+
+          setShieldInterceptionState({
+            attemptedUrl: normalizedUrl,
+            targetId,
+            strictestShield: protection.strictestShield,
+            bucket: protection.bucket,
+            calmCopy,
+          });
+
+          if (existingCooldown.session && existingCooldown.remainingSec > 0) {
+            setShieldLockState({
+              attemptedUrl: normalizedUrl,
+              targetId,
+              shieldId: protection.strictestShield,
+              type: existingCooldown.session.type,
+              calmCopy,
+            });
+          } else {
+            setShieldLockState(null);
+          }
+
+          navigate('blocked', '', normalizedUrl);
+          return;
+        }
+      }
+    }
+
+    setShieldInterceptionState(null);
+    setShieldLockState(null);
 
     const preflight = await resolveBlockDecision(normalizedUrl);
     domainAdultContextRef.current = preflight.isAdultDomain;
@@ -2520,6 +2633,16 @@ export const NativeWebViewBrowser = () => {
     
     setIsLoading(false);
   }, [urlInput, isNative, openWebView, handleSearch, navigate, logEvent, isUrlInput, resolveBlockDecision, getPreShieldBootScript]);
+
+  const handleShieldCooldownComplete = useCallback(() => {
+    const activeLock = shieldLockState;
+    if (!activeLock) return;
+
+    shieldBypassUrlRef.current = activeLock.attemptedUrl;
+    setShieldLockState(null);
+    setShieldInterceptionState(null);
+    handleNavigate(activeLock.attemptedUrl);
+  }, [shieldLockState, handleNavigate]);
 
   // Reader Mode handler
   const handleReaderMode = useCallback(async () => {
@@ -2768,6 +2891,9 @@ export const NativeWebViewBrowser = () => {
     setSearchQuery('');
     setUrlInput('');
     setFallbackUrl('');
+    setShieldInterceptionState(null);
+    setShieldLockState(null);
+    shieldBypassUrlRef.current = null;
     domainAdultContextRef.current = false;
     goHome();
   }, [isNative, webViewState.isOpen, webViewState.currentUrl, closeWebView, goHome, moderationBridge, setCentralBlurState, teardownWebViewScheduling, resetModernHealthForNavigation, setVideoBoost, maybeClearFlashShield]);
@@ -3012,29 +3138,65 @@ export const NativeWebViewBrowser = () => {
 
       <main className="flex-1 relative pb-16">
         {currentView === 'blocked' ? (
-          <div className="absolute inset-0 flex items-center justify-center p-6 bg-gradient-to-b from-destructive/10 to-background">
-            <div className="text-center max-w-sm">
-              <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-destructive/20 flex items-center justify-center">
-                <AlertTriangle className="w-10 h-10 text-destructive" />
+          shieldInterceptionState ? (
+            <div className="absolute inset-0 flex items-center justify-center p-6 bg-gradient-to-b from-aqua/10 to-background">
+              <div className="text-center max-w-sm">
+                <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-aqua/20 flex items-center justify-center">
+                  <Shield className="w-10 h-10 text-aqua" />
+                </div>
+                <h2 className="font-display text-2xl tracking-wider text-aqua mb-2">
+                  SHIELD INTERCEPT
+                </h2>
+                <p className="text-sm text-muted-foreground mb-6">{shieldInterceptionState.calmCopy}</p>
+                {!shieldLockState && (
+                  <div className="space-y-3">
+                    <button
+                      onClick={() => beginShieldCooldown('break')}
+                      className="w-full px-6 py-3 border border-aqua/35 text-aqua hover:text-foreground hover:border-aqua/70 transition-colors font-display text-sm tracking-wider"
+                    >
+                      Break
+                    </button>
+                    <button
+                      onClick={() => beginShieldCooldown('shield_break')}
+                      className="w-full px-6 py-3 border border-destructive/35 text-destructive hover:text-foreground hover:border-destructive/70 transition-colors font-display text-sm tracking-wider"
+                    >
+                      Shield Break
+                    </button>
+                    <button
+                      onClick={handleHome}
+                      className="w-full px-6 py-3 border border-silver/30 text-silver hover:text-foreground hover:border-silver/60 transition-colors font-display text-sm tracking-wider"
+                    >
+                      GO HOME
+                    </button>
+                  </div>
+                )}
               </div>
-              <h2 className="font-display text-2xl tracking-wider text-destructive mb-2">
-                SITE BLOCKED
-              </h2>
-              <p className="text-sm text-muted-foreground mb-4">{blockedReason}</p>
-              <div className="inline-block px-4 py-2 bg-destructive/10 border border-destructive/30 text-destructive text-xs font-display tracking-wider">
-                CATEGORY: {blockedCategory.toUpperCase()}
-              </div>
-              <p className="text-xs text-silver mt-6">
-                This site has been blocked by GoodCreation protection.
-              </p>
-              <button
-                onClick={handleHome}
-                className="mt-6 px-6 py-3 border border-silver/30 text-silver hover:text-foreground hover:border-silver/60 transition-colors font-display text-sm tracking-wider"
-              >
-                GO HOME
-              </button>
             </div>
-          </div>
+          ) : (
+            <div className="absolute inset-0 flex items-center justify-center p-6 bg-gradient-to-b from-destructive/10 to-background">
+              <div className="text-center max-w-sm">
+                <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-destructive/20 flex items-center justify-center">
+                  <AlertTriangle className="w-10 h-10 text-destructive" />
+                </div>
+                <h2 className="font-display text-2xl tracking-wider text-destructive mb-2">
+                  SITE BLOCKED
+                </h2>
+                <p className="text-sm text-muted-foreground mb-4">{blockedReason}</p>
+                <div className="inline-block px-4 py-2 bg-destructive/10 border border-destructive/30 text-destructive text-xs font-display tracking-wider">
+                  CATEGORY: {blockedCategory.toUpperCase()}
+                </div>
+                <p className="text-xs text-silver mt-6">
+                  This site has been blocked by GoodCreation protection.
+                </p>
+                <button
+                  onClick={handleHome}
+                  className="mt-6 px-6 py-3 border border-silver/30 text-silver hover:text-foreground hover:border-silver/60 transition-colors font-display text-sm tracking-wider"
+                >
+                  GO HOME
+                </button>
+              </div>
+            </div>
+          )
         ) : currentView === 'fallback' ? (
           <FallbackModeUI
             url={fallbackUrl}
@@ -3118,6 +3280,20 @@ export const NativeWebViewBrowser = () => {
           <AIStatusIndicator state={isModerationEnabled() ? moderationBridge.modelState : 'idle'} />
         </div>
       )}
+
+      <FrictionUnlockModal
+        isOpen={currentView === 'blocked' && !!shieldLockState}
+        mode="shield_lock"
+        onClose={handleHome}
+        shieldLock={shieldLockState ? {
+          shieldId: shieldLockState.shieldId,
+          targetId: shieldLockState.targetId,
+          type: shieldLockState.type,
+          calmCopy: shieldLockState.calmCopy,
+          onComplete: handleShieldCooldownComplete,
+          breathingCompanion: <WaveBreath />,
+        } : undefined}
+      />
 
       {/* External link warning modal */}
       <ExternalLinkWarning
