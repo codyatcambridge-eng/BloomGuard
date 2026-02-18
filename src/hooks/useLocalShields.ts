@@ -9,6 +9,7 @@ import {
   normalizeShieldsState,
   applyOnboardingDefaults,
 } from '@/logic/shields';
+import { normalizeTargetIds } from '@/lib/protected-targets';
 import { loadShieldsState, saveShieldsState } from '@/storage/shieldsLocal';
 
 export interface UseLocalShieldsResult {
@@ -77,11 +78,12 @@ export const useLocalShields = (): UseLocalShieldsResult => {
   }, [state, saveState]);
 
   const addProtectedAppId = useCallback((shieldId: ShieldId, appId: string) => {
-    const trimmed = appId.trim();
-    if (!trimmed) return;
+    const normalized = normalizeTargetIds([appId]);
+    const targetId = normalized[0];
+    if (!targetId) return;
 
     const current = state.shields[shieldId] || buildDefaultShield(shieldId);
-    if (current.protectedAppIds.includes(trimmed)) return;
+    if (current.protectedAppIds.includes(targetId)) return;
 
     saveState({
       ...state,
@@ -90,21 +92,22 @@ export const useLocalShields = (): UseLocalShieldsResult => {
         ...state.shields,
         [shieldId]: {
           ...current,
-          protectedAppIds: [...current.protectedAppIds, trimmed],
+          protectedAppIds: [...current.protectedAppIds, targetId],
         },
       },
     });
   }, [state, saveState]);
 
   const updateProtectedAppId = useCallback((shieldId: ShieldId, index: number, appId: string) => {
-    const trimmed = appId.trim();
-    if (!trimmed) return;
+    const normalized = normalizeTargetIds([appId]);
+    const targetId = normalized[0];
+    if (!targetId) return;
 
     const current = state.shields[shieldId] || buildDefaultShield(shieldId);
     if (index < 0 || index >= current.protectedAppIds.length) return;
 
     const nextList = [...current.protectedAppIds];
-    nextList[index] = trimmed;
+    nextList[index] = targetId;
 
     saveState({
       ...state,

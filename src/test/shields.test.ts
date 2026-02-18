@@ -27,10 +27,10 @@ describe('shields schedule helpers', () => {
 
     state.shields.sleep.enabled = true;
     state.shields.work.enabled = true;
-    state.shields.sleep.protectedAppIds = ['com.example.app'];
-    state.shields.work.protectedAppIds = ['com.example.app'];
+    state.shields.sleep.protectedAppIds = ['target.youtube'];
+    state.shields.work.protectedAppIds = ['target.youtube'];
 
-    const result = evaluateActiveShields(state, localDateAt(1, 23, 30), 'com.example.app');
+    const result = evaluateActiveShields(state, localDateAt(1, 23, 30), 'target.youtube');
 
     expect(result.activeShieldIds).toContain('sleep');
     expect(result.activeShieldIds).not.toContain('work');

@@ -1,3 +1,5 @@
+import { normalizeTargetIds, resolveProtectedTarget } from '@/lib/protected-targets';
+
 export type ShieldId = 'focus' | 'sleep' | 'work' | 'ascent';
 
 export interface ShieldWindow {
@@ -229,7 +231,7 @@ export function normalizeShieldConfig(input: Partial<ShieldConfig>, id: ShieldId
   });
 
   const appIds = Array.isArray(input.protectedAppIds)
-    ? input.protectedAppIds.filter((idVal): idVal is string => typeof idVal === 'string' && idVal.trim().length > 0).map(idVal => idVal.trim())
+    ? normalizeTargetIds(input.protectedAppIds)
     : [];
 
   return {
@@ -268,7 +270,7 @@ export function hasShieldConfigBeenInitialized(input: unknown): boolean {
 }
 
 function containsTargetApp(shield: ShieldConfig, targetAppId: string): boolean {
-  const target = targetAppId.trim();
+  const target = resolveProtectedTarget(targetAppId)?.id;
   if (!target) return false;
   return (shield.protectedAppIds || []).some(appId => appId === target);
 }
@@ -278,17 +280,18 @@ export function evaluateActiveShields(
   nowLocal: Date,
   targetAppId: string,
 ): EvaluateActiveShieldsResult {
-  if (!targetAppId || !targetAppId.trim()) {
+  const targetId = resolveProtectedTarget(targetAppId)?.id;
+  if (!targetId) {
     return {
       winnerShieldId: null,
       activeShieldIds: [],
-      reason: 'No target app identifier provided.',
+      reason: 'No valid protected target identifier provided.',
     };
   }
 
   const activeShieldIds = SHIELD_STRICTNESS_PRECEDENCE.filter((shieldId) => {
     const shield = shieldsState.shields[shieldId];
-    return containsTargetApp(shield, targetAppId) && isShieldActiveNow(shield, nowLocal);
+    return containsTargetApp(shield, targetId) && isShieldActiveNow(shield, nowLocal);
   });
 
   const winnerShieldId = activeShieldIds.length > 0 ? activeShieldIds[0] : null;
@@ -297,14 +300,14 @@ export function evaluateActiveShields(
     return {
       winnerShieldId: null,
       activeShieldIds,
-      reason: `No active shield matched app "${targetAppId}" at local wall-clock time.`,
+      reason: `No active shield matched protected target "${targetId}" at local wall-clock time.`,
     };
   }
 
   return {
     winnerShieldId,
     activeShieldIds,
-    reason: `Strictest active shield for "${targetAppId}" is ${winnerShieldId} (precedence: sleep > work > focus > ascent).`,
+    reason: `Strictest active shield for "${targetId}" is ${winnerShieldId} (precedence: sleep > work > focus > ascent).`,
   };
 }
 
@@ -345,7 +348,7 @@ export function applyOnboardingDefaults(
   for (const shieldId of suggested) {
     next.shields[shieldId].enabled = true;
     const appIds = Array.isArray(appIdsByShield[shieldId])
-      ? (appIdsByShield[shieldId] || []).filter((value): value is string => typeof value === 'string' && value.trim().length > 0).map(value => value.trim())
+      ? normalizeTargetIds(appIdsByShield[shieldId] || [])
       : [];
     next.shields[shieldId].protectedAppIds = appIds;
   }
