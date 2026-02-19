@@ -5,6 +5,7 @@ const config: CapacitorConfig = {
   appName: 'Miracle Worker',
   webDir: 'dist',
   plugins: {
+    SafeDriver: {},
     InAppBrowser: {
       // Plugin configuration
     },

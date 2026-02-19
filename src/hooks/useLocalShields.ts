@@ -11,12 +11,14 @@ import {
 } from '@/logic/shields';
 import { normalizeTargetIds } from '@/lib/protected-targets';
 import { loadShieldsState, saveShieldsState } from '@/storage/shieldsLocal';
+import { applyActiveShieldRestrictions } from '@/native/screenTime';
 
 export interface UseLocalShieldsResult {
   state: ShieldsState;
   isLoaded: boolean;
   hasPersistedState: boolean;
   saveState: (next: ShieldsState) => void;
+  setShieldScreenTimeSelectionBlob: (shieldId: ShieldId, blob: string | null) => void;
   setShieldEnabled: (shieldId: ShieldId, enabled: boolean) => void;
   updateShieldWindows: (shieldId: ShieldId, windows: ShieldWindow[]) => void;
   addProtectedAppId: (shieldId: ShieldId, appId: string) => void;
@@ -48,7 +50,26 @@ export const useLocalShields = (): UseLocalShieldsResult => {
     const normalized = normalizeShieldsState(next);
     setState(normalized);
     saveShieldsState(normalized);
+    applyActiveShieldRestrictions(normalized).catch(() => {
+      // best effort; ignore failures
+    });
   }, []);
+
+  const setShieldScreenTimeSelectionBlob = useCallback((shieldId: ShieldId, blob: string | null) => {
+    const current = state.shields[shieldId] || buildDefaultShield(shieldId);
+
+    saveState({
+      ...state,
+      configuredAt: state.configuredAt || new Date().toISOString(),
+      shields: {
+        ...state.shields,
+        [shieldId]: {
+          ...current,
+          screenTimeSelectionBlob: blob,
+        },
+      },
+    });
+  }, [state, saveState]);
 
   const setShieldEnabled = useCallback((shieldId: ShieldId, enabled: boolean) => {
     const current = state.shields[shieldId] || buildDefaultShield(shieldId);
@@ -188,6 +209,7 @@ export const useLocalShields = (): UseLocalShieldsResult => {
     isLoaded,
     hasPersistedState,
     saveState,
+    setShieldScreenTimeSelectionBlob,
     setShieldEnabled,
     updateShieldWindows,
     addProtectedAppId,

@@ -1,15 +1,18 @@
 import { useState } from "react";
 import { Search, Youtube, FileText, Newspaper, Cloud, MapPin, BookOpen, ShoppingBag, Mail } from "lucide-react";
 import { CathedralCard } from "@/components/ui/CathedralCard";
+import { SafeDriverCard } from "@/components/safeDriver/SafeDriverCard";
 import { QuickLink } from "@/components/ui/QuickLink";
 import { NativeWebViewBrowser } from "@/components/browser/NativeWebViewBrowser";
 import { useNativeWebView } from "@/hooks/useNativeWebView";
+import { useSafeDriverMode } from "@/hooks/useSafeDriverMode";
 
 const SafeBrowser = () => {
   const [searchQuery, setSearchQuery] = useState("");
   const [isSearching, setIsSearching] = useState(false);
   const [activeUrl, setActiveUrl] = useState<string | null>(null);
   const { isNative } = useNativeWebView();
+  const safeDriver = useSafeDriverMode();
 
   // Quick links that are generic and safe
   const quickLinks = [
@@ -71,8 +74,8 @@ const SafeBrowser = () => {
           </div>
         </div>
 
-        {/* Search Bar */}
-        <form onSubmit={handleSearch} className="w-full max-w-lg mb-10">
+      {/* Search Bar */}
+      <form onSubmit={handleSearch} className="w-full max-w-lg mb-10">
           <CathedralCard className="p-0 overflow-hidden">
             <div className="flex items-center">
               <div className="pl-4">
@@ -95,7 +98,26 @@ const SafeBrowser = () => {
               </button>
             </div>
           </CathedralCard>
-        </form>
+      </form>
+
+      {safeDriver.shouldShowBrowserCard && (
+        <div className="w-full max-w-lg mb-8">
+          <SafeDriverCard
+            mode={safeDriver.state.mode}
+            countdownRemainingMs={safeDriver.countdownRemainingMs}
+            screenTimeMessage={safeDriver.screenTimeUnavailableMessage}
+            onStart={safeDriver.startCountdown}
+            onCancel={safeDriver.cancel}
+            onOpenMusic={safeDriver.openMusic}
+            onSendCheckin={safeDriver.sendCheckinText}
+            onRememberCar={safeDriver.rememberCar}
+            onDismissCar={safeDriver.dismissCarPrompt}
+            carName={safeDriver.carName}
+            hasUnapprovedCar={safeDriver.hasUnapprovedCar}
+            showCheckinCopy={safeDriver.shouldShowCheckinCopy}
+          />
+        </div>
+      )}
 
         {/* Quick Links Grid */}
         <div className="w-full max-w-lg">

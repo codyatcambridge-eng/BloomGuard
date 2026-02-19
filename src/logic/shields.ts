@@ -16,6 +16,7 @@ export interface ShieldConfig {
   strictness: number;
   windows: ShieldWindow[]; // max 2
   protectedAppIds: string[]; // ordered
+  screenTimeSelectionBlob: string | null;
 }
 
 export interface ShieldsState {
@@ -83,6 +84,7 @@ export function buildDefaultShield(id: ShieldId): ShieldConfig {
     strictness: SHIELD_STRICTNESS_MAP[id],
     windows: DEFAULT_WINDOWS[id].map(w => ({ ...w, days: [...w.days] })),
     protectedAppIds: [],
+    screenTimeSelectionBlob: null,
   };
 }
 
@@ -234,6 +236,10 @@ export function normalizeShieldConfig(input: Partial<ShieldConfig>, id: ShieldId
     ? normalizeTargetIds(input.protectedAppIds)
     : [];
 
+  const selectionBlob = typeof input.screenTimeSelectionBlob === 'string' && input.screenTimeSelectionBlob.length > 0
+    ? input.screenTimeSelectionBlob
+    : null;
+
   return {
     id,
     label: SHIELD_LABELS[id],
@@ -241,6 +247,7 @@ export function normalizeShieldConfig(input: Partial<ShieldConfig>, id: ShieldId
     strictness: SHIELD_STRICTNESS_MAP[id],
     windows,
     protectedAppIds: appIds,
+    screenTimeSelectionBlob: selectionBlob,
   };
 }
 
@@ -309,6 +316,16 @@ export function evaluateActiveShields(
     activeShieldIds,
     reason: `Strictest active shield for "${targetId}" is ${winnerShieldId} (precedence: sleep > work > focus > ascent).`,
   };
+}
+
+export function getStrictestActiveShield(shieldsState: ShieldsState, nowLocal: Date = new Date()): ShieldConfig | null {
+  for (const shieldId of SHIELD_STRICTNESS_PRECEDENCE) {
+    const shield = shieldsState.shields[shieldId];
+    if (isShieldActiveNow(shield, nowLocal)) {
+      return shield;
+    }
+  }
+  return null;
 }
 
 export interface OnboardingAnswers {

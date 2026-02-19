@@ -4,11 +4,14 @@ import { FrictionUnlockModal } from "@/components/settings/FrictionUnlockModal";
 import { ShieldsSection } from "@/components/settings/ShieldsSection";
 import { useSettings, BlurLevel } from "@/hooks/useSettings";
 import { useLocalSettings, type BlurDialLevel } from "@/hooks/useLocalSettings";
+import { useSafeDriverMode } from "@/hooks/useSafeDriverMode";
+import { SafeDriverCard } from "@/components/safeDriver/SafeDriverCard";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { UTILITY_PASS_DURATIONS, UTILITY_PASS_REASONS } from "@/logic/utilityPass";
 
 const Settings = () => {
+  const safeDriver = useSafeDriverMode();
   const { settings, updateSetting, isLoading, deviceId } = useSettings();
   const { updateSetting: updateLocalSetting } = useLocalSettings();
   const [showFrictionModal, setShowFrictionModal] = useState(false);
@@ -295,6 +298,21 @@ const Settings = () => {
             </p>
           </div>
         </section>
+
+        <SafeDriverCard
+          mode={safeDriver.state.mode}
+          countdownRemainingMs={safeDriver.countdownRemainingMs}
+          screenTimeMessage={safeDriver.screenTimeUnavailableMessage}
+          onStart={safeDriver.startCountdown}
+          onCancel={safeDriver.cancel}
+          onOpenMusic={safeDriver.openMusic}
+          onSendCheckin={safeDriver.sendCheckinText}
+          onRememberCar={safeDriver.rememberCar}
+          onDismissCar={safeDriver.dismissCarPrompt}
+          carName={safeDriver.carName}
+          hasUnapprovedCar={safeDriver.hasUnapprovedCar}
+          showCheckinCopy={safeDriver.shouldShowCheckinCopy}
+        />
 
         {/* Shields */}
         <ShieldsSection />

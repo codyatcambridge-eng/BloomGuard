@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Shield } from 'lucide-react';
 import { useLocalShields } from '@/hooks/useLocalShields';
 import { ShieldsOnboardingModal } from '@/components/settings/ShieldsOnboardingModal';
 import { ShieldEditorModal } from '@/components/settings/ShieldEditorModal';
 import { SHIELD_STRICTNESS_PRECEDENCE, ShieldId } from '@/logic/shields';
 import { toast } from 'sonner';
+import { ScreenTime as screenTime, type ScreenTimeStatus } from '@/native/screenTime';
 
 const formatDays = (days: number[]): string => {
   if (days.length === 7) return 'Daily';
@@ -34,9 +35,12 @@ export const ShieldsSection = () => {
     updateProtectedAppId,
     removeProtectedAppId,
     moveProtectedAppId,
+    setShieldScreenTimeSelectionBlob,
   } = useLocalShields();
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [editingShieldId, setEditingShieldId] = useState<ShieldId | null>(null);
+  const [screenTimeStatusState, setScreenTimeStatusState] = useState<ScreenTimeStatus | null>(null);
+  const [isPickingScreenTimeApps, setIsPickingScreenTimeApps] = useState(false);
 
   const shouldAutoOpenOnboarding = isLoaded && !hasPersistedState;
 
@@ -52,6 +56,43 @@ export const ShieldsSection = () => {
 
   const showOneTimeCta = isLoaded && hasPersistedState && !state.onboardingDismissed;
   const editingShield = editingShieldId ? state.shields[editingShieldId] : null;
+  const refreshScreenTimeStatus = useCallback(async () => {
+    try {
+      const status = await screenTime.getScreenTimeStatus();
+      setScreenTimeStatusState(status);
+    } catch (error) {
+      console.error('Failed to get Screen Time status', error);
+      setScreenTimeStatusState({ supported: false, authorized: false, reason: 'status_error' });
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshScreenTimeStatus();
+  }, [refreshScreenTimeStatus]);
+
+  useEffect(() => {
+    if (editingShieldId) {
+      refreshScreenTimeStatus();
+    }
+  }, [editingShieldId, refreshScreenTimeStatus]);
+
+  const handleChooseScreenTimeApps = useCallback(async (shieldId: ShieldId, currentBlob: string | null) => {
+    if (!screenTimeStatusState?.supported || !screenTimeStatusState.authorized) return;
+    setIsPickingScreenTimeApps(true);
+    try {
+      const result = await screenTime.presentFamilyActivityPicker({
+        shieldId,
+        blob: currentBlob,
+      });
+      if (result?.blob) {
+        setShieldScreenTimeSelectionBlob(shieldId, result.blob);
+      }
+    } catch (error) {
+      console.error('Screen Time picker canceled or failed', error);
+    } finally {
+      setIsPickingScreenTimeApps(false);
+    }
+  }, [screenTimeStatusState, setShieldScreenTimeSelectionBlob]);
 
   return (
     <section className="cathedral-card">
@@ -157,6 +198,9 @@ export const ShieldsSection = () => {
         isOpen={editingShieldId !== null}
         shield={editingShield}
         onClose={() => setEditingShieldId(null)}
+        screenTimeStatus={screenTimeStatusState}
+        onChooseScreenTimeApps={handleChooseScreenTimeApps}
+        isPickingScreenTimeApps={isPickingScreenTimeApps}
         onToggleEnabled={setShieldEnabled}
         onSaveWindows={updateShieldWindows}
         onAddApp={addProtectedAppId}

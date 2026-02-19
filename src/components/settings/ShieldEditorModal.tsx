@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react';
 import { ChevronDown, ChevronUp, Plus, Trash2, X } from 'lucide-react';
 import { ShieldConfig, ShieldId, ShieldWindow, getShieldWindowUnionForDay } from '@/logic/shields';
+import { useCapacitor } from '@/hooks/useCapacitor';
+import { parseScreenTimeSelectionBlob, ScreenTimeStatus } from '@/native/screenTime';
 
 interface ShieldEditorModalProps {
   isOpen: boolean;
@@ -12,6 +14,9 @@ interface ShieldEditorModalProps {
   onUpdateApp: (shieldId: ShieldId, index: number, appId: string) => void;
   onRemoveApp: (shieldId: ShieldId, index: number) => void;
   onMoveApp: (shieldId: ShieldId, index: number, direction: 'up' | 'down') => void;
+  onChooseScreenTimeApps: (shieldId: ShieldId, currentBlob: string | null) => void;
+  screenTimeStatus: ScreenTimeStatus | null;
+  isPickingScreenTimeApps: boolean;
 }
 
 const DAY_OPTIONS = [
@@ -41,8 +46,12 @@ export const ShieldEditorModal = ({
   onUpdateApp,
   onRemoveApp,
   onMoveApp,
+  onChooseScreenTimeApps,
+  screenTimeStatus,
+  isPickingScreenTimeApps,
 }: ShieldEditorModalProps) => {
   const [appInput, setAppInput] = useState('');
+  const { isIOS } = useCapacitor();
 
   const overlapDetected = useMemo(() => {
     if (!shield) return false;
@@ -62,6 +71,7 @@ export const ShieldEditorModal = ({
   }, [shield]);
 
   if (!isOpen || !shield) return null;
+  const screenTimeSelection = parseScreenTimeSelectionBlob(shield.screenTimeSelectionBlob);
 
   const updateWindow = (index: number, update: Partial<ShieldWindow>) => {
     const next = [...shield.windows];
@@ -272,6 +282,38 @@ export const ShieldEditorModal = ({
                   </div>
                 ))}
               </div>
+            )}
+          </section>
+          <section className="border border-silver/20 p-3 space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm text-foreground">Choose Apps (Screen Time)</p>
+                <p className="text-xs text-muted-foreground">iOS only selection for Screen Time enforcement.</p>
+              </div>
+              <button
+                onClick={() => onChooseScreenTimeApps(shield.id, shield.screenTimeSelectionBlob)}
+                disabled={
+                  !isIOS ||
+                  isPickingScreenTimeApps ||
+                  !screenTimeStatus?.supported ||
+                  !screenTimeStatus?.authorized
+                }
+                className="px-3 h-9 text-xs rounded border border-silver/30 text-silver transition-colors hover:text-foreground hover:border-foreground disabled:opacity-40"
+              >
+                {isPickingScreenTimeApps ? 'Opening…' : 'Choose Apps'}
+              </button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {screenTimeSelection?.label || 'No Screen Time selection yet.'}
+            </p>
+            {!isIOS && (
+              <p className="text-xs text-destructive">Screen Time locking works only on iOS.</p>
+            )}
+            {screenTimeStatus && !screenTimeStatus.supported && (
+              <p className="text-xs text-destructive">Screen Time is not supported on this device.</p>
+            )}
+            {screenTimeStatus && screenTimeStatus.supported && !screenTimeStatus.authorized && (
+              <p className="text-xs text-muted-foreground">Screen Time authorization is required.</p>
             )}
           </section>
         </div>
