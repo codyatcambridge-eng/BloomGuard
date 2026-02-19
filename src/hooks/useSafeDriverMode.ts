@@ -3,21 +3,25 @@ import { toast } from 'sonner';
 import { ScreenTime as screenTime, type ScreenTimeStatus } from '@/native/screenTime';
 import { applyActiveShieldRestrictions } from '@/native/screenTime';
 import { loadShieldsState } from '@/storage/shieldsLocal';
+import { SafeDriver } from '@/plugins/SafeDriver';
 import {
   getState,
   subscribe,
   startCountdown,
   completeCountdown,
   cancelSafeDriver,
-  armSafeDriver,
   rememberDetectedCar,
-  clearDetectedCar,
+  ignoreDetectedCar,
+  setSafeDriverEnabled,
+  setAutoStartOnApprovedCar,
+  setBluetoothDetectionIdentifiers,
+  setBluetoothServiceUUIDs,
+  setBluetoothRssiThreshold,
   markCheckinShownToday,
   initializeDetection,
   SafeDriverStorage,
+  PairedCar,
 } from '@/lib/safeDriverState';
-
-const COUNTDOWN_DURATION_MS = 90_000;
 
 const buildTodayKey = () => new Date().toISOString().split('T')[0];
 
@@ -41,6 +45,21 @@ export interface UseSafeDriverModeResult {
   screenTimeUnavailableMessage: string | null;
   carName: string | null;
   hasUnapprovedCar: boolean;
+  safeDriverEnabled: boolean;
+  autoStartOnApprovedCar: boolean;
+  toggleSafeDriver: (enabled: boolean) => void;
+  toggleAutoStart: (enabled: boolean) => void;
+  registerAccessory: () => void;
+  registeringAccessory: boolean;
+  showAccessoryPicker: () => void;
+  testConnection: () => void;
+  bluetoothIdentifiersText: string;
+  bluetoothServiceUUIDsText: string;
+  bluetoothRssiThreshold: number | null;
+  updateBluetoothIdentifiers: (value: string) => void;
+  updateBluetoothServiceUUIDs: (value: string) => void;
+  updateBluetoothRssiThreshold: (value: string | number) => void;
+  pairedCars: PairedCar[];
 }
 
 export const useSafeDriverMode = (): UseSafeDriverModeResult => {
@@ -50,6 +69,7 @@ export const useSafeDriverMode = (): UseSafeDriverModeResult => {
   const [dailyCardDay, setDailyCardDay] = useState<string | null>(null);
   const [dailyCardVisible, setDailyCardVisible] = useState(false);
   const [timerTick, setTimerTick] = useState(0);
+  const [registeringAccessory, setRegisteringAccessory] = useState(false);
 
   useEffect(() => {
     const unsubscribe = subscribe(() => setState(getState()));
@@ -61,6 +81,26 @@ export const useSafeDriverMode = (): UseSafeDriverModeResult => {
   useEffect(() => {
     void initializeDetection();
   }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const config = state.bluetoothDetection;
+    void SafeDriver.configureBluetoothDetection({
+      approvedIdentifiers: config.identifiers,
+      serviceUUIDs: config.serviceUUIDs,
+      safeDriverEnabled: state.safeDriverEnabled,
+      autoStartOnApprovedCar: state.autoStartOnApprovedCar,
+      rssiThreshold: config.rssiThreshold,
+    }).catch(() => {
+      console.debug('[SafeDriver][DIAG] configureBluetoothDetection failed');
+    });
+  }, [
+    state.safeDriverEnabled,
+    state.autoStartOnApprovedCar,
+    state.bluetoothDetection.identifiers.join('|'),
+    state.bluetoothDetection.serviceUUIDs.join('|'),
+    state.bluetoothDetection.rssiThreshold,
+  ]);
 
   useEffect(() => {
     let active = true;
@@ -80,13 +120,13 @@ export const useSafeDriverMode = (): UseSafeDriverModeResult => {
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    if (state.mode !== 'COUNTDOWN' || !state.countdownExpiresAt) {
+    if (state.mode !== 'COUNTDOWN' || !state.countdownEndsAt) {
       setCountdownRemaining(null);
       return;
     }
 
     const tick = () => {
-      const end = new Date(state.countdownExpiresAt!).getTime();
+      const end = new Date(state.countdownEndsAt!).getTime();
       const remaining = Math.max(0, end - Date.now());
       setCountdownRemaining(remaining);
       if (remaining <= 0) {
@@ -99,7 +139,7 @@ export const useSafeDriverMode = (): UseSafeDriverModeResult => {
     return () => {
       window.clearInterval(interval);
     };
-  }, [state.mode, state.countdownExpiresAt]);
+  }, [state.mode, state.countdownEndsAt]);
 
   useEffect(() => {
     if (state.mode !== 'ACTIVE' && state.mode !== 'OFF') return;
@@ -142,9 +182,12 @@ export const useSafeDriverMode = (): UseSafeDriverModeResult => {
     return () => window.clearInterval(interval);
   }, []);
 
-  const hasUnapprovedCar = Boolean(state.lastDetectedCar && !state.lastDetectedCar.isApproved);
-  const countdownActive = state.mode === 'COUNTDOWN';
-  const shouldShowBrowserCard = dailyCardVisible || countdownActive || hasUnapprovedCar || state.mode === 'ARMED';
+  const hasUnapprovedCar = Boolean(
+    state.lastDetected &&
+    !state.lastDetected.isApproved &&
+    state.lastDetected.portName !== state.ignoredPortName
+  );
+  const shouldShowBrowserCard = false;
   const shouldShowCheckinCopy = dailyCardVisible;
 
   const start = () => {
@@ -185,11 +228,80 @@ export const useSafeDriverMode = (): UseSafeDriverModeResult => {
 
   const rememberCar = () => {
     rememberDetectedCar();
-    armSafeDriver();
   };
 
   const dismissCarPrompt = () => {
-    clearDetectedCar();
+    ignoreDetectedCar();
+  };
+
+  const toggleSafeDriver = (enabled: boolean) => {
+    setSafeDriverEnabled(enabled);
+  };
+
+  const toggleAutoStart = (enabled: boolean) => {
+    setAutoStartOnApprovedCar(enabled);
+  };
+
+  const presentAccessoryPicker = () => {
+    if (registeringAccessory) return;
+    setRegisteringAccessory(true);
+    void SafeDriver.showPicker()
+      .then(() => {
+        toast('Accessory picker shown. Complete setup on the device.');
+      })
+      .catch(() => {
+        toast('Accessory setup is unavailable on this device.');
+      })
+      .finally(() => {
+        setRegisteringAccessory(false);
+      });
+  };
+
+  const registerAccessory = presentAccessoryPicker;
+  const showAccessoryPicker = presentAccessoryPicker;
+
+  const testConnection = () => {
+    void SafeDriver.testHeartbeat()
+      .then((result) => {
+        if (result.seen) {
+          toast.success('Car detected. Your phone vibrated to confirm.');
+        } else {
+          toast('No paired car is currently in range.');
+        }
+      })
+      .catch(() => {
+        toast('Unable to test the connection right now.');
+      });
+  };
+
+  const parseList = (input: string) =>
+    input
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+
+  const bluetoothIdentifiersText = state.bluetoothDetection.identifiers.join('\n');
+  const bluetoothServiceUUIDsText = state.bluetoothDetection.serviceUUIDs.join('\n');
+  const bluetoothRssiThreshold = state.bluetoothDetection.rssiThreshold;
+
+  const updateBluetoothIdentifiers = (value: string) => {
+    setBluetoothDetectionIdentifiers(parseList(value));
+  };
+
+  const updateBluetoothServiceUUIDs = (value: string) => {
+    setBluetoothServiceUUIDs(parseList(value));
+  };
+
+  const updateBluetoothRssiThreshold = (value: string | number) => {
+    const normalized = typeof value === 'number' ? value.toString() : value;
+    const trimmed = normalized.trim();
+    if (!trimmed) {
+      setBluetoothRssiThreshold(null);
+      return;
+    }
+    const parsed = parseInt(trimmed, 10);
+    if (Number.isNaN(parsed)) return;
+    setBluetoothRssiThreshold(parsed);
   };
 
   const screenTimeUnavailableMessage = useMemo(() => {
@@ -212,7 +324,22 @@ export const useSafeDriverMode = (): UseSafeDriverModeResult => {
     shouldShowBrowserCard,
     shouldShowCheckinCopy,
     screenTimeUnavailableMessage,
-    carName: state.lastDetectedCar?.localizedName ?? null,
+    carName: state.lastDetected?.portName ?? null,
     hasUnapprovedCar,
+    safeDriverEnabled: state.safeDriverEnabled,
+    autoStartOnApprovedCar: state.autoStartOnApprovedCar,
+    toggleSafeDriver,
+    toggleAutoStart,
+    registerAccessory,
+    showAccessoryPicker,
+    testConnection,
+    registeringAccessory,
+    bluetoothIdentifiersText,
+    bluetoothServiceUUIDsText,
+    bluetoothRssiThreshold,
+    updateBluetoothIdentifiers,
+    updateBluetoothServiceUUIDs,
+    updateBluetoothRssiThreshold,
+    pairedCars: state.pairedCars,
   };
 };

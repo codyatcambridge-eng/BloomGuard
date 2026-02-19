@@ -7,6 +7,7 @@ import { BottomNav } from "@/components/layout/BottomNav";
 import HomeDashboard from "./pages/HomeDashboard";
 import SafeBrowser from "./pages/SafeBrowser";
 import Partners from "./pages/Partners";
+import SafeDriverSettings from "./pages/SafeDriverSettings";
 import Growth from "./pages/Growth";
 import Settings from "./pages/Settings";
 import Logs from "./pages/Logs";
@@ -34,6 +35,7 @@ const App = () => (
             <Route path="/challenges" element={<ChallengesScreen />} />
             <Route path="/share-card" element={<ShareCardPreview />} />
             <Route path="/settings" element={<Settings />} />
+            <Route path="/safe-driver" element={<SafeDriverSettings />} />
             <Route path="/logs" element={<Logs />} />
             <Route path="/admin/labels" element={<AdminLabels />} />
             <Route path="*" element={<NotFound />} />

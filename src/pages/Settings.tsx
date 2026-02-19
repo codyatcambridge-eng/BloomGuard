@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Shield, DollarSign, CreditCard, AlertTriangle, Eye, EyeOff, Coffee, Clock, Lock } from "lucide-react";
 import { FrictionUnlockModal } from "@/components/settings/FrictionUnlockModal";
 import { ShieldsSection } from "@/components/settings/ShieldsSection";
@@ -6,12 +7,14 @@ import { useSettings, BlurLevel } from "@/hooks/useSettings";
 import { useLocalSettings, type BlurDialLevel } from "@/hooks/useLocalSettings";
 import { useSafeDriverMode } from "@/hooks/useSafeDriverMode";
 import { SafeDriverCard } from "@/components/safeDriver/SafeDriverCard";
+import { PrimaryButton } from "@/components/ui/PrimaryButton";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { UTILITY_PASS_DURATIONS, UTILITY_PASS_REASONS } from "@/logic/utilityPass";
 
 const Settings = () => {
   const safeDriver = useSafeDriverMode();
+  const navigate = useNavigate();
   const { settings, updateSetting, isLoading, deviceId } = useSettings();
   const { updateSetting: updateLocalSetting } = useLocalSettings();
   const [showFrictionModal, setShowFrictionModal] = useState(false);
@@ -312,7 +315,38 @@ const Settings = () => {
           carName={safeDriver.carName}
           hasUnapprovedCar={safeDriver.hasUnapprovedCar}
           showCheckinCopy={safeDriver.shouldShowCheckinCopy}
+          safeDriverEnabled={safeDriver.safeDriverEnabled}
+          autoStartOnApprovedCar={safeDriver.autoStartOnApprovedCar}
+          onToggleSafeDriver={safeDriver.toggleSafeDriver}
+          onToggleAutoStart={safeDriver.toggleAutoStart}
+          bluetoothIdentifiersText={safeDriver.bluetoothIdentifiersText}
+          bluetoothServiceUUIDsText={safeDriver.bluetoothServiceUUIDsText}
+          bluetoothRssiThreshold={safeDriver.bluetoothRssiThreshold}
+          onUpdateBluetoothIdentifiers={safeDriver.updateBluetoothIdentifiers}
+          onUpdateBluetoothServiceUUIDs={safeDriver.updateBluetoothServiceUUIDs}
+          onUpdateBluetoothRssiThreshold={safeDriver.updateBluetoothRssiThreshold}
+          showSettingsControls
         />
+
+        <section className="cathedral-card">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="font-display text-xs uppercase tracking-[0.3em] text-muted-foreground">
+                SAFE DRIVER HUB
+              </p>
+              <h3 className="text-sm font-semibold tracking-wider">Permissions, pairing, and tuning</h3>
+              <p className="text-[11px] text-muted-foreground">
+                Launch the dedicated Safe Driver screen to inspect paired vehicles, permissions, and tune detection.
+              </p>
+            </div>
+            <PrimaryButton
+              onClick={() => navigate('/safe-driver')}
+              className="px-4 py-2 text-xs tracking-widest uppercase"
+            >
+              Open Hub
+            </PrimaryButton>
+          </div>
+        </section>
 
         {/* Shields */}
         <ShieldsSection />
