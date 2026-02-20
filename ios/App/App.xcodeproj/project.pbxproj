@@ -3,7 +3,7 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 60;
+	objectVersion = 70;
 	objects = {
 
 /* Begin PBXBuildFile section */
@@ -11,11 +11,45 @@
 		4D22ABE92AF431CB00220026 /* CapApp-SPM in Frameworks */ = {isa = PBXBuildFile; productRef = 4D22ABE82AF431CB00220026 /* CapApp-SPM */; };
 		50379B232058CBB4000EE86E /* capacitor.config.json in Resources */ = {isa = PBXBuildFile; fileRef = 50379B222058CBB4000EE86E /* capacitor.config.json */; };
 		504EC3081FED79650016851F /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 504EC3071FED79650016851F /* AppDelegate.swift */; };
+		NWGZLU7I17UUIDWUUV5HW9JT /* SafeDriverPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = LS1VSWHMH49WV86IPBLWTFNK /* SafeDriverPlugin.swift */; };
 		504EC30D1FED79650016851F /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 504EC30B1FED79650016851F /* Main.storyboard */; };
 		504EC30F1FED79650016851F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 504EC30E1FED79650016851F /* Assets.xcassets */; };
 		504EC3121FED79650016851F /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 504EC3101FED79650016851F /* LaunchScreen.storyboard */; };
 		50B271D11FEDC1A000F3C39B /* public in Resources */ = {isa = PBXBuildFile; fileRef = 50B271D01FEDC1A000F3C39B /* public */; };
+		CBEC08555B04B1CE27CDE951 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 77DFCEB619320B527B860FA2 /* PrivacyInfo.xcprivacy */; };
+		ECBB234A2F47F40200481D46 /* DeviceActivity.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = ECBB23492F47F40200481D46 /* DeviceActivity.framework */; };
+		XG5JBYMYA3D1FM5CJ2T9SQ9A /* FamilyControls.framework in Frameworks (App) */ = {isa = PBXBuildFile; fileRef = LZPZE14E1BP3RIE6N0GI90A6 /* FamilyControls.framework */; };
+		8QM6XVDXK8SEQLD0AUCH693I /* ExternalAccessory.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = W1WLE8CS9Z6K46HHZXHYCLHT /* ExternalAccessory.framework */; };
+		8D2LKCG1AO1O0TU327E6PHPK /* CoreBluetooth.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9XXHJ3XJI6FTH4BRG7I1H1UZ /* CoreBluetooth.framework */; };
+		HF41OTEWCK5H0WS95GUVAOW8 /* FamilyControls.framework in Frameworks (SafeDriverMonitor) */ = {isa = PBXBuildFile; fileRef = LZPZE14E1BP3RIE6N0GI90A6 /* FamilyControls.framework */; };
+		7X8SCFWH743GNPA0I1CRAP5H /* ManagedSettings.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 33N6ORUD9DWD69HNC7D40SCS /* ManagedSettings.framework */; };
+		ECBB23522F47F40200481D46 /* SafeDriverMonitor.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = ECBB23472F47F40200481D46 /* SafeDriverMonitor.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		A9C445B7A32A2837E4B834CA /* DeviceActivityMonitorExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0997D5FA3A25D88A6F9B432 /* SafeDriverMonitor/DeviceActivityMonitorExtension.swift */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		ECBB23502F47F40200481D46 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 504EC2FC1FED79650016851F /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = ECBB23462F47F40200481D46;
+			remoteInfo = SafeDriverMonitor;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		ECBB23532F47F40200481D46 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				ECBB23522F47F40200481D46 /* SafeDriverMonitor.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		2FAD9762203C412B000D30F8 /* config.xml */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = config.xml; sourceTree = "<group>"; };
@@ -26,9 +60,33 @@
 		504EC30E1FED79650016851F /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		504EC3111FED79650016851F /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		504EC3131FED79650016851F /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		E32UEQYYDC1MNB72OJCVN02Q /* App.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = App.entitlements; sourceTree = "<group>"; };
+		LS1VSWHMH49WV86IPBLWTFNK /* SafeDriverPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafeDriverPlugin.swift; sourceTree = "<group>"; };
+		77DFCEB619320B527B860FA2 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; name = PrivacyInfo.xcprivacy; lastKnownFileType = text.plist.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		50B271D01FEDC1A000F3C39B /* public */ = {isa = PBXFileReference; lastKnownFileType = folder; path = public; sourceTree = "<group>"; };
+		F0997D5FA3A25D88A6F9B432 /* SafeDriverMonitor/DeviceActivityMonitorExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafeDriverMonitor/DeviceActivityMonitorExtension.swift; sourceTree = "<group>"; };
 		958DCC722DB07C7200EA8C5F /* debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = debug.xcconfig; path = ../debug.xcconfig; sourceTree = SOURCE_ROOT; };
+		ECBB23472F47F40200481D46 /* SafeDriverMonitor.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = SafeDriverMonitor.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		ECBB23492F47F40200481D46 /* DeviceActivity.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = DeviceActivity.framework; path = System/Library/Frameworks/DeviceActivity.framework; sourceTree = SDKROOT; };
+		LZPZE14E1BP3RIE6N0GI90A6 /* FamilyControls.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; path = System/Library/Frameworks/FamilyControls.framework; sourceTree = SDKROOT; };
+		W1WLE8CS9Z6K46HHZXHYCLHT /* ExternalAccessory.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; path = System/Library/Frameworks/ExternalAccessory.framework; sourceTree = SDKROOT; };
+		9XXHJ3XJI6FTH4BRG7I1H1UZ /* CoreBluetooth.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; path = System/Library/Frameworks/CoreBluetooth.framework; sourceTree = SDKROOT; };
+		33N6ORUD9DWD69HNC7D40SCS /* ManagedSettings.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; path = System/Library/Frameworks/ManagedSettings.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		ECBB23562F47F40200481D46 /* PBXFileSystemSynchronizedBuildFileExceptionSet */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = ECBB23462F47F40200481D46 /* SafeDriverMonitor */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		ECBB234B2F47F40200481D46 /* SafeDriverMonitor */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (ECBB23562F47F40200481D46 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = SafeDriverMonitor; sourceTree = "<group>"; };
+/* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		504EC3011FED79650016851F /* Frameworks */ = {
@@ -36,6 +94,19 @@
 			buildActionMask = 2147483647;
 			files = (
 				4D22ABE92AF431CB00220026 /* CapApp-SPM in Frameworks */,
+				XG5JBYMYA3D1FM5CJ2T9SQ9A /* FamilyControls.framework in Frameworks (App) */,
+				8QM6XVDXK8SEQLD0AUCH693I /* ExternalAccessory.framework in Frameworks */,
+				8D2LKCG1AO1O0TU327E6PHPK /* CoreBluetooth.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		ECBB23442F47F40200481D46 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				ECBB234A2F47F40200481D46 /* DeviceActivity.framework in Frameworks */,
+				HF41OTEWCK5H0WS95GUVAOW8 /* FamilyControls.framework in Frameworks (SafeDriverMonitor) */,
+				7X8SCFWH743GNPA0I1CRAP5H /* ManagedSettings.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -47,6 +118,8 @@
 			children = (
 				958DCC722DB07C7200EA8C5F /* debug.xcconfig */,
 				504EC3061FED79650016851F /* App */,
+				ECBB234B2F47F40200481D46 /* SafeDriverMonitor */,
+				ECBB23482F47F40200481D46 /* Frameworks */,
 				504EC3051FED79650016851F /* Products */,
 			);
 			sourceTree = "<group>";
@@ -55,6 +128,7 @@
 			isa = PBXGroup;
 			children = (
 				504EC3041FED79650016851F /* App.app */,
+				ECBB23472F47F40200481D46 /* SafeDriverMonitor.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -64,14 +138,29 @@
 			children = (
 				50379B222058CBB4000EE86E /* capacitor.config.json */,
 				504EC3071FED79650016851F /* AppDelegate.swift */,
+				LS1VSWHMH49WV86IPBLWTFNK /* SafeDriverPlugin.swift */,
 				504EC30B1FED79650016851F /* Main.storyboard */,
 				504EC30E1FED79650016851F /* Assets.xcassets */,
 				504EC3101FED79650016851F /* LaunchScreen.storyboard */,
 				504EC3131FED79650016851F /* Info.plist */,
+				E32UEQYYDC1MNB72OJCVN02Q /* App.entitlements */,
+				77DFCEB619320B527B860FA2 /* PrivacyInfo.xcprivacy */,
 				2FAD9762203C412B000D30F8 /* config.xml */,
 				50B271D01FEDC1A000F3C39B /* public */,
 			);
 			path = App;
+			sourceTree = "<group>";
+		};
+		ECBB23482F47F40200481D46 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				ECBB23492F47F40200481D46 /* DeviceActivity.framework */,
+				LZPZE14E1BP3RIE6N0GI90A6 /* FamilyControls.framework */,
+				W1WLE8CS9Z6K46HHZXHYCLHT /* ExternalAccessory.framework */,
+				9XXHJ3XJI6FTH4BRG7I1H1UZ /* CoreBluetooth.framework */,
+				33N6ORUD9DWD69HNC7D40SCS /* ManagedSettings.framework */,
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -84,10 +173,12 @@
 				504EC3001FED79650016851F /* Sources */,
 				504EC3011FED79650016851F /* Frameworks */,
 				504EC3021FED79650016851F /* Resources */,
+				ECBB23532F47F40200481D46 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				ECBB23512F47F40200481D46 /* PBXTargetDependency */,
 			);
 			name = App;
 			packageProductDependencies = (
@@ -97,19 +188,44 @@
 			productReference = 504EC3041FED79650016851F /* App.app */;
 			productType = "com.apple.product-type.application";
 		};
+		ECBB23462F47F40200481D46 /* SafeDriverMonitor */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = ECBB23572F47F40200481D46 /* Build configuration list for PBXNativeTarget "SafeDriverMonitor" */;
+			buildPhases = (
+				ECBB23432F47F40200481D46 /* Sources */,
+				ECBB23442F47F40200481D46 /* Frameworks */,
+				ECBB23452F47F40200481D46 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				ECBB234B2F47F40200481D46 /* SafeDriverMonitor */,
+			);
+			name = SafeDriverMonitor;
+			packageProductDependencies = (
+			);
+			productName = SafeDriverMonitor;
+			productReference = ECBB23472F47F40200481D46 /* SafeDriverMonitor.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
 		504EC2FC1FED79650016851F /* Project object */ = {
 			isa = PBXProject;
 			attributes = {
-				LastSwiftUpdateCheck = 0920;
+				LastSwiftUpdateCheck = 2620;
 				LastUpgradeCheck = 0920;
 				TargetAttributes = {
 					504EC3031FED79650016851F = {
 						CreatedOnToolsVersion = 9.2;
 						LastSwiftMigration = 1100;
 						ProvisioningStyle = Automatic;
+					};
+					ECBB23462F47F40200481D46 = {
+						CreatedOnToolsVersion = 26.2;
 					};
 				};
 			};
@@ -130,6 +246,7 @@
 			projectRoot = "";
 			targets = (
 				504EC3031FED79650016851F /* App */,
+				ECBB23462F47F40200481D46 /* SafeDriverMonitor */,
 			);
 		};
 /* End PBXProject section */
@@ -145,6 +262,14 @@
 				50379B232058CBB4000EE86E /* capacitor.config.json in Resources */,
 				504EC30D1FED79650016851F /* Main.storyboard in Resources */,
 				2FAD9763203C412B000D30F8 /* config.xml in Resources */,
+				CBEC08555B04B1CE27CDE951 /* PrivacyInfo.xcprivacy in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		ECBB23452F47F40200481D46 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -156,10 +281,27 @@
 			buildActionMask = 2147483647;
 			files = (
 				504EC3081FED79650016851F /* AppDelegate.swift in Sources */,
+				NWGZLU7I17UUIDWUUV5HW9JT /* SafeDriverPlugin.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		ECBB23432F47F40200481D46 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A9C445B7A32A2837E4B834CA /* DeviceActivityMonitorExtension.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		ECBB23512F47F40200481D46 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = ECBB23462F47F40200481D46 /* SafeDriverMonitor */;
+			targetProxy = ECBB23502F47F40200481D46 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin PBXVariantGroup section */
 		504EC30B1FED79650016851F /* Main.storyboard */ = {
@@ -230,7 +372,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MTL_ENABLE_DEBUG_INFO = YES;
 				ONLY_ACTIVE_ARCH = YES;
 				SDKROOT = iphoneos;
@@ -281,7 +423,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				SDKROOT = iphoneos;
 				SWIFT_COMPILATION_MODE = wholemodule;
@@ -298,7 +440,8 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				INFOPLIST_FILE = App/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				CODE_SIGN_ENTITLEMENTS = App/App.entitlements;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -320,7 +463,8 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				INFOPLIST_FILE = App/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				CODE_SIGN_ENTITLEMENTS = App/App.entitlements;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -329,6 +473,86 @@
 				PRODUCT_BUNDLE_IDENTIFIER = bet.goodcreation.miracleworker;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		ECBB23542F47F40200481D46 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CODE_SIGN_ENTITLEMENTS = SafeDriverMonitor/SafeDriverMonitor.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = SafeDriverMonitor/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = SafeDriverMonitor;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MARKETING_VERSION = 1.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = bet.goodcreation.miracleworker.SafeDriverMonitor;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		ECBB23552F47F40200481D46 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CODE_SIGN_ENTITLEMENTS = SafeDriverMonitor/SafeDriverMonitor.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = SafeDriverMonitor/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = SafeDriverMonitor;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MARKETING_VERSION = 1.0;
+				MTL_FAST_MATH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = bet.goodcreation.miracleworker.SafeDriverMonitor;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -351,6 +575,15 @@
 			buildConfigurations = (
 				504EC3171FED79650016851F /* Debug */,
 				504EC3181FED79650016851F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		ECBB23572F47F40200481D46 /* Build configuration list for PBXNativeTarget "SafeDriverMonitor" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				ECBB23542F47F40200481D46 /* Debug */,
+				ECBB23552F47F40200481D46 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

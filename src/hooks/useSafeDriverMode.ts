@@ -245,7 +245,7 @@ export const useSafeDriverMode = (): UseSafeDriverModeResult => {
   const presentAccessoryPicker = () => {
     if (registeringAccessory) return;
     setRegisteringAccessory(true);
-    void SafeDriver.showPicker()
+    void SafeDriver.startPairing()
       .then(() => {
         toast('Accessory picker shown. Complete setup on the device.');
       })

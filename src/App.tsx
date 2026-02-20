@@ -16,6 +16,7 @@ import AdminLabels from "./pages/AdminLabels";
 import ChallengesScreen from "./pages/ChallengesScreen";
 import ShareCardPreview from "./pages/ShareCardPreview";
 import PartnerRequestsScreen from "./pages/PartnerRequestsScreen";
+import SafeDriverDashboard from "./pages/SafeDriverDashboard";
 
 const queryClient = new QueryClient();
 
@@ -28,6 +29,7 @@ const App = () => (
         <div className="min-h-screen bg-background">
           <Routes>
             <Route path="/" element={<HomeDashboard />} />
+            <Route path="/safe-driver/dashboard" element={<SafeDriverDashboard />} />
             <Route path="/browser" element={<SafeBrowser />} />
             <Route path="/partners" element={<Partners />} />
             <Route path="/partner-requests" element={<PartnerRequestsScreen />} />

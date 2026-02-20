@@ -8,6 +8,7 @@ import type {
   SafeDriverPermissionSnapshot,
   SafeDriverPlugin,
   SafeDriverScreenTimeAuthorizationResponse,
+  SafeDriverStatus,
   SafeDriverPairedCarsEvent,
 } from './SafeDriver';
 import { type PluginListenerHandle } from '@capacitor/core';
@@ -26,11 +27,15 @@ export class SafeDriverWeb implements SafeDriverPlugin {
   }
 
   async registerAccessory(): Promise<void> {
-    return;
+    return this.startPairing();
   }
 
   async showPicker(): Promise<void> {
-    console.debug('[SafeDriver][WEB] showPicker is not supported in the web preview');
+    return this.startPairing();
+  }
+
+  async startPairing(): Promise<void> {
+    console.debug('[SafeDriver][WEB] startPairing is not supported in the web preview');
   }
 
   async getBluetoothStatus(): Promise<SafeDriverBluetoothStatus> {
@@ -80,6 +85,10 @@ export class SafeDriverWeb implements SafeDriverPlugin {
     };
   }
 
+  async requestPermissions(): Promise<SafeDriverPermissionSnapshot> {
+    return this.checkPermissions();
+  }
+
   async requestScreenTimeAuth(): Promise<SafeDriverScreenTimeAuthorizationResponse> {
     return {
       supported: false,
@@ -90,6 +99,13 @@ export class SafeDriverWeb implements SafeDriverPlugin {
 
   async testHeartbeat(): Promise<{ seen: boolean }> {
     return { seen: false };
+  }
+
+  async getCurrentStatus(): Promise<SafeDriverStatus> {
+    return {
+      safeModeActive: false,
+      connectedVehicleName: null,
+    };
   }
 
   async addListener(

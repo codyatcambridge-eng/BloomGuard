@@ -86,6 +86,11 @@ export interface SafeDriverScreenTimeAuthorizationResponse {
   status: SafeDriverScreenTimeStatusType;
 }
 
+export interface SafeDriverStatus {
+  safeModeActive: boolean;
+  connectedVehicleName: string | null;
+}
+
 export interface SafeDriverPlugin {
   getCurrentRoute(): Promise<SafeDriverCarRouteEvent>;
   configureBluetoothDetection(
@@ -93,10 +98,13 @@ export interface SafeDriverPlugin {
   ): Promise<void>;
   registerAccessory(): Promise<void>;
   showPicker(): Promise<void>;
+  startPairing(): Promise<void>;
   getBluetoothStatus(): Promise<SafeDriverBluetoothStatus>;
   getLiveActivityStatus(): Promise<SafeDriverLiveActivityStatus>;
   checkPermissions(): Promise<SafeDriverPermissionSnapshot>;
+  requestPermissions(): Promise<SafeDriverPermissionSnapshot>;
   requestScreenTimeAuth(): Promise<SafeDriverScreenTimeAuthorizationResponse>;
+  getCurrentStatus(): Promise<SafeDriverStatus>;
   testHeartbeat(): Promise<{ seen: boolean }>;
   openSettings(): Promise<{ opened: boolean }>;
   addListener(
