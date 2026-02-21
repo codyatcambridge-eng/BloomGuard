@@ -69,7 +69,7 @@
     
     /* Cathedral Gradients */
     --gradient-cathedral: linear-gradient(180deg, hsl(220 50% 10%) 0%, hsl(220 60% 4%) 50%, hsl(220 50% 6%) 100%);
-    --gradient-marble: radial-gradient(ellipse at 30% 20%, hsl(30 20% 12%) 0%, hsl(220 60% 4%) 50%, hsl(220 70% 2%) 100%);
+    --gradient-marble: radial-gradient(120% 130% at 12% 8%, hsl(210 100% 58%) 0%, hsl(218 72% 18%) 42%, hsl(226 75% 7%) 100%);
     --gradient-gold: linear-gradient(135deg, hsl(45 100% 55%) 0%, hsl(45 80% 40%) 100%);
     --gradient-gold-shine: linear-gradient(135deg, hsl(45 100% 65%) 0%, hsl(45 100% 50%) 50%, hsl(45 80% 40%) 100%);
     --gradient-silver: linear-gradient(135deg, hsl(220 10% 70%) 0%, hsl(220 15% 50%) 100%);
@@ -111,12 +111,14 @@
   /* Cathedral Card - Main container style */
   .cathedral-card {
     @apply relative rounded-lg p-4;
-    background: linear-gradient(145deg, hsl(220 45% 10%) 0%, hsl(220 50% 7%) 100%);
-    border: 1px solid hsl(45 60% 40% / 0.3);
-    box-shadow: 
-      inset 0 1px 0 hsl(45 60% 50% / 0.1),
-      inset 0 -1px 0 hsl(220 50% 3% / 0.5),
-      0 4px 20px hsl(220 100% 3% / 0.6);
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    backdrop-filter: blur(20px) saturate(180%);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.18),
+      0 12px 40px rgba(1, 9, 32, 0.45);
+    overflow: hidden;
   }
 
   .cathedral-card::before {
@@ -126,18 +128,21 @@
     left: 0;
     right: 0;
     height: 1px;
-    background: linear-gradient(90deg, transparent, hsl(45 60% 50% / 0.3), transparent);
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.35), transparent);
+    pointer-events: none;
   }
 
   /* Silver Tablet - Secondary container */
   .silver-tablet {
     @apply relative rounded-lg p-4;
-    background: linear-gradient(145deg, hsl(220 20% 18%) 0%, hsl(220 25% 12%) 100%);
-    border: 1px solid hsl(220 15% 40% / 0.3);
-    box-shadow: 
-      inset 0 1px 0 hsl(220 10% 50% / 0.15),
-      inset 0 -1px 0 hsl(220 20% 8% / 0.3),
-      0 4px 20px hsl(220 100% 3% / 0.5);
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    backdrop-filter: blur(20px) saturate(180%);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.18),
+      0 12px 40px rgba(1, 9, 32, 0.45);
+    overflow: hidden;
   }
 
   /* Gold Border Frame */
@@ -164,48 +169,98 @@
   /* Primary Gold Button */
   .gold-button {
     @apply relative px-6 py-3 font-display text-sm tracking-wider;
-    background: linear-gradient(135deg, hsl(45 100% 55%) 0%, hsl(45 80% 42%) 100%);
-    color: hsl(220 60% 8%);
-    border: 1px solid hsl(45 80% 60% / 0.5);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.32) 0%, rgba(255, 255, 255, 0.11) 48%, rgba(255, 255, 255, 0.02) 100%);
+    color: hsl(210 100% 97%);
+    border: 1px solid rgba(255, 255, 255, 0.24);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    backdrop-filter: blur(20px) saturate(180%);
     box-shadow: 
-      0 0 20px hsl(45 100% 50% / 0.3),
-      inset 0 1px 0 hsl(45 100% 70% / 0.3);
+      0 0 15px rgba(0, 191, 255, 0.4),
+      inset 0 1px 0 rgba(255, 255, 255, 0.34),
+      inset 0 -1px 0 rgba(255, 255, 255, 0.1);
     transition: all 0.2s ease;
   }
 
   .gold-button:hover {
     box-shadow: 
-      0 0 30px hsl(45 100% 50% / 0.5),
-      inset 0 1px 0 hsl(45 100% 70% / 0.4);
+      0 0 20px rgba(0, 191, 255, 0.5),
+      inset 0 1px 0 rgba(255, 255, 255, 0.45),
+      inset 0 -1px 0 rgba(255, 255, 255, 0.14);
     transform: translateY(-1px);
   }
 
   .gold-button:active {
     transform: translateY(0);
     box-shadow: 
-      0 0 15px hsl(45 100% 50% / 0.3),
-      inset 0 2px 4px hsl(45 60% 30% / 0.3);
+      0 0 12px rgba(0, 191, 255, 0.35),
+      inset 0 2px 6px rgba(5, 18, 48, 0.35);
   }
 
   /* Secondary Silver Button */
   .silver-button {
     @apply px-5 py-2.5 font-display text-xs tracking-wider;
-    background: linear-gradient(135deg, hsl(220 15% 22%) 0%, hsl(220 20% 16%) 100%);
-    color: hsl(220 10% 70%);
-    border: 1px solid hsl(220 15% 35% / 0.5);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.3) 0%, rgba(255, 255, 255, 0.1) 48%, rgba(255, 255, 255, 0.02) 100%);
+    color: hsl(210 100% 96%);
+    border: 1px solid rgba(255, 255, 255, 0.24);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    backdrop-filter: blur(20px) saturate(180%);
+    box-shadow:
+      0 0 15px rgba(0, 191, 255, 0.4),
+      inset 0 1px 0 rgba(255, 255, 255, 0.34),
+      inset 0 -1px 0 rgba(255, 255, 255, 0.1);
     transition: all 0.2s ease;
   }
 
   .silver-button:hover {
-    background: linear-gradient(135deg, hsl(220 15% 26%) 0%, hsl(220 20% 20%) 100%);
-    border-color: hsl(220 15% 45% / 0.6);
-    color: hsl(220 10% 85%);
+    border-color: rgba(255, 255, 255, 0.35);
+    color: hsl(210 100% 98%);
+    box-shadow:
+      0 0 20px rgba(0, 191, 255, 0.5),
+      inset 0 1px 0 rgba(255, 255, 255, 0.45),
+      inset 0 -1px 0 rgba(255, 255, 255, 0.14);
+  }
+
+  .warroom-bg button:not([role='switch']),
+  .theme-stone-button,
+  .theme-bronze-button,
+  .theme-iron-button,
+  .theme-gold-button,
+  .theme-champ-button {
+    position: relative;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.24);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.3) 0%, rgba(255, 255, 255, 0.11) 48%, rgba(255, 255, 255, 0.03) 100%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    backdrop-filter: blur(20px) saturate(180%);
+    box-shadow:
+      0 0 15px rgba(0, 191, 255, 0.4),
+      inset 0 1px 0 rgba(255, 255, 255, 0.34),
+      inset 0 -1px 0 rgba(255, 255, 255, 0.1);
+  }
+
+  .warroom-bg button:not([role='switch'])::before,
+  .theme-stone-button::before,
+  .theme-bronze-button::before,
+  .theme-iron-button::before,
+  .theme-gold-button::before,
+  .theme-champ-button::before {
+    content: '';
+    position: absolute;
+    inset: 1px;
+    border-radius: inherit;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.38) 0%, rgba(255, 255, 255, 0) 58%);
+    pointer-events: none;
   }
 
   /* War Room Background */
   .warroom-bg {
-    background: var(--gradient-marble);
+    background: radial-gradient(120% 130% at 12% 8%, #1f83ff 0%, #0f3272 42%, #050c23 100%);
     position: relative;
+    isolation: isolate;
+  }
+
+  .liquid-glass-stage {
+    background-color: rgba(4, 12, 36, 0.35);
   }
 
   .warroom-bg::before {
@@ -213,9 +268,22 @@
     position: absolute;
     inset: 0;
     background: 
-      radial-gradient(ellipse 80% 40% at 50% 0%, hsl(45 100% 50% / 0.03) 0%, transparent 50%),
-      radial-gradient(circle at 20% 80%, hsl(220 60% 15% / 0.3) 0%, transparent 40%),
-      radial-gradient(circle at 80% 20%, hsl(220 50% 12% / 0.4) 0%, transparent 35%);
+      radial-gradient(circle at 18% 12%, rgba(78, 176, 255, 0.38) 0%, rgba(78, 176, 255, 0) 42%),
+      radial-gradient(circle at 84% 18%, rgba(0, 140, 255, 0.3) 0%, rgba(0, 140, 255, 0) 40%),
+      radial-gradient(circle at 50% 100%, rgba(3, 14, 46, 0.95) 0%, rgba(3, 14, 46, 0) 45%);
+    pointer-events: none;
+  }
+
+  .warroom-bg::after {
+    content: '';
+    position: absolute;
+    top: -20%;
+    left: -140%;
+    width: 80%;
+    height: 160%;
+    background: linear-gradient(110deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0.4) 50%, rgba(255, 255, 255, 0) 100%);
+    transform: skewX(-18deg);
+    animation: glimmer 8s linear infinite;
     pointer-events: none;
   }
 
@@ -227,8 +295,8 @@
     transform: translateX(-50%);
     width: 2px;
     height: 100px;
-    background: linear-gradient(180deg, hsl(45 100% 60%) 0%, hsl(45 100% 50% / 0.5) 50%, transparent 100%);
-    box-shadow: 0 0 30px 10px hsl(45 100% 50% / 0.3);
+    background: linear-gradient(180deg, rgba(145, 218, 255, 0.95) 0%, rgba(0, 191, 255, 0.55) 50%, transparent 100%);
+    box-shadow: 0 0 30px 10px rgba(0, 191, 255, 0.3);
   }
 
   /* Stat Colors */
@@ -488,6 +556,40 @@
     box-shadow: 0 0 12px hsl(45 100% 50% / 0.3);
   }
 
+  .theme-stone-card,
+  .theme-bronze-card,
+  .theme-iron-card,
+  .theme-gold-card,
+  .theme-champ-card {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    backdrop-filter: blur(20px) saturate(180%);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.18),
+      0 12px 40px rgba(1, 9, 32, 0.45);
+    overflow: hidden;
+  }
+
+  .cathedral-card::after,
+  .silver-tablet::after,
+  .theme-stone-card::after,
+  .theme-bronze-card::after,
+  .theme-iron-card::after,
+  .theme-gold-card::after,
+  .theme-champ-card::after {
+    content: '';
+    position: absolute;
+    top: -20%;
+    left: -140%;
+    width: 80%;
+    height: 160%;
+    background: linear-gradient(110deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0.4) 50%, rgba(255, 255, 255, 0) 100%);
+    transform: skewX(-18deg);
+    animation: glimmer 8s linear infinite;
+    pointer-events: none;
+  }
+
   /* Bronze accent color class */
   .text-accent-bronze {
     color: hsl(30 55% 55%);
@@ -496,6 +598,15 @@
 
 @layer utilities {
   /* Animations */
+  @keyframes glimmer {
+    0% {
+      transform: translateX(-160%) skewX(-18deg);
+    }
+    100% {
+      transform: translateX(290%) skewX(-18deg);
+    }
+  }
+
   .animate-pulse-gold {
     animation: pulse-gold 3s ease-in-out infinite;
   }
@@ -554,6 +665,17 @@
     .animate-shimmer,
     .animate-sway,
     .animate-glow-pulse {
+      animation: none;
+    }
+
+    .warroom-bg::after,
+    .cathedral-card::after,
+    .silver-tablet::after,
+    .theme-stone-card::after,
+    .theme-bronze-card::after,
+    .theme-iron-card::after,
+    .theme-gold-card::after,
+    .theme-champ-card::after {
       animation: none;
     }
   }

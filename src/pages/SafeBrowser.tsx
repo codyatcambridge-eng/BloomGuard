@@ -51,26 +51,26 @@ const SafeBrowser = () => {
 
   // Homepage view
   return (
-    <div className="min-h-screen pb-24 warroom-bg relative overflow-hidden">
+    <div className="min-h-screen pb-24 warroom-bg liquid-glass-stage relative overflow-hidden">
       {/* Golden beam accent */}
       <div className="golden-beam" />
       
       {/* Atmospheric overlay - calmer for browser */}
       <div className="absolute inset-0 pointer-events-none">
-        <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[600px] h-[300px] bg-gradient-to-b from-gold/3 via-transparent to-transparent blur-3xl" />
+        <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[600px] h-[300px] bg-gradient-to-b from-white/20 via-sky-200/5 to-transparent blur-3xl" />
       </div>
 
       {/* Main Content */}
       <main className="relative z-10 flex flex-col items-center justify-center min-h-[70vh] px-6 pt-16">
         {/* Brand Title */}
         <div className="text-center mb-10">
-          <h1 className="font-display text-4xl text-gold tracking-wider mb-2 italic">
+          <h1 className="font-display text-4xl text-white tracking-wider mb-2 italic">
             GoodCreation.bet
           </h1>
           <div className="flex items-center justify-center gap-3">
-            <span className="text-gold/40">◆</span>
-            <p className="text-silver text-sm tracking-widest">Safe Surfing</p>
-            <span className="text-gold/40">◆</span>
+            <span className="text-white/40">◆</span>
+            <p className="text-white/70 text-sm tracking-widest">Safe Surfing</p>
+            <span className="text-white/40">◆</span>
           </div>
         </div>
 
@@ -79,20 +79,20 @@ const SafeBrowser = () => {
           <CathedralCard className="p-0 overflow-hidden">
             <div className="flex items-center">
               <div className="pl-4">
-                <Search className="w-5 h-5 text-silver" />
+                <Search className="w-5 h-5 text-white/75" />
               </div>
               <input
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Search the web safely..."
-                className="flex-1 bg-transparent px-4 py-4 text-foreground placeholder:text-silver/50 focus:outline-none"
+                className="flex-1 bg-transparent px-4 py-4 text-white placeholder:text-white/50 focus:outline-none"
                 autoFocus
               />
               <button
                 type="submit"
                 disabled={isSearching}
-                className="px-6 py-4 bg-cathedral-steel/50 text-silver font-display text-sm tracking-wider hover:bg-cathedral-steel/70 transition-colors border-l border-gold/20"
+                className="px-6 py-4 bg-white/10 text-white/90 font-display text-sm tracking-wider hover:bg-white/20 transition-colors border-l border-white/25"
               >
                 Search
               </button>
@@ -137,7 +137,7 @@ const SafeBrowser = () => {
 
       {/* Footer */}
       <footer className="absolute bottom-24 left-0 right-0 px-6 text-center">
-        <p className="text-[10px] text-silver/40 font-display tracking-widest">
+        <p className="text-[10px] text-white/45 font-display tracking-widest">
           GOODCREATION SAFE BROWSER
         </p>
       </footer>
