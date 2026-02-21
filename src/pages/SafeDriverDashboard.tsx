@@ -17,6 +17,7 @@ const SafeDriverDashboard = () => {
   const [isCheckingPermissions, setIsCheckingPermissions] = useState(true);
   const [isRequestingPermissions, setIsRequestingPermissions] = useState(false);
   const [isPairing, setIsPairing] = useState(false);
+  const [isPresentingShieldPicker, setIsPresentingShieldPicker] = useState(false);
   const [isStatusLoading, setIsStatusLoading] = useState(true);
 
   const permissionsGranted = Boolean(permissionSnapshot?.screenTime?.authorized);
@@ -90,6 +91,19 @@ const SafeDriverDashboard = () => {
       setIsPairing(false);
     }
   };
+
+  const handlePresentFamilyActivityPicker = useCallback(async () => {
+    setIsPresentingShieldPicker(true);
+    try {
+      await SafeDriver.presentFamilyActivityPicker();
+      void refreshPermissions();
+      void refreshStatus();
+    } catch (error) {
+      console.warn('SafeDriver presentFamilyActivityPicker failed', error);
+    } finally {
+      setIsPresentingShieldPicker(false);
+    }
+  }, [refreshPermissions, refreshStatus]);
 
   const dynamicIslandStyle = useMemo(() => {
     if (!safeDriverStatus.safeModeActive) {
@@ -177,6 +191,15 @@ const SafeDriverDashboard = () => {
           ) : (
             <div className="mt-6 space-y-3 text-sm text-white/80">
               <p>Safe Driver is authorized and ready to protect your drive. Pair a vehicle or refresh the status to keep everything in sync.</p>
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                <button
+                  className="flex-1 rounded-2xl border border-emerald-400/60 bg-emerald-500/10 px-5 py-3 text-sm font-semibold text-emerald-100 transition hover:border-emerald-300/80 disabled:cursor-not-allowed disabled:border-emerald-500/30 disabled:text-emerald-400"
+                  onClick={handlePresentFamilyActivityPicker}
+                  disabled={isPresentingShieldPicker}
+                >
+                  {isPresentingShieldPicker ? 'Saving selection…' : 'Configure Shield apps'}
+                </button>
+              </div>
             </div>
           )}
 

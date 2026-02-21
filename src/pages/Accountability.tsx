@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { Users, UserPlus, Copy, Check, Clock, XCircle, CheckCircle, Loader2, Send } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useDeviceId } from "@/hooks/useDeviceId";
+import { setOverrideExpiresAt } from "@/lib/safeDriverState";
 import { toast } from "sonner";
 
 interface Partner {
@@ -38,6 +39,41 @@ const Accountability = () => {
     if (deviceId) {
       loadData();
     }
+  }, [deviceId]);
+
+  useEffect(() => {
+    if (!deviceId) return;
+
+    const channel = supabase
+      .channel(`override-requests-${deviceId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'override_requests',
+          filter: `requester_device_id=eq.${deviceId},status=eq.approved`,
+        },
+        (payload) => {
+          const approved = payload.new;
+          if (!approved) return;
+          setOverrideExpiresAt(approved.expires_at ?? null);
+          setOverrideRequests((prev) => {
+            const exists = prev.some((request) => request.id === approved.id);
+            if (exists) {
+              return prev.map((request) =>
+                request.id === approved.id ? approved : request
+              );
+            }
+            return [approved, ...prev];
+          });
+        }
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
   }, [deviceId]);
 
   const loadData = async () => {

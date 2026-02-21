@@ -104,6 +104,8 @@ export interface SafeDriverPlugin {
   checkPermissions(): Promise<SafeDriverPermissionSnapshot>;
   requestPermissions(): Promise<SafeDriverPermissionSnapshot>;
   requestScreenTimeAuth(): Promise<SafeDriverScreenTimeAuthorizationResponse>;
+  presentFamilyActivityPicker(): Promise<void>;
+  requestTemporaryBreak(): Promise<void>;
   getCurrentStatus(): Promise<SafeDriverStatus>;
   testHeartbeat(): Promise<{ seen: boolean }>;
   openSettings(): Promise<{ opened: boolean }>;

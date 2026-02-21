@@ -97,6 +97,14 @@ export class SafeDriverWeb implements SafeDriverPlugin {
     };
   }
 
+  async presentFamilyActivityPicker(): Promise<void> {
+    return Promise.reject(new Error('Family Activity picker is not supported in the web preview'));
+  }
+
+  async requestTemporaryBreak(): Promise<void> {
+    return Promise.reject(new Error('Temporary break is not supported in the web preview'));
+  }
+
   async testHeartbeat(): Promise<{ seen: boolean }> {
     return { seen: false };
   }

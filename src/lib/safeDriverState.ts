@@ -48,6 +48,7 @@ export interface SafeDriverStorage {
   lastCheckinDate: string | null;
   accountabilityPartnerPhone: string | null;
   pairedCars: PairedCar[];
+  overrideExpiresAt: string | null;
 }
 
 export interface SafeDriverSelection {
@@ -76,6 +77,7 @@ const DEFAULT_STATE: SafeDriverStorage = {
   lastCheckinDate: null,
   accountabilityPartnerPhone: null,
   pairedCars: [],
+  overrideExpiresAt: null,
 };
 
 let state: SafeDriverStorage = DEFAULT_STATE;
@@ -123,6 +125,9 @@ function load() {
             ? parsedBluetooth!.rssiThreshold
             : DEFAULT_BLUETOOTH_DETECTION.rssiThreshold,
       };
+      const overrideFromParsed = typeof parsed.overrideExpiresAt === 'string' ? parsed.overrideExpiresAt : null;
+      const overrideFromStorage =
+        overrideFromParsed || window.localStorage.getItem('overrideExpiresAt');
       state = {
         ...DEFAULT_STATE,
         ...parsed,
@@ -134,6 +139,7 @@ function load() {
           typeof parsed.accountabilityPartnerPhone === 'string'
             ? parsed.accountabilityPartnerPhone
             : null,
+        overrideExpiresAt: overrideFromStorage,
         pairedCars: normalizePairedCars(parsed.pairedCars),
       };
       return;
@@ -418,6 +424,32 @@ export function setAccountabilityPartnerPhone(phoneNumber: string | null) {
     ...state,
     accountabilityPartnerPhone: phoneNumber,
   });
+}
+
+export function setOverrideExpiresAt(expiresAt: string | null) {
+  if (state.overrideExpiresAt === expiresAt) return;
+  update({
+    ...state,
+    overrideExpiresAt: expiresAt,
+  });
+  if (typeof window !== 'undefined') {
+    if (expiresAt) {
+      window.localStorage.setItem('overrideExpiresAt', expiresAt);
+    } else {
+      window.localStorage.removeItem('overrideExpiresAt');
+    }
+  }
+}
+
+export function getOverrideDecision() {
+  const { overrideExpiresAt } = state;
+  if (overrideExpiresAt) {
+    const expires = Date.parse(overrideExpiresAt);
+    if (!Number.isNaN(expires) && expires > Date.now()) {
+      return { isAllowed: true, expiresAt: overrideExpiresAt };
+    }
+  }
+  return { isAllowed: false, expiresAt: state.overrideExpiresAt };
 }
 
 const LIVE_ACTIVITY_SNOOZE_MS = 5 * 60 * 1000;

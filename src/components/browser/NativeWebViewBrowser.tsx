@@ -8,6 +8,7 @@ import { useSettings } from '@/hooks/useSettings';
 import { useLocalSettings } from '@/hooks/useLocalSettings';
 import { useDeviceId } from '@/hooks/useDeviceId';
 import { useLocalBlocklist } from '@/hooks/useLocalBlocklist';
+import { getOverrideDecision } from '@/lib/safeDriverState';
 import { useBrowserNavigation } from '@/hooks/useBrowserNavigation';
 import { useCapacitor } from '@/hooks/useCapacitor';
 import { useModerationBridge } from '@/hooks/useModerationBridge';
@@ -675,6 +676,19 @@ export const NativeWebViewBrowser = () => {
   };
 
   const resolveBlockDecision = useCallback(async (url: string) => {
+    const overrideDecision = getOverrideDecision();
+    if (overrideDecision.isAllowed) {
+      const reason = overrideDecision.expiresAt
+        ? `Partner override active until ${new Date(overrideDecision.expiresAt).toLocaleString()}`
+        : 'Partner override active';
+      return {
+        isBlocked: false,
+        category: 'override',
+        reason,
+        isAdultDomain: false,
+      };
+    }
+
     const moderationEnabled = isModerationEnabled();
     if (!moderationEnabled) {
       return {
