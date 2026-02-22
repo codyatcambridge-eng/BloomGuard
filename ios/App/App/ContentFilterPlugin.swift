@@ -1,11 +1,12 @@
 @preconcurrency import Capacitor
 import CoreImage
+import CoreVideo
 import CoreML
 import os
 import UIKit
 import Vision
 
-private enum PluginError: LocalizedError {
+private enum PluginError: LocalizedError, Equatable {
   case missingPayload
   case invalidImageData
   case modelNotFound(name: String)
@@ -51,7 +52,7 @@ public class ContentFilterPlugin: CAPPlugin {
       guard let self = self else { return }
       do {
         try self.prepareCoreMLModel()
-        self.logger.info("Vision model loaded for \(self.modelResourceName)")
+        self.logger.debug("Vision model loaded for \(self.modelResourceName)")
       } catch {
         self.logger.error("Core ML model preparation failed: \(error.localizedDescription)")
       }
@@ -110,7 +111,7 @@ public class ContentFilterPlugin: CAPPlugin {
       call.reject("missing_image", PluginError.missingPayload.errorDescription, PluginError.missingPayload)
       return
     }
-    inferenceQueue.async { [weak self, weak call] in
+    Task.detached(priority: .userInitiated) { [weak self, weak call] in
       guard let self = self else {
         guard let call = call else { return }
         Task { @MainActor in
@@ -129,7 +130,7 @@ public class ContentFilterPlugin: CAPPlugin {
         let inferenceStart = Date()
         let request = VNCoreMLRequest(model: model) { [weak self, weak call] request, error in
           let inferenceTimeMs = Date().timeIntervalSince(inferenceStart) * 1000
-          self?.logger.info("Inference End: \(inferenceTimeMs) ms")
+          self?.logger.debug("Inference End: \(inferenceTimeMs) ms")
 
           if let error = error {
             guard let call = call else { return }
@@ -160,13 +161,22 @@ public class ContentFilterPlugin: CAPPlugin {
         }
 
         request.imageCropAndScaleOption = .scaleFill
-        self.logger.info("Inference Start")
-        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-        try handler.perform([request])
+        self.logger.debug("Inference Start")
+        let pixelBuffer = try self.pixelBuffer(from: cgImage)
+        try autoreleasepool {
+          let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
+          try handler.perform([request])
+        }
       } catch {
         guard let call = call else { return }
         Task { @MainActor in
-          call.reject("classification_failed", error.localizedDescription, error)
+          let nsError = error as NSError
+          let isNeuralOffline =
+            (error is PluginError && (error as? PluginError) == .modelUnavailable) ||
+            nsError.domain.lowercased().contains("ane") ||
+            nsError.localizedDescription.lowercased().contains("neural")
+          let code = isNeuralOffline ? "NPU_OFFLINE" : "classification_failed"
+          call.reject(code, error.localizedDescription, error)
         }
       }
     }
@@ -174,7 +184,7 @@ public class ContentFilterPlugin: CAPPlugin {
 
   private func prepareCoreMLModel() throws {
     let configuration = MLModelConfiguration()
-    configuration.computeUnits = .all
+    configuration.computeUnits = .all // Prefer ANE but allow CPU/GPU fallback
     modelLoaded = false
 
     guard let rawModelURL = Bundle.main.url(forResource: modelResourceName, withExtension: "mlmodel") else {
@@ -243,6 +253,40 @@ public class ContentFilterPlugin: CAPPlugin {
       throw PluginError.invalidImageData
     }
     return resized
+  }
+
+  private func pixelBuffer(from cgImage: CGImage) throws -> CVPixelBuffer {
+    let width = cgImage.width
+    let height = cgImage.height
+
+    let pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+    var pixelBuffer: CVPixelBuffer?
+    let attrs: [CFString: Any] = [
+      kCVPixelBufferCGImageCompatibilityKey: true,
+      kCVPixelBufferCGBitmapContextCompatibilityKey: true,
+      kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary
+    ]
+
+    let status = CVPixelBufferCreate(
+      kCFAllocatorDefault,
+      width,
+      height,
+      pixelFormat,
+      attrs as CFDictionary,
+      &pixelBuffer
+    )
+
+    guard status == kCVReturnSuccess, let buffer = pixelBuffer else {
+      throw PluginError.invalidImageData
+    }
+
+    CVPixelBufferLockBaseAddress(buffer, [])
+    defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+
+    let ciImage = CIImage(cgImage: cgImage)
+    ciContext.render(ciImage, to: buffer)
+
+    return buffer
   }
 
   private func blurReasons(from predictions: [String: Double]) -> [String] {

@@ -26,6 +26,7 @@ export interface ModerationResult {
   confidence: number;
   inferenceTime: number;
   reason: ModerationReason;
+  errorCode?: string;
   /** Detected signals for debugging */
   signals?: {
     hasHumanBody: boolean;
@@ -189,7 +190,7 @@ export const useOnDeviceModeration = () => {
         if (mounted) {
           modelRef.current = model;
           setModelState('ready');
-          console.log('[OnDeviceAI] NSFWJS model loaded successfully');
+          console.debug('[OnDeviceAI] NSFWJS model loaded successfully');
         }
       } catch (err) {
         if (mounted) {
@@ -437,13 +438,13 @@ export const useOnDeviceModeration = () => {
 
       // === CONSOLE LOGGING FOR XCODE DEBUG ===
       if (sexyScore > 0.05) {
-        console.log(`[OnDeviceAI] SEXY DETECTED: ${(sexyScore * 100).toFixed(1)}% (threshold: ${(thresholds.sexy * 100).toFixed(0)}%)`);
+        console.debug(`[OnDeviceAI] SEXY DETECTED: ${(sexyScore * 100).toFixed(1)}% (threshold: ${(thresholds.sexy * 100).toFixed(0)}%)`);
       }
       if (pornScore > 0.05) {
-        console.log(`[OnDeviceAI] PORN DETECTED: ${(pornScore * 100).toFixed(1)}% (threshold: ${(thresholds.porn * 100).toFixed(0)}%)`);
+        console.debug(`[OnDeviceAI] PORN DETECTED: ${(pornScore * 100).toFixed(1)}% (threshold: ${(thresholds.porn * 100).toFixed(0)}%)`);
       }
       if (shouldBlur) {
-        console.log(`[OnDeviceAI] >>> BLUR APPLIED <<< category=${dominantClass}, sexy=${(sexyScore * 100).toFixed(1)}%, porn=${(pornScore * 100).toFixed(1)}%`);
+        console.debug(`[OnDeviceAI] >>> BLUR APPLIED <<< category=${dominantClass}, sexy=${(sexyScore * 100).toFixed(1)}%, porn=${(pornScore * 100).toFixed(1)}%`);
       }
 
       const result: ModerationResult = {
@@ -468,7 +469,7 @@ export const useOnDeviceModeration = () => {
       const errorMsg = err instanceof Error ? err.message : 'Unknown error';
       const inferenceTime = performance.now() - loadStart;
       
-      // FAIL-OPEN: Return shouldBlur=false on any error or timeout
+      // Fail-safe: never fail-open on timeouts; apply soft blur instead.
       const isTiny = errorMsg.includes('too small');
       const isTimeout = errorMsg.includes('timeout');
       const reason: ModerationReason = isTiny 
@@ -481,7 +482,7 @@ export const useOnDeviceModeration = () => {
       
       return {
         isExplicit: false,
-        shouldBlur: false,
+        shouldBlur: true,
         predictions: [],
         dominantClass: 'Unknown',
         confidence: 0,
@@ -505,6 +506,7 @@ export const useOnDeviceModeration = () => {
     thresholds: AIThresholds = DEFAULT_THRESHOLDS
   ): Promise<Map<string, ModerationResult>> => {
     const results = new Map<string, ModerationResult>();
+    const batchStart = performance.now();
     
     const concurrency = 4;
     for (let i = 0; i < images.length; i += concurrency) {
@@ -519,6 +521,8 @@ export const useOnDeviceModeration = () => {
       });
     }
 
+    const latencyMs = performance.now() - batchStart;
+    console.debug('[OnDeviceAI] Scan Latency:', latencyMs.toFixed(1) + 'ms');
     return results;
   }, [classifyImage]);
 
@@ -546,6 +550,49 @@ export const useOnDeviceModeration = () => {
   // Clear cache
   const clearCache = useCallback(() => {
     imageCache.current.clear();
+  }, []);
+
+  // Flush cached results on navigation changes to prevent state leakage between tabs
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    let lastHref = window.location.href;
+
+    const emitLocationChange = () => {
+      window.dispatchEvent(new Event('locationchange'));
+    };
+
+    const originalPushState = history.pushState;
+    const originalReplaceState = history.replaceState;
+    history.pushState = function (...args) {
+      const ret = originalPushState.apply(this, args as any);
+      emitLocationChange();
+      return ret;
+    };
+    history.replaceState = function (...args) {
+      const ret = originalReplaceState.apply(this, args as any);
+      emitLocationChange();
+      return ret;
+    };
+
+    const handleLocationChange = () => {
+      const current = window.location.href;
+      if (current === lastHref) return;
+      lastHref = current;
+      imageCache.current.clear();
+      console.debug('[OnDeviceAI] location_change: cache cleared; default blur reset to safe');
+    };
+
+    window.addEventListener('popstate', handleLocationChange);
+    window.addEventListener('hashchange', handleLocationChange);
+    window.addEventListener('locationchange', handleLocationChange);
+
+    return () => {
+      history.pushState = originalPushState;
+      history.replaceState = originalReplaceState;
+      window.removeEventListener('popstate', handleLocationChange);
+      window.removeEventListener('hashchange', handleLocationChange);
+      window.removeEventListener('locationchange', handleLocationChange);
+    };
   }, []);
 
   return {

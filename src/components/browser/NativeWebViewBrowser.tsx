@@ -46,6 +46,8 @@ import { AIStatusBar } from './AIStatusBar';
 import { AIStatusIndicator } from './AIStatusIndicator';
 import { toast } from 'sonner';
 
+// Safe Browser tuning (prod): Gate=30px, UnsafeStreak=1, SafeStreak=3, TinySexyWeight<45px=0.5
+
 interface SearchResult {
   title: string;
   url: string;
@@ -218,8 +220,8 @@ export const NativeWebViewBrowser = () => {
     lastOffAt: 0,
   });
 
-  const UNSAFE_STREAK_REQUIRED = 2;
-  const SAFE_STREAK_REQUIRED = 2;
+  const UNSAFE_STREAK_REQUIRED = 1;
+  const SAFE_STREAK_REQUIRED = 3;
   const MODERN_STALE_MS = 15000;
   const MODERN_LEGACY_SUPPRESS_MS = 12000;
   const MODERN_TRANSPORT_SUPPRESS_MS = 18000;
@@ -236,7 +238,7 @@ export const NativeWebViewBrowser = () => {
     import.meta.env.VITE_ENABLE_DOM_BLUR_OVERLAY === 'true';
   const debugLog = useCallback((...args: unknown[]) => {
     if (!isDebugMode) return;
-    console.log(...args);
+    console.debug(...args);
   }, [isDebugMode]);
 
   const normalizeShouldBlur = useCallback((value: unknown): boolean => {
@@ -272,7 +274,7 @@ export const NativeWebViewBrowser = () => {
     );
     legacyPollSuppressionReasonRef.current = 'modern_transport:' + reason;
     if (isDebugMode) {
-      console.log(
+      console.debug(
         '[MW-DIAG][HOST][ModernTransport]',
         'activeUntil=' + modernTransportActiveUntilRef.current,
         'reason=' + modernTransportReasonRef.current,
@@ -367,7 +369,7 @@ export const NativeWebViewBrowser = () => {
     const hasSignalAges = ackAgeMs >= 0 || readyAgeMs >= 0;
     if (isDebugMode && hasSignalAges && !modernHealthDiagSeenRef.current.has(diagKey)) {
       modernHealthDiagSeenRef.current.add(diagKey);
-      console.log(
+      console.debug(
         '[MW-DIAG][HOST][ModernHealth]',
         'activeNavId=' + activeNavId,
         'activePageEpoch=' + activeEpoch,
@@ -449,12 +451,12 @@ export const NativeWebViewBrowser = () => {
       videoBoostRef.current.lastOnAt = now;
       setNativeScanProfile(prev => {
         if (prev === 'video_boost') {
-          console.log('[MW-Host][VideoBoost] suppressed', 'reason=same_config', 'profile=video_boost');
+          console.debug('[MW-Host][VideoBoost] suppressed', 'reason=same_config', 'profile=video_boost');
           return prev;
         }
         return 'video_boost';
       });
-      console.log('[MW-Host][VideoBoost] on', 'fps=' + VIDEO_BOOST_FPS, 'preset=strict', 'reason=' + reason);
+      console.debug('[MW-Host][VideoBoost] on', 'fps=' + VIDEO_BOOST_FPS, 'preset=strict', 'reason=' + reason);
       videoBoostRef.current.idleTimer = setTimeout(() => {
         setVideoBoost(false, 'idle_timeout');
       }, VIDEO_IDLE_RESET_MS);
@@ -464,7 +466,7 @@ export const NativeWebViewBrowser = () => {
     if (!active) {
       setNativeScanProfile(prev => {
         if (prev === 'balanced') {
-          console.log('[MW-Host][VideoBoost] suppressed', 'reason=same_config', 'profile=balanced');
+          console.debug('[MW-Host][VideoBoost] suppressed', 'reason=same_config', 'profile=balanced');
           return prev;
         }
         return 'balanced';
@@ -483,12 +485,12 @@ export const NativeWebViewBrowser = () => {
     videoBoostRef.current.lastOffAt = now;
     setNativeScanProfile(prev => {
       if (prev === 'balanced') {
-        console.log('[MW-Host][VideoBoost] suppressed', 'reason=same_config', 'profile=balanced');
+        console.debug('[MW-Host][VideoBoost] suppressed', 'reason=same_config', 'profile=balanced');
         return prev;
       }
       return 'balanced';
     });
-    console.log('[MW-Host][VideoBoost] off', 'fps=' + VIDEO_BALANCED_FPS, 'preset=balanced', 'reason=' + reason);
+    console.debug('[MW-Host][VideoBoost] off', 'fps=' + VIDEO_BALANCED_FPS, 'preset=balanced', 'reason=' + reason);
   }, [VIDEO_BALANCED_FPS, VIDEO_BOOST_FPS, VIDEO_IDLE_RESET_MS, VIDEO_MIN_OFF_MS, VIDEO_MIN_ON_MS, clearVideoBoostTimers]);
 
   const queueCurrentBlurState = useCallback((reason: string) => {
@@ -569,7 +571,7 @@ export const NativeWebViewBrowser = () => {
       }
     },
     onScanComplete: (stats) => {
-      console.log('[Browser] Scan complete:', stats);
+      console.debug('[Browser] Scan complete:', stats);
       if (localSettings.show_scan_notifications && stats.blurred > 0) {
         toast.success(`Scanned ${stats.total} images, ${stats.blurred} blurred`, {
           duration: 3000,
@@ -809,7 +811,7 @@ export const NativeWebViewBrowser = () => {
   const clearLoadEndInjectTimer = useCallback(() => {
     if (loadEndInjectTimerRef.current) {
       clearTimeout(loadEndInjectTimerRef.current);
-      console.log(
+      console.debug(
         '[MW-Host][Timer] stop',
         'name=loadEndInjectTimer',
         'navId=' + activeNavIdRef.current,
@@ -826,7 +828,7 @@ export const NativeWebViewBrowser = () => {
     resetModernHealthForNavigation('nav:' + reason);
     activateFlashShield('navigation:' + reason);
     setVideoBoost(false, 'navigation_change');
-    console.log(
+    console.debug(
       '[MW-Inject][Nav]',
       'navId=' + activeNavIdRef.current,
       'reason=' + reason,
@@ -843,11 +845,11 @@ export const NativeWebViewBrowser = () => {
       return;
     }
     if (!settingsLoaded) {
-      console.log('[MW-Inject][Gate] settings not loaded; skipping inject', 'reason=' + reason);
+      console.debug('[MW-Inject][Gate] settings not loaded; skipping inject', 'reason=' + reason);
       return;
     }
     if (!isModerationEnabled()) {
-      console.log('[MW-Bridge] Moderation disabled, skipping injection');
+      console.debug('[MW-Bridge] Moderation disabled, skipping injection');
       return;
     }
 
@@ -862,7 +864,7 @@ export const NativeWebViewBrowser = () => {
 
     if (injectionInFlightRef.current || recentlyInjectedSameUrl) {
       duplicateInjectionSkipsRef.current += 1;
-      console.log(
+      console.debug(
         '[MW-Inject][Skip]',
         'navId=' + navId,
         'reason=' + reason,
@@ -883,7 +885,7 @@ export const NativeWebViewBrowser = () => {
       domainContextAdult: domainAdultContextRef.current === true,
       pageEpoch: webViewPageEpochRef.current,
     };
-    console.log(
+    console.debug(
       '[MW-Inject][Config]',
       'enabled=' + config.enabled,
       'sensitivity=' + config.sensitivity,
@@ -899,7 +901,7 @@ export const NativeWebViewBrowser = () => {
       injectionDoneRef.current = true;
       lastInjectedUrlRef.current = targetUrl;
       lastInjectionAtRef.current = Date.now();
-      console.log(
+      console.debug(
         '[MW-Inject][InjectedDispatch]',
         'navId=' + navId,
         'reason=' + reason,
@@ -930,8 +932,8 @@ export const NativeWebViewBrowser = () => {
     executeScript,
   } = useNativeWebView({
     onLoadStart: (url) => {
-      console.log('[Browser] ======= LOAD START =======');
-      console.log('[Browser] URL:', url);
+      console.debug('[Browser] ======= LOAD START =======');
+      console.debug('[Browser] URL:', url);
       const closeLifecycleBlankNav =
         isBlankLikeNavigationUrl(url) &&
         !!currentUrlRef.current &&
@@ -952,8 +954,8 @@ export const NativeWebViewBrowser = () => {
       setCentralBlurState(false, 'navigation_load_start');
     },
     onLoadEnd: async (url) => {
-      console.log('[Browser] ======= LOAD END =======');
-      console.log('[Browser] URL:', url);
+      console.debug('[Browser] ======= LOAD END =======');
+      console.debug('[Browser] URL:', url);
       const recentLoadStartForUrl =
         !!lastLoadStartUrlRef.current &&
         lastLoadStartUrlRef.current === (url || '') &&
@@ -1013,7 +1015,7 @@ export const NativeWebViewBrowser = () => {
         if (legacyPollTimerRef.current) {
           clearTimeout(legacyPollTimerRef.current);
           legacyPollTimerRef.current = null;
-          console.log(
+          console.debug(
             '[MW-Host][Timer] stop',
             'name=legacyPollTimer',
             'navId=' + activeNavIdRef.current,
@@ -1037,14 +1039,14 @@ export const NativeWebViewBrowser = () => {
             if (!executeScript || !webViewState.isOpen) return;
             injectModerationScript(executeScript, 'webprocess_crash_reinject', url).catch(() => undefined);
             evaluateModernHealth('webprocess_crash_reinject');
-            console.log(
+            console.debug(
               '[MW-Host][CrashRecovery] reinject_attempt',
               'activeNavId=' + activeNavIdRef.current,
               'activePageEpoch=' + webViewPageEpochRef.current,
               'backoffMs=' + backoffMs,
             );
           }, backoffMs);
-          console.log(
+          console.debug(
             '[MW-Host][CrashRecovery] detected',
             'activeNavId=' + activeNavIdRef.current,
             'activePageEpoch=' + webViewPageEpochRef.current,
@@ -1058,8 +1060,8 @@ export const NativeWebViewBrowser = () => {
       navigate('fallback', '', url);
     },
     onUrlChange: async (url) => {
-      console.log('[Browser] ======= URL CHANGE =======');
-      console.log('[Browser] New URL:', url);
+      console.debug('[Browser] ======= URL CHANGE =======');
+      console.debug('[Browser] New URL:', url);
       const nextUrl = url || '';
       const previousUrl = currentUrlRef.current || webViewState.currentUrl || '';
       const sameDocumentUrlChange = isLikelySameDocumentUrlChange(previousUrl, nextUrl);
@@ -1092,7 +1094,7 @@ export const NativeWebViewBrowser = () => {
     },
     onNavigationRequest: handleNavigationRequest,
     onClose: () => {
-      console.log('[Browser] ======= WEBVIEW CLOSED =======');
+      console.debug('[Browser] ======= WEBVIEW CLOSED =======');
       teardownWebViewScheduling('webview_closed', webViewState.currentUrl).catch(() => undefined);
       clearLoadEndInjectTimer();
       moderationBridge.clearCache();
@@ -1111,7 +1113,7 @@ export const NativeWebViewBrowser = () => {
     },
     onMessageFromWebview: (payload) => {
       if (isDebugMode) {
-        console.log('[MW-Host][Capgo] messageFromWebview received');
+        console.debug('[MW-Host][Capgo] messageFromWebview received');
       }
       messageFromWebViewHandlerRef.current?.(payload);
     },
@@ -1135,7 +1137,7 @@ export const NativeWebViewBrowser = () => {
         }
       })();
     `);
-    console.log(
+    console.debug(
       '[MW-Host][Timer] teardown',
       'reason=' + reason,
       'navId=' + activeNavIdRef.current,
@@ -1155,22 +1157,24 @@ export const NativeWebViewBrowser = () => {
     session.running = false;
     session.profile = null;
     session.configKey = '';
-    console.log('[MW][NativeScan] stop', 'reason=' + reason);
+    console.debug('[MW][NativeScan] stop', 'reason=' + reason);
     stopNativeContentFilter().catch(() => undefined);
   }, []);
 
   const syncNativeScanSession = useCallback(async (reason: string) => {
     const moderationEnabled = isModerationEnabled();
+    const isHidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
     const gate =
       settingsLoaded &&
       isNative &&
       webViewState.isOpen &&
       moderationEnabled &&
       localSettings.shield_active &&
-      localSettings.blur_dial > 0;
+      localSettings.blur_dial > 0 &&
+      !isHidden;
 
     if (!gate) {
-      stopNativeScanSession('gate_false:' + reason);
+      stopNativeScanSession((isHidden ? 'hidden' : 'gate_false') + ':' + reason);
       return;
     }
 
@@ -1182,7 +1186,7 @@ export const NativeWebViewBrowser = () => {
     const session = nativeScanSessionRef.current;
 
     if (session.running && session.configKey === desiredConfigKey) {
-      console.log('[MW-Host][VideoBoost] suppressed', 'reason=same_config', 'config=' + desiredConfigKey);
+      console.debug('[MW-Host][VideoBoost] suppressed', 'reason=same_config', 'config=' + desiredConfigKey);
       return;
     }
 
@@ -1196,7 +1200,7 @@ export const NativeWebViewBrowser = () => {
           syncNativeScanSession('debounce_flush').catch(() => undefined);
         }, waitMs);
       }
-      console.log('[MW-Host][VideoBoost] suppressed', 'reason=debounce', 'waitMs=' + waitMs, 'config=' + desiredConfigKey);
+      console.debug('[MW-Host][VideoBoost] suppressed', 'reason=debounce', 'waitMs=' + waitMs, 'config=' + desiredConfigKey);
       return;
     }
 
@@ -1210,7 +1214,7 @@ export const NativeWebViewBrowser = () => {
     }
 
     try {
-      console.log('[MW][NativeScan] start', 'reason=' + reason, 'preset=' + desiredPreset, 'fps=' + desiredFps);
+      console.debug('[MW][NativeScan] start', 'reason=' + reason, 'preset=' + desiredPreset, 'fps=' + desiredFps);
       const startPayload = await startNativeContentFilter({
         preset: desiredPreset,
         kidMode,
@@ -1314,9 +1318,14 @@ export const NativeWebViewBrowser = () => {
     if (!isNative || !webViewState.isOpen) return;
 
     const onVisible = () => {
+      if (document.visibilityState === 'hidden') {
+        syncNativeScanSession('visibility_hidden').catch(() => undefined);
+        return;
+      }
       requestBlurHandshake('host_visible');
       queueCurrentBlurState('host_visible_resync');
       flushBlurStateToWebView();
+      syncNativeScanSession('visibility_visible').catch(() => undefined);
     };
 
     window.addEventListener('focus', onVisible);
@@ -1325,7 +1334,7 @@ export const NativeWebViewBrowser = () => {
       window.removeEventListener('focus', onVisible);
       document.removeEventListener('visibilitychange', onVisible);
     };
-  }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, requestBlurHandshake, queueCurrentBlurState, flushBlurStateToWebView]);
+  }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, requestBlurHandshake, queueCurrentBlurState, flushBlurStateToWebView, syncNativeScanSession]);
 
   useEffect(() => {
     if (!ENABLE_SIGNAL_PIPELINE) return;
@@ -1359,7 +1368,7 @@ export const NativeWebViewBrowser = () => {
     };
 
     const timer = setTimeout(reinjectAndPing, 250);
-    console.log(
+    console.debug(
       '[MW-Host][Timer] start',
       'name=reinjectTimer',
       'navId=' + activeNavIdRef.current,
@@ -1367,7 +1376,7 @@ export const NativeWebViewBrowser = () => {
     );
     return () => {
       clearTimeout(timer);
-      console.log(
+      console.debug(
         '[MW-Host][Timer] stop',
         'name=reinjectTimer',
         'navId=' + activeNavIdRef.current,
@@ -1405,7 +1414,7 @@ export const NativeWebViewBrowser = () => {
       return;
     }
     didInjectAfterSettingsLoadedRef.current = true;
-    console.log(
+    console.debug(
       '[MW-Inject][SettingsLoadedReinject]',
       'settingsLoaded=' + settingsLoaded,
       'isOpen=' + webViewState.isOpen,
@@ -1487,7 +1496,7 @@ export const NativeWebViewBrowser = () => {
     }
 
     resultQueueFlushCountRef.current += 1;
-    console.log(
+    console.debug(
       '[MW-Host][ResultQueue] flush',
       'reason=' + reason,
       'flushCount=' + resultQueueFlushCountRef.current,
@@ -1520,7 +1529,7 @@ export const NativeWebViewBrowser = () => {
   ) => {
     try {
       const posted = await postMessageToWebView(payload);
-      console.log(
+      console.debug(
         '[MW-Host][ResultDelivery]',
         'requestId=' + requestId,
         'delivered_to_js=' + posted,
@@ -1531,7 +1540,7 @@ export const NativeWebViewBrowser = () => {
         return true;
       }
     } catch (error) {
-      console.log('[MW-Host] Failed to post results via postMessage:', error);
+      console.debug('[MW-Host] Failed to post results via postMessage:', error);
     }
 
     resultQueueRef.current.push({
@@ -1559,7 +1568,7 @@ export const NativeWebViewBrowser = () => {
     const activeEpoch = webViewPageEpochRef.current;
     
     if (pendingRequestsRef.current.has(requestId)) {
-      console.log('[MW-Host] Duplicate request ignored:', requestId);
+      console.debug('[MW-Host] Duplicate request ignored:', requestId);
       return;
     }
     pendingRequestsRef.current.add(requestId);
@@ -1602,12 +1611,12 @@ export const NativeWebViewBrowser = () => {
     markModernTransportActive('request_received', requestEpoch ?? activeEpoch);
     
     const startTime = performance.now();
-    console.log('[MW-Host] request received', requestId, 'items=' + items.length, 'epoch=' + (requestEpoch ?? 'n/a'));
+    console.debug('[MW-Host] request received', requestId, 'items=' + items.length, 'epoch=' + (requestEpoch ?? 'n/a'));
     items.forEach(item => {
-      console.log('[MW-Host]   -', item.itemId, '[' + item.sourceType + ']:', item.src.substring(0, 60));
+      console.debug('[MW-Host]   -', item.itemId, '[' + item.sourceType + ']:', item.src.substring(0, 60));
     });
     
-    console.log('[MW-Host] calling scanBatch', requestId, 'itemCount=' + items.length);
+    console.debug('[MW-Host] calling scanBatch', requestId, 'itemCount=' + items.length);
     
     const results: Array<{
       itemId: string;
@@ -1622,7 +1631,10 @@ export const NativeWebViewBrowser = () => {
     // Process each item using the moderation bridge
     for (const item of items) {
       try {
-        const scanResult = await moderationBridge.scanImage(item.src, thresholds);
+        const scanResult = await moderationBridge.scanImage(item.src, thresholds, {
+          lastModified: (item as any).lastModified,
+          contentLength: (item as any).contentLength,
+        });
         
         if (scanResult) {
           const categoryConfidence = Object.entries(scanResult.predictions || {}).reduce((matched, [label, value]) => {
@@ -1641,9 +1653,9 @@ export const NativeWebViewBrowser = () => {
             severity: normalizedSeverity,
             predictions: scanResult.predictions,
           });
-          console.log('[MW-Host] scan result', item.itemId, ':', scanResult.category, 'blur=' + normalizedShouldBlur, 'conf=' + effectiveConfidence.toFixed(3), 'severity=' + normalizedSeverity);
+          console.debug('[MW-Host] scan result', item.itemId, ':', scanResult.category, 'blur=' + normalizedShouldBlur, 'conf=' + effectiveConfidence.toFixed(3), 'severity=' + normalizedSeverity);
         } else {
-          const shouldBlurOnFailure = localSettings.fail_closed === true;
+          const shouldBlurOnFailure = true;
           results.push({
             itemId: item.itemId,
             src: item.src,
@@ -1652,11 +1664,11 @@ export const NativeWebViewBrowser = () => {
             confidence: shouldBlurOnFailure ? 1 : 0,
             severity: shouldBlurOnFailure ? 'hard' : 'safe',
           });
-          console.log('[MW-Host] scan result', item.itemId, ': error (no result), failClosed=' + shouldBlurOnFailure);
+          console.debug('[MW-Host] scan result', item.itemId, ': error (no result), failClosed=' + shouldBlurOnFailure);
         }
       } catch (error) {
-        const shouldBlurOnFailure = localSettings.fail_closed === true;
-        console.log('[MW-Host] scan error', item.itemId, ':', error);
+        const shouldBlurOnFailure = true;
+        console.debug('[MW-Host] scan error', item.itemId, ':', error);
         results.push({
           itemId: item.itemId,
           src: item.src,
@@ -1669,7 +1681,7 @@ export const NativeWebViewBrowser = () => {
     }
     
     const elapsedMs = performance.now() - startTime;
-    console.log('[MW-Host] scan complete', requestId, 'elapsed=' + elapsedMs.toFixed(0) + 'ms');
+    console.debug('[MW-Host] scan complete', requestId, 'elapsed=' + elapsedMs.toFixed(0) + 'ms');
 
     const blurMode = localSettings.blur_mode || 'balanced';
     const modePolicy = blurMode === 'strict'
@@ -1716,7 +1728,7 @@ export const NativeWebViewBrowser = () => {
     const softRatioThreshold = Math.max(softRatioBase, modePolicy.softRatioFloor);
     const softMinHits = Math.max(softMinHitsBase, modePolicy.softMinHits, 2);
     const softConfidenceFloor = modePolicy.softConfFloor;
-    const tinyDimensionThreshold = 80;
+    const tinyDimensionThreshold = 30;
 
     const itemSizeById = new Map(request.items.map(item => [item.itemId, item]));
     const eligibleResults = results.filter(item => {
@@ -1725,7 +1737,8 @@ export const NativeWebViewBrowser = () => {
       const width = typeof requestItem.width === 'number' ? requestItem.width : 0;
       const height = typeof requestItem.height === 'number' ? requestItem.height : 0;
       if (width <= 0 || height <= 0) return true;
-      return width >= tinyDimensionThreshold && height >= tinyDimensionThreshold;
+      const isExplicit = item.shouldBlur && item.severity !== 'safe';
+      return isExplicit || (width >= tinyDimensionThreshold && height >= tinyDimensionThreshold);
     });
     const denominator = eligibleResults.length > 0 ? eligibleResults.length : results.length;
     const tinyExcludedCount = Math.max(results.length - eligibleResults.length, 0);
@@ -1745,10 +1758,28 @@ export const NativeWebViewBrowser = () => {
     const hardLowHits = hardResults.filter(item => item.confidence >= modePolicy.hardMultiConfFloor);
     const hardAnyHits = hardResults.length;
     const hardUnsafeMaxConf = hardResults.reduce((max, item) => Math.max(max, item.confidence), 0);
+    const immediateHardHit = hardResults.some(
+      item =>
+        (item.category === 'porn' || item.category === 'hentai') &&
+        item.confidence >= 0.80,
+    );
 
     const softResults = normalizedResults.filter(item => item.shouldBlur && item.severity === 'soft');
     const softQualifiedHits = softResults.filter(item => item.confidence >= softConfidenceFloor);
-    const softRatio = denominator > 0 ? softQualifiedHits.length / denominator : 0;
+    const softWeightedHits = softQualifiedHits.reduce((sum, item) => {
+      const requestItem = itemSizeById.get(item.itemId);
+      const width = typeof requestItem?.width === 'number' ? requestItem.width : 0;
+      const height = typeof requestItem?.height === 'number' ? requestItem.height : 0;
+      const isTinySexy =
+        (item.category || '').toLowerCase() === 'sexy' &&
+        width > 0 &&
+        height > 0 &&
+        width < 45 &&
+        height < 45;
+      const weight = isTinySexy ? 0.5 : 1;
+      return sum + weight;
+    }, 0);
+    const softRatio = denominator > 0 ? softWeightedHits / denominator : 0;
 
     const hardOverlayDecision =
       hardAnyHits > 0 ||
@@ -1784,10 +1815,10 @@ export const NativeWebViewBrowser = () => {
           return (currentUrl || '').replace(/^https?:\/\//, '').split('/')[0] || 'unknown';
         }
       })();
-      console.log(
+      console.debug(
         `[MW-Host][ScanSummary] url=${shortUrl} req=${requestId} total=${results.length} eligible=${denominator} tinyExcluded=${tinyExcludedCount} hardHits=${hardAnyHits} hardStrongHits=${hardStrongHits.length} softHits=${softQualifiedHits.length} safeHits=${Math.max(denominator - hardAnyHits - softQualifiedHits.length, 0)} hardMax=${hardUnsafeMaxConf.toFixed(3)} softMax=${softQualifiedHits.reduce((max, item) => Math.max(max, item.confidence), 0).toFixed(3)} softRatio=${softRatio.toFixed(3)} anyHard=${hardAnyHits > 0} mode=${blurMode} decision=${overlayDecision ? 'ON' : 'OFF'} reason=${decisionReason}`
       );
-      console.log(
+      console.debug(
         '[MW-DIAG][HOST][NormalizedSummary]',
         'req=' + requestId,
         'hardHits=' + hardAnyHits,
@@ -1799,7 +1830,12 @@ export const NativeWebViewBrowser = () => {
     }
 
     // Hysteresis is based on hard conditions only.
-    if (hardOverlayDecision) {
+    if (immediateHardHit) {
+      blurSignalRef.current.unsafeStreak = UNSAFE_STREAK_REQUIRED;
+      blurSignalRef.current.safeStreak = 0;
+      setCentralBlurState(true, `moderation_request_hard_immediate:${decisionReason}`);
+      debugLog('[MW-DIAG][HOST] immediate hard trigger', 'reason=' + decisionReason);
+    } else if (hardOverlayDecision) {
       processModerationSafetySignal(true, `moderation_request_hard:${decisionReason}`);
     } else {
       processModerationSafetySignal(false, 'moderation_request_no_hard');
@@ -1827,7 +1863,7 @@ export const NativeWebViewBrowser = () => {
     );
     
     // Post results back to the WebView with nonce for security
-    console.log('[MW-Host] posting results back', requestId, 'count=' + results.length, 'nonce=' + nonce.substring(0, 10));
+    console.debug('[MW-Host] posting results back', requestId, 'count=' + results.length, 'nonce=' + nonce.substring(0, 10));
     
     try {
       const resultMessage = createResultMessage(requestId, results, nonce, requestEpoch ?? undefined);
@@ -1841,7 +1877,7 @@ export const NativeWebViewBrowser = () => {
         maybeClearFlashShield('decision_active_epoch');
       }
     } catch (error) {
-      console.log('[MW-Host] Failed to post results via postMessage:', error);
+      console.debug('[MW-Host] Failed to post results via postMessage:', error);
     }
     
     pendingRequestsRef.current.delete(requestId);
@@ -1898,7 +1934,7 @@ export const NativeWebViewBrowser = () => {
         const ackKey = ackNavId + '|' + ackEpoch;
         if (isDebugMode && !ackDiagSeenRef.current.has(ackKey)) {
           ackDiagSeenRef.current.add(ackKey);
-          console.log(
+          console.debug(
             '[MW-Host][ACK]',
             'navId=' + ackNavId,
             'pageEpoch=' + ackEpoch,
@@ -1906,7 +1942,7 @@ export const NativeWebViewBrowser = () => {
             'source=' + source,
           );
         }
-        console.log(
+        console.debug(
           '[MW-Host][ACK] MW_INJECTED_ACK',
           'source=' + source,
           'navId=' + String(typedMessage.navId ?? 'none'),
@@ -1923,7 +1959,7 @@ export const NativeWebViewBrowser = () => {
         return;
       }
       if (typedMessage.type === 'MW_REQ_SENT') {
-        console.log(
+        console.debug(
           '[MW-Host][REQ] MW_REQ_SENT',
           'source=' + source,
           'requestId=' + String(typedMessage.requestId ?? 'none'),
@@ -1961,7 +1997,7 @@ export const NativeWebViewBrowser = () => {
         const readyKey = readyNavId + '|' + readyEpoch;
         if (isDebugMode && !readyDiagSeenRef.current.has(readyKey)) {
           readyDiagSeenRef.current.add(readyKey);
-          console.log(
+          console.debug(
             '[MW-Host][READY]',
             'navId=' + readyNavId,
             'pageEpoch=' + readyEpoch,
@@ -1971,7 +2007,7 @@ export const NativeWebViewBrowser = () => {
         }
         if (ENABLE_DOM_BLUR) {
           blurReadyRef.current = true;
-          console.log('[MW-Host] Blur overlay READY:', String(typedMessage.reason || 'ready'), String(typedMessage.url || ''));
+          console.debug('[MW-Host] Blur overlay READY:', String(typedMessage.reason || 'ready'), String(typedMessage.url || ''));
           queueCurrentBlurState('webview_ready_sync');
           await flushBlurStateToWebView();
         }
@@ -1994,7 +2030,7 @@ export const NativeWebViewBrowser = () => {
           console.warn('[MW-Host] Expected:', sessionNonce.substring(0, 10), 'Got:', (message.nonce || 'none').substring(0, 10));
           return;
         }
-        console.log(
+        console.debug(
           '[MW-Host] Received moderation request:',
           message.requestId,
           'noncePrefix=' + String(message.nonce || '').substring(0, 6),
@@ -2006,7 +2042,7 @@ export const NativeWebViewBrowser = () => {
       }
       
       if (typedMessage.type === 'gc-moderation-request' && typedMessage.action === 'scan') {
-        console.log('[MW-Host] Received legacy moderation request via postMessage');
+        console.debug('[MW-Host] Received legacy moderation request via postMessage');
         const result = await moderationBridge.handleWebViewMessage(message);
         
         if (result) {
@@ -2021,7 +2057,7 @@ export const NativeWebViewBrowser = () => {
               category: result.category,
               confidence: result.confidence,
             });
-            console.log('[MW-Host] Sent legacy moderation result for:', rawSrc.substring(0, 50));
+            console.debug('[MW-Host] Sent legacy moderation result for:', rawSrc.substring(0, 50));
           } catch (error) {
             console.debug('[MW-Host] Failed to send legacy moderation result:', error);
           }
@@ -2063,7 +2099,7 @@ export const NativeWebViewBrowser = () => {
       return;
     }
 
-    console.log('[MW-Host] Starting adaptive legacy queue polling (fallback)...');
+    console.debug('[MW-Host] Starting adaptive legacy queue polling (fallback)...');
     const MIN_POLL_MS = 300;
     const MAX_POLL_MS = 3000;
     const UNKNOWN_MIN_POLL_MS = 1500;
@@ -2097,7 +2133,7 @@ export const NativeWebViewBrowser = () => {
       idlePollMs = IDLE_MIN_POLL_MS;
       pollDelayMs = MIN_POLL_MS;
       consecutiveEmptyPolls = 0;
-      console.log('[MW-Host][Poll] exitingIdle', 'reason=' + reason, 'pollMs=' + pollDelayMs);
+      console.debug('[MW-Host][Poll] exitingIdle', 'reason=' + reason, 'pollMs=' + pollDelayMs);
     };
 
     const maybeEnterIdleMode = () => {
@@ -2108,7 +2144,7 @@ export const NativeWebViewBrowser = () => {
       idleMode = true;
       idlePollMs = IDLE_MIN_POLL_MS;
       pollDelayMs = idlePollMs;
-      console.log('[MW-Host][Poll] enteringIdle', 'pollMs=' + pollDelayMs);
+      console.debug('[MW-Host][Poll] enteringIdle', 'pollMs=' + pollDelayMs);
     };
 
     const onActivity = (reason: string) => {
@@ -2144,7 +2180,7 @@ export const NativeWebViewBrowser = () => {
         clearTimeout(legacyPollTimerRef.current);
       }
       legacyPollTimerRef.current = setTimeout(runPollLoop, delayMs);
-      console.log(
+      console.debug(
         '[MW-Host][Timer] start',
         'name=legacyPollTimer',
         'delayMs=' + delayMs,
@@ -2223,7 +2259,7 @@ export const NativeWebViewBrowser = () => {
           return false;
         }
         
-        console.log('[MW-Host] Legacy poll: found', items.length, 'items in queue');
+        console.debug('[MW-Host] Legacy poll: found', items.length, 'items in queue');
         const resultsToPush: Array<{
           src: string;
           shouldBlur: boolean;
@@ -2238,12 +2274,12 @@ export const NativeWebViewBrowser = () => {
           
           if (!src) continue;
           
-          console.log('[MW-Host] Legacy processing:', src.substring(0, 60));
+          console.debug('[MW-Host] Legacy processing:', src.substring(0, 60));
           
           const scanResult = await moderationBridge.scanImage(src, thresholds);
           
           if (scanResult) {
-            console.log('[MW-Host] Legacy scan result:', scanResult.shouldBlur, scanResult.category);
+            console.debug('[MW-Host] Legacy scan result:', scanResult.shouldBlur, scanResult.category);
             resultsToPush.push({
               src,
               shouldBlur: !!scanResult.shouldBlur,
@@ -2272,7 +2308,7 @@ export const NativeWebViewBrowser = () => {
             await executeScript(pushResultScript);
             legacyExecBackoffMsRef.current = 300;
             legacyExecBackoffUntilRef.current = 0;
-            console.log('[MW-Host] Legacy results pushed count=' + resultsToPush.length);
+            console.debug('[MW-Host] Legacy results pushed count=' + resultsToPush.length);
           } catch (e) {
             console.debug('[MW-Host] Failed to push legacy results batch:', e);
             legacyExecBackoffUntilRef.current = Date.now() + legacyExecBackoffMsRef.current;
@@ -2353,7 +2389,7 @@ export const NativeWebViewBrowser = () => {
       if (legacyPollTimerRef.current) {
         clearTimeout(legacyPollTimerRef.current);
         legacyPollTimerRef.current = null;
-        console.log(
+        console.debug(
           '[MW-Host][Timer] stop',
           'name=legacyPollTimer',
           'navId=' + activeNavIdRef.current,
@@ -2371,7 +2407,7 @@ export const NativeWebViewBrowser = () => {
   const handleSearch = useCallback(async (query: string) => {
     if (!query.trim()) return;
     
-    console.log('[Browser] Starting search:', query);
+    console.debug('[Browser] Starting search:', query);
     
     // Build Google search URL
     const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query.trim())}`;
@@ -2542,7 +2578,7 @@ export const NativeWebViewBrowser = () => {
       return;
     }
 
-    console.log('[Browser] Opening Reader Mode for:', fallbackUrl);
+    console.debug('[Browser] Opening Reader Mode for:', fallbackUrl);
     setIsLoadingReader(true);
     setReaderError(null);
     setPdfContent(null);
@@ -2811,7 +2847,7 @@ export const NativeWebViewBrowser = () => {
     
     try {
       await executeScript(rescanScript);
-      console.log('[Browser] Manual scan triggered');
+      console.debug('[Browser] Manual scan triggered');
     } catch (error) {
       console.error('[Browser] Manual scan failed:', error);
     }

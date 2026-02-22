@@ -52,10 +52,20 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
     error: null,
   });
 
-  const scanQueue = useRef<string[]>([]);
+  const scanQueue = useRef<Array<{ src: string; meta?: { lastModified?: number | string; contentLength?: number } }>>([]);
   const resultsCache = useRef<Map<string, ModerationScanResult>>(new Map());
   const processingRef = useRef(0);
   const maxConcurrent = 4;
+  const buildCacheKey = useCallback((src: string, meta?: { lastModified?: number | string; contentLength?: number }) => {
+    const parts = [src];
+    if (meta?.lastModified !== undefined && meta?.lastModified !== null) {
+      parts.push(`lm:${meta.lastModified}`);
+    }
+    if (typeof meta?.contentLength === 'number' && Number.isFinite(meta.contentLength)) {
+      parts.push(`cl:${meta.contentLength}`);
+    }
+    return parts.join('|');
+  }, []);
 
   const { isReady: modelReady, classifyImage, modelState } = useOnDeviceModeration();
   const { settings, getDialThresholds, isModerationEnabled, getModerationConfig } = useLocalSettings();
@@ -64,7 +74,7 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
   useEffect(() => {
     setState(prev => ({ ...prev, isReady: modelReady }));
     if (modelReady) {
-      console.log('[MW-Bridge] AI model ready for scanning');
+      console.debug('[MW-Bridge] AI model ready for scanning');
     }
   }, [modelReady]);
 
@@ -113,38 +123,51 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
   /**
    * Scan a single image and return result
    */
-  const scanImage = useCallback(async (src: string, thresholds?: { porn: number; sexy: number; hentai: number }): Promise<ModerationScanResult | null> => {
+  const scanImage = useCallback(async (
+    src: string,
+    thresholds?: { porn: number; sexy: number; hentai: number },
+    meta?: { lastModified?: number | string; contentLength?: number },
+  ): Promise<ModerationScanResult | null> => {
     if (!modelReady) {
-      console.log('[MW-Bridge] Model not ready, skipping scan');
+      console.debug('[MW-Bridge] Model not ready, skipping scan');
       return null;
     }
     
     if (!isModerationEnabled()) {
-      console.log('[MW-Bridge] Moderation disabled, skipping scan');
+      console.debug('[MW-Bridge] Moderation disabled, skipping scan');
       return null;
     }
 
+    const cacheKey = buildCacheKey(src, meta);
+
+    // Invalidate cache entries when metadata changes for same src
+    for (const key of Array.from(resultsCache.current.keys())) {
+      if ((key === src || key.startsWith(src + '|')) && key !== cacheKey) {
+        resultsCache.current.delete(key);
+      }
+    }
+
     // Check cache
-    if (resultsCache.current.has(src)) {
-      console.log('[MW-Bridge] Cache hit:', src.substring(0, 50));
-      return resultsCache.current.get(src)!;
+    if (resultsCache.current.has(cacheKey)) {
+      console.debug('[MW-Bridge] Cache hit:', cacheKey.substring(0, 50));
+      return resultsCache.current.get(cacheKey)!;
     }
 
     const effectiveThresholds = thresholds || getDialThresholds();
     const startTime = performance.now();
 
     try {
-      console.log('[MW-Bridge] Scanning:', src.substring(0, 60));
+      console.debug('[MW-Bridge] Scanning:', src.substring(0, 60));
       const result = await classifyImage(src, effectiveThresholds);
       const inferenceTime = performance.now() - startTime;
       
       if (!result) {
-        console.log('[MW-Bridge] No result from classifier');
+        console.debug('[MW-Bridge] No result from classifier');
         return null;
       }
 
       const scanResult = convertResult(src, result, inferenceTime);
-      resultsCache.current.set(src, scanResult);
+      resultsCache.current.set(cacheKey, scanResult);
 
       onSignal?.({
         Porn: scanResult.predictions?.Porn ?? scanResult.predictions?.porn ?? 0,
@@ -163,30 +186,50 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
       }));
 
       if (scanResult.shouldBlur) {
-        console.log('[MW-Bridge] BLUR:', src.substring(0, 50), '->', scanResult.category);
+        console.debug('[MW-Bridge] BLUR:', src.substring(0, 50), '->', scanResult.category);
         onImageBlurred?.(src, scanResult);
       } else {
-        console.log('[MW-Bridge] SAFE:', src.substring(0, 50), '->', scanResult.category);
+        console.debug('[MW-Bridge] SAFE:', src.substring(0, 50), '->', scanResult.category);
       }
 
       return scanResult;
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : 'Scan failed';
+      const code = (error as any)?.code || (error instanceof Error ? error.name : '');
+      const isNpuOffline = String(code).toUpperCase() === 'NPU_OFFLINE' || errorMsg.toUpperCase().includes('NPU_OFFLINE');
       console.debug('[MW-Bridge] Scan error:', src.substring(0, 50), errorMsg);
-      return null;
+
+      const fallback: ModerationScanResult = {
+        src,
+        shouldBlur: true,
+        category: isNpuOffline ? 'error_npu_offline' as any : 'error' as any,
+        confidence: 1,
+        severity: 'hard',
+        predictions: {},
+        inferenceTime: performance.now() - startTime,
+      };
+      setState(prev => ({
+        ...prev,
+        error: isNpuOffline ? 'NPU_OFFLINE' : 'SCAN_ERROR',
+        blurredCount: prev.blurredCount + 1,
+        scannedCount: prev.scannedCount + 1,
+      }));
+      return fallback;
     }
-  }, [modelReady, isModerationEnabled, getDialThresholds, classifyImage, convertResult, onImageBlurred, onSignal]);
+  }, [modelReady, isModerationEnabled, getDialThresholds, classifyImage, convertResult, onImageBlurred, onSignal, buildCacheKey]);
 
   /**
    * Process scan queue with concurrency limit
    */
   const processQueue = useCallback(async () => {
     while (processingRef.current < maxConcurrent && scanQueue.current.length > 0) {
-      const src = scanQueue.current.shift();
-      if (src && !resultsCache.current.has(src)) {
+      const item = scanQueue.current.shift();
+      if (!item) continue;
+      const cacheKey = buildCacheKey(item.src, item.meta);
+      if (!resultsCache.current.has(cacheKey)) {
         processingRef.current++;
         
-        scanImage(src).finally(() => {
+        scanImage(item.src, undefined, item.meta).finally(() => {
           processingRef.current--;
           setState(prev => ({
             ...prev,
@@ -196,23 +239,24 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
         });
       }
     }
-  }, [scanImage]);
+  }, [scanImage, buildCacheKey]);
 
   /**
    * Queue an image for scanning
    */
-  const queueScan = useCallback((src: string) => {
+  const queueScan = useCallback((src: string, meta?: { lastModified?: number | string; contentLength?: number }) => {
     if (!src || !src.startsWith('http')) return;
-    if (resultsCache.current.has(src)) return;
-    if (scanQueue.current.includes(src)) return;
+    const cacheKey = buildCacheKey(src, meta);
+    if (resultsCache.current.has(cacheKey)) return;
+    if (scanQueue.current.some(item => buildCacheKey(item.src, item.meta) === cacheKey)) return;
 
-    scanQueue.current.push(src);
+    scanQueue.current.push({ src, meta });
     setState(prev => ({
       ...prev,
       pendingCount: scanQueue.current.length + processingRef.current,
     }));
     processQueue();
-  }, [processQueue]);
+  }, [processQueue, buildCacheKey]);
 
   /**
    * Scan multiple images
@@ -222,30 +266,22 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
     
     setState(prev => ({ ...prev, isScanning: true }));
 
-    for (const src of sources) {
-      queueScan(src);
-    }
-
-    // Wait for all to complete
-    await new Promise<void>(resolve => {
-      const checkComplete = () => {
-        if (processingRef.current === 0 && scanQueue.current.length === 0) {
-          resolve();
-        } else {
-          setTimeout(checkComplete, 100);
+    const workerCount = Math.min(maxConcurrent, Math.max(sources.length, 1));
+    let index = 0;
+    const workers = Array.from({ length: workerCount }, async () => {
+      while (index < sources.length) {
+        const currentIndex = index++;
+        const src = sources[currentIndex];
+        const result = await scanImage(src);
+        if (result) {
+          results.set(src, result);
         }
-      };
-      setTimeout(checkComplete, 100);
+      }
     });
 
-    // Collect results
-    for (const src of sources) {
-      const result = resultsCache.current.get(src);
-      if (result) {
-        results.set(src, result);
-      }
-    }
+    await Promise.all(workers);
 
+    // Collect results
     const blurred = [...results.values()].filter(r => r.shouldBlur).length;
     
     setState(prev => ({ ...prev, isScanning: false }));
@@ -257,21 +293,21 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
     });
 
     return results;
-  }, [queueScan, onScanComplete]);
+  }, [scanImage, onScanComplete, maxConcurrent]);
 
   /**
    * Handle message from WebView (injected script)
    * This is the main entry point for WebView moderation requests
    */
   const handleWebViewMessage = useCallback(async (message: any): Promise<ModerationScanResult | null> => {
-    console.log('[MW-Bridge] Received WebView message:', message?.type, message?.action);
+    console.debug('[MW-Bridge] Received WebView message:', message?.type, message?.action);
     
     if (message?.type === 'gc-moderation-request' && message?.action === 'scan') {
-      const { src, thresholds, messageId, sourceType } = message;
+      const { src, thresholds, messageId, sourceType, lastModified, contentLength } = message;
       
-      console.log('[MW-Bridge] Processing scan request #' + messageId + ' [' + sourceType + ']:', src?.substring(0, 60));
+      console.debug('[MW-Bridge] Processing scan request #' + messageId + ' [' + sourceType + ']:', src?.substring(0, 60));
       
-      const result = await scanImage(src, thresholds);
+      const result = await scanImage(src, thresholds, { lastModified, contentLength });
       
       if (result) {
         return { ...result, messageId } as any;
@@ -283,9 +319,9 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
   /**
    * Get result for a specific image
    */
-  const getResult = useCallback((src: string): ModerationScanResult | undefined => {
-    return resultsCache.current.get(src);
-  }, []);
+  const getResult = useCallback((src: string, meta?: { lastModified?: number | string; contentLength?: number }): ModerationScanResult | undefined => {
+    return resultsCache.current.get(buildCacheKey(src, meta));
+  }, [buildCacheKey]);
 
   /**
    * Clear cache
@@ -303,7 +339,7 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
       lastScanTime: 0,
       error: null,
     });
-    console.log('[MW-Bridge] Cache cleared');
+    console.debug('[MW-Bridge] Cache cleared');
   }, [modelReady]);
 
   /**
