@@ -7,6 +7,9 @@ import FamilyControls
 
 #if canImport(ManagedSettings)
 import ManagedSettings
+
+private typealias AppCategoryPolicy = ManagedSettings.ShieldSettings.ActivityCategoryPolicy<ManagedSettings.Application>
+private typealias WebCategoryPolicy = ManagedSettings.ShieldSettings.ActivityCategoryPolicy<ManagedSettings.WebDomain>
 #endif
 
 @objc(ScreenTimePlugin)
@@ -128,12 +131,12 @@ public class ScreenTimePlugin: CAPPlugin {
     mutateShieldStore { store in
       store.shield.applications = selection.applicationTokens.isEmpty ? nil : selection.applicationTokens
       if selection.categoryTokens.isEmpty {
-        store.shield.applicationCategories = .none
+        store.shield.applicationCategories = AppCategoryPolicy.none
       } else {
-        store.shield.applicationCategories = .specific(selection.categoryTokens, except: [])
+        store.shield.applicationCategories = AppCategoryPolicy.specific(selection.categoryTokens, except: [])
       }
       store.shield.webDomains = nil
-      store.shield.webDomainCategories = .none
+      store.shield.webDomainCategories = WebCategoryPolicy.none
     }
     call.resolve(["success": true])
   }
@@ -155,9 +158,9 @@ public class ScreenTimePlugin: CAPPlugin {
         store.clearAllSettings()
       } else {
         store.shield.applications = nil
-        store.shield.applicationCategories = .none
+        store.shield.applicationCategories = AppCategoryPolicy.none
         store.shield.webDomains = nil
-        store.shield.webDomainCategories = .none
+        store.shield.webDomainCategories = WebCategoryPolicy.none
       }
     }
     call.resolve(["success": true])
@@ -236,9 +239,9 @@ public class ScreenTimePlugin: CAPPlugin {
   private func applySimulatedShieldChanges() {
     mutateShieldStore { store in
       store.shield.applications = nil
-      store.shield.applicationCategories = .none
+      store.shield.applicationCategories = AppCategoryPolicy.none
       store.shield.webDomains = nil
-      store.shield.webDomainCategories = .none
+      store.shield.webDomainCategories = WebCategoryPolicy.none
     }
   }
 }

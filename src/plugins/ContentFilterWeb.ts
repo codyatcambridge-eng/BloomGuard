@@ -21,4 +21,22 @@ export class ContentFilterWeb extends WebPlugin implements ContentFilterPlugin {
   async setNSFWSignal(): Promise<void> {
     return;
   }
+
+  async classifyImage(): Promise<ContentFilterNativePrediction> {
+    return {
+      predictions: {
+        Porn: 0,
+        Sexy: 0,
+        Hentai: 0,
+        Neutral: 1,
+        Drawing: 0,
+      },
+      confidence: 0,
+      inferenceTimeMs: 0,
+    };
+  }
+
+  async isModelReady(): Promise<{ ready: boolean }> {
+    return { ready: false };
+  }
 }

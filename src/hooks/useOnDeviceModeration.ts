@@ -1,6 +1,8 @@
+import { Capacitor } from '@capacitor/core';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import * as tf from '@tensorflow/tfjs';
 import * as nsfwjs from 'nsfwjs';
+import { ContentFilter, imageSourceToBase64 } from '@/plugins/ContentFilter';
 
 export interface ModerationPrediction {
   className: string;
@@ -76,6 +78,21 @@ const FAST_TIMEOUT_MS = 3000;
  */
 const MIN_IMAGE_DIMENSION = 60;
 
+const EXPECTED_NATIVE_LABELS = ['Porn', 'Sexy', 'Hentai', 'Neutral', 'Drawing'];
+
+const normalizeNativePredictions = (
+  raw: Record<string, number> | undefined,
+): Record<string, number> => {
+  const lowerMap: Record<string, number> = {};
+  Object.entries(raw ?? {}).forEach(([key, value]) => {
+    lowerMap[key.toLowerCase()] = Number(value) || 0;
+  });
+  return EXPECTED_NATIVE_LABELS.reduce((acc, label) => {
+    acc[label] = lowerMap[label.toLowerCase()] ?? 0;
+    return acc;
+  }, {} as Record<string, number>);
+};
+
 type ModelLoadingState = 'idle' | 'loading' | 'ready' | 'error';
 
 // Singleton pattern for the model - load once, use everywhere
@@ -149,6 +166,7 @@ export const useOnDeviceModeration = () => {
   const modelRef = useRef<nsfwjs.NSFWJS | null>(null);
   const imageCache = useRef<Map<string, ModerationResult>>(new Map());
   const initAttempted = useRef(false);
+  const nativeModelReadyRef = useRef(false);
 
   // Load model on mount with graceful error handling
   useEffect(() => {
@@ -187,6 +205,23 @@ export const useOnDeviceModeration = () => {
     return () => { mounted = false; };
   }, []);
 
+  const refreshNativeReady = useCallback(async () => {
+    if (!Capacitor.isNativePlatform()) {
+      nativeModelReadyRef.current = false;
+      return;
+    }
+    try {
+      const state = await ContentFilter.isModelReady();
+      nativeModelReadyRef.current = Boolean(state.ready);
+    } catch {
+      nativeModelReadyRef.current = false;
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshNativeReady();
+  }, [refreshNativeReady]);
+
   /**
    * Classify a single image with multi-parameter conditional logic and FAIL-OPEN behavior
    */
@@ -194,7 +229,6 @@ export const useOnDeviceModeration = () => {
     imageSource: HTMLImageElement | HTMLCanvasElement | string,
     thresholds: AIThresholds = DEFAULT_THRESHOLDS
   ): Promise<ModerationResult | null> => {
-    // FAIL-OPEN: Return null (no blur) if model isn't ready
     if (modelState !== 'ready' || !modelRef.current) {
       if (modelState === 'error') {
         console.debug('[OnDeviceAI] Model unavailable, fail-open: no blur');
@@ -204,8 +238,8 @@ export const useOnDeviceModeration = () => {
       return null;
     }
 
-    const startTime = performance.now();
     const LOAD_TIMEOUT = 8000;
+    const loadStart = performance.now();
 
     try {
       let image: HTMLImageElement | HTMLCanvasElement;
@@ -214,42 +248,38 @@ export const useOnDeviceModeration = () => {
       // Handle string URL input
       if (typeof imageSource === 'string') {
         cacheKey = imageSource;
-        
-        // Check cache first
+
         if (imageCache.current.has(cacheKey)) {
           return imageCache.current.get(cacheKey)!;
         }
 
-        // Load image from URL with timeout
         image = await new Promise<HTMLImageElement>((resolve, reject) => {
           const img = new Image();
           img.crossOrigin = 'anonymous';
-          
+
           const timeout = setTimeout(() => {
             img.src = '';
             reject(new Error('Image load timeout'));
           }, LOAD_TIMEOUT);
-          
+
           img.onload = () => {
             clearTimeout(timeout);
-            // FAIL-OPEN: Skip tiny images (< 60x60)
             if (img.width < MIN_IMAGE_DIMENSION || img.height < MIN_IMAGE_DIMENSION) {
               reject(new Error('Image too small - fail open'));
             }
             resolve(img);
           };
-          
+
           img.onerror = () => {
             clearTimeout(timeout);
             reject(new Error('Failed to load image'));
           };
-          
+
           img.src = imageSource;
         });
       } else {
         image = imageSource;
-        
-        // Check dimensions for HTMLImageElement
+
         if (image instanceof HTMLImageElement) {
           if (image.naturalWidth < MIN_IMAGE_DIMENSION || image.naturalHeight < MIN_IMAGE_DIMENSION) {
             console.debug('[OnDeviceAI] fail_open_tiny: dimensions', image.naturalWidth, 'x', image.naturalHeight);
@@ -259,23 +289,59 @@ export const useOnDeviceModeration = () => {
               predictions: [],
               dominantClass: 'Unknown',
               confidence: 0,
-              inferenceTime: performance.now() - startTime,
+              inferenceTime: performance.now() - loadStart,
               reason: 'fail_open_tiny',
             };
           }
         }
       }
 
-      // Run classification with FAST timeout (800ms) - FAIL-OPEN
-      const classifyPromise = modelRef.current.classify(image);
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error('Classification timeout')), FAST_TIMEOUT_MS);
-      });
-      
-      const predictions = await Promise.race([classifyPromise, timeoutPromise]);
-      const inferenceTime = performance.now() - startTime;
+      const runTensorFlowClassification = async () => {
+        const tfStart = performance.now();
+        const classifyPromise = modelRef.current!.classify(image);
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error('Classification timeout')), FAST_TIMEOUT_MS);
+        });
+        const rawPredictions = await Promise.race([classifyPromise, timeoutPromise]);
+        const mapped = rawPredictions.map(p => ({
+          className: p.className,
+          probability: p.probability,
+        }));
+        return {
+          predictions: mapped,
+          inferenceTime: performance.now() - tfStart,
+        };
+      };
 
-      // Build prediction map and formatted predictions
+      let predictions: ModerationPrediction[] = [];
+      let inferenceTime = 0;
+      const useNative = Capacitor.isNativePlatform() && nativeModelReadyRef.current;
+
+      if (useNative) {
+        try {
+          const base64 = await imageSourceToBase64(image);
+          const nativeStart = performance.now();
+          const nativeResult = await ContentFilter.classifyImage({ imageBase64: base64 });
+          inferenceTime = nativeResult.inferenceTimeMs ?? (performance.now() - nativeStart);
+          const normalized = normalizeNativePredictions(nativeResult.predictions);
+          predictions = EXPECTED_NATIVE_LABELS.map((label) => ({
+            className: label,
+            probability: normalized[label],
+          }));
+        } catch (nativeError) {
+          console.debug('[OnDeviceAI] Native inference failed, falling back:', nativeError);
+          nativeModelReadyRef.current = false;
+          await refreshNativeReady();
+          const fallback = await runTensorFlowClassification();
+          predictions = fallback.predictions;
+          inferenceTime = fallback.inferenceTime;
+        }
+      } else {
+        const fallback = await runTensorFlowClassification();
+        predictions = fallback.predictions;
+        inferenceTime = fallback.inferenceTime;
+      }
+
       const formattedPredictions: ModerationPrediction[] = predictions.map(p => ({
         className: p.className,
         probability: p.probability,
@@ -400,7 +466,7 @@ export const useOnDeviceModeration = () => {
       return result;
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Unknown error';
-      const inferenceTime = performance.now() - startTime;
+      const inferenceTime = performance.now() - loadStart;
       
       // FAIL-OPEN: Return shouldBlur=false on any error or timeout
       const isTiny = errorMsg.includes('too small');
@@ -423,7 +489,7 @@ export const useOnDeviceModeration = () => {
         reason,
       };
     }
-  }, [modelState]);
+  }, [modelState, refreshNativeReady]);
 
   // Helper to limit cache size
   const limitCache = () => {

@@ -1,4 +1,4 @@
-import { registerPlugin, PluginListenerHandle } from '@capacitor/core';
+import { Capacitor, registerPlugin, PluginListenerHandle } from '@capacitor/core';
 
 export interface NsfwProbabilities {
   Porn: number;
@@ -19,6 +19,12 @@ export interface ContentFilterRiskDecision {
   fps: number;
   reason: string;
   timestamp: number;
+}
+
+export interface ContentFilterNativePrediction {
+  predictions: Record<string, number>;
+  confidence: number;
+  inferenceTimeMs: number;
 }
 
 export interface ContentFilterPlugin {
@@ -47,11 +53,57 @@ export interface ContentFilterPlugin {
     score: number;
     probs?: NsfwProbabilities;
   }): Promise<void>;
+  classifyImage(options: { imageBase64: string }): Promise<ContentFilterNativePrediction>;
+  isModelReady(): Promise<{ ready: boolean }>;
   addListener(
     eventName: 'riskDecision',
     listenerFunc: (event: ContentFilterRiskDecision) => void,
   ): Promise<PluginListenerHandle>;
 }
+
+const CHUNK_SIZE = 0x8000;
+
+const bufferToBase64 = (buffer: ArrayBuffer): string => {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
+    const chunk = bytes.subarray(i, i + CHUNK_SIZE);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+};
+
+const fetchAsBase64 = async (url: string): Promise<string> => {
+  if (url.startsWith('data:')) {
+    const idx = url.indexOf(',');
+    return idx >= 0 ? url.slice(idx + 1) : url;
+  }
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch image for native classification: ${response.status}`);
+  }
+  const buffer = await response.arrayBuffer();
+  return bufferToBase64(buffer);
+};
+
+export const imageSourceToBase64 = async (
+  source: HTMLImageElement | HTMLCanvasElement,
+): Promise<string> => {
+  if (source instanceof HTMLCanvasElement) {
+    const dataUrl = source.toDataURL('image/jpeg', 0.85);
+    const idx = dataUrl.indexOf(',');
+    return idx >= 0 ? dataUrl.slice(idx + 1) : dataUrl;
+  }
+
+  const img = source as HTMLImageElement;
+  const src = img.currentSrc || img.src;
+  if (!src) {
+    throw new Error('Image element has no `src` value');
+  }
+  return fetchAsBase64(src);
+};
+
+export const isNativeContentFilterAvailable = (): boolean => Capacitor.isNativePlatform();
 
 export const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
 
@@ -92,3 +144,5 @@ export const setNSFWSignal = async (probs: Partial<NsfwProbabilities>) => {
 export const onRiskDecision = (
   listener: Parameters<ContentFilterPlugin['addListener']>[1],
 ) => ContentFilter.addListener('riskDecision', listener);
+
+export const isNativeModelReady = () => ContentFilter.isModelReady();
