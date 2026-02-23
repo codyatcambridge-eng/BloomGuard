@@ -91,7 +91,8 @@ interface SocialContent {
  */
 export const NativeWebViewBrowser = () => {
   const { isNative } = useCapacitor();
-  const ENABLE_DOM_BLUR = false;
+  // Flash Shield feature flag: enable frosted overlay + handshake.
+  const ENABLE_DOM_BLUR = true;
   const ENABLE_SIGNAL_PIPELINE = true;
   
   const [urlInput, setUrlInput] = useState('');
@@ -537,6 +538,14 @@ export const NativeWebViewBrowser = () => {
     currentUrlRef.current = webViewState.currentUrl || '';
   }, [webViewState.currentUrl]);
 
+  const flashLogLastRef = useRef(0);
+  const flashLog = useCallback((msg: string) => {
+    const now = Date.now();
+    if (now - flashLogLastRef.current < 800) return;
+    flashLogLastRef.current = now;
+    console.log('[FlashShield][DIAG]', msg);
+  }, []);
+
   const teardownWebViewScheduling = useCallback(async (reason: string, urlHint?: string) => {
     if (!isNative || !executeScript) return;
     const escapedReason = escapeForJs(reason);
@@ -821,6 +830,13 @@ export const NativeWebViewBrowser = () => {
    * Uses the new postMessage protocol with requestId/itemId tracking
    */
   const processModerationRequest = useCallback(async (request: ModerationRequestMessage, nonce: string) => {
+    setFlashGuardState?.(true, 'moderation_request');
+    flashLog('armed via moderation_request');
+    const timeoutId = setTimeout(() => {
+      setFlashGuardState?.(false, 'moderation_request_timeout');
+      flashLog('timeout -> disarm');
+    }, 8000);
+
     const { requestId, items, thresholds } = request;
     const requestEpoch = Number.isFinite(request.pageEpoch) ? Number(request.pageEpoch) : null;
     const activeEpoch = webViewPageEpochRef.current;
@@ -856,6 +872,9 @@ export const NativeWebViewBrowser = () => {
       }
 
       pendingRequestsRef.current.delete(requestId);
+      clearTimeout(timeoutId);
+      setFlashGuardState?.(false, 'moderation_epoch_stale');
+      flashLog('disarm stale epoch');
       return;
     }
     
@@ -1072,6 +1091,9 @@ export const NativeWebViewBrowser = () => {
     }
     
     pendingRequestsRef.current.delete(requestId);
+    clearTimeout(timeoutId);
+    setFlashGuardState?.(false, 'moderation_results');
+    flashLog('disarm after results');
   }, [
     moderationBridge,
     postMessageToWebView,
@@ -1086,6 +1108,8 @@ export const NativeWebViewBrowser = () => {
     currentUrl,
     processModerationSafetySignal,
     setCentralBlurState,
+    setFlashGuardState,
+    flashLog,
   ]);
 
   /**
