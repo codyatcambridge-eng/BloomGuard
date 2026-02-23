@@ -2,46 +2,110 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { Capacitor, type PluginListenerHandle } from '@capacitor/core';
 import { InAppBrowser, OpenWebViewOptions, ToolBarType, BackgroundColor } from '@capgo/inappbrowser';
 
+const FLASH_GUARD_DIAG_VISUAL = true; // Flip to false to disable temporary DIAG tint.
+const FLASH_GUARD_DIAG_VISUAL_MS = 1500;
+
 const FLASH_GUARD_SCRIPT = `(() => {
-  if (window.__MW_FLASH_GUARD__) return;
   const HOST_ID = 'mw-shadow-veil-host';
-  const host = document.createElement('div');
-  host.id = HOST_ID;
-  host.style.cssText = 'position:fixed;inset:0;z-index:2147483646;pointer-events:none;opacity:1;';
-  document.documentElement.appendChild(host);
-  const shadow = host.attachShadow({ mode: 'closed' });
-  const veil = document.createElement('div');
-  veil.style.cssText = [
-    'position:fixed',
-    'inset:0',
-    'background:rgba(8,12,18,0.45)',
-    'backdrop-filter:blur(22px) saturate(0.8)',
-    '-webkit-backdrop-filter:blur(22px) saturate(0.8)',
-    'transition:opacity 120ms ease',
-    'opacity:1'
-  ].join('!important;') + '!important;';
-  shadow.appendChild(veil);
+  const BASE_BG = 'rgba(8,12,18,0.45)';
+  const DIAG_ON = ${FLASH_GUARD_DIAG_VISUAL ? 'true' : 'false'};
+  const DIAG_MS = ${FLASH_GUARD_DIAG_VISUAL_MS};
 
-  const api = {
-    set(state, reason) {
-      const on = !!state;
-      veil.style.opacity = on ? '1' : '0';
-      veil.style.pointerEvents = on ? 'auto' : 'none';
-      host.dataset.reason = reason || 'unknown';
-    },
+  const existed = typeof window.__MW_FLASH_GUARD__ === 'object';
+  let api = existed ? window.__MW_FLASH_GUARD__ : null;
+  let host = document.getElementById(HOST_ID);
+  if (!host) {
+    host = document.createElement('div');
+    host.id = HOST_ID;
+    host.style.cssText = 'position:fixed;inset:0;z-index:2147483646;pointer-events:none;opacity:1;';
+    document.documentElement.appendChild(host);
+  }
+
+  let shadow = host.shadowRoot || null;
+  let veil = (api && api._veil) || null;
+  if (!shadow && !veil) {
+    try { shadow = host.attachShadow({ mode: 'closed' }); } catch (e) { shadow = null; }
+  }
+  if (!veil && shadow) {
+    veil = document.createElement('div');
+    veil.style.cssText = [
+      'position:fixed',
+      'inset:0',
+      'background:' + BASE_BG,
+      'backdrop-filter:blur(22px) saturate(0.8)',
+      '-webkit-backdrop-filter:blur(22px) saturate(0.8)',
+      'transition:opacity 120ms ease',
+      'opacity:1'
+    ].join('!important;') + '!important;';
+    shadow.appendChild(veil);
+  }
+
+  if (!api || typeof api !== 'object') {
+    api = { state: 'on', lastReason: 'boot' } as any;
+  }
+
+  api.set = (state, reason) => {
+    const on = !!state;
+    api.state = on ? 'on' : 'off';
+    api.lastReason = reason || 'unknown';
+    if (!veil) return;
+    veil.style.opacity = on ? '1' : '0';
+    veil.style.pointerEvents = on ? 'auto' : 'none';
+    host.dataset.reason = api.lastReason;
   };
 
-  const handler = (event) => {
-    const payload = event?.data || event?.detail || {};
-    if (!payload || typeof payload !== 'object') return;
-    if (payload.type !== 'MW_FLASH_GUARD') return;
-    api.set(!!payload.enabled, payload.reason || 'command');
+  api.inspect = () => {
+    const cs = veil ? getComputedStyle(veil) : null;
+    return {
+      present: !!veil,
+      display: cs?.display || null,
+      opacity: cs?.opacity || null,
+      zIndex: cs?.zIndex || null,
+      pointerEvents: cs?.pointerEvents || null,
+      hostAttached: !!host?.parentElement,
+      hostZ: host?.style?.zIndex || null,
+      hostOpacity: host?.style?.opacity || null,
+      state: api.state,
+      lastReason: api.lastReason,
+    };
   };
-  window.addEventListener('message', handler, true);
-  window.addEventListener('messageFromNative', handler as any, true);
+
+  api._veil = veil;
+
+  if (!api.__handlersAttached) {
+    const handler = (event) => {
+      const payload = event?.data || event?.detail || {};
+      if (!payload || typeof payload !== 'object') return;
+      if (payload.type !== 'MW_FLASH_GUARD') return;
+      api.set(!!payload.enabled, payload.reason || 'command');
+    };
+    window.addEventListener('message', handler, true);
+    window.addEventListener('messageFromNative', handler as any, true);
+    api.__handlersAttached = true;
+  }
+
+  if (DIAG_ON && !api.__diagPeeked && veil) {
+    api.__diagPeeked = true;
+    const diagBg = 'linear-gradient(135deg, rgba(46,134,255,0.28), ' + BASE_BG + ')';
+    veil.style.background = diagBg;
+    veil.style.opacity = '0.9';
+    setTimeout(() => {
+      veil.style.background = BASE_BG;
+      veil.style.opacity = '1';
+      api.__diagPeeked = false;
+    }, DIAG_MS);
+  }
 
   window.__MW_FLASH_GUARD__ = api;
   api.set(true, 'boot');
+
+  return JSON.stringify({
+    installed: typeof window.__MW_FLASH_GUARD__ === 'object',
+    existed,
+    guardPresent: !!veil,
+    state: api.state,
+    snapshot: api.inspect(),
+  });
 })();`;
 
 export type WebViewEvent =
@@ -112,6 +176,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
   const closeCountRef = useRef(0);
   const executeScript60sWindowStartRef = useRef(0);
   const executeScript60sCountRef = useRef(0);
+  const flashDiagLogAtRef = useRef(0);
   const pageLoadErrorRecoveryRef = useRef<{ url: string; count: number; at: number }>({
     url: '',
     count: 0,
@@ -134,56 +199,118 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     isOpenRef.current = false;
   }, []);
 
+  const flashDiagLog = useCallback((...args: unknown[]) => {
+    const now = Date.now();
+    if (now - flashDiagLogAtRef.current < 250) return;
+    flashDiagLogAtRef.current = now;
+    console.log('[FlashShield][DIAG]', ...args);
+  }, []);
+
   const installFlashGuard = useCallback(async (): Promise<boolean> => {
     // Re-install on every navigation because document reloads drop the injected guard.
-    if (!isNative || !isOpenRef.current) return false;
-    try {
-      const statusRaw = await InAppBrowser.executeScript({
-        code: "typeof window.__MW_FLASH_GUARD__ === 'object' ? 'ok' : 'missing'",
-      });
-      const status =
-        typeof statusRaw === 'string'
-          ? statusRaw
-          : (statusRaw as { result?: unknown; data?: unknown }).result ??
-            (statusRaw as { result?: unknown; data?: unknown }).data;
-      if (status === 'ok' && flashGuardInstalledRef.current) {
-        return true;
-      }
-    } catch {
-      // Fall through to reinstall.
+    if (!isNative || !isOpenRef.current) {
+      flashDiagLog('install skipped: native=', isNative, 'open=', isOpenRef.current);
+      return false;
     }
-
     try {
-      const installResult = await InAppBrowser.executeScript({
-        code: `${FLASH_GUARD_SCRIPT}; typeof window.__MW_FLASH_GUARD__ === 'object' ? 'installed' : 'missing'`,
-      });
-      const installed =
+      flashDiagLog('install: begin probe');
+      const installResult = await InAppBrowser.executeScript({ code: FLASH_GUARD_SCRIPT });
+      const payload =
         typeof installResult === 'string'
           ? installResult
           : (installResult as { result?: unknown; data?: unknown }).result ??
             (installResult as { result?: unknown; data?: unknown }).data;
-      flashGuardInstalledRef.current = installed === 'installed' || installed === 'ok';
+      let parsed: { installed?: boolean; existed?: boolean; guardPresent?: boolean; state?: string } = {};
+      if (typeof payload === 'string') {
+        try {
+          parsed = JSON.parse(payload);
+        } catch {
+          parsed = {};
+        }
+      } else if (payload && typeof payload === 'object') {
+        parsed = payload as typeof parsed;
+      }
+      flashGuardInstalledRef.current = !!parsed.installed || !!parsed.guardPresent;
+      flashDiagLog('install: result', {
+        installed: parsed.installed ?? false,
+        existed: parsed.existed ?? false,
+        guardPresent: parsed.guardPresent ?? false,
+        state: parsed.state ?? null,
+      });
       return flashGuardInstalledRef.current;
     } catch (error) {
-      console.debug('[NativeWebView] FlashGuard install failed', error);
+      console.debug('[FlashShield][DIAG] install failed', error);
       flashGuardInstalledRef.current = false;
       return false;
     }
-  }, [isNative]);
+  }, [isNative, flashDiagLog]);
+
+  const probeFlashGuard = useCallback(
+    async (tag: string) => {
+      if (!isNative || !isOpenRef.current) {
+        flashDiagLog('probe skipped', tag, 'native=', isNative, 'open=', isOpenRef.current);
+        return null;
+      }
+      try {
+        const probe = await InAppBrowser.executeScript({
+          code: `(() => {\n            const api = window.__MW_FLASH_GUARD__;\n            const host = document.getElementById('mw-shadow-veil-host');\n            const veil = host?.shadowRoot?.firstChild;\n            const cs = veil ? getComputedStyle(veil) : null;\n            return {\n              existed: !!api,\n              guardPresent: !!veil,\n              state: api?.state || null,\n              lastReason: api?.lastReason || null,\n              style: {\n                display: cs?.display || null,\n                opacity: cs?.opacity || null,\n                zIndex: cs?.zIndex || null,\n                pointerEvents: cs?.pointerEvents || null,\n              },\n              host: {\n                attached: !!host?.parentElement,\n                zIndex: host?.style?.zIndex || null,\n                opacity: host?.style?.opacity || null,\n              }\n            };\n          })();`,\n        });
+        const payload =
+          typeof probe === 'string'
+            ? probe
+            : (probe as { result?: unknown; data?: unknown }).result ??
+              (probe as { result?: unknown; data?: unknown }).data;
+        let parsed: unknown = payload;
+        if (typeof payload === 'string') {
+          try {
+            parsed = JSON.parse(payload);
+          } catch {
+            parsed = { raw: payload };
+          }
+        }
+        flashDiagLog('probe', tag, parsed);
+        return parsed as Record<string, unknown>;
+      } catch (error) {
+        console.debug('[FlashShield][DIAG] probe failed', tag, error);
+        return null;
+      }
+    },
+    [isNative, flashDiagLog],
+  );
 
   const setFlashGuardState = useCallback(
     async (enabled: boolean, reason: string) => {
-      if (!isNative || !isOpenRef.current) return;
+      if (!isNative || !isOpenRef.current) {
+        flashDiagLog('toggle skipped', reason, 'native=', isNative, 'open=', isOpenRef.current);
+        return;
+      }
       const ensured = await installFlashGuard();
-      if (!ensured) return;
-      const code = `window.__MW_FLASH_GUARD__ && window.__MW_FLASH_GUARD__.set(${enabled ? 'true' : 'false'}, '${reason.replace(/'/g, "\\'")}')`;
+      if (!ensured) {
+        flashDiagLog('toggle skipped: install failed', reason);
+        return;
+      }
+      const safeReason = reason.replace(/'/g, "\\'");
+      const code = `(() => {\n        const api = window.__MW_FLASH_GUARD__;\n        const host = document.getElementById('mw-shadow-veil-host');\n        const veil = host?.shadowRoot?.firstChild;\n        if (!api) return { ok: false, reason: 'no_api' };\n        api.set(${enabled ? 'true' : 'false'}, '${safeReason}');\n        const cs = veil ? getComputedStyle(veil) : null;\n        return {\n          ok: true,\n          state: api.state,\n          lastReason: api.lastReason,\n          guardPresent: !!veil,\n          style: {\n            display: cs?.display || null,\n            opacity: cs?.opacity || null,\n            zIndex: cs?.zIndex || null,\n            pointerEvents: cs?.pointerEvents || null,\n          }\n        };\n      })();`;
       try {
-        await InAppBrowser.executeScript({ code });
+        const toggleResult = await InAppBrowser.executeScript({ code });
+        const payload =
+          typeof toggleResult === 'string'
+            ? toggleResult
+            : (toggleResult as { result?: unknown; data?: unknown }).result ??
+              (toggleResult as { result?: unknown; data?: unknown }).data;
+        let parsed: unknown = payload;
+        if (typeof payload === 'string') {
+          try {
+            parsed = JSON.parse(payload);
+          } catch {
+            parsed = { raw: payload };
+          }
+        }
+        flashDiagLog('toggle', enabled ? 'on' : 'off', reason, parsed);
       } catch (error) {
-        console.debug('[NativeWebView] FlashGuard toggle failed', error);
+        console.debug('[FlashShield][DIAG] FlashGuard toggle failed', reason, error);
       }
     },
-    [isNative, installFlashGuard],
+    [isNative, installFlashGuard, flashDiagLog],
   );
 
   // Set up event listeners
@@ -220,7 +347,11 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
         canGoForward: historyIndexRef.current < historyStackRef.current.length - 1,
       }));
 
-      void installFlashGuard();
+      void probeFlashGuard('url_change');
+      void installFlashGuard().then((installed) => {
+        flashDiagLog('url_change install complete', installed);
+        void probeFlashGuard('url_change_post_install');
+      });
     });
 
     // Page load complete listener
@@ -232,7 +363,11 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
         at: Date.now(),
       };
       setState(prev => ({ ...prev, isLoading: false, error: null }));
-      void setFlashGuardState(false, 'load_end');
+      void (async () => {
+        await probeFlashGuard('load_end_pre_toggle');
+        await setFlashGuardState(false, 'load_end');
+        await probeFlashGuard('load_end_post_toggle');
+      })();
       if (currentUrlRef.current) {
         onLoadEnd?.(currentUrlRef.current);
       }
@@ -309,7 +444,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
       InAppBrowser.removeAllListeners();
       listenersSetupRef.current = false;
     };
-  }, [isNative, onUrlChange, onLoadEnd, onLoadError, onClose, onMessageFromWebview, markClosed, setFlashGuardState]);
+  }, [isNative, onUrlChange, onLoadEnd, onLoadError, onClose, onMessageFromWebview, markClosed, setFlashGuardState, probeFlashGuard, flashDiagLog]);
 
   // Open URL in native WebView
   const open = useCallback(async (url: string, inApp: boolean = true) => {
