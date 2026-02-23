@@ -134,22 +134,48 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     isOpenRef.current = false;
   }, []);
 
-  const installFlashGuard = useCallback(async () => {
-    if (!isNative || flashGuardInstalledRef.current) return;
+  const installFlashGuard = useCallback(async (): Promise<boolean> => {
+    // Re-install on every navigation because document reloads drop the injected guard.
+    if (!isNative || !isOpenRef.current) return false;
     try {
-      await InAppBrowser.executeScript({ code: FLASH_GUARD_SCRIPT });
-      flashGuardInstalledRef.current = true;
-      await InAppBrowser.executeScript({
-        code: "window.__MW_FLASH_GUARD__ && window.__MW_FLASH_GUARD__.set(true,'arm')",
+      const statusRaw = await InAppBrowser.executeScript({
+        code: "typeof window.__MW_FLASH_GUARD__ === 'object' ? 'ok' : 'missing'",
       });
+      const status =
+        typeof statusRaw === 'string'
+          ? statusRaw
+          : (statusRaw as { result?: unknown; data?: unknown }).result ??
+            (statusRaw as { result?: unknown; data?: unknown }).data;
+      if (status === 'ok' && flashGuardInstalledRef.current) {
+        return true;
+      }
+    } catch {
+      // Fall through to reinstall.
+    }
+
+    try {
+      const installResult = await InAppBrowser.executeScript({
+        code: `${FLASH_GUARD_SCRIPT}; typeof window.__MW_FLASH_GUARD__ === 'object' ? 'installed' : 'missing'`,
+      });
+      const installed =
+        typeof installResult === 'string'
+          ? installResult
+          : (installResult as { result?: unknown; data?: unknown }).result ??
+            (installResult as { result?: unknown; data?: unknown }).data;
+      flashGuardInstalledRef.current = installed === 'installed' || installed === 'ok';
+      return flashGuardInstalledRef.current;
     } catch (error) {
       console.debug('[NativeWebView] FlashGuard install failed', error);
+      flashGuardInstalledRef.current = false;
+      return false;
     }
   }, [isNative]);
 
   const setFlashGuardState = useCallback(
     async (enabled: boolean, reason: string) => {
       if (!isNative || !isOpenRef.current) return;
+      const ensured = await installFlashGuard();
+      if (!ensured) return;
       const code = `window.__MW_FLASH_GUARD__ && window.__MW_FLASH_GUARD__.set(${enabled ? 'true' : 'false'}, '${reason.replace(/'/g, "\\'")}')`;
       try {
         await InAppBrowser.executeScript({ code });
@@ -157,7 +183,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
         console.debug('[NativeWebView] FlashGuard toggle failed', error);
       }
     },
-    [isNative],
+    [isNative, installFlashGuard],
   );
 
   // Set up event listeners
@@ -193,6 +219,8 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
         canGoBack: historyIndexRef.current > 0,
         canGoForward: historyIndexRef.current < historyStackRef.current.length - 1,
       }));
+
+      void installFlashGuard();
     });
 
     // Page load complete listener
