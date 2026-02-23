@@ -173,6 +173,30 @@ const FLASH_GUARD_PROOF_SCRIPT = `(() => {
   };
 })();`;
 
+const FLASH_GUARD_PROBE_SCRIPT = `(() => {
+  const api = window.__MW_FLASH_GUARD__;
+  const host = document.getElementById('mw-shadow-veil-host');
+  const veil = host?.shadowRoot?.firstChild;
+  const cs = veil ? getComputedStyle(veil) : null;
+  return {
+    existed: !!api,
+    guardPresent: !!veil,
+    state: api?.state || null,
+    lastReason: api?.lastReason || null,
+    style: {
+      display: cs?.display || null,
+      opacity: cs?.opacity || null,
+      zIndex: cs?.zIndex || null,
+      pointerEvents: cs?.pointerEvents || null,
+    },
+    host: {
+      attached: !!host?.parentElement,
+      zIndex: host?.style?.zIndex || null,
+      opacity: host?.style?.opacity || null,
+    }
+  };
+})();`;
+
 export type WebViewEvent =
   | 'loadstart'
   | 'loadstop'
@@ -348,8 +372,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
         return null;
       }
       try {
-        const probe = await InAppBrowser.executeScript({
-          code: `(() => {\n            const api = window.__MW_FLASH_GUARD__;\n            const host = document.getElementById('mw-shadow-veil-host');\n            const veil = host?.shadowRoot?.firstChild;\n            const cs = veil ? getComputedStyle(veil) : null;\n            return {\n              existed: !!api,\n              guardPresent: !!veil,\n              state: api?.state || null,\n              lastReason: api?.lastReason || null,\n              style: {\n                display: cs?.display || null,\n                opacity: cs?.opacity || null,\n                zIndex: cs?.zIndex || null,\n                pointerEvents: cs?.pointerEvents || null,\n              },\n              host: {\n                attached: !!host?.parentElement,\n                zIndex: host?.style?.zIndex || null,\n                opacity: host?.style?.opacity || null,\n              }\n            };\n          })();`,\n        });
+        const probe = await InAppBrowser.executeScript({ code: FLASH_GUARD_PROBE_SCRIPT });
         const payload =
           typeof probe === 'string'
             ? probe
