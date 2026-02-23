@@ -433,6 +433,7 @@ export const NativeWebViewBrowser = () => {
     reload: webViewReload,
     postMessageToWebView,
     executeScript,
+    setFlashGuardState,
   } = useNativeWebView({
     onLoadStart: (url) => {
       console.log('[Browser] ======= LOAD START =======');
@@ -446,11 +447,13 @@ export const NativeWebViewBrowser = () => {
       blurReadyRef.current = false;
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       setCentralBlurState(false, 'navigation_load_start');
+      setFlashGuardState?.(true, 'navigation_start');
     },
     onLoadEnd: async (url) => {
       console.log('[Browser] ======= LOAD END =======');
       console.log('[Browser] URL:', url);
       setIsLoading(false);
+      setFlashGuardState?.(false, 'load_end');
       if (!ENABLE_SIGNAL_PIPELINE) return;
       
       // Inject moderation script after page fully loads
@@ -486,6 +489,7 @@ export const NativeWebViewBrowser = () => {
       console.error('[Browser] URL:', url);
       console.error('[Browser] Error:', error);
       setIsLoading(false);
+      setFlashGuardState?.(true, 'load_error');
       clearLoadEndInjectTimer();
       injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
@@ -518,6 +522,7 @@ export const NativeWebViewBrowser = () => {
       blurPendingRef.current = null;
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       setCentralBlurState(false, 'webview_closed');
+      setFlashGuardState?.(false, 'close');
       navigate('home', '', '');
     },
     onMessageFromWebview: (payload) => {

@@ -2,13 +2,55 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { Capacitor, type PluginListenerHandle } from '@capacitor/core';
 import { InAppBrowser, OpenWebViewOptions, ToolBarType, BackgroundColor } from '@capgo/inappbrowser';
 
-export type WebViewEvent = 
-  | 'loadstart' 
-  | 'loadstop' 
-  | 'loaderror' 
-  | 'beforeload' 
-  | 'message' 
-  | 'navigation' 
+const FLASH_GUARD_SCRIPT = `(() => {
+  if (window.__MW_FLASH_GUARD__) return;
+  const HOST_ID = 'mw-shadow-veil-host';
+  const host = document.createElement('div');
+  host.id = HOST_ID;
+  host.style.cssText = 'position:fixed;inset:0;z-index:2147483646;pointer-events:none;opacity:1;';
+  document.documentElement.appendChild(host);
+  const shadow = host.attachShadow({ mode: 'closed' });
+  const veil = document.createElement('div');
+  veil.style.cssText = [
+    'position:fixed',
+    'inset:0',
+    'background:rgba(8,12,18,0.45)',
+    'backdrop-filter:blur(22px) saturate(0.8)',
+    '-webkit-backdrop-filter:blur(22px) saturate(0.8)',
+    'transition:opacity 120ms ease',
+    'opacity:1'
+  ].join('!important;') + '!important;';
+  shadow.appendChild(veil);
+
+  const api = {
+    set(state, reason) {
+      const on = !!state;
+      veil.style.opacity = on ? '1' : '0';
+      veil.style.pointerEvents = on ? 'auto' : 'none';
+      host.dataset.reason = reason || 'unknown';
+    },
+  };
+
+  const handler = (event) => {
+    const payload = event?.data || event?.detail || {};
+    if (!payload || typeof payload !== 'object') return;
+    if (payload.type !== 'MW_FLASH_GUARD') return;
+    api.set(!!payload.enabled, payload.reason || 'command');
+  };
+  window.addEventListener('message', handler, true);
+  window.addEventListener('messageFromNative', handler as any, true);
+
+  window.__MW_FLASH_GUARD__ = api;
+  api.set(true, 'boot');
+})();`;
+
+export type WebViewEvent =
+  | 'loadstart'
+  | 'loadstop'
+  | 'loaderror'
+  | 'beforeload'
+  | 'message'
+  | 'navigation'
   | 'close';
 
 export interface WebViewState {
@@ -75,6 +117,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     count: 0,
     at: 0,
   });
+  const flashGuardInstalledRef = useRef(false);
 
   const markClosed = useCallback((reason: string) => {
     const previousId = activeInstanceIdRef.current;
@@ -91,6 +134,32 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     isOpenRef.current = false;
   }, []);
 
+  const installFlashGuard = useCallback(async () => {
+    if (!isNative || flashGuardInstalledRef.current) return;
+    try {
+      await InAppBrowser.executeScript({ code: FLASH_GUARD_SCRIPT });
+      flashGuardInstalledRef.current = true;
+      await InAppBrowser.executeScript({
+        code: "window.__MW_FLASH_GUARD__ && window.__MW_FLASH_GUARD__.set(true,'arm')",
+      });
+    } catch (error) {
+      console.debug('[NativeWebView] FlashGuard install failed', error);
+    }
+  }, [isNative]);
+
+  const setFlashGuardState = useCallback(
+    async (enabled: boolean, reason: string) => {
+      if (!isNative || !isOpenRef.current) return;
+      const code = `window.__MW_FLASH_GUARD__ && window.__MW_FLASH_GUARD__.set(${enabled ? 'true' : 'false'}, '${reason.replace(/'/g, "\\'")}')`;
+      try {
+        await InAppBrowser.executeScript({ code });
+      } catch (error) {
+        console.debug('[NativeWebView] FlashGuard toggle failed', error);
+      }
+    },
+    [isNative],
+  );
+
   // Set up event listeners
   useEffect(() => {
     if (!isNative || listenersSetupRef.current) return;
@@ -103,10 +172,10 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
       const url = event.url;
       console.log('[NativeWebView] URL changed:', url);
       currentUrlRef.current = url;
-      
+
       setState(prev => ({ ...prev, currentUrl: url }));
       onUrlChange?.(url);
-      
+
       // Update history
       if (historyIndexRef.current === historyStackRef.current.length - 1) {
         historyStackRef.current.push(url);
@@ -117,7 +186,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
         historyStackRef.current.push(url);
         historyIndexRef.current = historyStackRef.current.length - 1;
       }
-      
+
       // Update navigation state
       setState(prev => ({
         ...prev,
@@ -135,6 +204,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
         at: Date.now(),
       };
       setState(prev => ({ ...prev, isLoading: false, error: null }));
+      void setFlashGuardState(false, 'load_end');
       if (currentUrlRef.current) {
         onLoadEnd?.(currentUrlRef.current);
       }
@@ -155,6 +225,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
         void InAppBrowser.reload()
           .then(() => {
             setState(prev => ({ ...prev, isLoading: true, error: null }));
+            void setFlashGuardState(true, 'reload_after_error');
           })
           .catch(() => {
             setState(prev => ({ ...prev, isLoading: false, error: 'pageLoadError' }));
@@ -176,6 +247,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     InAppBrowser.addListener('closeEvent', () => {
       console.log('[NativeWebView] Browser closed');
       markClosed('closeEvent');
+      flashGuardInstalledRef.current = false;
       setState(prev => ({ ...prev, isOpen: false }));
       onClose?.();
     });
@@ -209,7 +281,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
       InAppBrowser.removeAllListeners();
       listenersSetupRef.current = false;
     };
-  }, [isNative, onUrlChange, onLoadEnd, onLoadError, onClose, onMessageFromWebview, markClosed]);
+  }, [isNative, onUrlChange, onLoadEnd, onLoadError, onClose, onMessageFromWebview, markClosed, setFlashGuardState]);
 
   // Open URL in native WebView
   const open = useCallback(async (url: string, inApp: boolean = true) => {
@@ -237,11 +309,13 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
       }
       markClosed('reopen_before_open');
       setState(prev => ({ ...prev, isOpen: false }));
+      flashGuardInstalledRef.current = false;
     }
 
     setState(prev => ({ ...prev, isLoading: true, error: null }));
     onLoadStart?.(url);
     pageLoadErrorRecoveryRef.current = { url, count: 0, at: Date.now() };
+    void setFlashGuardState(true, 'nav_start');
 
     try {
       const options: OpenWebViewOptions = {
@@ -262,10 +336,11 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
       };
 
       await InAppBrowser.openWebView(options);
-      
+      await installFlashGuard();
+
       historyStackRef.current = [url];
       historyIndexRef.current = 0;
-      
+
       setState(prev => ({
         ...prev,
         isOpen: true,
@@ -287,7 +362,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
         'activeInstanceId=' + instanceId,
         'url=' + url,
       );
-      
+
       return true;
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : 'Failed to open WebView';
@@ -296,15 +371,16 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
       onLoadError?.(url, errorMsg);
       return false;
     }
-  }, [isNative, onLoadStart, onLoadError, onNavigationRequest]);
+  }, [isNative, onLoadStart, onLoadError, onNavigationRequest, installFlashGuard, markClosed, setFlashGuardState]);
 
   // Close the WebView
   const close = useCallback(async () => {
     if (!isNative) return;
-    
+
     try {
       await InAppBrowser.close();
       markClosed('close()');
+      flashGuardInstalledRef.current = false;
       setState(prev => ({ ...prev, isOpen: false }));
       historyStackRef.current = [];
       historyIndexRef.current = -1;
@@ -325,13 +401,11 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
   // Navigate back in WebView history
   const goBack = useCallback(async () => {
     if (!isNative || historyIndexRef.current <= 0) return false;
-    
+
     try {
-      // InAppBrowser doesn't expose back/forward directly
-      // We track history and reload the previous URL
       historyIndexRef.current--;
       const prevUrl = historyStackRef.current[historyIndexRef.current];
-      
+
       if (prevUrl) {
         await InAppBrowser.setUrl({ url: prevUrl });
         setState(prev => ({
@@ -351,11 +425,11 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
   // Navigate forward in WebView history
   const goForward = useCallback(async () => {
     if (!isNative || historyIndexRef.current >= historyStackRef.current.length - 1) return false;
-    
+
     try {
       historyIndexRef.current++;
       const nextUrl = historyStackRef.current[historyIndexRef.current];
-      
+
       if (nextUrl) {
         await InAppBrowser.setUrl({ url: nextUrl });
         setState(prev => ({
@@ -375,26 +449,28 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
   // Reload current page
   const reload = useCallback(async () => {
     if (!isNative || !state.currentUrl) return;
-    
+
     try {
       await InAppBrowser.reload();
       setState(prev => ({ ...prev, isLoading: true }));
+      void setFlashGuardState(true, 'manual_reload');
     } catch (error) {
       console.error('[NativeWebView] Reload error:', error);
     }
-  }, [isNative, state.currentUrl]);
+  }, [isNative, state.currentUrl, setFlashGuardState]);
 
   // Set URL without full navigation (for redirects)
   const setUrl = useCallback(async (url: string) => {
     if (!isNative) return;
-    
+
     try {
       await InAppBrowser.setUrl({ url });
       setState(prev => ({ ...prev, currentUrl: url, isLoading: true }));
+      void setFlashGuardState(true, 'set_url');
     } catch (error) {
       console.error('[NativeWebView] SetUrl error:', error);
     }
-  }, [isNative]);
+  }, [isNative, setFlashGuardState]);
 
   const postMessageToWebView = useCallback(async (detail: Record<string, unknown>): Promise<boolean> => {
     if (!isNative) return false;
@@ -476,5 +552,6 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     setUrl,
     postMessageToWebView,
     executeScript,
+    setFlashGuardState,
   };
 };
