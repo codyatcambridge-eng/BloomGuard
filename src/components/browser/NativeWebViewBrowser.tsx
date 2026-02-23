@@ -891,9 +891,7 @@ export const NativeWebViewBrowser = () => {
     const config = {
       ...getModerationConfig(),
       allowReveal: isRevealAllowed() && localSettings.kid_safe_profile !== true,
-      enableVideoFrameSnapshots:
-        (localSettings.prototype_mode === true || localSettings.kid_safe_profile === true) &&
-        import.meta.env.VITE_ENABLE_VIDEO_FRAME_SNAPSHOTS === 'true',
+      enableVideoFrameSnapshots: import.meta.env.VITE_ENABLE_VIDEO_FRAME_SNAPSHOTS === 'true',
       kidSafeProfile: localSettings.kid_safe_profile === true,
       domainContextAdult: domainAdultContextRef.current === true,
       pageEpoch: webViewPageEpochRef.current,

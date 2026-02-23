@@ -221,7 +221,9 @@ export function generatePreShieldBootScript(): string {
     const style = document.createElement('style');
     style.id = 'mw-preshield-boot-style';
     style.textContent = [
-      '.mw-pre-scan-shield{position:absolute!important;inset:0!important;display:flex!important;align-items:center!important;justify-content:center!important;background:rgba(10,10,10,.88)!important;color:rgba(255,255,255,.92)!important;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important;font-size:11px!important;font-weight:600!important;letter-spacing:.02em!important;z-index:9997!important;pointer-events:none!important;}',
+      '.mw-pre-scan-shield{position:absolute!important;inset:0!important;display:flex!important;flex-direction:column!important;align-items:center!important;justify-content:center!important;background:rgba(10,10,10,.88)!important;color:rgba(255,255,255,.92)!important;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important;font-size:11px!important;font-weight:600!important;letter-spacing:.02em!important;z-index:9997!important;pointer-events:none!important;text-align:center!important;gap:4px!important;}',
+      '.mw-shield-title{font-weight:700!important;font-size:12px!important;}',
+      '.mw-shield-quote{font-style:italic!important;opacity:0.7!important;font-size:10px!important;font-weight:500!important;}',
       '[data-mw-shield="1"][data-mw-shield-state="pending"],[data-mw-shield="1"][data-mw-shield-state="unsafe"]{opacity:0!important;visibility:hidden!important;}'
     ].join('');
     const root = document.head || document.documentElement;
@@ -643,6 +645,12 @@ export function generateModerationScript(config: InjectionConfig): string {
       'backdrop-filter: none !important;',
       '-webkit-backdrop-filter: none !important;',
       '}',
+      '.mw-frost-content { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; color:white; text-align:center; pointer-events:none; }',
+      '.mw-frost-title { font-weight:700; letter-spacing:0.04em; font-size:13px; }',
+      '.mw-frost-quote { font-style:italic; opacity:0.7; font-size:11px; }',
+      '.mw-hold-progress { position:absolute; width:44px; height:44px; pointer-events:none; top:50%; left:50%; transform:translate(-50%,-50%); }',
+      '.mw-hold-progress-bg { fill:none; stroke:rgba(255,255,255,0.25); stroke-width:3; }',
+      '.mw-hold-progress-fg { fill:none; stroke:#6ee7ff; stroke-width:3; stroke-linecap:round; transform:rotate(-90deg); transform-origin:50% 50%; transition:stroke-dashoffset 60ms linear; }',
     ].join('');
     (document.head || document.documentElement).appendChild(style);
   }
@@ -823,6 +831,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     revealed: new Set(), // Tracks URLs that user has manually revealed
     elements: new Map(), // itemId -> element
     viewportObserver: null, // IntersectionObserver for viewport optimization
+    nextVideoObserver: null, // IntersectionObserver for pre-emptive next video scanning
     mutationObservers: [],
     stats: {
       imgTags: 0,
@@ -1100,6 +1109,9 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function queueVideoMediaTargets(video, sourceTypePrefix) {
     if (!video) return;
+    if (isShortsOrReelsStyle(video)) {
+      ensureVideoSkeletonOverlay(video, 'shorts_detected');
+    }
     const sourceType = sourceTypePrefix || 'video';
     const poster = video.poster || video.getAttribute('poster');
     if (poster) {
@@ -1118,6 +1130,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       queueForScan(thumb, video, sourceType + '-thumbnail');
     }
     queueVideoFrameSnapshot(video, sourceType);
+    observeForNextVideo(video);
   }
 
   function isVideoSnapshotSurface(video) {
@@ -1220,6 +1233,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       videoActivityState.rapidSourceChanges = 0;
     }
     videoActivityState.rapidSourceChanges += 1;
+    if (isShortsOrReelsStyle(video)) {
+      ensureVideoSkeletonOverlay(video, reason || 'source_change');
+    }
     queueVideoMediaTargets(video, 'video-source-change');
     if (videoActivityState.rapidSourceChanges >= 3 && isShortsOrReelsStyle(video)) {
       postVideoActivity('playing', reason || 'rapid_source_change');
@@ -1509,15 +1525,32 @@ export function generateModerationScript(config: InjectionConfig): string {
       overlay = document.createElement('div');
       overlay.className = 'mw-pre-scan-shield';
       overlay.dataset.mwShieldOverlayFor = shieldId;
+      overlay.appendChild(buildShieldContent());
       parent.appendChild(overlay);
     }
 
     overlay.dataset.mwShieldOverlayState = shieldState;
     if (shieldState === 'unsafe') {
-      overlay.textContent = 'Shielded';
+      const title = overlay.querySelector('.mw-shield-title');
+      if (title) title.textContent = 'Frosted';
     } else {
-      overlay.textContent = 'Shielding...';
+      const title = overlay.querySelector('.mw-shield-title');
+      if (title) title.textContent = 'Shielding';
     }
+  }
+
+  function buildShieldContent() {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'mw-shield-content';
+    const title = document.createElement('div');
+    title.className = 'mw-shield-title';
+    title.textContent = 'Shielding';
+    const quote = document.createElement('div');
+    quote.className = 'mw-shield-quote';
+    quote.textContent = 'Algorithms are noisy, real life is quiet.';
+    wrapper.appendChild(title);
+    wrapper.appendChild(quote);
+    return wrapper;
   }
 
   function shouldSkipBlurForShield(element) {
@@ -1638,6 +1671,215 @@ export function generateModerationScript(config: InjectionConfig): string {
     return true;
   }
 
+  // ==================== VIDEO SKELETON & FROST OVERLAYS ====================
+
+  function ensureVideoOverlayHost(video) {
+    if (!video || !video.parentElement) return null;
+    const parent = video.parentElement;
+    const pos = window.getComputedStyle(parent).position;
+    if (pos === 'static') {
+      parent.style.position = 'relative';
+    }
+    return parent;
+  }
+
+  function ensureVideoSkeletonOverlay(video, reason) {
+    if (!video || video.tagName !== 'VIDEO') return null;
+    if (!isShortsOrReelsStyle(video)) return null;
+    const host = ensureVideoOverlayHost(video);
+    if (!host) return null;
+    const existing = host.querySelector('[data-mw-skeleton-for="' + (video.dataset.mwSrcKey || video.dataset.mwItemId || 'video') + '"]');
+    if (existing) {
+      existing.dataset.mwSkeletonReason = reason || existing.dataset.mwSkeletonReason || 'unknown';
+      existing.style.opacity = '1';
+      return existing;
+    }
+    const overlay = document.createElement('div');
+    overlay.className = 'mw-video-skeleton';
+    overlay.dataset.mwSkeletonFor = video.dataset.mwSrcKey || video.dataset.mwItemId || 'video';
+    overlay.dataset.mwSkeletonReason = reason || 'unknown';
+    overlay.style.opacity = '1';
+    host.appendChild(overlay);
+    video.dataset.mwSkeleton = 'active';
+    return overlay;
+  }
+
+  function removeVideoSkeletonOverlay(video, reason) {
+    if (!video || !video.parentElement) return;
+    const host = video.parentElement;
+    const selector = '[data-mw-skeleton-for="' + (video.dataset.mwSrcKey || video.dataset.mwItemId || 'video') + '"]';
+    const overlay = host.querySelector(selector);
+    if (!overlay) return;
+    overlay.dataset.mwSkeletonReason = reason || 'remove';
+    fadeOutAndRemove(overlay, 300);
+    video.dataset.mwSkeleton = 'inactive';
+  }
+
+  function ensureVideoFrostOverlay(video, reason) {
+    if (!video || video.tagName !== 'VIDEO') return null;
+    const host = ensureVideoOverlayHost(video);
+    if (!host) return null;
+    const selector = '[data-mw-frost-for="' + (video.dataset.mwSrcKey || video.dataset.mwItemId || 'video') + '"]';
+    let overlay = host.querySelector(selector);
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.className = 'mw-video-frost';
+      overlay.dataset.mwFrostFor = video.dataset.mwSrcKey || video.dataset.mwItemId || 'video';
+      overlay.appendChild(buildFrostContent());
+      installHoldToReveal(overlay, video);
+      host.appendChild(overlay);
+    }
+    overlay.dataset.mwFrostReason = reason || 'apply';
+    const title = overlay.querySelector('.mw-frost-title');
+    if (title) {
+      title.textContent = reason && reason.includes('unsafe') ? 'Frosted' : 'Shielding';
+    }
+    overlay.style.opacity = '1';
+    video.dataset.mwFrost = 'active';
+    return overlay;
+  }
+
+  function fadeOutAndRemove(node, durationMs) {
+    if (!node) return;
+    const duration = Number.isFinite(durationMs) ? durationMs : 300;
+    node.style.transition = (node.style.transition || '') + ', opacity ' + duration + 'ms ease-in-out';
+    node.style.opacity = '0';
+    setTimeout(() => {
+      try { node.remove(); } catch (e) {}
+    }, duration + 40);
+  }
+
+  function fadeOutSkeletonAndFrost(video, reason) {
+    if (!video) return;
+    removeVideoSkeletonOverlay(video, reason || 'fadeout');
+    const host = video.parentElement;
+    if (host) {
+      const selector = '[data-mw-frost-for="' + (video.dataset.mwSrcKey || video.dataset.mwItemId || 'video') + '"]';
+      const frost = host.querySelector(selector);
+      if (frost) {
+        frost.dataset.mwFrostReason = reason || 'fadeout';
+        fadeOutAndRemove(frost, 300);
+      }
+    }
+    video.dataset.mwFrost = 'inactive';
+  }
+
+  function buildFrostContent() {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'mw-frost-content';
+    const title = document.createElement('div');
+    title.className = 'mw-frost-title';
+    title.textContent = 'Shielding';
+    const quote = document.createElement('div');
+    quote.className = 'mw-frost-quote';
+    quote.textContent = 'Algorithms are noisy, real life is quiet.';
+    wrapper.appendChild(title);
+    wrapper.appendChild(quote);
+    return wrapper;
+  }
+
+  function installHoldToReveal(overlay, video) {
+    if (!overlay || !video) return;
+    if (overlay.dataset.mwHoldInit === '1') return;
+    const platformAllows = PLATFORM === 'youtube' || PLATFORM === 'youtube-shorts' || PLATFORM === 'facebook';
+    if (!platformAllows) return;
+    overlay.dataset.mwHoldInit = '1';
+
+    let holdTimer = null;
+    let progressTimer = null;
+    let startTs = 0;
+    let progressBar = null;
+    let lastHaptic = 0;
+
+    function ensureProgressBar() {
+      if (progressBar) return progressBar;
+      progressBar = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      progressBar.setAttribute('class', 'mw-hold-progress');
+      progressBar.setAttribute('viewBox', '0 0 36 36');
+      const circleBg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      circleBg.setAttribute('cx', '18');
+      circleBg.setAttribute('cy', '18');
+      circleBg.setAttribute('r', '16');
+      circleBg.setAttribute('class', 'mw-hold-progress-bg');
+      const circleFg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      circleFg.setAttribute('cx', '18');
+      circleFg.setAttribute('cy', '18');
+      circleFg.setAttribute('r', '16');
+      circleFg.setAttribute('class', 'mw-hold-progress-fg');
+      circleFg.setAttribute('stroke-dasharray', '100');
+      circleFg.setAttribute('stroke-dashoffset', '100');
+      progressBar.appendChild(circleBg);
+      progressBar.appendChild(circleFg);
+      overlay.appendChild(progressBar);
+      return progressBar;
+    }
+
+    function vibrate(pattern) {
+      try {
+        if (navigator && typeof navigator.vibrate === 'function') {
+          navigator.vibrate(pattern);
+        }
+      } catch (_) {}
+    }
+
+    function updateProgress() {
+      if (!startTs) return;
+      const elapsed = Date.now() - startTs;
+      const pct = Math.min(1, elapsed / 3000);
+      const svg = progressBar || ensureProgressBar();
+      const fg = svg.querySelector('.mw-hold-progress-fg');
+      if (fg) {
+        fg.setAttribute('stroke-dashoffset', String(100 - pct * 100));
+      }
+      if (elapsed >= 1000 && lastHaptic < 1) { vibrate(20); lastHaptic = 1; }
+      if (elapsed >= 2000 && lastHaptic < 2) { vibrate(20); lastHaptic = 2; }
+      if (elapsed >= 3000) {
+        lastHaptic = 3;
+        vibrate([30, 40, 30]);
+        completeReveal();
+        return;
+      }
+      progressTimer = requestAnimationFrame(updateProgress);
+    }
+
+    function startHold() {
+      if (holdTimer || progressTimer) cancelHold('restart');
+      startTs = Date.now();
+      lastHaptic = 0;
+      ensureProgressBar();
+      holdTimer = setTimeout(() => {}, 3000); // marker
+      progressTimer = requestAnimationFrame(updateProgress);
+    }
+
+    function cancelHold(_reason) {
+      if (holdTimer) clearTimeout(holdTimer);
+      if (progressTimer) cancelAnimationFrame(progressTimer);
+      holdTimer = null;
+      progressTimer = null;
+      startTs = 0;
+      lastHaptic = 0;
+      if (progressBar) {
+        progressBar.remove();
+        progressBar = null;
+      }
+    }
+
+    function completeReveal() {
+      cancelHold('done');
+      const src = video.dataset.mwSrc || video.currentSrc || video.poster || '';
+      state.revealed.add(src);
+      video.dataset.mwRevealed = 'true';
+      removeBlur(video, src);
+      fadeOutSkeletonAndFrost(video, 'hold_reveal_complete');
+    }
+
+    const startEvents = ['touchstart', 'mousedown'];
+    const endEvents = ['touchend', 'touchcancel', 'mouseup', 'mouseleave'];
+
+    startEvents.forEach(evt => overlay.addEventListener(evt, startHold, { passive: true }));
+    endEvents.forEach(evt => overlay.addEventListener(evt, () => cancelHold('lift'), { passive: true }));
+  }
+
   // ==================== BLUR MANAGEMENT ====================
 
   /**
@@ -1650,6 +1892,13 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (element.dataset.mwRevealed === 'true') return;
     if (element.dataset.mwModerated === 'blurred') return; // Already hard blurred
     if (shouldSkipBlurForShield(element)) return;
+    if (element.tagName === 'VIDEO') {
+      ensureVideoSkeletonOverlay(element, 'semantic_delay');
+      element.dataset.mwModerated = 'softblur';
+      element.dataset.mwSrc = src;
+      element.dataset.mwItemId = itemId || '';
+      return;
+    }
     
     try {
       element.style.filter = 'blur(' + CONFIG.softBlurStrength + 'px)';
@@ -1673,6 +1922,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       const beforeState = element.dataset.mwModerated || '';
       const beforeFilter = element.style.getPropertyValue('filter') || element.style.filter || '';
       const beforeHasBlur = beforeFilter.toLowerCase().includes('blur(');
+      if (element.tagName === 'VIDEO') {
+        fadeOutSkeletonAndFrost(element, 'softblur_safe');
+      }
       if (element.dataset.mwModerated === 'softblur' || element.classList.contains('mw-softblur')) {
         element.style.filter = 'none';
         element.dataset.mwModerated = 'safe';
@@ -1779,15 +2031,21 @@ export function generateModerationScript(config: InjectionConfig): string {
       return;
     }
     
-    const blurPx = (IS_YOUTUBE ? 40 : (blurStrengthPx || CONFIG.blurStrength || 30));
-    
     try {
-      // Force blur with !important for iOS WebKit
-      element.style.setProperty('filter', 'blur(' + blurPx + 'px)', 'important');
-      element.style.setProperty('-webkit-filter', 'blur(' + blurPx + 'px)', 'important');
-      element.style.setProperty('backdrop-filter', 'blur(' + blurPx + 'px)', 'important');
-      element.style.setProperty('-webkit-backdrop-filter', 'blur(' + blurPx + 'px)', 'important');
-      element.style.transition = 'filter 0.3s ease';
+      const blurPx = (IS_YOUTUBE ? 40 : (blurStrengthPx || CONFIG.blurStrength || 30));
+      if (element.tagName === 'VIDEO') {
+        ensureVideoFrostOverlay(element, 'unsafe');
+        removeVideoSkeletonOverlay(element, 'unsafe_to_frost');
+        element.style.setProperty('filter', 'none', 'important');
+        element.style.setProperty('-webkit-filter', 'none', 'important');
+      } else {
+        // Force blur with !important for iOS WebKit
+        element.style.setProperty('filter', 'blur(' + blurPx + 'px)', 'important');
+        element.style.setProperty('-webkit-filter', 'blur(' + blurPx + 'px)', 'important');
+        element.style.setProperty('backdrop-filter', 'blur(' + blurPx + 'px)', 'important');
+        element.style.setProperty('-webkit-backdrop-filter', 'blur(' + blurPx + 'px)', 'important');
+        element.style.transition = 'filter 0.3s ease';
+      }
       element.dataset.mwModerated = 'blurred';
       element.dataset.mwCategory = category || 'flagged';
       element.dataset.mwSrc = src;
@@ -2348,6 +2606,10 @@ export function generateModerationScript(config: InjectionConfig): string {
         const preDecisionFilter = element.style.getPropertyValue('filter') || element.style.filter || '';
         const preDecisionHasBlur = preDecisionFilter.toLowerCase().includes('blur(');
         if (finalBlur) {
+          if (element.tagName === 'VIDEO') {
+            ensureVideoFrostOverlay(element, 'unsafe_result');
+            removeVideoSkeletonOverlay(element, 'unsafe_result');
+          }
           console.log(
             '[MW][JSBlur] applied reason=' + (decisionReason || 'unknown'),
             'src=' + String(src || '').substring(0, 120),
@@ -2377,6 +2639,9 @@ export function generateModerationScript(config: InjectionConfig): string {
               'state=' + preDecisionState,
               'hasBlurFilter=' + preDecisionHasBlur
             );
+          }
+          if (element.tagName === 'VIDEO') {
+            fadeOutSkeletonAndFrost(element, 'safe_result');
           }
           markSafeResolved(src);
           // Remove soft blur if result is safe
@@ -2687,6 +2952,36 @@ export function generateModerationScript(config: InjectionConfig): string {
   function observeForViewport(element) {
     if (state.viewportObserver && element.nodeType === 1) {
       state.viewportObserver.observe(element);
+    }
+  }
+
+  /**
+   * Pre-emptive scan for the next video just below the viewport.
+   */
+  function setupNextVideoObserver() {
+    if (!('IntersectionObserver' in window)) return null;
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        const video = entry.target;
+        if (!video || video.tagName !== 'VIDEO') return;
+        const rect = entry.boundingClientRect;
+        const isBelowViewport = rect.top >= window.innerHeight && rect.top <= window.innerHeight * 1.5;
+        if (isBelowViewport) {
+          queueVideoMediaTargets(video, 'next-in-queue');
+          observer.unobserve(video);
+        }
+      });
+    }, {
+      rootMargin: '0px 0px 120% 0px',
+      threshold: 0.0,
+    });
+    return observer;
+  }
+
+  function observeForNextVideo(video) {
+    if (!video || video.tagName !== 'VIDEO') return;
+    if (state.nextVideoObserver) {
+      state.nextVideoObserver.observe(video);
     }
   }
 
@@ -3237,6 +3532,31 @@ export function generateModerationScript(config: InjectionConfig): string {
         opacity: 0 !important;
         visibility: hidden !important;
       }
+      @keyframes mw-skeleton-pulse {
+        0% { background-color: #1a1a1a; }
+        100% { background-color: #2a2a2a; }
+      }
+      .mw-video-skeleton {
+        position: absolute !important;
+        inset: 0 !important;
+        animation: mw-skeleton-pulse 1.2s ease-in-out infinite alternate !important;
+        background-color: #1a1a1a !important;
+        pointer-events: none !important;
+        z-index: 9995 !important;
+        opacity: 1 !important;
+        transition: opacity 0.3s ease-in-out !important;
+      }
+      .mw-video-frost {
+        position: absolute !important;
+        inset: 0 !important;
+        background-color: rgba(15, 15, 15, 0.8) !important;
+        backdrop-filter: blur(50px) saturate(1.5) !important;
+        -webkit-backdrop-filter: blur(50px) saturate(1.5) !important;
+        pointer-events: none !important;
+        z-index: 9994 !important;
+        opacity: 1 !important;
+        transition: opacity 0.3s ease-in-out !important;
+      }
       ytd-thumbnail, ytd-rich-item-renderer, yt-img-shadow, #shorts-player,
       [class*="DivVideoContainer"], [class*="DivPlayerContainer"], .video-card {
         position: relative !important;
@@ -3261,6 +3581,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   // Set up observers
   setupMutationObserver(document.body);
   state.viewportObserver = setupViewportObserver();
+  state.nextVideoObserver = setupNextVideoObserver();
   
   // YouTube-specific: Set up scroll handler for infinite scroll
   setupYouTubeScrollHandler();
@@ -3461,6 +3782,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (state.viewportObserver && typeof state.viewportObserver.disconnect === 'function') {
       state.viewportObserver.disconnect();
       state.viewportObserver = null;
+    }
+    if (state.nextVideoObserver && typeof state.nextVideoObserver.disconnect === 'function') {
+      state.nextVideoObserver.disconnect();
+      state.nextVideoObserver = null;
     }
     state.mutationObservers.forEach(observer => {
       try { observer.disconnect(); } catch (e) {}
