@@ -4,6 +4,7 @@ import { InAppBrowser, OpenWebViewOptions, ToolBarType, BackgroundColor } from '
 
 const FLASH_GUARD_DIAG_VISUAL = true; // Flip to false to disable temporary DIAG tint.
 const FLASH_GUARD_DIAG_VISUAL_MS = 1500;
+const FLASH_GUARD_PROOF_MS = 2000;
 
 const FLASH_GUARD_SCRIPT = `(() => {
   const HOST_ID = 'mw-shadow-veil-host';
@@ -17,7 +18,7 @@ const FLASH_GUARD_SCRIPT = `(() => {
   if (!host) {
     host = document.createElement('div');
     host.id = HOST_ID;
-    host.style.cssText = 'position:fixed;inset:0;z-index:2147483646;pointer-events:none;opacity:1;';
+    host.style.cssText = 'position:fixed;inset:0;z-index:2147483647;pointer-events:none;opacity:1;';
     document.documentElement.appendChild(host);
   }
 
@@ -106,6 +107,70 @@ const FLASH_GUARD_SCRIPT = `(() => {
     state: api.state,
     snapshot: api.inspect(),
   });
+})();`;
+
+const FLASH_GUARD_PROOF_SCRIPT = `(() => {
+  const HOST_ID = 'mw-shadow-veil-host';
+  const BASE_BG = 'rgba(8,12,18,0.45)';
+  const BLUE_TINT = 'linear-gradient(135deg, rgba(32,142,255,0.72), rgba(8,12,18,0.62))';
+
+  let host = document.getElementById(HOST_ID);
+  if (!host) {
+    host = document.createElement('div');
+    host.id = HOST_ID;
+    host.style.cssText = 'position:fixed;inset:0;z-index:2147483647;pointer-events:none;opacity:1;';
+    document.documentElement.appendChild(host);
+  }
+
+  let shadow = host.shadowRoot;
+  if (!shadow) {
+    try { shadow = host.attachShadow({ mode: 'closed' }); } catch (e) { shadow = null; }
+  }
+
+  let veil = shadow ? shadow.firstChild : null;
+  if (!veil && shadow) {
+    veil = document.createElement('div');
+    shadow.appendChild(veil);
+  }
+
+  const element = veil instanceof HTMLElement ? veil : null;
+
+  if (element) {
+    element.style.cssText = [
+      'position:fixed',
+      'inset:0',
+      'background:' + BLUE_TINT,
+      'backdrop-filter:blur(22px) saturate(0.8)',
+      '-webkit-backdrop-filter:blur(22px) saturate(0.8)',
+      'opacity:0.95',
+      'visibility:visible',
+      'z-index:2147483647',
+      'pointer-events:none',
+      'transition:none'
+    ].join('!important;') + '!important;';
+
+    setTimeout(() => {
+      element.style.background = BASE_BG;
+      element.style.opacity = '1';
+      element.style.visibility = 'visible';
+      element.style.zIndex = '2147483647';
+      element.style.pointerEvents = 'none';
+    }, ${FLASH_GUARD_PROOF_MS});
+  }
+
+  const cs = element ? getComputedStyle(element) : null;
+  return {
+    guardPresent: !!element,
+    hostPresent: !!host,
+    style: {
+      display: cs?.display || null,
+      opacity: cs?.opacity || null,
+      zIndex: cs?.zIndex || null,
+      visibility: cs?.visibility || null,
+    },
+    documentReadyState: document.readyState,
+    locationHref: location.href,
+  };
 })();`;
 
 export type WebViewEvent =
@@ -205,6 +270,37 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     flashDiagLogAtRef.current = now;
     console.log('[FlashShield][DIAG]', ...args);
   }, []);
+
+  const runFlashGuardDiagProof = useCallback(
+    async (tag: string) => {
+      if (!isNative || !isOpenRef.current) {
+        flashDiagLog('proof skipped', tag, 'native=', isNative, 'open=', isOpenRef.current);
+        return null;
+      }
+      try {
+        const proof = await InAppBrowser.executeScript({ code: FLASH_GUARD_PROOF_SCRIPT });
+        const payload =
+          typeof proof === 'string'
+            ? proof
+            : (proof as { result?: unknown; data?: unknown }).result ??
+              (proof as { result?: unknown; data?: unknown }).data;
+        let parsed: unknown = payload;
+        if (typeof payload === 'string') {
+          try {
+            parsed = JSON.parse(payload);
+          } catch {
+            parsed = { raw: payload };
+          }
+        }
+        flashDiagLog('proof', tag, parsed);
+        return parsed as Record<string, unknown>;
+      } catch (error) {
+        console.debug('[FlashShield][DIAG] proof failed', tag, error);
+        return null;
+      }
+    },
+    [isNative, flashDiagLog],
+  );
 
   const installFlashGuard = useCallback(async (): Promise<boolean> => {
     // Re-install on every navigation because document reloads drop the injected guard.
@@ -306,11 +402,14 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
           }
         }
         flashDiagLog('toggle', enabled ? 'on' : 'off', reason, parsed);
+        if (reason?.toLowerCase().includes('manual')) {
+          void runFlashGuardDiagProof('manual_toggle');
+        }
       } catch (error) {
         console.debug('[FlashShield][DIAG] FlashGuard toggle failed', reason, error);
       }
     },
-    [isNative, installFlashGuard, flashDiagLog],
+    [isNative, installFlashGuard, flashDiagLog, runFlashGuardDiagProof],
   );
 
   // Set up event listeners
@@ -352,6 +451,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
         flashDiagLog('url_change install complete', installed);
         void probeFlashGuard('url_change_post_install');
       });
+      void runFlashGuardDiagProof('url_change_force');
     });
 
     // Page load complete listener
