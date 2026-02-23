@@ -653,6 +653,19 @@ export const NativeWebViewBrowser = () => {
     return false;
   };
 
+  const isYouTubeShortsPath = (urlString: string): boolean => {
+    const url = normalizeUrlForNavComparison(urlString);
+    if (!url) return false;
+    return url.hostname.toLowerCase().includes('youtube.com') && url.pathname.startsWith('/shorts/');
+  };
+
+  const isSocialDomain = (urlString: string): boolean => {
+    const parsed = normalizeUrlForNavComparison(urlString);
+    if (!parsed) return false;
+    const host = parsed.hostname.toLowerCase();
+    return host.includes('youtube.com') || host.includes('facebook.com');
+  };
+
   const extractDomain = (urlString: string): string => {
     try {
       const urlObj = new URL(normalizeUrl(urlString));
@@ -1082,7 +1095,13 @@ export const NativeWebViewBrowser = () => {
       }
       setUrlInput(nextUrl);
       navigate('browse', nextUrl, nextUrl);
-      if (!sameDocumentUrlChange) {
+      if (sameDocumentUrlChange) {
+        if (isYouTubeShortsPath(previousUrl) && isYouTubeShortsPath(nextUrl) && previousUrl !== nextUrl) {
+          await cancelPendingScans('shorts_nav');
+          queueCurrentBlurState('shorts_nav_reset');
+          setCentralBlurState(false, 'shorts_nav_reset');
+        }
+      } else {
         // Reset injection for new page navigation
         clearLoadEndInjectTimer();
         injectionDoneRef.current = false;
@@ -1137,13 +1156,32 @@ export const NativeWebViewBrowser = () => {
         }
       })();
     `);
-    console.debug(
-      '[MW-Host][Timer] teardown',
-      'reason=' + reason,
-      'navId=' + activeNavIdRef.current,
-      'url=' + (urlHint || webViewState.currentUrl || 'unknown'),
-    );
+      console.debug(
+        '[MW-Host][Timer] teardown',
+        'reason=' + reason,
+        'navId=' + activeNavIdRef.current,
+        'url=' + (urlHint || webViewState.currentUrl || 'unknown'),
+      );
   }, [isNative, executeScript, webViewState.currentUrl]);
+
+  const cancelPendingScans = useCallback(async (reason: string) => {
+    if (!isNative || !executeScript) return;
+    const escapedReason = escapeForJs(reason);
+    await executeScript(`
+      (function() {
+        try {
+          if (window.__MW_CANCEL_PENDING__) window.__MW_CANCEL_PENDING__('${escapedReason}');
+          window.postMessage({ type: 'MW_CANCEL_PENDING', reason: '${escapedReason}' }, '*');
+          if (window.parent && window.parent !== window) {
+            window.parent.postMessage({ type: 'MW_CANCEL_PENDING', reason: '${escapedReason}' }, '*');
+          }
+          return 'OK';
+        } catch (e) {
+          return 'ERR';
+        }
+      })();
+    `);
+  }, [isNative, executeScript]);
 
   const stopNativeScanSession = useCallback((reason: string) => {
     const session = nativeScanSessionRef.current;
@@ -1628,57 +1666,64 @@ export const NativeWebViewBrowser = () => {
       predictions?: Record<string, number>;
     }> = [];
     
-    // Process each item using the moderation bridge
-    for (const item of items) {
-      try {
-        const scanResult = await moderationBridge.scanImage(item.src, thresholds, {
-          lastModified: (item as any).lastModified,
-          contentLength: (item as any).contentLength,
-        });
-        
-        if (scanResult) {
-          const categoryConfidence = Object.entries(scanResult.predictions || {}).reduce((matched, [label, value]) => {
-            if (matched >= 0) return matched;
-            return label.toLowerCase() === scanResult.category.toLowerCase() ? value : -1;
-          }, -1);
-          const effectiveConfidence = categoryConfidence >= 0 ? categoryConfidence : scanResult.confidence;
-          const normalizedShouldBlur = normalizeShouldBlur(scanResult.shouldBlur);
-          const normalizedSeverity = normalizeSeverity(scanResult.severity, scanResult.category);
+    const MAX_CONCURRENT_SCANS = 6;
+    let scanIndex = 0;
+
+    const runWorker = async () => {
+      while (scanIndex < items.length) {
+        const item = items[scanIndex];
+        scanIndex += 1;
+        try {
+          const scanResult = await moderationBridge.scanImage(item.src, thresholds, {
+            lastModified: (item as any).lastModified,
+            contentLength: (item as any).contentLength,
+          });
+          
+          if (scanResult) {
+            const categoryConfidence = Object.entries(scanResult.predictions || {}).reduce((matched, [label, value]) => {
+              if (matched >= 0) return matched;
+              return label.toLowerCase() === scanResult.category.toLowerCase() ? value : -1;
+            }, -1);
+            const effectiveConfidence = categoryConfidence >= 0 ? categoryConfidence : scanResult.confidence;
+            const normalizedShouldBlur = normalizeShouldBlur(scanResult.shouldBlur);
+            const normalizedSeverity = normalizeSeverity(scanResult.severity, scanResult.category);
+            results.push({
+              itemId: item.itemId,
+              src: item.src,
+              shouldBlur: normalizedShouldBlur,
+              category: scanResult.category,
+              confidence: effectiveConfidence,
+              severity: normalizedSeverity,
+              predictions: scanResult.predictions,
+            });
+            console.debug('[MW-Host] scan result', item.itemId, ':', scanResult.category, 'blur=' + normalizedShouldBlur, 'conf=' + effectiveConfidence.toFixed(3), 'severity=' + normalizedSeverity);
+          } else {
+            results.push({
+              itemId: item.itemId,
+              src: item.src,
+              shouldBlur: false,
+              category: 'pending',
+              confidence: 0,
+              severity: 'safe',
+            });
+            console.debug('[MW-Host] scan result', item.itemId, ': pending (no result)');
+          }
+        } catch (error) {
+          console.debug('[MW-Host] scan error', item.itemId, ':', error);
           results.push({
             itemId: item.itemId,
             src: item.src,
-            shouldBlur: normalizedShouldBlur,
-            category: scanResult.category,
-            confidence: effectiveConfidence,
-            severity: normalizedSeverity,
-            predictions: scanResult.predictions,
+            shouldBlur: false,
+            category: 'pending',
+            confidence: 0,
+            severity: 'safe',
           });
-          console.debug('[MW-Host] scan result', item.itemId, ':', scanResult.category, 'blur=' + normalizedShouldBlur, 'conf=' + effectiveConfidence.toFixed(3), 'severity=' + normalizedSeverity);
-        } else {
-          const shouldBlurOnFailure = true;
-          results.push({
-            itemId: item.itemId,
-            src: item.src,
-            shouldBlur: shouldBlurOnFailure,
-            category: shouldBlurOnFailure ? 'error_fail_closed' : 'error',
-            confidence: shouldBlurOnFailure ? 1 : 0,
-            severity: shouldBlurOnFailure ? 'hard' : 'safe',
-          });
-          console.debug('[MW-Host] scan result', item.itemId, ': error (no result), failClosed=' + shouldBlurOnFailure);
         }
-      } catch (error) {
-        const shouldBlurOnFailure = true;
-        console.debug('[MW-Host] scan error', item.itemId, ':', error);
-        results.push({
-          itemId: item.itemId,
-          src: item.src,
-          shouldBlur: shouldBlurOnFailure,
-          category: shouldBlurOnFailure ? 'error_fail_closed' : 'error',
-          confidence: shouldBlurOnFailure ? 1 : 0,
-          severity: shouldBlurOnFailure ? 'hard' : 'safe',
-        });
       }
-    }
+    };
+
+    const workerCount = Math.min(MAX_CONCURRENT_SCANS, items.length);
+    await Promise.allSettled(Array.from({ length: workerCount }, runWorker));
     
     const elapsedMs = performance.now() - startTime;
     console.debug('[MW-Host] scan complete', requestId, 'elapsed=' + elapsedMs.toFixed(0) + 'ms');
@@ -1726,7 +1771,8 @@ export const NativeWebViewBrowser = () => {
 
     const hardConfThreshold = Math.max(hardThresholdBase, modePolicy.hardConfFloor);
     const softRatioThreshold = Math.max(softRatioBase, modePolicy.softRatioFloor);
-    const softMinHits = Math.max(softMinHitsBase, modePolicy.softMinHits, 2);
+    const socialSoftMin = isSocialDomain(currentUrl || currentUrlRef.current || '') ? 6 : softMinHitsBase;
+    const softMinHits = Math.max(softMinHitsBase, modePolicy.softMinHits, socialSoftMin, 2);
     const softConfidenceFloor = modePolicy.softConfFloor;
     const tinyDimensionThreshold = 30;
 

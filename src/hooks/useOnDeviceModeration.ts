@@ -27,6 +27,7 @@ export interface ModerationResult {
   inferenceTime: number;
   reason: ModerationReason;
   errorCode?: string;
+  status?: 'ok' | 'pending' | 'error';
   /** Detected signals for debugging */
   signals?: {
     hasHumanBody: boolean;
@@ -377,6 +378,7 @@ export const useOnDeviceModeration = () => {
           inferenceTime,
           reason: 'threshold_safe',
           signals: estimateSignals(formattedPredictions),
+          status: 'ok',
         };
 
         if (cacheKey) {
@@ -413,6 +415,7 @@ export const useOnDeviceModeration = () => {
           inferenceTime,
           reason: 'swimwear_detected',
           signals,
+          status: 'ok',
         };
 
         if (cacheKey) {
@@ -456,6 +459,7 @@ export const useOnDeviceModeration = () => {
         inferenceTime,
         reason,
         signals,
+        status: 'ok',
       };
 
       if (cacheKey) {
@@ -468,26 +472,18 @@ export const useOnDeviceModeration = () => {
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Unknown error';
       const inferenceTime = performance.now() - loadStart;
-      
-      // Fail-safe: never fail-open on timeouts; apply soft blur instead.
-      const isTiny = errorMsg.includes('too small');
-      const isTimeout = errorMsg.includes('timeout');
-      const reason: ModerationReason = isTiny 
-        ? 'fail_open_tiny' 
-        : isTimeout 
-          ? 'fail_open_timeout' 
-          : 'fail_open_error';
-      
-      console.debug(`[OnDeviceAI] ${reason}:`, errorMsg);
-      
+      const isTimeout = errorMsg.toLowerCase().includes('timeout');
+      const reason: ModerationReason = isTimeout ? 'fail_open_timeout' : 'fail_open_error';
+      console.debug('[OnDeviceAI] pending_result:', errorMsg);
       return {
         isExplicit: false,
-        shouldBlur: true,
+        shouldBlur: false,
         predictions: [],
-        dominantClass: 'Unknown',
+        dominantClass: 'Pending',
         confidence: 0,
         inferenceTime,
         reason,
+        status: 'pending',
       };
     }
   }, [modelState, refreshNativeReady]);
@@ -507,19 +503,22 @@ export const useOnDeviceModeration = () => {
   ): Promise<Map<string, ModerationResult>> => {
     const results = new Map<string, ModerationResult>();
     const batchStart = performance.now();
-    
-    const concurrency = 4;
-    for (let i = 0; i < images.length; i += concurrency) {
-      const batch = images.slice(i, i + concurrency);
-      const batchResults = await Promise.all(
-        batch.map(url => classifyImage(url, thresholds))
-      );
-      batch.forEach((url, idx) => {
-        if (batchResults[idx]) {
-          results.set(url, batchResults[idx]!);
+
+    const workerCount = Math.min(6, Math.max(images.length, 1));
+    let idx = 0;
+    const worker = async () => {
+      while (idx < images.length) {
+        const current = idx;
+        idx += 1;
+        const url = images[current];
+        const result = await classifyImage(url, thresholds);
+        if (result) {
+          results.set(url, result);
         }
-      });
-    }
+      }
+    };
+
+    await Promise.allSettled(Array.from({ length: workerCount }, worker));
 
     const latencyMs = performance.now() - batchStart;
     console.debug('[OnDeviceAI] Scan Latency:', latencyMs.toFixed(1) + 'ms');

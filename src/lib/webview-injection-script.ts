@@ -462,7 +462,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     kidSafeProfile: ${config.kidSafeProfile === true},
     domainContextAdult: ${config.domainContextAdult === true},
     pageEpoch: ${pageEpoch},
-    minImageSize: 80, // Minimum image dimension (fail-open below this - 80x80)
+    minImageSize: 40, // Pre-scan gate: drop anything under 40px to keep queue lean
     semanticDelayMs: 200, // Delay before applying blur (200ms)
     // Neutral fast-pass removed for strict/YouTube mode
     anatomicalThreshold: 0.60, // Sexy/Porn must be > this to maintain blur
@@ -625,11 +625,11 @@ export function generateModerationScript(config: InjectionConfig): string {
       '#' + OVERLAY_ID + ' {',
       'position: fixed !important;',
       'inset: 0 !important;',
-      'z-index: 2147483646 !important;',
+      'z-index: 2147483647 !important;',
       'pointer-events: none !important;',
       'display: none !important;',
       'opacity: 0 !important;',
-      'background: rgba(20,20,20,0.16) !important;',
+      'background: rgba(18,18,18,0.16) !important;',
       'backdrop-filter: blur(22px) saturate(0.85) !important;',
       '-webkit-backdrop-filter: blur(22px) saturate(0.85) !important;',
       'transition: opacity 140ms ease !important;',
@@ -637,6 +637,11 @@ export function generateModerationScript(config: InjectionConfig): string {
       '#' + OVERLAY_ID + '.mw-enabled {',
       'display: block !important;',
       'opacity: 1 !important;',
+      '}',
+      '#' + OVERLAY_ID + '.mw-video-cover {',
+      'background: rgba(18,18,18,0.98) !important;',
+      'backdrop-filter: none !important;',
+      '-webkit-backdrop-filter: none !important;',
       '}',
     ].join('');
     (document.head || document.documentElement).appendChild(style);
@@ -662,6 +667,15 @@ export function generateModerationScript(config: InjectionConfig): string {
     ensureOverlayStyle();
     const overlay = ensureOverlayElement();
     if (!overlay) return;
+
+    try {
+      const hasVideo = !!document.querySelector('video');
+      if (hasVideo) {
+        overlay.classList.add('mw-video-cover');
+      } else {
+        overlay.classList.remove('mw-video-cover');
+      }
+    } catch (e) {}
 
     if (overlayState.enabled) {
       overlay.classList.add('mw-enabled');
@@ -689,6 +703,11 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function handleBlurCommand(message) {
     if (!message || typeof message !== 'object') return false;
+
+    if (message.type === 'MW_CANCEL_PENDING') {
+      cancelAllPending(message.reason || 'host_cancel');
+      return true;
+    }
 
     if (message.type === 'MW_BLUR_STATE') {
       if (CONFIG.debug) {
@@ -774,6 +793,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     sendReady: function(reason) { sendBlurReady(reason || 'api_ready'); },
     getState: function() { return { enabled: !!overlayState.enabled, reason: overlayState.reason, updatedAt: overlayState.updatedAt }; },
   };
+  window.__MW_CANCEL_PENDING__ = cancelAllPending;
 
   // Fail-open default: overlay starts disabled until host sends state.
   setOverlayEnabled(false, 'init_default_disabled');
@@ -1300,12 +1320,13 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       
       const rect = element.getBoundingClientRect();
-      const buffer = 300;
+      const vBuffer = window.innerHeight * 0.2; // 1.2x viewport window
+      const hBuffer = window.innerWidth * 0.2;
       return (
-        rect.top < window.innerHeight + buffer &&
-        rect.bottom > -buffer &&
-        rect.left < window.innerWidth + buffer &&
-        rect.right > -buffer
+        rect.top < window.innerHeight + vBuffer &&
+        rect.bottom > -vBuffer &&
+        rect.left < window.innerWidth + hBuffer &&
+        rect.right > -hBuffer
       );
     } catch (e) {
       return false;
@@ -2507,12 +2528,19 @@ export function generateModerationScript(config: InjectionConfig): string {
       return false;
     }
     
+    // Viewport gate: drop items far off-screen to avoid long queues.
+    if (element && !isElementVisible(element)) {
+      removePreScanShield(element);
+      state.stats.skippedViewport++;
+      return false;
+    }
+
     // FAIL-OPEN: Skip tiny images (< minImageSize), but never leave pre-shield pending forever.
     if (isTinyImage(element)) {
       removePreScanShield(element);
       state.stats.skippedTiny++;
       if (CONFIG.debug) {
-        console.log('[MW] skipped tiny image (fail-open, <80x80):', url.substring(0, 50));
+        console.log('[MW] skipped tiny image (fail-open, <40px):', url.substring(0, 50));
       }
       return false;
     }
@@ -2606,6 +2634,24 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     
     return true;
+  }
+
+  function cancelAllPending(reason) {
+    const why = reason || 'cancel_all_pending';
+    batchQueue.length = 0;
+    state.pending.clear();
+    state.pendingBySrc.clear();
+    state.pendingRequests.clear();
+    state.scanned.clear();
+    if (state.semanticTimer) {
+      clearTimeout(state.semanticTimer);
+      state.semanticTimer = null;
+    }
+    state.elements.forEach(function(el) { removePreScanShield(el); });
+    state.elements.clear();
+    if (CONFIG.debug) {
+      console.log('[MW] cancelAllPending', 'reason=' + why);
+    }
   }
 
   // ==================== VIEWPORT OPTIMIZATION (IntersectionObserver) ====================
