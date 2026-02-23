@@ -189,7 +189,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     blockingMode: '${config.blockingMode || 'mvp'}',
     pageEpoch: ${pageEpoch},
     minImageSize: 80, // Minimum image dimension (fail-open below this - 80x80)
-    semanticDelayMs: 200, // Delay before applying blur (200ms)
+    semanticDelayMs: 0, // Apply blur immediately; no delay to avoid flash of unblurred content
     // Neutral fast-pass removed for strict/YouTube mode
     anatomicalThreshold: 0.60, // Sexy/Porn must be > this to maintain blur
     scanDelay: 50,
@@ -301,6 +301,7 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   const OVERLAY_ID = 'mw-blur-overlay';
   const OVERLAY_STYLE_ID = 'mw-blur-overlay-style';
+  const DOM_OVERLAY_ENABLED = false;
 
   const overlayState = window.__MW_BLUR_STATE__ || {
     enabled: false,
@@ -336,6 +337,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function ensureOverlayStyle() {
+    if (!DOM_OVERLAY_ENABLED) return null;
     if (document.getElementById(OVERLAY_STYLE_ID)) return;
     const style = document.createElement('style');
     style.id = OVERLAY_STYLE_ID;
@@ -361,6 +363,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function ensureOverlayElement() {
+    if (!DOM_OVERLAY_ENABLED) return null;
     let overlay = document.getElementById(OVERLAY_ID);
     if (!overlay) {
       overlay = document.createElement('div');
@@ -373,8 +376,9 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function setOverlayEnabled(enabled, reason) {
     const prevEnabled = !!overlayState.enabled;
-    overlayState.enabled = !!enabled;
-    overlayState.reason = reason || 'unknown';
+    const nextEnabled = DOM_OVERLAY_ENABLED ? !!enabled : false;
+    overlayState.enabled = nextEnabled;
+    overlayState.reason = DOM_OVERLAY_ENABLED ? (reason || 'unknown') : 'dom_overlay_disabled';
     overlayState.updatedAt = Date.now();
 
     ensureOverlayStyle();
@@ -395,6 +399,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function sendBlurReady(reason) {
+    if (!DOM_OVERLAY_ENABLED) return;
     postToHost({
       type: 'MW_BLUR_READY',
       reason: reason || 'ready',
@@ -404,6 +409,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function handleBlurCommand(message) {
+    if (!DOM_OVERLAY_ENABLED) return false;
     if (!message || typeof message !== 'object') return false;
 
     if (message.type === 'MW_BLUR_STATE') {
@@ -432,7 +438,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     return false;
   }
 
-  if (!window.__MW_BLUR_LISTENER__) {
+  if (DOM_OVERLAY_ENABLED && !window.__MW_BLUR_LISTENER__) {
     window.__MW_BLUR_LISTENER__ = true;
     const onBlurCommandEvent = function(event) {
       handleBlurCommand(readHostEventPayload(event));
@@ -441,7 +447,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     window.addEventListener('messageFromNative', onBlurCommandEvent);
   }
 
-  if (!window.__MW_BLUR_NAV_HOOKED__) {
+  if (DOM_OVERLAY_ENABLED && !window.__MW_BLUR_NAV_HOOKED__) {
     window.__MW_BLUR_NAV_HOOKED__ = true;
     const rawPushState = history.pushState;
     const rawReplaceState = history.replaceState;
@@ -467,7 +473,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     });
   }
 
-  if (!window.__MW_BLUR_HEAL_OBSERVER__) {
+  if (DOM_OVERLAY_ENABLED && !window.__MW_BLUR_HEAL_OBSERVER__) {
     window.__MW_BLUR_HEAL_OBSERVER__ = new MutationObserver(function() {
       ensureOverlayStyle();
       const overlay = ensureOverlayElement();
@@ -483,13 +489,21 @@ export function generateModerationScript(config: InjectionConfig): string {
     } catch (e) {}
   }
 
-  window.__MW_BLUR_OVERLAY_API__ = {
-    enable: function(reason) { setOverlayEnabled(true, reason || 'api_enable'); },
-    disable: function(reason) { setOverlayEnabled(false, reason || 'api_disable'); },
-    setState: function(enabled, reason) { setOverlayEnabled(!!enabled, reason || 'api_state'); },
-    sendReady: function(reason) { sendBlurReady(reason || 'api_ready'); },
-    getState: function() { return { enabled: !!overlayState.enabled, reason: overlayState.reason, updatedAt: overlayState.updatedAt }; },
-  };
+  window.__MW_BLUR_OVERLAY_API__ = DOM_OVERLAY_ENABLED
+    ? {
+        enable: function(reason) { setOverlayEnabled(true, reason || 'api_enable'); },
+        disable: function(reason) { setOverlayEnabled(false, reason || 'api_disable'); },
+        setState: function(enabled, reason) { setOverlayEnabled(!!enabled, reason || 'api_state'); },
+        sendReady: function(reason) { sendBlurReady(reason || 'api_ready'); },
+        getState: function() { return { enabled: !!overlayState.enabled, reason: overlayState.reason, updatedAt: overlayState.updatedAt }; },
+      }
+    : {
+        enable: function() {},
+        disable: function() {},
+        setState: function() {},
+        sendReady: function() {},
+        getState: function() { return { enabled: false, reason: 'dom_overlay_disabled', updatedAt: overlayState.updatedAt }; },
+      };
 
   // Fail-open default: overlay starts disabled until host sends state.
   setOverlayEnabled(false, 'init_default_disabled');
@@ -810,6 +824,20 @@ export function generateModerationScript(config: InjectionConfig): string {
     return width < CONFIG.minImageSize || height < CONFIG.minImageSize;
   }
 
+  function isLikelyAvatarLike(element) {
+    try {
+      const haystack = [
+        element.getAttribute('class') || '',
+        element.getAttribute('id') || '',
+        element.getAttribute('alt') || '',
+        element.getAttribute('aria-label') || '',
+      ].join(' ').toLowerCase();
+      return /avatar|profile|pfp|logo|icon/.test(haystack);
+    } catch (e) {
+      return false;
+    }
+  }
+
   /**
    * Check if element is visible in or near viewport
    */
@@ -845,6 +873,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (state.revealed.has(src)) return;
     if (element.dataset.mwRevealed === 'true') return;
     if (element.dataset.mwModerated === 'blurred') return; // Already hard blurred
+    if (element.dataset.mwPreblurClear === 'true') return; // Already cleared due to prior safe decision
     
     try {
       element.style.filter = 'blur(' + CONFIG.softBlurStrength + 'px)';
@@ -872,6 +901,8 @@ export function generateModerationScript(config: InjectionConfig): string {
         element.style.filter = 'none';
         element.dataset.mwModerated = 'safe';
         element.classList.remove('mw-softblur');
+        element.dataset.mwPreblurClear = 'true';
+        element.dataset.mwPreblurClear = 'true';
         
         if (CONFIG.debug) {
           console.log('[MW] soft blur removed (safe):', src.substring(0, 50));
@@ -885,6 +916,27 @@ export function generateModerationScript(config: InjectionConfig): string {
         'afterState=' + (element.dataset.mwModerated || ''),
         'afterFilter=' + (element.style.getPropertyValue('filter') || element.style.filter || '')
       );
+    } catch (e) {}
+  }
+
+  // Marks elements that had pre-scan blur so we don't reapply soft blur on requeue.
+  function clearPreBlur(element) {
+    try {
+      element.dataset.mwPreblurClear = 'true';
+      const filter = element.style.getPropertyValue('filter') || element.style.filter || '';
+      if (!filter || filter.toLowerCase().includes('blur(')) {
+        element.style.filter = 'none';
+      }
+    } catch (e) {}
+  }
+
+  function clearPreBlur(element) {
+    try {
+      element.dataset.mwPreblurClear = 'true';
+      const filter = element.style.getPropertyValue('filter') || element.style.filter || '';
+      if (!filter || filter.toLowerCase().includes('blur(')) {
+        element.style.filter = 'none';
+      }
     } catch (e) {}
   }
 
@@ -1007,6 +1059,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       element.style.filter = 'none';
       element.dataset.mwModerated = 'revealed';
       element.dataset.mwRevealed = 'true'; // Persistence marker
+      element.dataset.mwPreblurClear = 'true';
       element.classList.remove('mw-softblur');
       
       // Add to revealed set for persistence
@@ -1685,6 +1738,15 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       return false;
     }
+
+    // Conservative skip for obvious avatars/icons/logos (fail-open).
+    if (isLikelyAvatarLike(element)) {
+      state.stats.skipped++;
+      if (CONFIG.debug) {
+        console.log('[MW] skipped avatar-like element:', url.substring(0, 50));
+      }
+      return false;
+    }
     
     // Skip already processed
     if (state.scanned.has(url)) {
@@ -1720,17 +1782,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     // Store element reference
     state.elements.set(itemId, element);
     
-    // SEMANTIC DELAY: only apply soft blur after semanticDelayMs if still pending.
-    // Fast safe results will cancel this timer before any blur is shown.
-    const blurTimer = setTimeout(() => {
-      const pending = state.pending.get(itemId);
-      if (pending && pending.state === 'pending') {
-        applySoftBlur(element, url, itemId);
-        if (CONFIG.debug) {
-          console.log('[MW][Timer] semanticDelay fired: soft blur applied itemId=' + itemId, url.substring(0, 60));
-        }
-      }
-    }, CONFIG.semanticDelayMs);
+    // Apply soft blur immediately to prevent any flash of unblurred content.
+    // Safe results will remove the blur as soon as moderation completes.
+    applySoftBlur(element, url, itemId);
+    const blurTimer = null;
     
     state.pending.set(itemId, {
       element: element,
@@ -2267,13 +2322,13 @@ export function generateModerationScript(config: InjectionConfig): string {
     timerLog('start', label + ':' + delayMs + 'ms');
   }
 
-  // Initial scan
-  if (document.readyState === 'complete') {
-    scanFullPage();
-    if (isYouTube()) {
-      scheduleInitTimeout('initialYouTubeScan', scanYouTubeThumbnails, 200);
-    }
-  } else {
+  // Initial scan – run immediately to pre-blur anything already in the DOM.
+  scanFullPage();
+  if (isYouTube()) {
+    scheduleInitTimeout('initialYouTubeScan', scanYouTubeThumbnails, 200);
+  }
+  // Also rescan on load to catch late resources without delaying first blur.
+  if (document.readyState !== 'complete') {
     const onLoadScan = () => {
       if (timerState.teardownDone) return;
       scanFullPage();

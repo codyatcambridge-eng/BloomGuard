@@ -91,8 +91,8 @@ interface SocialContent {
  */
 export const NativeWebViewBrowser = () => {
   const { isNative } = useCapacitor();
-  // Flash Shield feature flag: enable frosted overlay + handshake.
-  const ENABLE_DOM_BLUR = true;
+  // Page-wide DOM blur/overlay is disabled; per-element blur remains in injection script.
+  const ENABLE_DOM_BLUR = false;
   const ENABLE_SIGNAL_PIPELINE = true;
   
   const [urlInput, setUrlInput] = useState('');
@@ -449,6 +449,10 @@ export const NativeWebViewBrowser = () => {
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       setCentralBlurState(false, 'navigation_load_start');
       setFlashGuardState?.(true, 'navigation_start');
+      // Early inject to attach per-element pre-blur before first paint.
+      if (executeScript) {
+        void injectModerationScript(executeScript, 'onLoadStart', url);
+      }
     },
     onLoadEnd: async (url) => {
       console.log('[Browser] ======= LOAD END =======');
@@ -476,7 +480,7 @@ export const NativeWebViewBrowser = () => {
             `);
           }
           loadEndInjectTimerRef.current = null;
-        }, 500);
+        }, 80);
         console.log(
           '[MW-Host][Timer] start',
           'name=loadEndInjectTimer',

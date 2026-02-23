@@ -2,7 +2,9 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { Capacitor, type PluginListenerHandle } from '@capacitor/core';
 import { InAppBrowser, OpenWebViewOptions, ToolBarType, BackgroundColor } from '@capgo/inappbrowser';
 
-const FLASH_GUARD_DIAG_VISUAL = true; // Flip to false to disable temporary DIAG tint.
+// Page-wide flash guard must remain off; per-element blur handles safety.
+const FLASH_GUARD_ENABLED = false;
+const FLASH_GUARD_DIAG_VISUAL = false; // Keep DIAG visuals off as a safeguard.
 const FLASH_GUARD_DIAG_VISUAL_MS = 1500;
 const FLASH_GUARD_PROOF_MS = 2000;
 
@@ -297,6 +299,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
 
   const runFlashGuardDiagProof = useCallback(
     async (tag: string) => {
+      if (!FLASH_GUARD_ENABLED) return null;
       if (!isNative || !isOpenRef.current) {
         flashDiagLog('proof skipped', tag, 'native=', isNative, 'open=', isOpenRef.current);
         return null;
@@ -327,6 +330,10 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
   );
 
   const installFlashGuard = useCallback(async (): Promise<boolean> => {
+    if (!FLASH_GUARD_ENABLED) {
+      flashGuardInstalledRef.current = false;
+      return false;
+    }
     // Re-install on every navigation because document reloads drop the injected guard.
     if (!isNative || !isOpenRef.current) {
       flashDiagLog('install skipped: native=', isNative, 'open=', isOpenRef.current);
@@ -367,6 +374,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
 
   const probeFlashGuard = useCallback(
     async (tag: string) => {
+      if (!FLASH_GUARD_ENABLED) return null;
       if (!isNative || !isOpenRef.current) {
         flashDiagLog('probe skipped', tag, 'native=', isNative, 'open=', isOpenRef.current);
         return null;
@@ -398,6 +406,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
 
   const setFlashGuardState = useCallback(
     async (enabled: boolean, reason: string) => {
+      if (!FLASH_GUARD_ENABLED) return;
       if (!isNative || !isOpenRef.current) {
         flashDiagLog('toggle skipped', reason, 'native=', isNative, 'open=', isOpenRef.current);
         return;
@@ -469,12 +478,14 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
         canGoForward: historyIndexRef.current < historyStackRef.current.length - 1,
       }));
 
-      void probeFlashGuard('url_change');
-      void installFlashGuard().then((installed) => {
-        flashDiagLog('url_change install complete', installed);
-        void probeFlashGuard('url_change_post_install');
-      });
-      void runFlashGuardDiagProof('url_change_force');
+      if (FLASH_GUARD_ENABLED) {
+        void probeFlashGuard('url_change');
+        void installFlashGuard().then((installed) => {
+          flashDiagLog('url_change install complete', installed);
+          void probeFlashGuard('url_change_post_install');
+        });
+        void runFlashGuardDiagProof('url_change_force');
+      }
     });
 
     // Page load complete listener
@@ -486,11 +497,13 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
         at: Date.now(),
       };
       setState(prev => ({ ...prev, isLoading: false, error: null }));
-      void (async () => {
-        await probeFlashGuard('load_end_pre_toggle');
-        await setFlashGuardState(false, 'load_end');
-        await probeFlashGuard('load_end_post_toggle');
-      })();
+      if (FLASH_GUARD_ENABLED) {
+        void (async () => {
+          await probeFlashGuard('load_end_pre_toggle');
+          await setFlashGuardState(false, 'load_end');
+          await probeFlashGuard('load_end_post_toggle');
+        })();
+      }
       if (currentUrlRef.current) {
         onLoadEnd?.(currentUrlRef.current);
       }
