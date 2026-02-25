@@ -43,6 +43,18 @@ import { ExternalLinkWarning } from './ExternalLinkWarning';
 import { AIStatusBar } from './AIStatusBar';
 import { toast } from 'sonner';
 
+const YOUTUBE_HOST_PATTERNS = ['youtube.com', 'youtu.be', 'ytimg.com'];
+const isYouTubeUrl = (value?: string) => {
+  if (!value) return false;
+  const lower = value.toLowerCase();
+  for (let i = 0; i < YOUTUBE_HOST_PATTERNS.length; i++) {
+    if (lower.includes(YOUTUBE_HOST_PATTERNS[i])) {
+      return true;
+    }
+  }
+  return false;
+};
+
 interface SearchResult {
   title: string;
   url: string;
@@ -395,6 +407,7 @@ export const NativeWebViewBrowser = () => {
     const config = {
       ...getModerationConfig(),
       pageEpoch: webViewPageEpochRef.current,
+      diagYouTubeShorts: localSettings.diag_youtube_shorts === true && isYouTubeUrl(targetUrl),
     };
     console.log(
       '[MW-Inject][Config]',
@@ -541,6 +554,24 @@ export const NativeWebViewBrowser = () => {
   useEffect(() => {
     currentUrlRef.current = webViewState.currentUrl || '';
   }, [webViewState.currentUrl]);
+
+  const diagLogTimestampsRef = useRef<Record<string, number>>({});
+  const diagLog = useCallback((key: string, message: string) => {
+    const now = Date.now();
+    const previous = diagLogTimestampsRef.current[key] || 0;
+    if (now - previous < 2500) return;
+    diagLogTimestampsRef.current[key] = now;
+    console.log('[MW-YT][DIAG]', message);
+  }, []);
+  const shouldLogYouTubeDiag = useCallback((url?: string) => {
+    if (localSettings.diag_youtube_shorts !== true) return false;
+    const candidate = url || webViewState.currentUrl || currentUrlRef.current || '';
+    return isYouTubeUrl(candidate);
+  }, [localSettings.diag_youtube_shorts, webViewState.currentUrl]);
+  const logYouTubeDiag = useCallback((key: string, message: string, url?: string) => {
+    if (!shouldLogYouTubeDiag(url)) return;
+    diagLog(key, message);
+  }, [shouldLogYouTubeDiag, diagLog]);
 
   const flashLogLastRef = useRef(0);
   const flashLog = useCallback((msg: string) => {
@@ -857,6 +888,17 @@ export const NativeWebViewBrowser = () => {
         'req=' + requestId,
         'requestEpoch=' + requestEpoch,
         'activeEpoch=' + activeEpoch,
+      );
+      const diagUrl = webViewState.currentUrl || currentUrlRef.current || '';
+      logYouTubeDiag(
+        'safe_epoch_stale',
+        'safe_epoch_stale requestId=' + requestId +
+        ' requestEpoch=' + requestEpoch +
+        ' activeEpoch=' + activeEpoch +
+        ' navId=' + activeNavIdRef.current +
+        ' itemCount=' + items.length +
+        ' url=' + (diagUrl || 'unknown'),
+        diagUrl
       );
 
       const staleResults = items.map(item => ({
@@ -1307,6 +1349,13 @@ export const NativeWebViewBrowser = () => {
     const scheduleNextPoll = (delayMs: number) => {
       if (cancelled) return;
       if (pollTimer) {
+        const diagUrl = webViewState.currentUrl || currentUrlRef.current || '';
+        logYouTubeDiag(
+          'legacyTimer',
+          'legacy-timer timer_pending navId=' + activeNavIdRef.current +
+          ' url=' + (diagUrl || 'unknown'),
+          diagUrl
+        );
         clearTimeout(pollTimer);
       }
       pollTimer = setTimeout(runPollLoop, delayMs);
@@ -1340,6 +1389,21 @@ export const NativeWebViewBrowser = () => {
         `;
         
         const result = await executeScript(getQueueScript);
+        const diagUrl = webViewState.currentUrl || currentUrlRef.current || '';
+        const resultTypeLabel = result === undefined ? 'undefined' : typeof result;
+        const previewValue = result === undefined ? 'undefined' : result === null ? 'null' : String(result);
+        const trimmedResult = typeof result === 'string' ? result.trim() : '';
+        const startsWithObjArr = typeof result === 'string' && trimmedResult.startsWith('[');
+        logYouTubeDiag(
+          'legacyPoll',
+          'legacy-poll type=' + resultTypeLabel +
+          ' isUndefined=' + (result === undefined) +
+          ' isEMPTY=' + (result === 'EMPTY') +
+          ' startsWithObjArr=' + startsWithObjArr +
+          ' preview=' + previewValue.substring(0, 24) +
+          ' url=' + (diagUrl || 'unknown'),
+          diagUrl
+        );
         
         if (!result || result === 'EMPTY' || result === 'null') {
           return false;

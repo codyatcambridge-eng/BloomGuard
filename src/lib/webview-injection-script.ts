@@ -32,6 +32,7 @@ export interface InjectionConfig {
   nonce: string; // Security nonce for message validation
   blockingMode?: 'mvp' | 'full';
   pageEpoch?: number;
+  diagYouTubeShorts?: boolean;
 }
 
 export interface FailOpenModePolicyInput {
@@ -188,6 +189,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     nonce: '${nonce}',
     blockingMode: '${config.blockingMode || 'mvp'}',
     pageEpoch: ${pageEpoch},
+    diagYouTubeShorts: ${config.diagYouTubeShorts ? 'true' : 'false'},
     minImageSize: 80, // Minimum image dimension (fail-open below this - 80x80)
     semanticDelayMs: 0, // Apply blur immediately; no delay to avoid flash of unblurred content
     // Neutral fast-pass removed for strict/YouTube mode
@@ -588,6 +590,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     youtubeScrollTimeout: null,
     youtubeScrollHandler: null,
     debugSummaryInterval: null,
+    diagHeartbeatInterval: null,
     initialTimeouts: [],
     paused: document.visibilityState !== 'visible',
     teardownDone: false,
@@ -606,6 +609,8 @@ export function generateModerationScript(config: InjectionConfig): string {
     scanNode: { sec: 0, count: 0 },
     mutationScan: { sec: 0, count: 0 },
   };
+  let diagPrevRequests = 0;
+  let diagPrevResponses = 0;
   const mutationScanQueue = [];
   const mutationScanSet = new Set();
   let mutationScanTimer = null;
@@ -774,6 +779,35 @@ export function generateModerationScript(config: InjectionConfig): string {
   const PLATFORM = detectPlatform();
   const IS_YOUTUBE = PLATFORM === 'youtube' || PLATFORM === 'youtube-shorts';
   console.log('[MW] Platform detected:', PLATFORM, 'isYouTube:', IS_YOUTUBE);
+  const DIAG_ENABLED = CONFIG.diagYouTubeShorts && IS_YOUTUBE;
+  const diagLogTimestamps = {};
+  function diagLog(key, message) {
+    if (!DIAG_ENABLED) return;
+    const now = Date.now();
+    const previous = diagLogTimestamps[key] || 0;
+    if (now - previous < 2500) return;
+    diagLogTimestamps[key] = now;
+    console.log('[MW-YT][DIAG]', message);
+  }
+  function describeElementHint(element) {
+    var hint = 'no-hint';
+    var id = element.id || '';
+    if (id) {
+      hint = id;
+    } else {
+      var className = (element.className || '').trim();
+      if (className) {
+        var tokens = [];
+        className.split(' ').forEach(function(token) {
+          if (token && tokens.length < 2) tokens.push(token);
+        });
+        if (tokens.length) {
+          hint = tokens.join(' ');
+        }
+      }
+    }
+    return hint;
+  }
 
   // ==================== URL UTILITIES ====================
 
@@ -1076,9 +1110,27 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function createRevealOverlay(element, src, category, itemId) {
     if (element.dataset.mwHasOverlay === 'true') return;
-    
+    if (!element.isConnected) {
+      diagLog(
+        'overlay-disconnected',
+        'overlay-skip hasParent=' + (!!element.parentElement) +
+        ' connected=false tag=' + (element.tagName || 'unknown') +
+        ' srcType=' + (element.dataset.mwSourceType || 'unknown') +
+        ' hint=' + describeElementHint(element)
+      );
+      return;
+    }
     const parent = element.parentElement;
-    if (!parent) return;
+    if (!parent) {
+      diagLog(
+        'overlay-no-parent',
+        'overlay-skip hasParent=false connected=' + (!!element.isConnected) +
+        ' tag=' + (element.tagName || 'unknown') +
+        ' srcType=' + (element.dataset.mwSourceType || 'unknown') +
+        ' hint=' + describeElementHint(element)
+      );
+      return;
+    }
     
     const parentPos = window.getComputedStyle(parent).position;
     if (parentPos === 'static') {
@@ -1781,6 +1833,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     
     // Store element reference
     state.elements.set(itemId, element);
+    element.dataset.mwSourceType = sourceType || 'unknown';
     
     // Apply soft blur immediately to prevent any flash of unblurred content.
     // Safe results will remove the blur as soon as moderation completes.
@@ -2263,6 +2316,38 @@ export function generateModerationScript(config: InjectionConfig): string {
     timerLog('start', 'debugSummaryInterval:' + reason);
   }
 
+  function startDiagHeartbeat(reason) {
+    if (!DIAG_ENABLED || timerState.paused || timerState.diagHeartbeatInterval) return;
+    diagPrevRequests = state.stats.requestsSent;
+    diagPrevResponses = state.stats.responsesReceived;
+    timerState.diagHeartbeatInterval = setInterval(function() {
+      const nowReq = state.stats.requestsSent;
+      const nowRes = state.stats.responsesReceived;
+      const deltaReq = nowReq - diagPrevRequests;
+      const deltaRes = nowRes - diagPrevResponses;
+      diagPrevRequests = nowReq;
+      diagPrevResponses = nowRes;
+      diagLog(
+        'heartbeat',
+        'stats queued=' + batchQueue.length +
+        ' pending=' + state.pending.size +
+        ' batch=' + batchQueue.length +
+        ' sentΔ=' + deltaReq +
+        ' recvΔ=' + deltaRes +
+        ' totalSent=' + nowReq +
+        ' totalRecv=' + nowRes
+      );
+    }, 5000);
+    timerLog('start', 'diagHeartbeat:' + reason);
+  }
+
+  function stopDiagHeartbeat(reason) {
+    if (!timerState.diagHeartbeatInterval) return;
+    clearInterval(timerState.diagHeartbeatInterval);
+    timerState.diagHeartbeatInterval = null;
+    timerLog('stop', 'diagHeartbeat:' + reason);
+  }
+
   // ==================== INITIALIZATION ====================
 
   // Inject CSS
@@ -2446,6 +2531,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     state.pendingBySrc.clear();
     cleanupExpiredSafeResolved();
     pruneDisconnectedPending('stopManagedTimers');
+    stopDiagHeartbeat(reason);
   }
 
   function startManagedTimers(reason) {
@@ -2454,6 +2540,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     startUrlChangePoll(reason);
     startYouTubePeriodicScan(reason);
     startDebugSummary(reason);
+    startDiagHeartbeat(reason);
   }
 
   function pauseManagedTimers(reason) {

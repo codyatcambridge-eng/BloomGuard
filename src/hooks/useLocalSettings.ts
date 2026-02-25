@@ -35,6 +35,7 @@ export interface LocalProtectionSettings {
   blur_strength_px: number; // 0-50px
   fail_closed: boolean; // Blur on timeout/error
   debug_mode: boolean;
+  diag_youtube_shorts: boolean;
   // MVP settings
   blocking_mode: BlockingMode;
   prototype_mode: boolean; // Show labeling UI on reveal
@@ -59,6 +60,7 @@ const DEFAULT_SETTINGS: LocalProtectionSettings = {
   blur_strength_px: 24,
   fail_closed: false, // Fail-open by default to reduce over-blurring from transient scan failures
   debug_mode: false,
+  diag_youtube_shorts: false,
   // MVP: Only block shirtless and swimwear
   blocking_mode: 'mvp',
   prototype_mode: false,
