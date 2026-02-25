@@ -69,11 +69,11 @@ const Settings = () => {
       {/* Header */}
       <header className="px-4 pt-8 pb-4 border-b border-border">
         <div className="flex items-center gap-3">
-          <Shield className="w-8 h-8 text-aqua" />
+            <Shield className="w-8 h-8 text-aqua" />
           <div>
             <h1 className="font-display text-2xl tracking-wider">SETTINGS</h1>
             <p className="text-xs text-muted-foreground uppercase tracking-widest">
-              Iron Watch Configuration
+              GoodCreation.net Configuration
             </p>
           </div>
         </div>
@@ -90,7 +90,7 @@ const Settings = () => {
                 <Shield className={`w-5 h-5 ${settings.shield_active ? "text-accent-foreground" : "text-muted-foreground"}`} />
               </div>
               <div>
-                <h3 className="font-display text-sm tracking-wider">THE IRON SHIELD</h3>
+                <h3 className="font-display text-sm tracking-wider">THE GOODCREATION SHIELD</h3>
                 <p className="text-xs text-muted-foreground">Master Protection Toggle</p>
               </div>
             </div>

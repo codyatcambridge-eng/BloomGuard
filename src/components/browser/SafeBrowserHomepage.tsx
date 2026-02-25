@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Search, Shield, Sparkles } from "lucide-react";
+import { Search, Shield, Sparkles, Instagram, Youtube, Link } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 
@@ -50,10 +50,10 @@ export const SafeBrowserHomepage = ({ onSearch, isSearching = false }: SafeBrows
             <Shield className="w-16 h-16 text-aqua" />
           </div>
           <h1 className="font-display text-5xl tracking-wider text-foreground mb-2">
-            IRON WATCH
+            GOODCREATION.NET
           </h1>
           <p className="text-sm text-muted-foreground font-display tracking-widest">
-            PROTECTED SEARCH
+            SAFE BROWSER
           </p>
         </div>
 
@@ -111,6 +111,40 @@ export const SafeBrowserHomepage = ({ onSearch, isSearching = false }: SafeBrows
           </Button>
         </div>
 
+        {/* Quick social launches */}
+        <div className="mt-8 grid grid-cols-1 sm:grid-cols-3 gap-3 w-full max-w-2xl">
+          <Button
+            type="button"
+            variant="secondary"
+            className="justify-center gap-2"
+            onClick={() => onSearch("https://www.snapchat.com")}
+            disabled={isSearching}
+          >
+            <Link className="w-4 h-4" />
+            Snapchat
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            className="justify-center gap-2"
+            onClick={() => onSearch("https://www.instagram.com")}
+            disabled={isSearching}
+          >
+            <Instagram className="w-4 h-4" />
+            Instagram
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            className="justify-center gap-2"
+            onClick={() => onSearch("https://www.youtube.com")}
+            disabled={isSearching}
+          >
+            <Youtube className="w-4 h-4" />
+            YouTube
+          </Button>
+        </div>
+
         {/* Protection Badge */}
         <div className="mt-12 text-center">
           <div className="inline-flex items-center gap-2 px-5 py-2.5 bg-aqua/10 border border-aqua/30 rounded-full">
@@ -151,7 +185,7 @@ export const SafeBrowserHomepage = ({ onSearch, isSearching = false }: SafeBrows
           </button>
         </div>
         <p className="text-center text-[10px] text-muted-foreground/60 mt-3 font-display tracking-wider">
-          IRON WATCH SAFE BROWSER © 2025
+          GOODCREATION.NET SAFE BROWSER © 2025
         </p>
       </footer>
     </div>

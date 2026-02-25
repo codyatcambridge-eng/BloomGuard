@@ -61,7 +61,7 @@ export const BrowserHeader = ({
       {/* Title Bar */}
       <div className="flex items-center gap-2 mb-3">
         <Shield className="w-6 h-6 text-aqua" />
-        <h1 className="font-display text-lg tracking-wider">GoodCreation.bet</h1>
+        <h1 className="font-display text-lg tracking-wider">GoodCreation.net</h1>
         {isProtected && (
           <div className="ml-auto flex items-center gap-1 text-aqua">
             <Lock className="w-3 h-3" />

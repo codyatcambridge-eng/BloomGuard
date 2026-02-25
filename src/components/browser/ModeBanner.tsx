@@ -65,7 +65,7 @@ const MODE_CONFIG: Record<string, {
   blocked: {
     icon: <Shield className="w-4 h-4" />,
     title: "Site Blocked",
-    description: "This site has been blocked by Iron Watch protection.",
+    description: "This site has been blocked by GoodCreation protection.",
     bgClass: "bg-destructive/10 border-destructive/20",
     textClass: "text-destructive",
   },

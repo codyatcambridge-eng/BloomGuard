@@ -1448,50 +1448,6 @@ export const NativeWebViewBrowser = () => {
     };
   }, [ENABLE_SIGNAL_PIPELINE, isNative, webViewState.isOpen, isModerationEnabled, executeScript, moderationBridge, localSettings.blur_strength_px, webViewState.currentUrl]);
 
-  // Search handler - redirects to Google search immediately
-  const handleSearch = useCallback(async (query: string) => {
-    if (!query.trim()) return;
-    
-    console.log('[Browser] Starting search:', query);
-    
-    // Build Google search URL
-    const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query.trim())}`;
-    
-    // IMMEDIATELY set view to browse and navigate - fail-open approach
-    navigate('browse', searchUrl, searchUrl);
-    setUrlInput(searchUrl);
-    setIsLoading(true);
-    
-    await logEvent('search', query, 'google_redirect');
-    
-    // Open in native WebView or fallback
-    if (isNative) {
-      try {
-        const success = await openWebView(searchUrl, true);
-        if (success) {
-          await logEvent('allowed', 'google.com', 'native-webview');
-        } else {
-          setFallbackUrl(searchUrl);
-          navigate('fallback', '', searchUrl);
-          await logEvent('fallback', 'google.com', 'webview-failed');
-        }
-      } catch (error) {
-        console.error('[Browser] WebView open error:', error);
-        setFallbackUrl(searchUrl);
-        setFailureError(error instanceof Error ? error.message : 'Failed to load search');
-        navigate('failure', '', searchUrl);
-        await logEvent('error', 'google.com', 'webview-error');
-      }
-    } else {
-      // On web, use fallback modes
-      setFallbackUrl(searchUrl);
-      navigate('fallback', '', searchUrl);
-      await logEvent('fallback', 'google.com', 'web-platform');
-    }
-    
-    setIsLoading(false);
-  }, [navigate, logEvent, isNative, openWebView]);
-
   /**
    * Determine if input is a URL vs search query
    * URLs: contain domain TLDs (.com, .org, etc), protocol prefixes, or IP addresses
@@ -1522,7 +1478,7 @@ export const NativeWebViewBrowser = () => {
     }
     
     // IP address pattern
-    if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?/.test(trimmed)) {
+    if (/^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}(:\\d+)?/.test(trimmed)) {
       return true;
     }
     
@@ -1534,6 +1490,52 @@ export const NativeWebViewBrowser = () => {
     // Everything else is a search
     return false;
   }, []);
+
+  // Search handler - direct URLs go straight to browser; others search Google
+  const handleSearch = useCallback(async (query: string) => {
+    const trimmed = query.trim();
+    if (!trimmed) return;
+    
+    const targetUrl = isUrlInput(trimmed)
+      ? (trimmed.startsWith('http') ? trimmed : `https://${trimmed}`)
+      : `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`;
+    
+    console.log('[Browser] Starting navigation:', targetUrl);
+    
+    // IMMEDIATELY set view to browse and navigate - fail-open approach
+    navigate('browse', targetUrl, targetUrl);
+    setUrlInput(targetUrl);
+    setIsLoading(true);
+    
+    await logEvent('search', trimmed, isUrlInput(trimmed) ? 'direct_url' : 'google_redirect');
+    
+    // Open in native WebView or fallback
+    if (isNative) {
+      try {
+        const success = await openWebView(targetUrl, true);
+        if (success) {
+          await logEvent('allowed', targetUrl, 'native-webview');
+        } else {
+          setFallbackUrl(targetUrl);
+          navigate('fallback', '', targetUrl);
+          await logEvent('fallback', targetUrl, 'webview-failed');
+        }
+      } catch (error) {
+        console.error('[Browser] WebView open error:', error);
+        setFallbackUrl(targetUrl);
+        setFailureError(error instanceof Error ? error.message : 'Failed to load');
+        navigate('failure', '', targetUrl);
+        await logEvent('error', targetUrl, 'webview-error');
+      }
+    } else {
+      // On web, use fallback modes
+      setFallbackUrl(targetUrl);
+      navigate('fallback', '', targetUrl);
+      await logEvent('fallback', targetUrl, 'web-platform');
+    }
+    
+    setIsLoading(false);
+  }, [navigate, logEvent, isNative, openWebView, isUrlInput]);
 
   // Main navigation handler - immediately navigate to browse view (fail-open)
   const handleNavigate = useCallback(async (targetUrl?: string, e?: React.FormEvent) => {
