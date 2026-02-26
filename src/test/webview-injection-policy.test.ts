@@ -58,6 +58,18 @@ describe('webview injection blur policy', () => {
       blockingMode: 'mvp',
     });
     expect(mvpAllowed.shouldBlur).toBe(true);
+
+    const mvpThirstAllowed = applyFailOpenAndModePolicyDecision({
+      rawShouldBlur: anatomical.shouldBlur,
+      normalizedCategory: 'thirst',
+      predictedLabel: 'thirst',
+      isErrorResult: false,
+      failClosed: false,
+      enabled: true,
+      sensitivity: 2,
+      blockingMode: 'mvp',
+    });
+    expect(mvpThirstAllowed.shouldBlur).toBe(true);
   });
 
   it('timeout is fail-open when failClosed=false', () => {

@@ -9,6 +9,7 @@ export type ModerationCategory =
   | 'safe'
   | 'neutral'
   | 'drawing'
+  | 'thirst'
   | 'nudity'
   | 'partial_nudity'
   | 'shirtless_male'
@@ -30,6 +31,10 @@ export interface ModerationScanResult {
   severity: ModerationSeverity;
   predictions: Record<string, number>;
   inferenceTime: number;
+  reason?: string;
+  modelVersion?: string;
+  thresholdsUsed?: Record<string, unknown>;
+  diagnostics?: Record<string, unknown>;
 }
 
 export interface ModerationBridgePlugin {
@@ -147,6 +152,7 @@ export function shouldBlurCategory(category: ModerationCategory, sensitivity: nu
     'nudity': 0,
     // These require higher sensitivity
     'sexy': 1,
+    'thirst': 1,
     'suggestive': 2,
     'partial_nudity': 2,
     'shirtless_male': 3,
@@ -215,6 +221,7 @@ export function getCategoryLabel(category: ModerationCategory): string {
     'safe': 'Safe',
     'neutral': 'Neutral',
     'drawing': 'Drawing',
+    'thirst': 'Thirst Trap',
     'nudity': 'Nudity',
     'partial_nudity': 'Partial Nudity',
     'shirtless_male': 'Shirtless',

@@ -62,6 +62,41 @@ const isYouTubeUrl = (value?: string) => {
   return false;
 };
 
+const isYouTubeDomainUrl = (value?: string) => {
+  if (!value) return false;
+  try {
+    const parsed = new URL(value);
+    const host = parsed.hostname.toLowerCase();
+    return host === 'youtube.com' || host === 'www.youtube.com' || host === 'm.youtube.com' || host === 'youtu.be';
+  } catch {
+    return false;
+  }
+};
+
+const isYouTubeShortsUrl = (value?: string) => {
+  if (!value) return false;
+  try {
+    const parsed = new URL(value);
+    const host = parsed.hostname.toLowerCase();
+    return (host === 'youtube.com' || host === 'www.youtube.com' || host === 'm.youtube.com') && parsed.pathname.startsWith('/shorts');
+  } catch {
+    return false;
+  }
+};
+
+const isDiagYtBlurEnabledForUrl = (value?: string) => {
+  if (!isYouTubeShortsUrl(value)) return false;
+  if (typeof window === 'undefined') return false;
+  try {
+    const maybeFlag = (window as unknown as Record<string, unknown>).DIAG_YT_BLUR;
+    if (maybeFlag === 1 || maybeFlag === '1') return true;
+    if (window.localStorage && window.localStorage.getItem('DIAG_YT_BLUR') === '1') return true;
+  } catch {
+    return false;
+  }
+  return false;
+};
+
 interface SearchResult {
   title: string;
   url: string;
@@ -273,6 +308,11 @@ export const NativeWebViewBrowser = () => {
   const navigationSeqRef = useRef(0);
   const activeNavIdRef = useRef(0);
   const currentUrlRef = useRef('');
+  const diagYtBlurEpochRef = useRef({
+    staleHostRejectCount: 0,
+    epochHeldCount: 0,
+    epochIncrementedCount: 0,
+  });
   const messageFromWebViewHandlerRef = useRef<((payload: unknown) => void) | null>(null);
   
   const {
@@ -362,15 +402,53 @@ export const NativeWebViewBrowser = () => {
   }, []);
 
   const markNavigation = useCallback((reason: string, url: string) => {
+    const previousUrl = currentUrlRef.current || '';
+    const previousEpoch = webViewPageEpochRef.current || 0;
+    const sameUrl = !!previousUrl && previousUrl === url;
+    const holdEpoch =
+      reason === 'onUrlChange' &&
+      (
+        sameUrl ||
+        (isYouTubeShortsUrl(previousUrl) && isYouTubeShortsUrl(url))
+      );
     navigationSeqRef.current += 1;
     activeNavIdRef.current = navigationSeqRef.current;
-    webViewPageEpochRef.current = activeNavIdRef.current;
+    if (!holdEpoch || previousEpoch <= 0) {
+      webViewPageEpochRef.current = activeNavIdRef.current;
+      if (isDiagYtBlurEnabledForUrl(url || previousUrl)) {
+        diagYtBlurEpochRef.current.epochIncrementedCount += 1;
+        console.log(
+          '[MW-YT][DIAG][EPOCH][HOST]',
+          'action=epoch_incremented',
+          'count=' + diagYtBlurEpochRef.current.epochIncrementedCount,
+          'reason=' + reason,
+          'prevEpoch=' + previousEpoch,
+          'nextEpoch=' + webViewPageEpochRef.current,
+          'prevUrl=' + (previousUrl || 'unknown'),
+          'nextUrl=' + (url || 'unknown'),
+        );
+      }
+    } else if (isDiagYtBlurEnabledForUrl(url || previousUrl)) {
+      diagYtBlurEpochRef.current.epochHeldCount += 1;
+      console.log(
+        '[MW-YT][DIAG][EPOCH][HOST]',
+        'action=epoch_held',
+        'count=' + diagYtBlurEpochRef.current.epochHeldCount,
+        'reason=' + reason,
+        'epoch=' + previousEpoch,
+        'prevUrl=' + (previousUrl || 'unknown'),
+        'nextUrl=' + (url || 'unknown'),
+      );
+    }
     console.log(
       '[MW-Inject][Nav]',
       'navId=' + activeNavIdRef.current,
       'reason=' + reason,
       'targetUrl=' + (url || 'unknown'),
     );
+    if (url) {
+      currentUrlRef.current = url;
+    }
   }, []);
 
   const injectModerationScript = useCallback(async (
@@ -883,6 +961,9 @@ export const NativeWebViewBrowser = () => {
     const { requestId, items, thresholds } = request;
     const requestEpoch = Number.isFinite(request.pageEpoch) ? Number(request.pageEpoch) : null;
     const activeEpoch = webViewPageEpochRef.current;
+    const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
+    const stickyShortsMode = isYouTubeShortsUrl(activeUrl);
+    const relaxedYouTubeEpochMode = isYouTubeDomainUrl(activeUrl);
     
     if (pendingRequestsRef.current.has(requestId)) {
       console.log('[MW-Host] Duplicate request ignored:', requestId);
@@ -890,7 +971,19 @@ export const NativeWebViewBrowser = () => {
     }
     pendingRequestsRef.current.add(requestId);
 
-    if (requestEpoch !== null && requestEpoch !== activeEpoch) {
+    if (requestEpoch !== null && requestEpoch !== activeEpoch && !relaxedYouTubeEpochMode) {
+      if (isDiagYtBlurEnabledForUrl(activeUrl)) {
+        diagYtBlurEpochRef.current.staleHostRejectCount += 1;
+        console.log(
+          '[MW-YT][DIAG][EPOCH][HOST]',
+          'action=stale_host_reject',
+          'count=' + diagYtBlurEpochRef.current.staleHostRejectCount,
+          'requestId=' + requestId,
+          'requestEpoch=' + requestEpoch,
+          'activeEpoch=' + activeEpoch,
+          'url=' + (activeUrl || 'unknown'),
+        );
+      }
       debugLog(
         '[MW-Host][Epoch] stale request ignored',
         'req=' + requestId,
@@ -931,6 +1024,17 @@ export const NativeWebViewBrowser = () => {
       flashLog('disarm stale epoch');
       return;
     }
+    if (requestEpoch !== null && requestEpoch !== activeEpoch && relaxedYouTubeEpochMode && isDiagYtBlurEnabledForUrl(activeUrl)) {
+      console.log(
+        '[MW-YT][DIAG][EPOCH][HOST]',
+        'action=stale_host_bypass_youtube',
+        'requestId=' + requestId,
+        'requestEpoch=' + requestEpoch,
+        'activeEpoch=' + activeEpoch,
+        'scope=' + (stickyShortsMode ? 'shorts' : 'youtube'),
+        'url=' + (activeUrl || 'unknown'),
+      );
+    }
     
     const startTime = performance.now();
     console.log('[MW-Host] request received', requestId, 'items=' + items.length, 'epoch=' + (requestEpoch ?? 'n/a'));
@@ -948,6 +1052,14 @@ export const NativeWebViewBrowser = () => {
       confidence: number;
       severity: ModerationSeverity;
       predictions?: Record<string, number>;
+      model_version?: string;
+      thresholds?: Record<string, unknown>;
+      decision_reason?: string;
+      image_width?: number;
+      image_height?: number;
+      host?: string;
+      ts?: number;
+      diagnostics?: Record<string, unknown>;
     }> = [];
     
     // Process each item using the moderation bridge
@@ -969,6 +1081,16 @@ export const NativeWebViewBrowser = () => {
             confidence: effectiveConfidence,
             severity: scanResult.severity || mapModerationCategoryToSeverity(scanResult.category),
             predictions: scanResult.predictions,
+            model_version: scanResult.modelVersion,
+            thresholds: scanResult.thresholdsUsed,
+            decision_reason: scanResult.reason,
+            image_width: typeof scanResult.diagnostics?.imageWidth === 'number' ? scanResult.diagnostics.imageWidth : item.width,
+            image_height: typeof scanResult.diagnostics?.imageHeight === 'number' ? scanResult.diagnostics.imageHeight : item.height,
+            host: typeof scanResult.diagnostics?.host === 'string' ? scanResult.diagnostics.host : (() => {
+              try { return new URL(item.src).hostname; } catch { return undefined; }
+            })(),
+            ts: Date.now(),
+            diagnostics: scanResult.diagnostics,
           });
           console.log('[MW-Host] scan result', item.itemId, ':', scanResult.category, 'blur=' + scanResult.shouldBlur, 'conf=' + effectiveConfidence.toFixed(3));
         } else {
@@ -1232,6 +1354,17 @@ export const NativeWebViewBrowser = () => {
         console.log('[MW-Host] Blur overlay READY:', String(typedMessage.reason || 'ready'), String(typedMessage.url || ''));
         queueCurrentBlurState('webview_ready_sync');
         await flushBlurStateToWebView();
+        return;
+      }
+
+      if (typedMessage.type === 'gc-label-request' && source === 'capgo') {
+        // Forward to app window listeners (Prototype Label modal) without re-posting to webview.
+        window.dispatchEvent(new MessageEvent('message', { data: typedMessage }));
+        return;
+      }
+
+      if (typedMessage.type === 'gc-correction-feedback') {
+        console.log('[MW-Host] correction feedback received');
         return;
       }
       

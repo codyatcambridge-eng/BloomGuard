@@ -108,6 +108,14 @@ export interface ModerationResultItem {
   category: string;
   confidence: number;
   severity?: ModerationSeverity;
+  predictions?: Record<string, number>;
+  model_version?: string;
+  thresholds?: Record<string, unknown>;
+  decision_reason?: string;
+  image_width?: number;
+  image_height?: number;
+  host?: string;
+  ts?: number;
   /** Which triggers matched (for debugging) */
   matchedTriggers?: string[];
   /** Reason for the decision */
@@ -169,19 +177,23 @@ export type RequestState = 'pending' | 'waitingForHost' | 'handled' | 'timeout' 
  * Validate a moderation request message
  * Checks for required fields and correct types
  */
-export function isValidModerationRequest(message: any): message is ModerationRequestMessage {
+export function isValidModerationRequest(message: unknown): message is ModerationRequestMessage {
+  const m = message as Record<string, unknown>;
   return (
-    message &&
-    typeof message === 'object' &&
-    message.type === 'gc-moderation-request' &&
-    typeof message.requestId === 'string' &&
-    typeof message.nonce === 'string' &&
-    Array.isArray(message.items) &&
-    message.items.every((item: any) =>
-      item &&
-      typeof item.itemId === 'string' &&
-      typeof item.src === 'string'
-    )
+    !!m &&
+    typeof m === 'object' &&
+    m.type === 'gc-moderation-request' &&
+    typeof m.requestId === 'string' &&
+    typeof m.nonce === 'string' &&
+    Array.isArray(m.items) &&
+    m.items.every((item: unknown) => {
+      const it = item as Record<string, unknown>;
+      return (
+        !!it &&
+        typeof it.itemId === 'string' &&
+        typeof it.src === 'string'
+      );
+    })
   );
 }
 
@@ -189,32 +201,35 @@ export function isValidModerationRequest(message: any): message is ModerationReq
  * Validate a moderation result message
  * Checks for required fields and correct types
  */
-export function isValidModerationResult(message: any): message is ModerationResultMessage {
+export function isValidModerationResult(message: unknown): message is ModerationResultMessage {
+  const m = message as Record<string, unknown>;
   return (
-    message &&
-    typeof message === 'object' &&
-    message.type === 'gc-moderation-result' &&
-    typeof message.requestId === 'string' &&
-    typeof message.nonce === 'string' &&
-    Array.isArray(message.results)
+    !!m &&
+    typeof m === 'object' &&
+    m.type === 'gc-moderation-result' &&
+    typeof m.requestId === 'string' &&
+    typeof m.nonce === 'string' &&
+    Array.isArray(m.results)
   );
 }
 
-export function isBlurOverlayReadyMessage(message: any): message is BlurOverlayReadyMessage {
+export function isBlurOverlayReadyMessage(message: unknown): message is BlurOverlayReadyMessage {
+  const m = message as Record<string, unknown>;
   return (
-    message &&
-    typeof message === 'object' &&
-    message.type === 'MW_BLUR_READY' &&
-    typeof message.timestamp === 'number'
+    !!m &&
+    typeof m === 'object' &&
+    m.type === 'MW_BLUR_READY' &&
+    typeof m.timestamp === 'number'
   );
 }
 
-export function isSensitivityUpdateMessage(message: any): message is SensitivityUpdateMessage {
+export function isSensitivityUpdateMessage(message: unknown): message is SensitivityUpdateMessage {
+  const m = message as Record<string, unknown>;
   return (
-    message &&
-    typeof message === 'object' &&
-    message.type === 'MW_SENSITIVITY_UPDATE' &&
-    typeof message.level === 'number'
+    !!m &&
+    typeof m === 'object' &&
+    m.type === 'MW_SENSITIVITY_UPDATE' &&
+    typeof m.level === 'number'
   );
 }
 
@@ -350,6 +365,7 @@ const HARD_SUBSTRING_KEYWORDS = [
 ];
 
 const SOFT_EXACT_CATEGORIES = new Set([
+  'thirst',
   'sexy',
   'suggestive',
   'swimwear',

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import * as tf from '@tensorflow/tfjs';
 import * as nsfwjs from 'nsfwjs';
+import { useLocalSettings } from '@/hooks/useLocalSettings';
 
 export interface ModerationPrediction {
   className: string;
@@ -14,7 +15,8 @@ export type ModerationReason =
   | 'fail_open_error'
   | 'fail_open_tiny'
   | 'model_not_ready'
-  | 'swimwear_detected';
+  | 'swimwear_detected'
+  | 'thirst_detected';
 
 export interface ModerationResult {
   isExplicit: boolean;
@@ -24,6 +26,42 @@ export interface ModerationResult {
   confidence: number;
   inferenceTime: number;
   reason: ModerationReason;
+  nsfwRisk?: number;
+  decisionReason?: string;
+  modelVersion?: string;
+  thresholdsUsed?: {
+    nsfwGrayZoneMin: number;
+    nsfwGrayZoneMax: number;
+    explicitOverride: number;
+    skinRatio: number;
+    thirstWeights: {
+      nsfw: number;
+      skin: number;
+      person: number;
+    };
+  };
+  segmentation?: {
+    attempted: boolean;
+    applied: boolean;
+    personPresent: boolean;
+    personPixels: number;
+    skinPixels: number;
+    skinRatio: number;
+    thirstScore: number;
+    threshold: number;
+    strictMode: boolean;
+    grayZone: boolean;
+    throttled: boolean;
+    cached: boolean;
+    modelVersion: string;
+    imageWidth: number;
+    imageHeight: number;
+    inputWidth: number;
+    inputHeight: number;
+    host?: string;
+    segMs: number;
+    skinMs: number;
+  };
   /** Detected signals for debugging */
   signals?: {
     hasHumanBody: boolean;
@@ -75,12 +113,30 @@ const FAST_TIMEOUT_MS = 3000;
  * Minimum image dimensions - smaller images fail-open
  */
 const MIN_IMAGE_DIMENSION = 60;
+const SEGMENTATION_TIMEOUT_MS = 2000;
+const SEGMENTATION_MIN_PERSON_PIXELS = 1500;
+const SEGMENTATION_GRAY_ZONE_MIN = 0.15;
+const SEGMENTATION_GRAY_ZONE_MAX = 0.65;
+const NSFW_EXPLICIT_OVERRIDE_THRESHOLD = 0.85;
+const NSFW_WEIGHT = 0.65;
+const SKIN_WEIGHT = 0.30;
+const PERSON_WEIGHT = 0.05;
+const SEGMENTATION_MODEL_VERSION = 'body-pix@2.x';
+const NSFW_MODEL_VERSION = 'nsfwjs@4.2.0';
 
 type ModelLoadingState = 'idle' | 'loading' | 'ready' | 'error';
 
 // Singleton pattern for the model - load once, use everywhere
 let globalModel: nsfwjs.NSFWJS | null = null;
 let globalModelPromise: Promise<nsfwjs.NSFWJS> | null = null;
+type BodyPixModel = {
+  segmentPerson: (
+    input: HTMLImageElement | HTMLCanvasElement,
+    config?: Record<string, unknown>
+  ) => Promise<{ data: Uint8Array | Int32Array; width: number; height: number }>;
+};
+let globalSegmentationModel: BodyPixModel | null = null;
+let globalSegmentationModelPromise: Promise<BodyPixModel | null> | null = null;
 
 const loadModel = async (): Promise<nsfwjs.NSFWJS> => {
   if (globalModel) return globalModel;
@@ -95,6 +151,100 @@ const loadModel = async (): Promise<nsfwjs.NSFWJS> => {
   })();
 
   return globalModelPromise;
+};
+
+const loadSegmentationModel = async (): Promise<BodyPixModel | null> => {
+  if (globalSegmentationModel) return globalSegmentationModel;
+  if (globalSegmentationModelPromise) return globalSegmentationModelPromise;
+
+  globalSegmentationModelPromise = (async () => {
+    try {
+      await tf.ready();
+      const bodyPix = await import('@tensorflow-models/body-pix');
+      const model = await bodyPix.load({
+        architecture: 'MobileNetV1',
+        outputStride: 16,
+        multiplier: 0.5,
+        quantBytes: 2,
+      });
+      globalSegmentationModel = model as unknown as BodyPixModel;
+      console.log('[OnDeviceAI] BodyPix model loaded successfully');
+      return globalSegmentationModel;
+    } catch (err) {
+      console.warn('[OnDeviceAI] BodyPix unavailable, segmentation disabled:', err);
+      return null;
+    }
+  })();
+
+  return globalSegmentationModelPromise;
+};
+
+const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
+
+const toDialBucket = (thresholds: AIThresholds): 'relaxed' | 'medium' | 'strict' => {
+  if (thresholds.sexy >= 0.8) return 'relaxed';
+  if (thresholds.sexy >= 0.5) return 'medium';
+  return 'strict';
+};
+
+const computeNsfwRisk = (porn: number, sexy: number, hentai: number): number => {
+  const explicit = Math.max(porn, hentai);
+  return clamp01(explicit * 0.8 + sexy * 0.45);
+};
+
+const isLikelySkinPixel = (r: number, g: number, b: number): boolean => {
+  const y = 0.299 * r + 0.587 * g + 0.114 * b;
+  const cb = 128 - 0.168736 * r - 0.331264 * g + 0.5 * b;
+  const cr = 128 + 0.5 * r - 0.418688 * g - 0.081312 * b;
+  return (
+    y > 40 &&
+    cr >= 133 && cr <= 173 &&
+    cb >= 77 && cb <= 127 &&
+    r > 70 && g > 35 && b > 20 &&
+    r > g && r > b
+  );
+};
+
+const getSkinRatioThresholdForDial = (
+  dialBucket: 'relaxed' | 'medium' | 'strict',
+  settings: {
+    segmentationSkinRatioRelaxed: number;
+    segmentationSkinRatioMedium: number;
+    segmentationSkinRatioStrict: number;
+  },
+): number => {
+  if (dialBucket === 'relaxed') return settings.segmentationSkinRatioRelaxed;
+  if (dialBucket === 'medium') return settings.segmentationSkinRatioMedium;
+  return settings.segmentationSkinRatioStrict;
+};
+
+const getImageDimensions = (image: HTMLImageElement | HTMLCanvasElement): { width: number; height: number } => {
+  if (image instanceof HTMLImageElement) {
+    return {
+      width: image.naturalWidth || image.width || 0,
+      height: image.naturalHeight || image.height || 0,
+    };
+  }
+  return { width: image.width || 0, height: image.height || 0 };
+};
+
+const downscaleForSegmentation = (
+  image: HTMLImageElement | HTMLCanvasElement,
+  maxInputPx: number
+): { canvas: HTMLCanvasElement; width: number; height: number } => {
+  const dims = getImageDimensions(image);
+  const longestSide = Math.max(dims.width, dims.height, 1);
+  const scale = Math.min(1, maxInputPx / longestSide);
+  const width = Math.max(1, Math.round(dims.width * scale));
+  const height = Math.max(1, Math.round(dims.height * scale));
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return { canvas, width, height };
+  ctx.drawImage(image, 0, 0, width, height);
+  return { canvas, width, height };
 };
 
 /**
@@ -148,7 +298,24 @@ export const useOnDeviceModeration = () => {
   const [error, setError] = useState<string | null>(null);
   const modelRef = useRef<nsfwjs.NSFWJS | null>(null);
   const imageCache = useRef<Map<string, ModerationResult>>(new Map());
+  const segmentationCache = useRef<Map<string, {
+    expiresAt: number;
+    value: {
+      personPresent: boolean;
+      personPixels: number;
+      skinPixels: number;
+      skinRatio: number;
+      thirstScore: number;
+      inputWidth: number;
+      inputHeight: number;
+      segMs: number;
+      skinMs: number;
+    };
+  }>>(new Map());
+  const segmentationLastRunAt = useRef(0);
+  const segmentationCounters = useRef({ cacheHits: 0, throttleSkips: 0, attempts: 0 });
   const initAttempted = useRef(false);
+  const { settings } = useLocalSettings();
 
   // Load model on mount with graceful error handling
   useEffect(() => {
@@ -273,7 +440,7 @@ export const useOnDeviceModeration = () => {
       });
       
       const predictions = await Promise.race([classifyPromise, timeoutPromise]);
-      const inferenceTime = performance.now() - startTime;
+      let inferenceTime = performance.now() - startTime;
 
       // Build prediction map and formatted predictions
       const formattedPredictions: ModerationPrediction[] = predictions.map(p => ({
@@ -290,17 +457,173 @@ export const useOnDeviceModeration = () => {
       const sexyScore = predMap['sexy'] || 0;
       const hentaiScore = predMap['hentai'] || 0;
       const neutralScore = predMap['neutral'] || 0;
+      const nsfwRisk = computeNsfwRisk(pornScore, sexyScore, hentaiScore);
+      const dialBucket = toDialBucket(thresholds);
+      const strictMode = dialBucket === 'strict';
+      const inGrayZone = nsfwRisk >= SEGMENTATION_GRAY_ZONE_MIN && nsfwRisk <= SEGMENTATION_GRAY_ZONE_MAX;
+      const shouldTrySegmentation =
+        settings.enableSegmentationSignal === true &&
+        (strictMode || (settings.segmentationGrayZoneOnly ? inGrayZone : true));
+      const segmentationThreshold = getSkinRatioThresholdForDial(dialBucket, settings);
+      const sourceHost = (() => {
+        if (!cacheKey) return undefined;
+        try {
+          return new URL(cacheKey).hostname;
+        } catch {
+          return undefined;
+        }
+      })();
+      const imageDims = getImageDimensions(image);
+      const diagEnabled = !!import.meta.env.DEV && settings.debug_mode === true;
+
+      let segmentationAttempted = false;
+      let segmentationApplied = false;
+      let segmentationPersonPresent = false;
+      let segmentationPersonPixels = 0;
+      let segmentationSkinPixels = 0;
+      let segmentationSkinRatio = 0;
+      let segmentationThirstScore = clamp01(NSFW_WEIGHT * nsfwRisk);
+      let segmentationThrottled = false;
+      let segmentationCached = false;
+      let segmentationInputWidth = imageDims.width;
+      let segmentationInputHeight = imageDims.height;
+      let segMs = 0;
+      let skinMs = 0;
+
+      if (shouldTrySegmentation) {
+        segmentationAttempted = true;
+        const now = Date.now();
+        const cacheTtlMs = Math.max(1_000, Number(settings.segmentationCacheTtlMs) || 20_000);
+        const cached = cacheKey ? segmentationCache.current.get(cacheKey) : undefined;
+        if (cached && cached.expiresAt > now) {
+          segmentationCached = true;
+          segmentationCounters.current.cacheHits += 1;
+          segmentationPersonPresent = cached.value.personPresent;
+          segmentationPersonPixels = cached.value.personPixels;
+          segmentationSkinPixels = cached.value.skinPixels;
+          segmentationSkinRatio = cached.value.skinRatio;
+          segmentationThirstScore = cached.value.thirstScore;
+          segmentationInputWidth = cached.value.inputWidth;
+          segmentationInputHeight = cached.value.inputHeight;
+          segMs = cached.value.segMs;
+          skinMs = cached.value.skinMs;
+        } else {
+          const throttleMs = Math.max(0, Number(settings.segmentationThrottleMs) || 800);
+          if ((now - segmentationLastRunAt.current) < throttleMs) {
+            segmentationThrottled = true;
+            segmentationCounters.current.throttleSkips += 1;
+          } else {
+            segmentationCounters.current.attempts += 1;
+            segmentationLastRunAt.current = now;
+            try {
+              const segmentationModel = await loadSegmentationModel();
+              if (segmentationModel) {
+                const maxInputPx = Math.max(96, Number(settings.segmentationMaxInputPx) || 256);
+                const downscaled = downscaleForSegmentation(image, maxInputPx);
+                segmentationInputWidth = downscaled.width;
+                segmentationInputHeight = downscaled.height;
+
+                const segStart = performance.now();
+                const segmentPromise = segmentationModel.segmentPerson(downscaled.canvas, {
+                  internalResolution: 'medium',
+                  segmentationThreshold: 0.7,
+                  maxDetections: 1,
+                  scoreThreshold: 0.3,
+                  nmsRadius: 20,
+                });
+                const segmentTimeout = new Promise<never>((_, reject) => {
+                  setTimeout(() => reject(new Error('Segmentation timeout')), SEGMENTATION_TIMEOUT_MS);
+                });
+                const segmentation = await Promise.race([segmentPromise, segmentTimeout]);
+                segMs = performance.now() - segStart;
+
+                const ctx = downscaled.canvas.getContext('2d', { willReadFrequently: true });
+                if (ctx && segmentation?.data) {
+                  const skinStart = performance.now();
+                  const pixels = ctx.getImageData(0, 0, downscaled.width, downscaled.height).data;
+                  const mask = segmentation.data;
+                  const limit = Math.min(mask.length, downscaled.width * downscaled.height);
+                  let personPixels = 0;
+                  let skinPixels = 0;
+
+                  for (let i = 0; i < limit; i++) {
+                    if ((mask[i] ?? 0) <= 0) continue;
+                    personPixels++;
+                    const pxIdx = i * 4;
+                    if (isLikelySkinPixel(
+                      pixels[pxIdx] ?? 0,
+                      pixels[pxIdx + 1] ?? 0,
+                      pixels[pxIdx + 2] ?? 0,
+                    )) {
+                      skinPixels++;
+                    }
+                  }
+                  skinMs = performance.now() - skinStart;
+
+                  segmentationPersonPixels = personPixels;
+                  segmentationSkinPixels = skinPixels;
+                  if (personPixels >= SEGMENTATION_MIN_PERSON_PIXELS) {
+                    segmentationPersonPresent = true;
+                    segmentationSkinRatio = clamp01(skinPixels / Math.max(1, personPixels));
+                  } else {
+                    segmentationPersonPresent = false;
+                    segmentationSkinRatio = 0;
+                  }
+                  segmentationThirstScore = clamp01(
+                    NSFW_WEIGHT * nsfwRisk +
+                    SKIN_WEIGHT * segmentationSkinRatio +
+                    PERSON_WEIGHT * (segmentationPersonPresent ? 1 : 0)
+                  );
+
+                  if (cacheKey) {
+                    segmentationCache.current.set(cacheKey, {
+                      expiresAt: now + cacheTtlMs,
+                      value: {
+                        personPresent: segmentationPersonPresent,
+                        personPixels: segmentationPersonPixels,
+                        skinPixels: segmentationSkinPixels,
+                        skinRatio: segmentationSkinRatio,
+                        thirstScore: segmentationThirstScore,
+                        inputWidth: segmentationInputWidth,
+                        inputHeight: segmentationInputHeight,
+                        segMs,
+                        skinMs,
+                      },
+                    });
+                    if (segmentationCache.current.size > 400) {
+                      const firstSegKey = segmentationCache.current.keys().next().value;
+                      if (firstSegKey) segmentationCache.current.delete(firstSegKey);
+                    }
+                  }
+                }
+              }
+            } catch (segErr) {
+              // Fail-open by design for Stage-B.
+              if (diagEnabled) {
+                console.debug('[OnDeviceAI][StageB] segmentation_fail_open:', segErr);
+              }
+            }
+          }
+        }
+      }
+
+      segmentationApplied =
+        segmentationPersonPresent &&
+        segmentationSkinRatio > segmentationThreshold;
 
       // Neutral fast-pass: strongly neutral images should not be blurred unless explicit scores are meaningful.
       if (
         neutralScore >= NEUTRAL_FAST_PASS_THRESHOLD &&
         pornScore < thresholds.porn &&
         hentaiScore < thresholds.hentai &&
-        sexyScore < Math.max(thresholds.sexy + 0.2, 0.7)
+        sexyScore < Math.max(thresholds.sexy + 0.2, 0.7) &&
+        nsfwRisk < NSFW_EXPLICIT_OVERRIDE_THRESHOLD &&
+        !segmentationApplied
       ) {
         const sorted = [...predictions].sort((a, b) => b.probability - a.probability);
         const dominantClass = sorted[0]?.className || 'Unknown';
         const confidence = sorted[0]?.probability || 0;
+        inferenceTime = performance.now() - startTime;
         const result: ModerationResult = {
           isExplicit: false,
           shouldBlur: false,
@@ -309,6 +632,42 @@ export const useOnDeviceModeration = () => {
           confidence,
           inferenceTime,
           reason: 'threshold_safe',
+          nsfwRisk,
+          decisionReason: 'neutral_fast_pass',
+          modelVersion: `${NSFW_MODEL_VERSION}+${SEGMENTATION_MODEL_VERSION}`,
+          thresholdsUsed: {
+            nsfwGrayZoneMin: SEGMENTATION_GRAY_ZONE_MIN,
+            nsfwGrayZoneMax: SEGMENTATION_GRAY_ZONE_MAX,
+            explicitOverride: NSFW_EXPLICIT_OVERRIDE_THRESHOLD,
+            skinRatio: segmentationThreshold,
+            thirstWeights: {
+              nsfw: NSFW_WEIGHT,
+              skin: SKIN_WEIGHT,
+              person: PERSON_WEIGHT,
+            },
+          },
+          segmentation: {
+            attempted: segmentationAttempted,
+            applied: false,
+            personPresent: segmentationPersonPresent,
+            personPixels: segmentationPersonPixels,
+            skinPixels: segmentationSkinPixels,
+            skinRatio: segmentationSkinRatio,
+            thirstScore: segmentationThirstScore,
+            threshold: segmentationThreshold,
+            strictMode,
+            grayZone: inGrayZone,
+            throttled: segmentationThrottled,
+            cached: segmentationCached,
+            modelVersion: SEGMENTATION_MODEL_VERSION,
+            imageWidth: imageDims.width,
+            imageHeight: imageDims.height,
+            inputWidth: segmentationInputWidth,
+            inputHeight: segmentationInputHeight,
+            host: sourceHost,
+            segMs,
+            skinMs,
+          },
           signals: estimateSignals(formattedPredictions),
         };
 
@@ -328,15 +687,17 @@ export const useOnDeviceModeration = () => {
       const pornHit = pornScore > thresholds.porn;
       const hentaiHit = hentaiScore > thresholds.hentai;
       const sexyHit = sexyScore > thresholds.sexy;
+      const explicitOverride = nsfwRisk >= NSFW_EXPLICIT_OVERRIDE_THRESHOLD;
 
       // ==== SWIMWEAR/SHIRTLESS LOGIC ====
       // If Sexy is high and skin-density is high (with weak clothing signal), mark as unsafe.
-      const isSwimwearShirtless = 
-        sexyScore > SWIMWEAR_SEXY_THRESHOLD && 
+      const isSwimwearShirtless =
+        sexyScore > SWIMWEAR_SEXY_THRESHOLD &&
         signals.skinDensity >= MIN_SKIN_DENSITY_FOR_SWIMWEAR &&
         !signals.hasClothing;
 
       if (isSwimwearShirtless) {
+        inferenceTime = performance.now() - startTime;
         const result: ModerationResult = {
           isExplicit: false,
           shouldBlur: true,
@@ -345,6 +706,42 @@ export const useOnDeviceModeration = () => {
           confidence: sexyScore,
           inferenceTime,
           reason: 'swimwear_detected',
+          nsfwRisk,
+          decisionReason: 'stage_a_swimwear_detected',
+          modelVersion: `${NSFW_MODEL_VERSION}+${SEGMENTATION_MODEL_VERSION}`,
+          thresholdsUsed: {
+            nsfwGrayZoneMin: SEGMENTATION_GRAY_ZONE_MIN,
+            nsfwGrayZoneMax: SEGMENTATION_GRAY_ZONE_MAX,
+            explicitOverride: NSFW_EXPLICIT_OVERRIDE_THRESHOLD,
+            skinRatio: segmentationThreshold,
+            thirstWeights: {
+              nsfw: NSFW_WEIGHT,
+              skin: SKIN_WEIGHT,
+              person: PERSON_WEIGHT,
+            },
+          },
+          segmentation: {
+            attempted: segmentationAttempted,
+            applied: segmentationApplied,
+            personPresent: segmentationPersonPresent,
+            personPixels: segmentationPersonPixels,
+            skinPixels: segmentationSkinPixels,
+            skinRatio: segmentationSkinRatio,
+            thirstScore: segmentationThirstScore,
+            threshold: segmentationThreshold,
+            strictMode,
+            grayZone: inGrayZone,
+            throttled: segmentationThrottled,
+            cached: segmentationCached,
+            modelVersion: SEGMENTATION_MODEL_VERSION,
+            imageWidth: imageDims.width,
+            imageHeight: imageDims.height,
+            inputWidth: segmentationInputWidth,
+            inputHeight: segmentationInputHeight,
+            host: sourceHost,
+            segMs,
+            skinMs,
+          },
           signals,
         };
 
@@ -359,15 +756,27 @@ export const useOnDeviceModeration = () => {
 
       // ==== STANDARD THRESHOLD CHECK ====
       // Sexy-only hits are ignored when the image is strongly neutral to reduce false positives.
-      const isExplicit = pornHit || hentaiHit;
-      const shouldBlur = isExplicit || (sexyHit && neutralScore < NEUTRAL_FAST_PASS_THRESHOLD);
+      const isExplicit = pornHit || hentaiHit || explicitOverride;
+      let shouldBlur = isExplicit || (sexyHit && neutralScore < NEUTRAL_FAST_PASS_THRESHOLD);
 
       // Find dominant class
       const sorted = [...predictions].sort((a, b) => b.probability - a.probability);
-      const dominantClass = sorted[0]?.className || 'Unknown';
-      const confidence = sorted[0]?.probability || 0;
+      let dominantClass = sorted[0]?.className || 'Unknown';
+      let confidence = sorted[0]?.probability || 0;
+      let reason: ModerationReason = shouldBlur ? 'threshold_hit' : 'threshold_safe';
+      let decisionReason = shouldBlur ? 'stage_a_threshold' : 'stage_a_safe';
 
-      const reason: ModerationReason = shouldBlur ? 'threshold_hit' : 'threshold_safe';
+      if (!shouldBlur && segmentationApplied) {
+        shouldBlur = true;
+        reason = 'thirst_detected';
+        dominantClass = 'Thirst';
+        confidence = Math.max(segmentationThirstScore, segmentationSkinRatio);
+        decisionReason = 'stage_b_thirst_detected';
+      } else if (explicitOverride) {
+        shouldBlur = true;
+        reason = 'threshold_hit';
+        decisionReason = 'explicit_override';
+      }
 
       // === CONSOLE LOGGING FOR XCODE DEBUG ===
       if (sexyScore > 0.05) {
@@ -379,6 +788,7 @@ export const useOnDeviceModeration = () => {
       if (shouldBlur) {
         console.log(`[OnDeviceAI] >>> BLUR APPLIED <<< category=${dominantClass}, sexy=${(sexyScore * 100).toFixed(1)}%, porn=${(pornScore * 100).toFixed(1)}%`);
       }
+      inferenceTime = performance.now() - startTime;
 
       const result: ModerationResult = {
         isExplicit,
@@ -388,12 +798,72 @@ export const useOnDeviceModeration = () => {
         confidence,
         inferenceTime,
         reason,
+        nsfwRisk,
+        decisionReason,
+        modelVersion: `${NSFW_MODEL_VERSION}+${SEGMENTATION_MODEL_VERSION}`,
+        thresholdsUsed: {
+          nsfwGrayZoneMin: SEGMENTATION_GRAY_ZONE_MIN,
+          nsfwGrayZoneMax: SEGMENTATION_GRAY_ZONE_MAX,
+          explicitOverride: NSFW_EXPLICIT_OVERRIDE_THRESHOLD,
+          skinRatio: segmentationThreshold,
+          thirstWeights: {
+            nsfw: NSFW_WEIGHT,
+            skin: SKIN_WEIGHT,
+            person: PERSON_WEIGHT,
+          },
+        },
+        segmentation: {
+          attempted: segmentationAttempted,
+          applied: segmentationApplied,
+          personPresent: segmentationPersonPresent,
+          personPixels: segmentationPersonPixels,
+          skinPixels: segmentationSkinPixels,
+          skinRatio: segmentationSkinRatio,
+          thirstScore: segmentationThirstScore,
+          threshold: segmentationThreshold,
+          strictMode,
+          grayZone: inGrayZone,
+          throttled: segmentationThrottled,
+          cached: segmentationCached,
+          modelVersion: SEGMENTATION_MODEL_VERSION,
+          imageWidth: imageDims.width,
+          imageHeight: imageDims.height,
+          inputWidth: segmentationInputWidth,
+          inputHeight: segmentationInputHeight,
+          host: sourceHost,
+          segMs,
+          skinMs,
+        },
         signals,
       };
 
       if (cacheKey) {
         imageCache.current.set(cacheKey, result);
         limitCache();
+      }
+
+      if (diagEnabled) {
+        console.debug(
+          '[OnDeviceAI][2Stage]',
+          `nsfwMs=${Math.round(inferenceTime - segMs - skinMs)}`,
+          `segMs=${Math.round(segMs)}`,
+          `skinMs=${Math.round(skinMs)}`,
+          `totalMs=${Math.round(inferenceTime)}`,
+          `nsfwRisk=${nsfwRisk.toFixed(3)}`,
+          `personPresent=${segmentationPersonPresent}`,
+          `skinRatio=${segmentationSkinRatio.toFixed(3)}`,
+          `thirstScore=${segmentationThirstScore.toFixed(3)}`,
+          `dial=${dialBucket}`,
+          `skinThr=${segmentationThreshold.toFixed(3)}`,
+          `decision=${shouldBlur ? 'blur' : 'safe'}`,
+          `reason=${decisionReason}`,
+          `segAttempted=${segmentationAttempted}`,
+          `segCached=${segmentationCached}`,
+          `segThrottled=${segmentationThrottled}`,
+          `segAttempts=${segmentationCounters.current.attempts}`,
+          `segCacheHits=${segmentationCounters.current.cacheHits}`,
+          `segThrottleSkips=${segmentationCounters.current.throttleSkips}`,
+        );
       }
 
       console.debug(`[OnDeviceAI] ${reason}: blur=${shouldBlur}, dom=${dominantClass}, conf=${confidence.toFixed(2)}`);
@@ -423,7 +893,7 @@ export const useOnDeviceModeration = () => {
         reason,
       };
     }
-  }, [modelState]);
+  }, [modelState, settings]);
 
   // Helper to limit cache size
   const limitCache = () => {

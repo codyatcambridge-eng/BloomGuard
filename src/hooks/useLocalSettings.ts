@@ -44,6 +44,15 @@ export interface LocalProtectionSettings {
   soft_overlay_ratio_threshold: number;
   soft_overlay_min_hits: number;
   blur_mode: BlurMode;
+  // Stage-B segmentation controls
+  enableSegmentationSignal: boolean;
+  segmentationGrayZoneOnly: boolean;
+  segmentationThrottleMs: number;
+  segmentationMaxInputPx: number;
+  segmentationCacheTtlMs: number;
+  segmentationSkinRatioRelaxed: number;
+  segmentationSkinRatioMedium: number;
+  segmentationSkinRatioStrict: number;
 }
 
 const SETTINGS_KEY = 'iron_watch_local_settings';
@@ -68,6 +77,17 @@ const DEFAULT_SETTINGS: LocalProtectionSettings = {
   soft_overlay_ratio_threshold: 0.5,
   soft_overlay_min_hits: 4,
   blur_mode: 'balanced',
+  // Segmentation defaults:
+  // - enabled in dev only
+  // - gray-zone only by default for MVP-safe perf
+  enableSegmentationSignal: !!import.meta.env.DEV,
+  segmentationGrayZoneOnly: true,
+  segmentationThrottleMs: 800,
+  segmentationMaxInputPx: 256,
+  segmentationCacheTtlMs: 20_000,
+  segmentationSkinRatioRelaxed: 0.28,
+  segmentationSkinRatioMedium: 0.22,
+  segmentationSkinRatioStrict: 0.16,
 };
 
 export const useLocalSettings = () => {
@@ -178,8 +198,60 @@ export const useLocalSettings = () => {
       blockingMode: settings.blocking_mode,
       prototypeMode: settings.prototype_mode,
       triggers: triggers || {},
+      segmentation: {
+        enabled: settings.enableSegmentationSignal,
+        grayZoneOnly: settings.segmentationGrayZoneOnly,
+        throttleMs: settings.segmentationThrottleMs,
+        maxInputPx: settings.segmentationMaxInputPx,
+        cacheTtlMs: settings.segmentationCacheTtlMs,
+        skinRatioThresholds: {
+          relaxed: settings.segmentationSkinRatioRelaxed,
+          medium: settings.segmentationSkinRatioMedium,
+          strict: settings.segmentationSkinRatioStrict,
+        },
+      },
     };
-  }, [settings.shield_active, settings.blur_dial, settings.blur_strength_px, settings.fail_closed, settings.debug_mode, settings.blocking_mode, settings.prototype_mode]);
+  }, [
+    settings.shield_active,
+    settings.blur_dial,
+    settings.blur_strength_px,
+    settings.fail_closed,
+    settings.debug_mode,
+    settings.blocking_mode,
+    settings.prototype_mode,
+    settings.enableSegmentationSignal,
+    settings.segmentationGrayZoneOnly,
+    settings.segmentationThrottleMs,
+    settings.segmentationMaxInputPx,
+    settings.segmentationCacheTtlMs,
+    settings.segmentationSkinRatioRelaxed,
+    settings.segmentationSkinRatioMedium,
+    settings.segmentationSkinRatioStrict,
+  ]);
+
+  const getSegmentationConfig = useCallback(() => {
+    return {
+      enabled: settings.enableSegmentationSignal,
+      grayZoneOnly: settings.segmentationGrayZoneOnly,
+      throttleMs: settings.segmentationThrottleMs,
+      maxInputPx: settings.segmentationMaxInputPx,
+      cacheTtlMs: settings.segmentationCacheTtlMs,
+      skinRatioThresholds: {
+        relaxed: settings.segmentationSkinRatioRelaxed,
+        medium: settings.segmentationSkinRatioMedium,
+        strict: settings.segmentationSkinRatioStrict,
+      },
+    };
+  }, [
+    settings.enableSegmentationSignal,
+    settings.segmentationGrayZoneOnly,
+    settings.segmentationThrottleMs,
+    settings.segmentationMaxInputPx,
+    settings.segmentationCacheTtlMs,
+    settings.segmentationSkinRatioRelaxed,
+    settings.segmentationSkinRatioMedium,
+    settings.segmentationSkinRatioStrict,
+  ]);
 
   // Check if a category should be blocked based on MVP mode
   const shouldBlockCategory = useCallback((category: string): boolean => {
@@ -207,6 +279,7 @@ export const useLocalSettings = () => {
     getDialThresholds,
     isModerationEnabled,
     getModerationConfig,
+    getSegmentationConfig,
     getNonce,
     shouldBlockCategory,
   };

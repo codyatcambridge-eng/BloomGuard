@@ -65,6 +65,7 @@ const MVP_UNSAFE_CATEGORIES = new Set([
   'bikini',
   'swim_trunks',
   'sports_bra',
+  'thirst',
 ]);
 
 function normalizePolicyLabel(label: string): string {
@@ -235,6 +236,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     sexy: 'sexy',
     sexual: 'sexy',
     suggestive: 'sexy',
+    thirst: 'thirst',
     swimwear: 'sexy',
     shirtless: 'sexy',
     shirtless_male: 'sexy',
@@ -244,7 +246,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     safe: 'safe',
     drawing: 'drawing',
   };
-  const TRACE_UNSAFE_LABELS = new Set(['porn', 'sexy', 'hentai']);
+  const TRACE_UNSAFE_LABELS = new Set(['porn', 'sexy', 'hentai', 'thirst']);
   const LEGACY_RESULTS_POLL_MS = 250;
   const URL_CHANGE_POLL_MS = 1200;
   console.log('[MW] Effective config:', JSON.stringify({
@@ -1060,7 +1062,23 @@ export function generateModerationScript(config: InjectionConfig): string {
   const IS_YOUTUBE = PLATFORM === 'youtube' || PLATFORM === 'youtube-shorts';
   console.log('[MW] Platform detected:', PLATFORM, 'isYouTube:', IS_YOUTUBE);
   const DIAG_ENABLED = CONFIG.diagYouTubeShorts && IS_YOUTUBE;
+  const DIAG_SHORTS_CONTEXT = window.location.href.indexOf('/shorts') !== -1;
+  const DIAG_YT_BLUR = IS_YOUTUBE && DIAG_SHORTS_CONTEXT && (function() {
+    try {
+      if (window.DIAG_YT_BLUR === 1 || window.DIAG_YT_BLUR === '1') return true;
+      if (window.localStorage && window.localStorage.getItem('DIAG_YT_BLUR') === '1') return true;
+    } catch (e) {}
+    return false;
+  })();
   const diagLogTimestamps = {};
+  const diagNodeIds = new WeakMap();
+  const diagNodeParentAtBlur = new WeakMap();
+  const diagEpochCounters = {
+    staleInjectedDiscardCount: 0,
+    epochHeldCount: 0,
+    epochIncrementedCount: 0,
+  };
+  let diagNodeSeq = 0;
   function diagLog(key, message) {
     if (!DIAG_ENABLED) return;
     const now = Date.now();
@@ -1087,6 +1105,90 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
     }
     return hint;
+  }
+
+  function isYouTubeDomainUrl(value) {
+    if (!value) return false;
+    try {
+      var parsed = new URL(value, window.location.href);
+      var host = String(parsed.hostname || '').toLowerCase();
+      return host === 'youtube.com' || host === 'www.youtube.com' || host === 'm.youtube.com' || host === 'youtu.be';
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function isYouTubeShortsUrl(value) {
+    if (!value) return false;
+    try {
+      var parsed = new URL(value, window.location.href);
+      var host = String(parsed.hostname || '').toLowerCase();
+      return (host === 'youtube.com' || host === 'www.youtube.com' || host === 'm.youtube.com') && parsed.pathname.indexOf('/shorts') === 0;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function getDiagNodeId(node) {
+    if (!node || node.nodeType !== 1) return 'n/a';
+    const existing = diagNodeIds.get(node);
+    if (existing) return existing;
+    diagNodeSeq += 1;
+    const created = 'n' + diagNodeSeq;
+    diagNodeIds.set(node, created);
+    return created;
+  }
+
+  function getDiagRect(node) {
+    if (!node || typeof node.getBoundingClientRect !== 'function') {
+      return 'x=0,y=0,w=0,h=0';
+    }
+    try {
+      const rect = node.getBoundingClientRect();
+      return 'x=' + Math.round(rect.x) + ',y=' + Math.round(rect.y) + ',w=' + Math.round(rect.width) + ',h=' + Math.round(rect.height);
+    } catch (e) {
+      return 'x=0,y=0,w=0,h=0';
+    }
+  }
+
+  function getDiagSourceFields(node) {
+    let currentSrc = '';
+    let poster = '';
+    try {
+      if (node && typeof node.currentSrc === 'string' && node.currentSrc) {
+        currentSrc = node.currentSrc;
+      } else if (node && typeof node.src === 'string' && node.src) {
+        currentSrc = node.src;
+      }
+      if (node && typeof node.poster === 'string' && node.poster) {
+        poster = node.poster;
+      }
+    } catch (e) {}
+    return { currentSrc: currentSrc, poster: poster };
+  }
+
+  function hasParentChangedSinceBlur(node) {
+    const baseline = diagNodeParentAtBlur.get(node);
+    if (!baseline) return false;
+    return baseline.parent !== (node.parentElement || null);
+  }
+
+  function diagNodeLifecycleLog(action, node, extra) {
+    if (!DIAG_YT_BLUR) return;
+    if (!node || node.nodeType !== 1) return;
+    const source = getDiagSourceFields(node);
+    console.log(
+      '[MW-YT][DIAG][NODE]',
+      'action=' + action,
+      'nodeId=' + getDiagNodeId(node),
+      'tag=' + (node.tagName || 'unknown'),
+      'rect=' + getDiagRect(node),
+      'currentSrc=' + String(source.currentSrc || '').substring(0, 160),
+      'poster=' + String(source.poster || '').substring(0, 160),
+      'connected=' + (!!node.isConnected),
+      'parentChanged=' + hasParentChangedSinceBlur(node),
+      extra || ''
+    );
   }
 
   // ==================== URL UTILITIES ====================
@@ -1261,6 +1363,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     'bikini',
     'swim_trunks',
     'sports_bra',
+    'thirst',
   ]);
 
   function isExplicitUnsafeLabel(label) {
@@ -1336,6 +1439,8 @@ export function generateModerationScript(config: InjectionConfig): string {
     const blurPx = IS_YOUTUBE ? 40 : Math.min(desiredBlur, 20);
     
     try {
+      diagNodeParentAtBlur.set(element, { parent: element.parentElement || null });
+      diagNodeLifecycleLog('applyBlur', element, 'src=' + String(src || '').substring(0, 120));
       // Force blur with !important for iOS WebKit
       element.style.setProperty('filter', 'blur(' + blurPx + 'px)', 'important');
       element.style.setProperty('-webkit-filter', 'blur(' + blurPx + 'px)', 'important');
@@ -1371,6 +1476,14 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function removeBlur(element, src) {
     try {
+      const overlay = element.parentElement?.querySelector('.mw-reveal-overlay');
+      diagNodeLifecycleLog(
+        'removeBlur',
+        element,
+        'src=' + String(src || '').substring(0, 120) +
+        ' overlayFound=' + (!!overlay) +
+        ' overlayConnected=' + (!!overlay?.isConnected)
+      );
       element.style.filter = 'none';
       element.dataset.mwModerated = 'revealed';
       element.dataset.mwRevealed = 'true'; // Persistence marker
@@ -1380,7 +1493,6 @@ export function generateModerationScript(config: InjectionConfig): string {
       // Add to revealed set for persistence
       state.revealed.add(src);
       
-      const overlay = element.parentElement?.querySelector('.mw-reveal-overlay');
       if (overlay) {
         overlay.style.display = 'none';
       }
@@ -1392,13 +1504,19 @@ export function generateModerationScript(config: InjectionConfig): string {
   function clearElementBlur(element) {
     if (!element) return;
     try {
+      const overlay = element.parentElement?.querySelector('.mw-reveal-overlay');
+      diagNodeLifecycleLog(
+        'clearElementBlur',
+        element,
+        'overlayFound=' + (!!overlay) +
+        ' overlayConnected=' + (!!overlay?.isConnected)
+      );
       element.style.filter = 'none';
       element.dataset.mwModerated = 'safe';
       element.dataset.mwRevealed = 'false';
       element.dataset.mwPreblurClear = 'true';
       element.classList.remove('mw-softblur');
       element.classList.remove('mw-blurred');
-      const overlay = element.parentElement?.querySelector('.mw-reveal-overlay');
       if (overlay) {
         overlay.style.display = 'none';
       }
@@ -1406,8 +1524,15 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function createRevealOverlay(element, src, category, itemId) {
+    diagNodeLifecycleLog(
+      'createRevealOverlay.enter',
+      element,
+      'src=' + String(src || '').substring(0, 120) +
+      ' hasOverlay=' + (element.dataset.mwHasOverlay === 'true')
+    );
     if (element.dataset.mwHasOverlay === 'true') return;
     if (!element.isConnected) {
+      diagNodeLifecycleLog('createRevealOverlay.skip_disconnected', element, '');
       diagLog(
         'overlay-disconnected',
         'overlay-skip hasParent=' + (!!element.parentElement) +
@@ -1419,6 +1544,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     const parent = element.parentElement;
     if (!parent) {
+      diagNodeLifecycleLog('createRevealOverlay.skip_no_parent', element, '');
       diagLog(
         'overlay-no-parent',
         'overlay-skip hasParent=false connected=' + (!!element.isConnected) +
@@ -1497,6 +1623,19 @@ export function generateModerationScript(config: InjectionConfig): string {
         
         // POST a label request message so the host can open the labeling modal
         var labelItemId = itemId || element.dataset.mwItemId || 'unknown_' + Date.now();
+        var mwModelVersion = element.dataset.mwModelVersion || null;
+        var mwDecisionReason = element.dataset.mwDecisionReason || null;
+        var mwNsfwRisk = toFiniteNumber(element.dataset.mwNsfwRisk);
+        var mwPersonPresent = element.dataset.mwPersonPresent === '1';
+        var mwSkinRatio = toFiniteNumber(element.dataset.mwSkinRatio);
+        var mwThirstScore = toFiniteNumber(element.dataset.mwThirstScore);
+        var mwSkinThreshold = toFiniteNumber(element.dataset.mwSkinThreshold);
+        var mwGrayMin = toFiniteNumber(element.dataset.mwGrayZoneMin);
+        var mwGrayMax = toFiniteNumber(element.dataset.mwGrayZoneMax);
+        var mwExplicitOverride = toFiniteNumber(element.dataset.mwExplicitOverride);
+        var mwImageWidth = toFiniteNumber(element.dataset.mwImageWidth);
+        var mwImageHeight = toFiniteNumber(element.dataset.mwImageHeight);
+        var mwHost = element.dataset.mwHost || null;
         var labelRequest = {
           type: 'gc-label-request',
           requestId: 'r_' + Date.now().toString(36),
@@ -1504,7 +1643,28 @@ export function generateModerationScript(config: InjectionConfig): string {
           src: src,
           pageUrl: window.location.href,
           platform: PLATFORM,
-          modelPrediction: { category: category, confidence: null }
+          modelPrediction: {
+            category: category,
+            confidence: toFiniteNumber(element.dataset.mwConfidence),
+            model_version: mwModelVersion,
+            thresholds: {
+              nsfw_gray_zone_min: mwGrayMin,
+              nsfw_gray_zone_max: mwGrayMax,
+              explicit_override: mwExplicitOverride,
+              skin_ratio: mwSkinThreshold,
+            },
+            predictions: {
+              nsfwRisk: mwNsfwRisk,
+              personPresent: mwPersonPresent,
+              skinRatio: mwSkinRatio,
+              thirstScore: mwThirstScore,
+            },
+            decision_reason: mwDecisionReason,
+            image_width: mwImageWidth,
+            image_height: mwImageHeight,
+            host: mwHost,
+            timestamp: Date.now(),
+          }
         };
         console.log('[MW] posting gc-label-request', labelItemId);
         postToHost(labelRequest);
@@ -1517,6 +1677,17 @@ export function generateModerationScript(config: InjectionConfig): string {
     overlay.appendChild(btn);
     parent.appendChild(overlay);
     element.dataset.mwHasOverlay = 'true';
+    diagNodeLifecycleLog(
+      'createRevealOverlay.attached_target',
+      element,
+      'src=' + String(src || '').substring(0, 120) +
+      ' overlayConnected=' + (!!overlay.isConnected)
+    );
+    diagNodeLifecycleLog(
+      'createRevealOverlay.attached_overlay',
+      overlay,
+      'forNodeId=' + getDiagNodeId(element)
+    );
   }
 
   /**
@@ -1737,8 +1908,22 @@ export function generateModerationScript(config: InjectionConfig): string {
       const resultEpoch = Number.isFinite(message.pageEpoch) ? Number(message.pageEpoch) : null;
       const expectedNoncePrefix = String(CONFIG.nonce || '').substring(0, 6);
       const receivedNoncePrefix = String(nonce || 'none').substring(0, 6);
-      if (resultEpoch !== null && resultEpoch !== state.pageEpoch) {
+      const stickyShortsMode = isYouTubeShortsUrl(window.location.href);
+      const relaxedYouTubeEpochMode = isYouTubeDomainUrl(window.location.href);
+      if (resultEpoch !== null && resultEpoch !== state.pageEpoch && !relaxedYouTubeEpochMode) {
         state.stats.staleEpochDiscarded++;
+        if (DIAG_YT_BLUR) {
+          diagEpochCounters.staleInjectedDiscardCount += 1;
+          console.warn(
+            '[MW-YT][DIAG][EPOCH][INJECT]',
+            'action=stale_injected_discard',
+            'count=' + diagEpochCounters.staleInjectedDiscardCount,
+            'requestId=' + requestId,
+            'resultEpoch=' + resultEpoch,
+            'activeEpoch=' + state.pageEpoch,
+            'url=' + window.location.href
+          );
+        }
         console.warn(
           '[MW][RejectResult]',
           'reason=epoch',
@@ -1749,6 +1934,17 @@ export function generateModerationScript(config: InjectionConfig): string {
           'activeEpoch=' + state.pageEpoch
         );
         return;
+      }
+      if (resultEpoch !== null && resultEpoch !== state.pageEpoch && relaxedYouTubeEpochMode && DIAG_YT_BLUR) {
+        console.log(
+          '[MW-YT][DIAG][EPOCH][INJECT]',
+          'action=stale_injected_bypass_youtube',
+          'requestId=' + requestId,
+          'resultEpoch=' + resultEpoch,
+          'activeEpoch=' + state.pageEpoch,
+          'scope=' + (stickyShortsMode ? 'shorts' : 'youtube'),
+          'url=' + window.location.href
+        );
       }
       
       if (!requestId || !Array.isArray(results)) {
@@ -1782,7 +1978,22 @@ export function generateModerationScript(config: InjectionConfig): string {
       console.log('[MW] received result', requestId, 'count=' + results.length);
       
       results.forEach(result => {
-      const { itemId, src, shouldBlur, category, confidence, reason } = result;
+      const {
+        itemId,
+        src,
+        shouldBlur,
+        category,
+        confidence,
+        reason,
+        model_version,
+        thresholds,
+        decision_reason,
+        image_width,
+        image_height,
+        host,
+        ts,
+        diagnostics,
+      } = result;
       const rawPredictions = result && typeof result === 'object'
         ? (result.predictions || result.scores || result.probabilities || null)
         : null;
@@ -1800,6 +2011,20 @@ export function generateModerationScript(config: InjectionConfig): string {
         sexy: toFiniteNumber(normalizedPredictions.sexy),
         hentai: toFiniteNumber(normalizedPredictions.hentai),
       };
+      const diagnosticsObj = diagnostics && typeof diagnostics === 'object' ? diagnostics : null;
+      const thresholdObj = thresholds && typeof thresholds === 'object' ? thresholds : null;
+      const diagnosticNsfwRisk = toFiniteNumber(diagnosticsObj?.nsfwRisk);
+      const diagnosticSkinRatio = toFiniteNumber(diagnosticsObj?.skinRatio);
+      const diagnosticThirstScore = toFiniteNumber(diagnosticsObj?.thirstScore);
+      const diagnosticPersonPresent = diagnosticsObj?.personPresent === true || diagnosticsObj?.personPresent === 'true';
+      const hostDecisionReason = typeof decision_reason === 'string' ? decision_reason : '';
+      const hostGrayMin = toFiniteNumber(thresholdObj?.nsfwGrayZoneMin);
+      const hostGrayMax = toFiniteNumber(thresholdObj?.nsfwGrayZoneMax);
+      const hostExplicitOverride = toFiniteNumber(thresholdObj?.explicitOverride);
+      const hostSkinThreshold = toFiniteNumber(thresholdObj?.skinRatio);
+      const hostImageWidth = toFiniteNumber(image_width) ?? toFiniteNumber(diagnosticsObj?.imageWidth);
+      const hostImageHeight = toFiniteNumber(image_height) ?? toFiniteNumber(diagnosticsObj?.imageHeight);
+      const hostName = (typeof host === 'string' && host) ? host : (typeof diagnosticsObj?.host === 'string' ? diagnosticsObj.host : '');
       const strongestUnsafeLabel = Object.entries(unsafeScores)
         .reduce(function(best, entry) {
           var label = entry[0];
@@ -1857,7 +2082,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       // ======== ANATOMICAL LOGIC ========
       // Only maintain blur if Sexy or Porn > 0.60
       let shouldApplyBlur = shouldBlur;
-      let decisionReason = reason || '';
+      let decisionReason = hostDecisionReason || reason || '';
       const forceUnsafe = FORCE_UNSAFE_CATEGORIES.has(rawCategory);
 
       // Prefer explicit threshold evaluation when label + score are available.
@@ -1944,6 +2169,23 @@ export function generateModerationScript(config: InjectionConfig): string {
       const dims = element ? getElementDimensions(element) : { width: 0, height: 0 };
       
       if (element && element.isConnected) {
+        try {
+          element.dataset.mwConfidence = String(toFiniteNumber(confidence) ?? 0);
+          element.dataset.mwDecisionReason = String(decisionReason || '');
+          element.dataset.mwModelVersion = String(model_version || '');
+          element.dataset.mwNsfwRisk = String(diagnosticNsfwRisk ?? '');
+          element.dataset.mwPersonPresent = diagnosticPersonPresent ? '1' : '0';
+          element.dataset.mwSkinRatio = String(diagnosticSkinRatio ?? '');
+          element.dataset.mwThirstScore = String(diagnosticThirstScore ?? '');
+          element.dataset.mwSkinThreshold = String(hostSkinThreshold ?? '');
+          element.dataset.mwGrayZoneMin = String(hostGrayMin ?? '');
+          element.dataset.mwGrayZoneMax = String(hostGrayMax ?? '');
+          element.dataset.mwExplicitOverride = String(hostExplicitOverride ?? '');
+          element.dataset.mwImageWidth = String(hostImageWidth ?? dims.width ?? '');
+          element.dataset.mwImageHeight = String(hostImageHeight ?? dims.height ?? '');
+          element.dataset.mwHost = String(hostName || '');
+          element.dataset.mwTimestamp = String(toFiniteNumber(ts) ?? Date.now());
+        } catch (e) {}
         const preDecisionState = element.dataset.mwModerated || '';
         const preDecisionFilter = element.style.getPropertyValue('filter') || element.style.filter || '';
         const preDecisionHasBlur = preDecisionFilter.toLowerCase().includes('blur(');
@@ -2764,11 +3006,37 @@ export function generateModerationScript(config: InjectionConfig): string {
   let lastUrl = window.location.href;
   const checkUrlChange = () => {
     if (window.location.href !== lastUrl) {
-      console.log('[MW] SPA navigation detected:', lastUrl, '->', window.location.href);
-      lastUrl = window.location.href;
-      state.pageEpoch += 1;
-      if (CONFIG.debug) {
-        console.log('[MW][Epoch] incremented pageEpoch=' + state.pageEpoch);
+      const previousUrl = lastUrl;
+      const nextUrl = window.location.href;
+      console.log('[MW] SPA navigation detected:', previousUrl, '->', nextUrl);
+      lastUrl = nextUrl;
+      const holdEpoch = isYouTubeShortsUrl(previousUrl) && isYouTubeShortsUrl(nextUrl);
+      if (!holdEpoch) {
+        state.pageEpoch += 1;
+        if (CONFIG.debug) {
+          console.log('[MW][Epoch] incremented pageEpoch=' + state.pageEpoch);
+        }
+        if (DIAG_YT_BLUR) {
+          diagEpochCounters.epochIncrementedCount += 1;
+          console.log(
+            '[MW-YT][DIAG][EPOCH][INJECT]',
+            'action=epoch_incremented',
+            'count=' + diagEpochCounters.epochIncrementedCount,
+            'pageEpoch=' + state.pageEpoch,
+            'prevUrl=' + previousUrl,
+            'nextUrl=' + nextUrl
+          );
+        }
+      } else if (DIAG_YT_BLUR) {
+        diagEpochCounters.epochHeldCount += 1;
+        console.log(
+          '[MW-YT][DIAG][EPOCH][INJECT]',
+          'action=epoch_held',
+          'count=' + diagEpochCounters.epochHeldCount,
+          'pageEpoch=' + state.pageEpoch,
+          'prevUrl=' + previousUrl,
+          'nextUrl=' + nextUrl
+        );
       }
 
       if (batchTimer) {

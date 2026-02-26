@@ -10,6 +10,19 @@ import { enqueueLabel } from '@/lib/label-queue';
 
 export type UserLabel = 'shirtless' | 'swimwear' | 'other' | 'unsure';
 
+interface ModelPredictionContext {
+  category?: string;
+  confidence?: number;
+  model_version?: string;
+  thresholds?: Record<string, unknown>;
+  predictions?: Record<string, unknown>;
+  decision_reason?: string;
+  image_width?: number;
+  image_height?: number;
+  host?: string;
+  timestamp?: number;
+}
+
 export interface PrototypeLabelModalProps {
   open: boolean;
   onClose: () => void;
@@ -19,7 +32,7 @@ export interface PrototypeLabelModalProps {
     src?: string;
     pageUrl?: string;
     platform?: string;
-    modelPrediction?: { category?: string; confidence?: number };
+    modelPrediction?: ModelPredictionContext;
   } | null;
 }
 
@@ -100,6 +113,13 @@ export const PrototypeLabelModal: React.FC<PrototypeLabelModalProps> = ({ open, 
         pageUrl: context.pageUrl || '',
         platform: context.platform || '',
         modelPrediction: context.modelPrediction || undefined,
+        modelVersion: context.modelPrediction?.model_version,
+        thresholds: context.modelPrediction?.thresholds,
+        predictions: context.modelPrediction?.predictions,
+        decisionReason: context.modelPrediction?.decision_reason,
+        imageWidth: typeof context.modelPrediction?.image_width === 'number' ? context.modelPrediction.image_width : undefined,
+        imageHeight: typeof context.modelPrediction?.image_height === 'number' ? context.modelPrediction.image_height : undefined,
+        host: context.modelPrediction?.host,
         userLabel,
         userComment: comment || '',
         consentImage,

@@ -84,7 +84,9 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
     let category = calculateCategory(predictions);
 
     // Keep category aligned with blur decisions so downstream JS doesn't discard unsafe hits.
-    if (result.reason === 'swimwear_detected') {
+    if (result.reason === 'thirst_detected') {
+      category = 'thirst';
+    } else if (result.reason === 'swimwear_detected') {
       category = 'swimwear';
     } else if (
       result.shouldBlur &&
@@ -99,6 +101,17 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
       }
     }
 
+    const diagnostics: Record<string, unknown> = {};
+    if (typeof result.nsfwRisk === 'number') diagnostics.nsfwRisk = result.nsfwRisk;
+    if (result.segmentation) {
+      diagnostics.personPresent = result.segmentation.personPresent;
+      diagnostics.skinRatio = result.segmentation.skinRatio;
+      diagnostics.thirstScore = result.segmentation.thirstScore;
+      diagnostics.imageWidth = result.segmentation.imageWidth;
+      diagnostics.imageHeight = result.segmentation.imageHeight;
+      diagnostics.host = result.segmentation.host;
+    }
+
     return {
       src,
       shouldBlur: result.shouldBlur,
@@ -107,6 +120,10 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
       severity: mapModerationCategoryToSeverity(category),
       predictions,
       inferenceTime,
+      reason: result.reason,
+      modelVersion: result.modelVersion,
+      thresholdsUsed: result.thresholdsUsed as Record<string, unknown> | undefined,
+      diagnostics: Object.keys(diagnostics).length > 0 ? diagnostics : undefined,
     };
   }, []);
 
@@ -263,18 +280,31 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
    * Handle message from WebView (injected script)
    * This is the main entry point for WebView moderation requests
    */
-  const handleWebViewMessage = useCallback(async (message: any): Promise<ModerationScanResult | null> => {
-    console.log('[MW-Bridge] Received WebView message:', message?.type, message?.action);
+  const handleWebViewMessage = useCallback(async (
+    message: unknown
+  ): Promise<(ModerationScanResult & { messageId?: number }) | null> => {
+    const msg = (message && typeof message === 'object'
+      ? message
+      : {}) as {
+      type?: string;
+      action?: string;
+      src?: string;
+      thresholds?: { porn: number; sexy: number; hentai: number };
+      messageId?: number;
+      sourceType?: string;
+    };
+    console.log('[MW-Bridge] Received WebView message:', msg.type, msg.action);
     
-    if (message?.type === 'gc-moderation-request' && message?.action === 'scan') {
-      const { src, thresholds, messageId, sourceType } = message;
+    if (msg.type === 'gc-moderation-request' && msg.action === 'scan') {
+      const { src, thresholds, messageId, sourceType } = msg;
       
       console.log('[MW-Bridge] Processing scan request #' + messageId + ' [' + sourceType + ']:', src?.substring(0, 60));
       
+      if (!src) return null;
       const result = await scanImage(src, thresholds);
       
       if (result) {
-        return { ...result, messageId } as any;
+        return { ...result, messageId };
       }
     }
     return null;

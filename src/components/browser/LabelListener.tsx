@@ -15,7 +15,18 @@ interface LabelRequestMessage {
   src: string;
   pageUrl?: string;
   platform?: string;
-  modelPrediction?: { category?: string; confidence?: number };
+  modelPrediction?: {
+    category?: string;
+    confidence?: number;
+    model_version?: string;
+    thresholds?: Record<string, unknown>;
+    predictions?: Record<string, unknown>;
+    decision_reason?: string;
+    image_width?: number;
+    image_height?: number;
+    host?: string;
+    timestamp?: number;
+  };
 }
 
 interface ModalContext {
@@ -24,7 +35,7 @@ interface ModalContext {
   src?: string;
   pageUrl?: string;
   platform?: string;
-  modelPrediction?: { category?: string; confidence?: number };
+  modelPrediction?: LabelRequestMessage['modelPrediction'];
 }
 
 function isLabelRequest(data: unknown): data is LabelRequestMessage {

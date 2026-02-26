@@ -5,8 +5,9 @@
  * - Simple retry with exponential backoff
  * - Stores corrections for retraining
  *
- * Note: For privacy, we only upload image bytes if the user explicitly consented (consentImage = true).
+ * Note: For privacy, raw image bytes are never uploaded by this queue.
  */
+import { supabase } from '@/integrations/supabase/client';
 
 export interface LabelItem {
   requestId: string;
@@ -15,10 +16,17 @@ export interface LabelItem {
   pageUrl?: string;
   platform?: string;
   modelPrediction?: { category?: string; confidence?: number };
+  modelVersion?: string;
+  thresholds?: Record<string, unknown>;
+  predictions?: Record<string, unknown>;
+  decisionReason?: string;
+  imageWidth?: number;
+  imageHeight?: number;
+  host?: string;
   userLabel: 'shirtless' | 'swimwear' | 'other' | 'unsure';
   userComment?: string;
   consentImage?: boolean;
-  imageBase64?: string | null; // optional, not used by default
+  imageBase64?: string | null; // local-only, never uploaded
   timestamp: number;
   attempts?: number;
   lastAttempt?: number;
@@ -38,16 +46,6 @@ export interface CorrectionItem {
 
 const STORAGE_KEY = 'mw_label_queue_v1';
 const CORRECTIONS_KEY = 'mw_corrections_log';
-
-// Get the Supabase URL from environment
-function getUploadUrl(): string {
-  const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-  if (supabaseUrl) {
-    return `${supabaseUrl}/functions/v1/moderation-labels`;
-  }
-  // Fallback for development
-  return '/api/moderation/labels';
-}
 
 function readQueue(): LabelItem[] {
   try {
@@ -134,9 +132,7 @@ export function clearOldCorrections() {
 export async function uploadPending() {
   const q = readQueue();
   if (q.length === 0) return;
-  
-  const UPLOAD_URL = getUploadUrl();
-  
+
   // process items sequentially to avoid overloading device/network
   for (let i = 0; i < q.length; i++) {
     const item = q[i];
@@ -153,32 +149,32 @@ export async function uploadPending() {
       writeQueue(q);
       
       // send minimal payload — backend may refetch image if consentImage true
-      const payload: any = {
+      const payload: Record<string, unknown> = {
         requestId: item.requestId,
         itemId: item.itemId,
         src: item.src,
         pageUrl: item.pageUrl,
         platform: item.platform,
         modelPrediction: item.modelPrediction,
+        model_version: item.modelVersion,
+        thresholds: item.thresholds,
+        predictions: item.predictions,
+        decision_reason: item.decisionReason,
+        image_width: item.imageWidth,
+        image_height: item.imageHeight,
+        host: item.host,
         userLabel: item.userLabel,
         userComment: item.userComment,
         consentUpload: !!item.consentImage,
         timestamp: item.timestamp,
       };
       
-      if (item.consentImage && item.imageBase64) {
-        // optional: if image base64 available, send it (careful with sizes)
-        payload.imageBase64 = item.imageBase64;
-      }
-      
-      const res = await fetch(UPLOAD_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+      const { data, error } = await supabase.functions.invoke('moderation-labels', {
+        body: payload,
       });
-      
-      if (!res.ok) {
-        console.warn('[label-queue] upload failed status', res.status);
+
+      if (error || !data?.ok) {
+        console.warn('[label-queue] upload failed', error?.message || data?.error || 'unknown');
         continue;
       }
       

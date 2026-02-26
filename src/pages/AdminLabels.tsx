@@ -1,14 +1,13 @@
 /**
  * Admin Labels Viewer
  * 
- * Simple admin page to view the last 100 moderation labels.
- * Requires MW_API_KEY to fetch data.
+ * Simple admin page to view the last 100 moderation labels for the signed-in user.
  */
 
 import { useState, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
+import { supabase } from '@/integrations/supabase/client';
 import {
   Table,
   TableBody,
@@ -52,24 +51,23 @@ const LABEL_COLORS: Record<string, string> = {
 
 export default function AdminLabels() {
   const navigate = useNavigate();
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem('mw_admin_api_key') || '');
   const [labels, setLabels] = useState<ModerationLabel[]>([]);
   const [stats, setStats] = useState<LabelStats | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const fetchLabels = async () => {
-    if (!apiKey) {
-      setError('API key required');
-      return;
-    }
-
     setLoading(true);
     setError(null);
 
     try {
-      // Save API key for convenience
-      localStorage.setItem('mw_admin_api_key', apiKey);
+      const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
+      if (sessionError) {
+        throw sessionError;
+      }
+      if (!sessionData.session?.access_token) {
+        throw new Error('Sign in required');
+      }
 
       const response = await fetch(
         `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/moderation-labels?limit=100`,
@@ -77,7 +75,7 @@ export default function AdminLabels() {
           method: 'GET',
           headers: {
             'Content-Type': 'application/json',
-            'x-api-key': apiKey,
+            Authorization: `Bearer ${sessionData.session.access_token}`,
           },
         }
       );
@@ -102,11 +100,9 @@ export default function AdminLabels() {
     }
   };
 
-  // Auto-fetch on mount if API key exists
+  // Auto-fetch on mount for signed-in users
   useEffect(() => {
-    if (apiKey) {
-      fetchLabels();
-    }
+    fetchLabels();
   }, []);
 
   const formatDate = (dateStr: string) => {
@@ -133,18 +129,10 @@ export default function AdminLabels() {
           <h1 className="text-2xl font-bold">Admin: Moderation Labels</h1>
         </div>
 
-        {/* API Key Input */}
         <div className="flex gap-2 mb-6">
-          <Input
-            type="password"
-            placeholder="Enter MW_API_KEY"
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            className="max-w-md"
-          />
-          <Button onClick={fetchLabels} disabled={loading || !apiKey}>
+          <Button onClick={fetchLabels} disabled={loading}>
             <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
-            {loading ? 'Loading...' : 'Fetch Labels'}
+            {loading ? 'Loading...' : 'Refresh Labels'}
           </Button>
         </div>
 
@@ -250,7 +238,7 @@ export default function AdminLabels() {
           </div>
         ) : !loading && !error ? (
           <div className="text-center text-muted-foreground py-12">
-            No labels found. Enter your API key and click Fetch Labels.
+            No labels found for this account.
           </div>
         ) : null}
       </div>
