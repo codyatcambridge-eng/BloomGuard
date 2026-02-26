@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { Shield, X } from 'lucide-react';
 import { Slider } from '@/components/ui/slider';
 import { useLocalSettings, BlurDialLevel } from '@/hooks/useLocalSettings';
@@ -31,10 +31,29 @@ const DIAL_PRESETS: Record<BlurDialLevel, { name: string; description: string; f
   },
 };
 
-export const BlurShieldOverlay = () => {
+interface BlurShieldOverlayProps {
+  executeScript?: (script: string) => Promise<unknown>;
+}
+
+export const BlurShieldOverlay = ({ executeScript }: BlurShieldOverlayProps) => {
   const [open, setOpen] = useState(false);
   const { settings, updateSetting } = useLocalSettings();
   const preset = useMemo(() => DIAL_PRESETS[settings.blur_dial] || DIAL_PRESETS[2], [settings.blur_dial]);
+  const actionsDisabled = !settings.shield_active || !executeScript;
+
+  const sendShieldCommand = useCallback((action: 'report' | 'false_positive' | 'deep_scan') => {
+    if (!executeScript) return;
+    executeScript(`
+      (function() {
+        try {
+          window.postMessage({ type: 'MW_SHIELD_ACTION', action: '${action}', timestamp: Date.now() }, '*');
+          return 'OK';
+        } catch (e) {
+          return 'ERR';
+        }
+      })();
+    `).catch(() => {});
+  }, [executeScript]);
 
   return (
     <div className="pointer-events-none fixed inset-0 z-[60]">
@@ -63,6 +82,39 @@ export const BlurShieldOverlay = () => {
               step={1}
               className="w-full"
             />
+
+            <div className="grid grid-cols-3 gap-2 text-[0.65rem] uppercase tracking-[0.2em]">
+              <button
+                type="button"
+                disabled={actionsDisabled}
+                onClick={() => sendShieldCommand('report')}
+                className="rounded-lg border border-border/60 bg-destructive/10 px-2 py-1 text-center text-destructive transition hover:bg-destructive/20 disabled:cursor-not-allowed disabled:opacity-50"
+                aria-label="Report potential leak"
+              >
+                <span className="block text-base leading-none">[!]</span>
+                Report Leak
+              </button>
+              <button
+                type="button"
+                disabled={actionsDisabled}
+                onClick={() => sendShieldCommand('false_positive')}
+                className="rounded-lg border border-border/60 bg-emerald/10 px-2 py-1 text-center text-emerald transition hover:bg-emerald/20 disabled:cursor-not-allowed disabled:opacity-50"
+                aria-label="Mark as false positive"
+              >
+                <span className="block text-base leading-none">[✓]</span>
+                False Positive
+              </button>
+              <button
+                type="button"
+                disabled={actionsDisabled}
+                onClick={() => sendShieldCommand('deep_scan')}
+                className="rounded-lg border border-border/60 bg-sky/10 px-2 py-1 text-center text-sky transition hover:bg-sky/20 disabled:cursor-not-allowed disabled:opacity-50"
+                aria-label="Trigger high resolution deep scan"
+              >
+                <span className="block text-base leading-none">[👁]</span>
+                Deep Scan
+              </button>
+            </div>
 
             <p className="text-[10px] leading-snug text-muted-foreground">{preset.description}</p>
             <div className="flex flex-wrap gap-2">

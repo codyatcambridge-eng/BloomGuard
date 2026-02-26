@@ -2147,7 +2147,7 @@ export const NativeWebViewBrowser = () => {
     <div className="min-h-screen bg-background flex flex-col">
       {/* Global label listener for prototype mode */}
       <LabelListener />
-      {isNative && currentView === 'browse' && <BlurShieldOverlay />}
+      {isNative && currentView === 'browse' && <BlurShieldOverlay executeScript={executeScript} />}
       <BrowserHeader
         currentView={currentView}
         displayUrl={displayUrl}

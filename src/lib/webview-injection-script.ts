@@ -147,10 +147,14 @@ export function generateModerationScript(config: InjectionConfig): string {
   const buildVersion = Date.now();
   const buildCommit = 'ce87d1f';
   const pageEpoch = Number.isFinite(config.pageEpoch) ? Number(config.pageEpoch) : Date.now();
+  const requestedBlurStrength = Number.isFinite(config.blurStrength) ? config.blurStrength : 0;
+  const clampedBlurStrength = Math.min(Math.max(0, requestedBlurStrength), 20);
   
   return `
-(function() {
-  'use strict';
+  (function() {
+    'use strict';
+    const REQUESTED_BLUR_STRENGTH = ${requestedBlurStrength};
+    const CLAMPED_BLUR_STRENGTH = ${clampedBlurStrength};
   
   // ==================== INITIALIZATION ====================
   
@@ -170,7 +174,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   console.log('[MW] ========================================');
   console.log('[MW] injected - Moderation Script v3.0');
   console.log('[MW] Sensitivity:', ${config.sensitivity});
-  console.log('[MW] Blur Strength:', ${config.blurStrength}, 'px');
+  console.log('[MW] Blur Strength:', CLAMPED_BLUR_STRENGTH, 'px', '(requested:', REQUESTED_BLUR_STRENGTH + 'px)');
   console.log('[MW] Enabled:', ${config.enabled});
   console.log('[MW] Forced Blur:', ${config.forcedBlur || false});
   console.log('[MW] Fail-Closed:', ${failClosed}, '(default: fail-open)');
@@ -180,7 +184,7 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   const CONFIG = {
     sensitivity: ${config.sensitivity},
-    blurStrength: ${config.blurStrength},
+    blurStrength: CLAMPED_BLUR_STRENGTH,
     softBlurStrength: 8, // Soft blur for semantic delay
     enabled: ${config.enabled},
     forcedBlur: ${config.forcedBlur || false},
@@ -212,6 +216,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     return THRESHOLDS[level] || THRESHOLDS[3];
   }
   let effectiveThresholds = getThresholdsForLevel(CONFIG.sensitivity);
+  const HEURISTIC_CACHE_KEY = 'mw_heuristic_cache';
+  const HEURISTIC_CACHE_LIMIT = 32;
+  let lastShieldTarget = null;
   const DEBUG_DISABLE_BLUR_ON_YOUTUBE = false;
   const DEBUG_BLUR_TRACE_LIMIT = 10;
   const HOSTNAME = (window.location && window.location.hostname ? window.location.hostname.toLowerCase() : '');
@@ -495,7 +502,6 @@ export function generateModerationScript(config: InjectionConfig): string {
     CONFIG.sensitivity = normalized;
     CONFIG.enabled = normalized > 0;
     effectiveThresholds = getThresholdsForLevel(normalized);
-    resetBlurState('sensitivity_change');
     const toggle = document.getElementById(SENSITIVITY_TOGGLE_ID);
     if (toggle) {
       updateSensitivityToggleButton(toggle);
@@ -526,9 +532,12 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function handleBlurCommand(message) {
-    if (!DOM_OVERLAY_ENABLED) return false;
     if (!message || typeof message !== 'object') return false;
-
+    if (message.type === 'MW_SHIELD_ACTION') {
+      handleShieldAction(message.action);
+      return true;
+    }
+    if (!DOM_OVERLAY_ENABLED) return false;
     if (message.type === 'MW_BLUR_STATE') {
       if (CONFIG.debug) {
         console.log('[MW-DIAG][INJECT] source=overlay_state_message', 'enabled=' + (!!message.enabled), 'reason=' + (message.reason || 'state'));
@@ -674,6 +683,140 @@ export function generateModerationScript(config: InjectionConfig): string {
       staleEpochDiscarded: 0,
     },
   };
+
+  function safeScore(value) {
+    const n = toFiniteNumber(value);
+    return n === null ? 0 : n;
+  }
+
+  function readHeuristicCache() {
+    try {
+      const stored = localStorage.getItem(HEURISTIC_CACHE_KEY);
+      if (!stored) {
+        return { blacklist: [], whitelist: [], history: [] };
+      }
+      const parsed = JSON.parse(stored);
+      return {
+        blacklist: Array.isArray(parsed.blacklist) ? parsed.blacklist : [],
+        whitelist: Array.isArray(parsed.whitelist) ? parsed.whitelist : [],
+        history: Array.isArray(parsed.history) ? parsed.history : [],
+      };
+    } catch (error) {
+      return { blacklist: [], whitelist: [], history: [] };
+    }
+  }
+
+  function writeHeuristicCache(cache) {
+    try {
+      localStorage.setItem(HEURISTIC_CACHE_KEY, JSON.stringify(cache));
+    } catch (error) {}
+  }
+
+  function persistHeuristicEntry(entry, bucket) {
+    const cache = readHeuristicCache();
+    cache.history = cache.history || [];
+    cache.history.push(entry);
+    if (cache.history.length > HEURISTIC_CACHE_LIMIT) {
+      cache.history = cache.history.slice(-HEURISTIC_CACHE_LIMIT);
+    }
+    if (bucket && cache[bucket]) {
+      cache[bucket].push(entry);
+      if (cache[bucket].length > HEURISTIC_CACHE_LIMIT) {
+        cache[bucket] = cache[bucket].slice(-HEURISTIC_CACHE_LIMIT);
+      }
+    }
+    writeHeuristicCache(cache);
+  }
+
+  function getShieldScores(predictions) {
+    return {
+      porn: safeScore(predictions?.porn),
+      sexy: safeScore(predictions?.sexy),
+      hentai: safeScore(predictions?.hentai),
+      neutral: safeScore(predictions?.neutral),
+    };
+  }
+
+  function resolveShieldElement(target) {
+    if (!target) return null;
+    if (target.element && target.element.isConnected) {
+      return target.element;
+    }
+    if (target.itemId) {
+      const stored = state.elements.get(target.itemId);
+      if (stored && stored.isConnected) {
+        return stored;
+      }
+    }
+    return null;
+  }
+
+  function queueDeepScanTarget(target) {
+    if (!target || !target.src) return;
+    const element = resolveShieldElement(target);
+    if (!element) {
+      console.warn('[MW][ShieldAction] missing element for deep scan', target.src);
+      return;
+    }
+    state.scanned.delete(target.src);
+    clearSafeResolved(target.src);
+    const prevPendingId = state.pendingBySrc.get(target.src);
+    if (prevPendingId) {
+      clearPendingItem(prevPendingId, 'deep_scan');
+    }
+    queueForScan(target.src, element, target.sourceType || 'deep_scan');
+    console.log('[MW][ShieldAction] deep scan enqueued', target.src);
+  }
+
+  const SHIELD_CACHE_BUCKETS = {
+    report: 'blacklist',
+    false_positive: 'whitelist',
+  };
+
+  function logShieldAction(action, target, scores) {
+    const entry = {
+      action: action,
+      src: target.src,
+      category: target.normalizedCategory || target.category || 'unknown',
+      timestamp: Date.now(),
+      scores: scores,
+      itemId: target.itemId || null,
+    };
+    console.log('[MW][ShieldAction]', action, 'scores=', scores, 'src=' + target.src);
+    const bucket = SHIELD_CACHE_BUCKETS[action] || null;
+    persistHeuristicEntry(entry, bucket);
+  }
+
+  function handleShieldAction(action) {
+    if (!action) return;
+    const target = lastShieldTarget;
+    if (!target || !target.src) {
+      console.warn('[MW][ShieldAction] no active target for', action);
+      return;
+    }
+    const element = resolveShieldElement(target);
+    if (!element) {
+      console.warn('[MW][ShieldAction] missing DOM element for', action, target.src);
+      return;
+    }
+    const scores = getShieldScores(target.predictions || {});
+    logShieldAction(action, target, scores);
+    if (action === 'report') {
+      state.revealed.delete(target.src);
+      element.dataset.mwRevealed = 'false';
+      clearSafeResolved(target.src);
+      applyBlur(element, target.src, target.normalizedCategory || target.predictedLabel || 'flagged', CLAMPED_BLUR_STRENGTH, target.itemId);
+      return;
+    }
+    if (action === 'false_positive') {
+      markSafeResolved(target.src);
+      removeBlur(element, target.src);
+      return;
+    }
+    if (action === 'deep_scan') {
+      queueDeepScanTarget(target);
+    }
+  }
 
   // Batch queue for collecting items before sending request
   let batchQueue = [];
@@ -1189,7 +1332,8 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (state.revealed.has(src)) return;
     if (element.dataset.mwRevealed === 'true') return;
     
-    const blurPx = (IS_YOUTUBE ? 40 : (blurStrengthPx || CONFIG.blurStrength || 30));
+    const desiredBlur = blurStrengthPx || CONFIG.blurStrength || 30;
+    const blurPx = IS_YOUTUBE ? 40 : Math.min(desiredBlur, 20);
     
     try {
       // Force blur with !important for iOS WebKit
@@ -1685,6 +1829,16 @@ export function generateModerationScript(config: InjectionConfig): string {
       // Find the element for this item
       const element = state.elements.get(itemId);
       const pendingItem = state.pending.get(itemId);
+      lastShieldTarget = {
+        itemId: itemId,
+        src: src,
+        normalizedCategory: normalizedCategory,
+        predictedLabel: predictedLabel,
+        predictions: normalizedPredictions,
+        element: element && element.isConnected ? element : null,
+        sourceType: (pendingItem && pendingItem.sourceType) || (element && element.dataset?.mwSourceType) || 'unknown',
+        timestamp: Date.now(),
+      };
       
       // Clear any pending blur timer (semantic delay)
       if (pendingItem && pendingItem.blurTimer) {
@@ -1756,8 +1910,19 @@ export function generateModerationScript(config: InjectionConfig): string {
         decisionReason = policyDecision.reason;
       }
       
-      // Apply blur based on result or forced blur mode
-      let finalBlur = CONFIG.forcedBlur || (shouldApplyBlur && CONFIG.enabled && CONFIG.sensitivity > 0);
+      const dialActive = CONFIG.enabled && CONFIG.sensitivity > 0;
+      const sexyScoreForAction = unsafeScores.sexy || 0;
+      const pornScoreForAction = unsafeScores.porn || 0;
+      const hardBlurOverride = (predictedLabel === 'porn' && pornScoreForAction > 0.8) ||
+        (predictedLabel === 'sexy' && sexyScoreForAction > 0.8);
+      const dynamicBlurCandidate = rawCategory === 'swimwear' || (predictedLabel === 'sexy' && sexyScoreForAction < 0.8);
+      let finalBlur = CONFIG.forcedBlur || (shouldApplyBlur && dialActive);
+      if (hardBlurOverride) {
+        finalBlur = true;
+        decisionReason = (decisionReason ? decisionReason + '/' : '') + 'hard_blur';
+      } else if (dynamicBlurCandidate) {
+        decisionReason = (decisionReason ? decisionReason + '/' : '') + 'dynamic_blur';
+      }
       if (DEBUG_SKIP_DOMAIN_BLUR && !CONFIG.forcedBlur) {
         if (finalBlur) state.stats.blurSkippedByKillSwitch++;
         finalBlur = false;
