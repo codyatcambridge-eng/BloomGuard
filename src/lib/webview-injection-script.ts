@@ -208,7 +208,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     3: { porn: 0.3, sexy: 0.45, hentai: 0.3 },      // Strict
     4: { porn: 0.15, sexy: 0.25, hentai: 0.15 },    // Maximum
   };
-  const EFFECTIVE_THRESHOLDS = THRESHOLDS[CONFIG.sensitivity] || THRESHOLDS[3];
+  function getThresholdsForLevel(level) {
+    return THRESHOLDS[level] || THRESHOLDS[3];
+  }
+  let effectiveThresholds = getThresholdsForLevel(CONFIG.sensitivity);
   const DEBUG_DISABLE_BLUR_ON_YOUTUBE = false;
   const DEBUG_BLUR_TRACE_LIMIT = 10;
   const HOSTNAME = (window.location && window.location.hostname ? window.location.hostname.toLowerCase() : '');
@@ -239,7 +242,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   const URL_CHANGE_POLL_MS = 1200;
   console.log('[MW] Effective config:', JSON.stringify({
     blurDial: CONFIG.sensitivity,
-    thresholds: EFFECTIVE_THRESHOLDS,
+    thresholds: effectiveThresholds,
     minImageSize: CONFIG.minImageSize,
     debugDisableBlurOnYouTube: DEBUG_DISABLE_BLUR_ON_YOUTUBE,
     skipBlurOnCurrentDomain: DEBUG_SKIP_DOMAIN_BLUR,
@@ -398,6 +401,118 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (CONFIG.debug && prevEnabled !== overlayState.enabled) {
       console.log('[MW-DIAG][INJECT] source=overlay', 'enabled=' + overlayState.enabled, 'reason=' + overlayState.reason);
     }
+  }
+
+  const SENSITIVITY_LABELS = {
+    0: 'Off',
+    1: 'Relaxed',
+    2: 'Moderate',
+    3: 'Strict',
+    4: 'Maximum',
+  };
+  const SENSITIVITY_ACCENTS = {
+    0: { background: 'rgba(148,163,184,0.85)', border: 'rgba(148,163,184,0.9)' },
+    1: { background: 'rgba(16,185,129,0.9)', border: 'rgba(16,185,129,1)' },
+    2: { background: 'rgba(234,179,8,0.9)', border: 'rgba(234,179,8,1)' },
+    3: { background: 'rgba(249,115,22,0.95)', border: 'rgba(249,115,22,1)' },
+    4: { background: 'rgba(239,68,68,0.95)', border: 'rgba(239,68,68,1)' },
+  };
+  const SENSITIVITY_TOGGLE_ID = 'mw-sensitivity-toggle';
+  const SENSITIVITY_TOGGLE_STYLE_ID = 'mw-sensitivity-toggle-style';
+
+  function getSensitivityLabel(level) {
+    return SENSITIVITY_LABELS[level] || 'Moderate';
+  }
+
+  function getSensitivityAccent(level) {
+    return SENSITIVITY_ACCENTS[level] || SENSITIVITY_ACCENTS[2];
+  }
+
+  function updateSensitivityToggleButton(button) {
+    if (!button) return;
+    const level = CONFIG.sensitivity;
+    const labelSpan = button.querySelector('.mw-sensitivity-label');
+    if (labelSpan) {
+      labelSpan.textContent = getSensitivityLabel(level);
+    }
+    const accent = getSensitivityAccent(level);
+    button.style.background = accent.background;
+    button.style.borderColor = accent.border;
+    button.setAttribute('aria-label', 'Shield sensitivity: ' + getSensitivityLabel(level));
+    button.dataset.mwSensitivityLevel = String(level);
+  }
+
+  function ensureSensitivityToggleStyle() {
+    if (document.getElementById(SENSITIVITY_TOGGLE_STYLE_ID)) return;
+    const style = document.createElement('style');
+    style.id = SENSITIVITY_TOGGLE_STYLE_ID;
+    style.textContent = "#".concat(SENSITIVITY_TOGGLE_ID, " { ") +
+      " position: fixed; " +
+      " bottom: 18px; " +
+      " right: 18px; " +
+      " z-index: 2147483647; " +
+      " } ";
+    (document.head || document.documentElement || document.body || document.documentElement).appendChild(style);
+  }
+
+  function ensureSensitivityToggle() {
+    ensureSensitivityToggleStyle();
+    if (document.getElementById(SENSITIVITY_TOGGLE_ID)) return;
+    const hostRoot = document.body || document.documentElement;
+    if (!hostRoot) {
+      requestAnimationFrame(ensureSensitivityToggle);
+      return;
+    }
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.id = SENSITIVITY_TOGGLE_ID;
+    button.setAttribute('aria-live', 'polite');
+    button.className = 'mw-sensitivity-toggle';
+    const icon = document.createElement('span');
+    icon.className = 'mw-sensitivity-icon';
+    icon.textContent = '🛡';
+    const label = document.createElement('span');
+    label.className = 'mw-sensitivity-label';
+    button.appendChild(icon);
+    button.appendChild(label);
+    button.addEventListener('click', () => {
+      cycleSensitivityLevel();
+    });
+    hostRoot.appendChild(button);
+    updateSensitivityToggleButton(button);
+  }
+
+  function cycleSensitivityLevel() {
+    const nextLevel = (CONFIG.sensitivity + 1) % 5;
+    applySensitivityLevel(nextLevel, 'floating_toggle_cycle');
+  }
+
+  function applySensitivityLevel(level, reason) {
+    const normalized = Math.min(4, Math.max(0, Math.round(level)));
+    if (normalized === CONFIG.sensitivity && (normalized > 0) === CONFIG.enabled) {
+      return;
+    }
+    CONFIG.sensitivity = normalized;
+    CONFIG.enabled = normalized > 0;
+    effectiveThresholds = getThresholdsForLevel(normalized);
+    resetBlurState('sensitivity_change');
+    const toggle = document.getElementById(SENSITIVITY_TOGGLE_ID);
+    if (toggle) {
+      updateSensitivityToggleButton(toggle);
+    }
+    console.log('[MW] Sensitivity dial set to', normalized, 'label=' + getSensitivityLabel(normalized), 'reason=' + (reason || 'toggle'));
+    if (CONFIG.enabled) {
+      scanFullPage();
+      if (isYouTube()) {
+        scanYouTubeThumbnails();
+      }
+    }
+    postToHost({
+      type: 'MW_SENSITIVITY_UPDATE',
+      level: normalized,
+      reason: reason || 'overlay_toggle',
+      timestamp: Date.now(),
+    });
   }
 
   function sendBlurReady(reason) {
@@ -717,6 +832,28 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
     });
     toClear.forEach(function(itemId) { clearPendingItem(itemId, reason || 'disconnected'); });
+  }
+
+  function resetBlurState(reason) {
+    state.pending.forEach(function(_item, itemId) {
+      clearPendingItem(itemId, reason || 'sensitivity_reset');
+    });
+    state.pendingRequests.forEach(function(pending) {
+      if (pending && pending.timeoutId) {
+        clearTimeout(pending.timeoutId);
+      }
+    });
+    state.pendingRequests.clear();
+    state.pendingBySrc.clear();
+    state.safeResolved.clear();
+    state.safeResolvedAt.clear();
+    state.blurred.clear();
+    state.scanned.clear();
+    state.elements.forEach(function(element) {
+      if (element && element.isConnected) {
+        clearElementBlur(element);
+      }
+    });
   }
 
   function flushMutationScanQueue() {
@@ -1108,6 +1245,22 @@ export function generateModerationScript(config: InjectionConfig): string {
     } catch (e) {}
   }
 
+  function clearElementBlur(element) {
+    if (!element) return;
+    try {
+      element.style.filter = 'none';
+      element.dataset.mwModerated = 'safe';
+      element.dataset.mwRevealed = 'false';
+      element.dataset.mwPreblurClear = 'true';
+      element.classList.remove('mw-softblur');
+      element.classList.remove('mw-blurred');
+      const overlay = element.parentElement?.querySelector('.mw-reveal-overlay');
+      if (overlay) {
+        overlay.style.display = 'none';
+      }
+    } catch (e) {}
+  }
+
   function createRevealOverlay(element, src, category, itemId) {
     if (element.dataset.mwHasOverlay === 'true') return;
     if (!element.isConnected) {
@@ -1313,7 +1466,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         width: item.width,
         height: item.height,
       })),
-      thresholds: THRESHOLDS[CONFIG.sensitivity] || THRESHOLDS[3],
+      thresholds: effectiveThresholds,
       pageEpoch: state.pageEpoch,
       nonce: CONFIG.nonce,
       timestamp: timestamp,
@@ -1514,8 +1667,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       const predictedLabel = TRACE_UNSAFE_LABELS.has(normalizedCategory)
         ? normalizedCategory
         : ((strongestUnsafeLabel && strongestUnsafeLabel.label) || topPrediction.label || normalizedCategory || 'unknown');
-      const thresholdUsed = Object.prototype.hasOwnProperty.call(EFFECTIVE_THRESHOLDS, predictedLabel)
-        ? EFFECTIVE_THRESHOLDS[predictedLabel]
+      const thresholdUsed = Object.prototype.hasOwnProperty.call(effectiveThresholds, predictedLabel)
+        ? effectiveThresholds[predictedLabel]
         : null;
       const predictionScore = toFiniteNumber(normalizedPredictions[predictedLabel]);
       const confidenceScore = toFiniteNumber(confidence);
@@ -2085,10 +2238,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           if (el.tagName === 'IMG') {
             scanImgElement(el);
           } else {
-            // Scan all images inside YouTube components
-            el.querySelectorAll('img').forEach(img => {
-              scanImgElement(img);
-            });
+            el.querySelectorAll('img').forEach(scanImgElement);
           }
         });
       } catch (e) {}
@@ -2116,7 +2266,7 @@ export function generateModerationScript(config: InjectionConfig): string {
             const tagName = el.tagName ? el.tagName.toLowerCase() : '';
             
             // YouTube-specific: immediately scan ytd-* elements
-            if (tagName.startsWith('ytd-') || 
+            if (tagName.startsWith('ytd-') ||
                 tagName === 'yt-image' ||
                 el.id === 'thumbnail' ||
                 el.classList?.contains('yt-core-image')) {
@@ -2144,29 +2294,15 @@ export function generateModerationScript(config: InjectionConfig): string {
           if (attr === 'data-src' || attr === 'data-lazy-src') {
             queueMutationScan(target);
           }
-          
-          if (attr === 'style') {
-            queueMutationScan(target);
-          }
         }
       });
       
-      // If YouTube changes detected, do a targeted rescan after a short delay
       if (hasYouTubeChanges) {
-        if (!mutationScanTimer) {
-          mutationScanTimer = setTimeout(flushMutationScanQueue, 100);
-        }
+        scheduleYouTubeScan('mutation');
       }
     });
-    
-    observer.observe(root, {
-      childList: true,
-      subtree: true,
-      attributes: true,
-      attributeFilter: ['src', 'srcset', 'poster', 'data-src', 'data-lazy-src', 'data-thumb', 'style'],
-    });
+    observer.observe(root, { childList: true, subtree: true, attributes: false });
     state.mutationObservers.push(observer);
-    
     return observer;
   }
 
@@ -2456,6 +2592,8 @@ export function generateModerationScript(config: InjectionConfig): string {
     timerLog('start', 'mainScrollTimeout');
   };
   window.addEventListener('scroll', timerState.mainScrollHandler, { passive: true });
+
+  ensureSensitivityToggle();
 
   // SPA navigation detection
   let lastUrl = window.location.href;

@@ -1,7 +1,12 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import type { PluginListenerHandle } from '@capacitor/core';
 import LabelListener from '@/components/browser/LabelListener';
-import { Shield, AlertTriangle, Loader2, Globe } from 'lucide-react';
+import {
+  Shield,
+  AlertTriangle,
+  Loader2,
+  Globe,
+} from 'lucide-react';
 import { useNativeWebView } from '@/hooks/useNativeWebView';
 import { useContentProtection } from '@/hooks/useContentProtection';
 import { useSettings } from '@/hooks/useSettings';
@@ -17,6 +22,7 @@ import {
   createResultMessage,
   createBlurOverlayStateMessage,
   isBlurOverlayReadyMessage,
+  isSensitivityUpdateMessage,
   escapeForJs,
   mapModerationCategoryToSeverity,
   type ModerationSeverity,
@@ -41,6 +47,7 @@ import { YouTubePreviewView } from './YouTubePreviewView';
 import { SocialPreviewView, SocialPlatform } from './SocialPreviewView';
 import { ExternalLinkWarning } from './ExternalLinkWarning';
 import { AIStatusBar } from './AIStatusBar';
+import { BlurShieldOverlay } from './BlurShieldOverlay';
 import { toast } from 'sonner';
 
 const YOUTUBE_HOST_PATTERNS = ['youtube.com', 'youtu.be', 'ytimg.com'];
@@ -141,6 +148,7 @@ export const NativeWebViewBrowser = () => {
     getModerationConfig,
     isModerationEnabled,
     getNonce,
+    updateSetting,
   } = useLocalSettings();
   const deviceId = useDeviceId();
 
@@ -1243,6 +1251,15 @@ export const NativeWebViewBrowser = () => {
         await processModerationRequest(message, message.nonce);
         return;
       }
+
+      if (isSensitivityUpdateMessage(message)) {
+        const level = Math.max(0, Math.min(4, Math.round(message.level)));
+        if (level !== localSettings.blur_dial) {
+          console.log('[MW-Host] Received sensitivity update from page:', level, message.reason || 'overlay_toggle');
+          updateSetting('blur_dial', level);
+        }
+        return;
+      }
       
       if (typedMessage.type === 'gc-moderation-request' && typedMessage.action === 'scan') {
         console.log('[MW-Host] Received legacy moderation request via postMessage');
@@ -2130,6 +2147,7 @@ export const NativeWebViewBrowser = () => {
     <div className="min-h-screen bg-background flex flex-col">
       {/* Global label listener for prototype mode */}
       <LabelListener />
+      {isNative && currentView === 'browse' && <BlurShieldOverlay />}
       <BrowserHeader
         currentView={currentView}
         displayUrl={displayUrl}

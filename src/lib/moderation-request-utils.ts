@@ -153,6 +153,13 @@ export interface BlurOverlayStateMessage {
   timestamp: number;
 }
 
+export interface SensitivityUpdateMessage {
+  type: 'MW_SENSITIVITY_UPDATE';
+  level: number;
+  reason?: string;
+  timestamp: number;
+}
+
 /**
  * State of a pending moderation request
  */
@@ -199,6 +206,15 @@ export function isBlurOverlayReadyMessage(message: any): message is BlurOverlayR
     typeof message === 'object' &&
     message.type === 'MW_BLUR_READY' &&
     typeof message.timestamp === 'number'
+  );
+}
+
+export function isSensitivityUpdateMessage(message: any): message is SensitivityUpdateMessage {
+  return (
+    message &&
+    typeof message === 'object' &&
+    message.type === 'MW_SENSITIVITY_UPDATE' &&
+    typeof message.level === 'number'
   );
 }
 
