@@ -1,5 +1,9 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { useOnDeviceModeration, ModerationResult } from '@/hooks/useOnDeviceModeration';
+import {
+  useOnDeviceModeration,
+  ModerationResult,
+  type ModerationScanContext,
+} from '@/hooks/useOnDeviceModeration';
 import { useLocalSettings } from '@/hooks/useLocalSettings';
 import { 
   ModerationScanResult, 
@@ -30,6 +34,8 @@ export interface UseModerationBridgeOptions {
   }) => void;
   onError?: (error: string) => void;
 }
+
+export interface BridgeScanContext extends ModerationScanContext {}
 
 export const isWebViewBlurReadyEvent = (message: unknown): boolean => {
   return isBlurOverlayReadyMessage(message);
@@ -104,9 +110,21 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
     const diagnostics: Record<string, unknown> = {};
     if (typeof result.nsfwRisk === 'number') diagnostics.nsfwRisk = result.nsfwRisk;
     if (result.segmentation) {
+      diagnostics.segmentationAttempted = result.segmentation.attempted;
+      diagnostics.segmentationApplied = result.segmentation.applied;
+      diagnostics.segmentationCached = result.segmentation.cached;
+      diagnostics.segmentationThrottled = result.segmentation.throttled;
       diagnostics.personPresent = result.segmentation.personPresent;
+      diagnostics.personPixels = result.segmentation.personPixels;
+      diagnostics.skinPixels = result.segmentation.skinPixels;
       diagnostics.skinRatio = result.segmentation.skinRatio;
       diagnostics.thirstScore = result.segmentation.thirstScore;
+      diagnostics.segMs = result.segmentation.segMs;
+      diagnostics.skinMs = result.segmentation.skinMs;
+      diagnostics.inputWidth = result.segmentation.inputWidth;
+      diagnostics.inputHeight = result.segmentation.inputHeight;
+      diagnostics.inputSource = result.segmentation.inputSource;
+      diagnostics.stageBSkipReason = result.segmentation.skipReason;
       diagnostics.imageWidth = result.segmentation.imageWidth;
       diagnostics.imageHeight = result.segmentation.imageHeight;
       diagnostics.host = result.segmentation.host;
@@ -121,6 +139,7 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
       predictions,
       inferenceTime,
       reason: result.reason,
+      decisionReason: result.decisionReason,
       modelVersion: result.modelVersion,
       thresholdsUsed: result.thresholdsUsed as Record<string, unknown> | undefined,
       diagnostics: Object.keys(diagnostics).length > 0 ? diagnostics : undefined,
@@ -130,7 +149,11 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
   /**
    * Scan a single image and return result
    */
-  const scanImage = useCallback(async (src: string, thresholds?: { porn: number; sexy: number; hentai: number }): Promise<ModerationScanResult | null> => {
+  const scanImage = useCallback(async (
+    src: string,
+    thresholds?: { porn: number; sexy: number; hentai: number },
+    context?: BridgeScanContext,
+  ): Promise<ModerationScanResult | null> => {
     if (!modelReady) {
       console.log('[MW-Bridge] Model not ready, skipping scan');
       return null;
@@ -152,7 +175,7 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
 
     try {
       console.log('[MW-Bridge] Scanning:', src.substring(0, 60));
-      const result = await classifyImage(src, effectiveThresholds);
+      const result = await classifyImage(src, effectiveThresholds, context);
       const inferenceTime = performance.now() - startTime;
       
       if (!result) {

@@ -61,6 +61,8 @@ export interface ModerationResult {
     host?: string;
     segMs: number;
     skinMs: number;
+    inputSource?: string;
+    skipReason?: string;
   };
   /** Detected signals for debugging */
   signals?: {
@@ -75,6 +77,13 @@ export interface AIThresholds {
   porn: number;
   sexy: number;
   hentai: number;
+}
+
+export interface ModerationScanContext {
+  requestId?: string;
+  itemId?: string;
+  pageEpoch?: number;
+  sourceType?: string;
 }
 
 /**
@@ -123,6 +132,42 @@ const SKIN_WEIGHT = 0.30;
 const PERSON_WEIGHT = 0.05;
 const SEGMENTATION_MODEL_VERSION = 'body-pix@2.x';
 const NSFW_MODEL_VERSION = 'nsfwjs@4.2.0';
+const IMAGE_LOAD_TIMEOUT_MS = 8000;
+const STAGE_B_FORCE_NEXT_KEY = 'MW_STAGEB_FORCE_NEXT_N';
+const STAGE_B_FORCE_NEXT_FN_KEY = '__MW_STAGEB_FORCE_NEXT__';
+
+export interface StageBEligibilityInput {
+  segmentationEnabled: boolean;
+  strictMode: boolean;
+  grayZoneOnly: boolean;
+  inGrayZone: boolean;
+  forceOverride: boolean;
+}
+
+export type StageBEligibilityReason =
+  | 'eligible'
+  | 'forced_override'
+  | 'feature_flag_disabled'
+  | 'gray_zone_gate';
+
+export function evaluateStageBEligibility(input: StageBEligibilityInput): {
+  eligible: boolean;
+  reason: StageBEligibilityReason;
+} {
+  if (input.forceOverride) {
+    return { eligible: true, reason: 'forced_override' };
+  }
+  if (!input.segmentationEnabled) {
+    return { eligible: false, reason: 'feature_flag_disabled' };
+  }
+  if (input.strictMode) {
+    return { eligible: true, reason: 'eligible' };
+  }
+  if (!input.grayZoneOnly || input.inGrayZone) {
+    return { eligible: true, reason: 'eligible' };
+  }
+  return { eligible: false, reason: 'gray_zone_gate' };
+}
 
 type ModelLoadingState = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -247,6 +292,237 @@ const downscaleForSegmentation = (
   return { canvas, width, height };
 };
 
+const readStageBForceNextCount = (): number => {
+  if (!import.meta.env.DEV || typeof window === 'undefined') return 0;
+  try {
+    const raw = window.localStorage.getItem(STAGE_B_FORCE_NEXT_KEY);
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+    return Math.floor(parsed);
+  } catch {
+    return 0;
+  }
+};
+
+const writeStageBForceNextCount = (count: number): void => {
+  if (!import.meta.env.DEV || typeof window === 'undefined') return;
+  try {
+    const normalized = Math.max(0, Math.floor(Number(count) || 0));
+    if (normalized > 0) {
+      window.localStorage.setItem(STAGE_B_FORCE_NEXT_KEY, String(normalized));
+    } else {
+      window.localStorage.removeItem(STAGE_B_FORCE_NEXT_KEY);
+    }
+  } catch {
+    // Best effort only.
+  }
+};
+
+const consumeStageBForceNextCount = (): { active: boolean; before: number; after: number } => {
+  const before = readStageBForceNextCount();
+  if (before <= 0) return { active: false, before: 0, after: 0 };
+  const after = before - 1;
+  writeStageBForceNextCount(after);
+  return { active: true, before, after };
+};
+
+const getErrorMessage = (err: unknown): string => (
+  err instanceof Error ? err.message : String(err)
+);
+
+const isLikelyCorsError = (err: unknown): boolean => {
+  const message = getErrorMessage(err).toLowerCase();
+  return (
+    message.includes('cors') ||
+    message.includes('cross-origin') ||
+    message.includes('securityerror') ||
+    message.includes('tainted') ||
+    message.includes('insecure')
+  );
+};
+
+const loadImageElement = (
+  src: string,
+  timeoutMs: number,
+  crossOrigin: 'anonymous' | null = 'anonymous',
+): Promise<HTMLImageElement> => {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    if (crossOrigin) {
+      img.crossOrigin = crossOrigin;
+    }
+
+    const timeout = setTimeout(() => {
+      img.src = '';
+      reject(new Error('Image load timeout'));
+    }, timeoutMs);
+
+    img.onload = () => {
+      clearTimeout(timeout);
+      resolve(img);
+    };
+
+    img.onerror = () => {
+      clearTimeout(timeout);
+      reject(new Error('Image decode error'));
+    };
+
+    img.src = src;
+  });
+};
+
+const decodeBlobToCanvas = async (blob: Blob): Promise<{ canvas: HTMLCanvasElement; source: 'blob_bitmap' | 'blob_image' }> => {
+  if (typeof createImageBitmap === 'function') {
+    const bitmap = await createImageBitmap(blob);
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, bitmap.width || 0);
+      canvas.height = Math.max(1, bitmap.height || 0);
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) {
+        throw new Error('Canvas context unavailable');
+      }
+      ctx.drawImage(bitmap, 0, 0);
+      return { canvas, source: 'blob_bitmap' };
+    } finally {
+      if (typeof bitmap.close === 'function') {
+        bitmap.close();
+      }
+    }
+  }
+
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    const image = await loadImageElement(objectUrl, IMAGE_LOAD_TIMEOUT_MS, null);
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, image.naturalWidth || image.width || 0);
+    canvas.height = Math.max(1, image.naturalHeight || image.height || 0);
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) {
+      throw new Error('Canvas context unavailable');
+    }
+    ctx.drawImage(image, 0, 0);
+    return { canvas, source: 'blob_image' };
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+};
+
+const canReadCanvasPixels = (
+  canvas: HTMLCanvasElement,
+): { ok: boolean; reason?: 'cors_blocked' | 'canvas_getimagedata_failed' | 'canvas_ctx_unavailable'; error?: string } => {
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) {
+    return { ok: false, reason: 'canvas_ctx_unavailable' };
+  }
+
+  try {
+    const sampleWidth = Math.max(1, Math.min(canvas.width, 1));
+    const sampleHeight = Math.max(1, Math.min(canvas.height, 1));
+    ctx.getImageData(0, 0, sampleWidth, sampleHeight);
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: isLikelyCorsError(err) ? 'cors_blocked' : 'canvas_getimagedata_failed',
+      error: getErrorMessage(err),
+    };
+  }
+};
+
+const prepareSegmentationCanvas = async (
+  image: HTMLImageElement | HTMLCanvasElement,
+  maxInputPx: number,
+  sourceUrl?: string,
+): Promise<
+  | {
+      ok: true;
+      canvas: HTMLCanvasElement;
+      width: number;
+      height: number;
+      source: 'direct' | 'blob_bitmap' | 'blob_image';
+    }
+  | {
+      ok: false;
+      reason:
+        | 'cors_blocked'
+        | 'fetch_blocked'
+        | 'image_decode_error'
+        | 'canvas_getimagedata_failed'
+        | 'canvas_ctx_unavailable';
+      error?: string;
+    }
+> => {
+  const direct = downscaleForSegmentation(image, maxInputPx);
+  const directReadable = canReadCanvasPixels(direct.canvas);
+  if (directReadable.ok) {
+    return {
+      ok: true,
+      canvas: direct.canvas,
+      width: direct.width,
+      height: direct.height,
+      source: 'direct',
+    };
+  }
+
+  if (!sourceUrl) {
+    return {
+      ok: false,
+      reason: directReadable.reason || 'canvas_getimagedata_failed',
+      error: directReadable.error,
+    };
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(sourceUrl, { mode: 'cors', credentials: 'omit' });
+  } catch (err) {
+    return {
+      ok: false,
+      reason: isLikelyCorsError(err) ? 'cors_blocked' : 'fetch_blocked',
+      error: getErrorMessage(err),
+    };
+  }
+
+  if (!response.ok) {
+    return {
+      ok: false,
+      reason: 'fetch_blocked',
+      error: 'HTTP ' + response.status,
+    };
+  }
+
+  const blob = await response.blob();
+  let decoded: { canvas: HTMLCanvasElement; source: 'blob_bitmap' | 'blob_image' };
+  try {
+    decoded = await decodeBlobToCanvas(blob);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: 'image_decode_error',
+      error: getErrorMessage(err),
+    };
+  }
+
+  const fallback = downscaleForSegmentation(decoded.canvas, maxInputPx);
+  const fallbackReadable = canReadCanvasPixels(fallback.canvas);
+  if (!fallbackReadable.ok) {
+    return {
+      ok: false,
+      reason: fallbackReadable.reason || 'canvas_getimagedata_failed',
+      error: fallbackReadable.error,
+    };
+  }
+
+  return {
+    ok: true,
+    canvas: fallback.canvas,
+    width: fallback.width,
+    height: fallback.height,
+    source: decoded.source,
+  };
+};
+
 /**
  * Estimate "signals" from NSFWJS predictions
  * Since NSFWJS doesn't directly output body parts, we infer from class distributions
@@ -314,6 +590,7 @@ export const useOnDeviceModeration = () => {
   }>>(new Map());
   const segmentationLastRunAt = useRef(0);
   const segmentationCounters = useRef({ cacheHits: 0, throttleSkips: 0, attempts: 0 });
+  const stageBFlagLoggedEpochs = useRef<Set<string>>(new Set());
   const initAttempted = useRef(false);
   const { settings } = useLocalSettings();
 
@@ -354,12 +631,31 @@ export const useOnDeviceModeration = () => {
     return () => { mounted = false; };
   }, []);
 
+  useEffect(() => {
+    if (!import.meta.env.DEV || typeof window === 'undefined') return;
+    const globalWindow = window as unknown as Record<string, unknown>;
+    globalWindow[STAGE_B_FORCE_NEXT_FN_KEY] = (nextItems: number) => {
+      const normalized = Math.max(0, Math.floor(Number(nextItems) || 0));
+      writeStageBForceNextCount(normalized);
+      console.debug('[OnDeviceAI][StageB] dev_force_set', 'nextItems=' + normalized);
+      return normalized;
+    };
+    return () => {
+      try {
+        delete globalWindow[STAGE_B_FORCE_NEXT_FN_KEY];
+      } catch {
+        // Ignore cleanup failures.
+      }
+    };
+  }, []);
+
   /**
    * Classify a single image with multi-parameter conditional logic and FAIL-OPEN behavior
    */
   const classifyImage = useCallback(async (
     imageSource: HTMLImageElement | HTMLCanvasElement | string,
-    thresholds: AIThresholds = DEFAULT_THRESHOLDS
+    thresholds: AIThresholds = DEFAULT_THRESHOLDS,
+    scanContext?: ModerationScanContext,
   ): Promise<ModerationResult | null> => {
     // FAIL-OPEN: Return null (no blur) if model isn't ready
     if (modelState !== 'ready' || !modelRef.current) {
@@ -372,7 +668,22 @@ export const useOnDeviceModeration = () => {
     }
 
     const startTime = performance.now();
-    const LOAD_TIMEOUT = 8000;
+    const diagEnabled = !!import.meta.env.DEV;
+    const requestId = scanContext?.requestId || 'n/a';
+    const itemId = scanContext?.itemId || 'n/a';
+    const pageEpoch = Number.isFinite(scanContext?.pageEpoch)
+      ? String(scanContext?.pageEpoch)
+      : 'n/a';
+    const stageBDiag = (...parts: string[]) => {
+      if (!diagEnabled) return;
+      console.debug(
+        '[OnDeviceAI][StageB]',
+        'requestId=' + requestId,
+        'itemId=' + itemId,
+        'pageEpoch=' + pageEpoch,
+        ...parts,
+      );
+    };
 
     try {
       let image: HTMLImageElement | HTMLCanvasElement;
@@ -384,35 +695,26 @@ export const useOnDeviceModeration = () => {
         
         // Check cache first
         if (imageCache.current.has(cacheKey)) {
-          return imageCache.current.get(cacheKey)!;
+          const cachedResult = imageCache.current.get(cacheKey)!;
+          const cachedSeg = cachedResult.segmentation;
+          if (diagEnabled) {
+            stageBDiag(
+              'cache_hit=image_result',
+              'nsfwRisk=' + String(cachedResult.nsfwRisk ?? 'n/a'),
+              'dial=' + toDialBucket(thresholds),
+              'personPresent=' + String(cachedSeg?.personPresent ?? 'n/a'),
+              'skinRatio=' + String(cachedSeg?.skinRatio ?? 'n/a'),
+              'thirstScore=' + String(cachedSeg?.thirstScore ?? 'n/a'),
+            );
+          }
+          return cachedResult;
         }
 
         // Load image from URL with timeout
-        image = await new Promise<HTMLImageElement>((resolve, reject) => {
-          const img = new Image();
-          img.crossOrigin = 'anonymous';
-          
-          const timeout = setTimeout(() => {
-            img.src = '';
-            reject(new Error('Image load timeout'));
-          }, LOAD_TIMEOUT);
-          
-          img.onload = () => {
-            clearTimeout(timeout);
-            // FAIL-OPEN: Skip tiny images (< 60x60)
-            if (img.width < MIN_IMAGE_DIMENSION || img.height < MIN_IMAGE_DIMENSION) {
-              reject(new Error('Image too small - fail open'));
-            }
-            resolve(img);
-          };
-          
-          img.onerror = () => {
-            clearTimeout(timeout);
-            reject(new Error('Failed to load image'));
-          };
-          
-          img.src = imageSource;
-        });
+        image = await loadImageElement(imageSource, IMAGE_LOAD_TIMEOUT_MS, 'anonymous');
+        if (image.width < MIN_IMAGE_DIMENSION || image.height < MIN_IMAGE_DIMENSION) {
+          throw new Error('Image too small - fail open');
+        }
       } else {
         image = imageSource;
         
@@ -461,9 +763,15 @@ export const useOnDeviceModeration = () => {
       const dialBucket = toDialBucket(thresholds);
       const strictMode = dialBucket === 'strict';
       const inGrayZone = nsfwRisk >= SEGMENTATION_GRAY_ZONE_MIN && nsfwRisk <= SEGMENTATION_GRAY_ZONE_MAX;
-      const shouldTrySegmentation =
-        settings.enableSegmentationSignal === true &&
-        (strictMode || (settings.segmentationGrayZoneOnly ? inGrayZone : true));
+      const forceStageB = consumeStageBForceNextCount();
+      const stageBEligibility = evaluateStageBEligibility({
+        segmentationEnabled: settings.enableSegmentationSignal === true,
+        strictMode,
+        grayZoneOnly: settings.segmentationGrayZoneOnly === true,
+        inGrayZone,
+        forceOverride: forceStageB.active,
+      });
+      const shouldTrySegmentation = stageBEligibility.eligible;
       const segmentationThreshold = getSkinRatioThresholdForDial(dialBucket, settings);
       const sourceHost = (() => {
         if (!cacheKey) return undefined;
@@ -474,7 +782,44 @@ export const useOnDeviceModeration = () => {
         }
       })();
       const imageDims = getImageDimensions(image);
-      const diagEnabled = !!import.meta.env.DEV && settings.debug_mode === true;
+      const stageBPageEpochKey = pageEpoch === 'n/a' ? null : pageEpoch;
+      if (diagEnabled && stageBPageEpochKey && !stageBFlagLoggedEpochs.current.has(stageBPageEpochKey)) {
+        stageBDiag(
+          'flag_state',
+          'enableSegmentationSignal=' + settings.enableSegmentationSignal,
+          'grayZoneOnly=' + settings.segmentationGrayZoneOnly,
+          'throttleMs=' + settings.segmentationThrottleMs,
+          'maxInputPx=' + settings.segmentationMaxInputPx,
+          'cacheTtlMs=' + settings.segmentationCacheTtlMs,
+          'devDefault=' + String(!!import.meta.env.DEV),
+        );
+        stageBFlagLoggedEpochs.current.add(stageBPageEpochKey);
+        if (stageBFlagLoggedEpochs.current.size > 48) {
+          const oldestKey = stageBFlagLoggedEpochs.current.values().next().value;
+          if (oldestKey) {
+            stageBFlagLoggedEpochs.current.delete(oldestKey);
+          }
+        }
+      }
+
+      stageBDiag(
+        'considered',
+        'nsfwRisk=' + nsfwRisk.toFixed(3),
+        'dial=' + dialBucket,
+        'eligible=' + shouldTrySegmentation,
+        'skipReason=' + (shouldTrySegmentation ? 'none' : stageBEligibility.reason),
+        'strictMode=' + strictMode,
+        'grayZoneOnly=' + settings.segmentationGrayZoneOnly,
+        'grayZone=' + inGrayZone,
+      );
+      if (forceStageB.active) {
+        stageBDiag(
+          'force_override_active',
+          'before=' + forceStageB.before,
+          'after=' + forceStageB.after,
+          'throttle_respected=true',
+        );
+      }
 
       let segmentationAttempted = false;
       let segmentationApplied = false;
@@ -487,6 +832,8 @@ export const useOnDeviceModeration = () => {
       let segmentationCached = false;
       let segmentationInputWidth = imageDims.width;
       let segmentationInputHeight = imageDims.height;
+      let segmentationInputSource: 'direct' | 'blob_bitmap' | 'blob_image' | 'none' = 'none';
+      let segmentationSkipReason = shouldTrySegmentation ? '' : stageBEligibility.reason;
       let segMs = 0;
       let skinMs = 0;
 
@@ -497,6 +844,7 @@ export const useOnDeviceModeration = () => {
         const cached = cacheKey ? segmentationCache.current.get(cacheKey) : undefined;
         if (cached && cached.expiresAt > now) {
           segmentationCached = true;
+          segmentationSkipReason = 'cache_hit';
           segmentationCounters.current.cacheHits += 1;
           segmentationPersonPresent = cached.value.personPresent;
           segmentationPersonPixels = cached.value.personPixels;
@@ -507,11 +855,28 @@ export const useOnDeviceModeration = () => {
           segmentationInputHeight = cached.value.inputHeight;
           segMs = cached.value.segMs;
           skinMs = cached.value.skinMs;
+          stageBDiag(
+            'cache_hit',
+            'cache_hit=true',
+            'personPresent=' + segmentationPersonPresent,
+            'personPixels=' + segmentationPersonPixels,
+            'skinPixels=' + segmentationSkinPixels,
+            'skinRatio=' + segmentationSkinRatio.toFixed(3),
+            'thirstScore=' + segmentationThirstScore.toFixed(3),
+          );
         } else {
           const throttleMs = Math.max(0, Number(settings.segmentationThrottleMs) || 800);
-          if ((now - segmentationLastRunAt.current) < throttleMs) {
+          const elapsedSinceLastRun = now - segmentationLastRunAt.current;
+          if (elapsedSinceLastRun < throttleMs) {
             segmentationThrottled = true;
+            segmentationSkipReason = 'throttle_skip';
             segmentationCounters.current.throttleSkips += 1;
+            stageBDiag(
+              'throttle_skip',
+              'throttle_skip=true',
+              'sinceLastMs=' + elapsedSinceLastRun,
+              'throttleMs=' + throttleMs,
+            );
           } else {
             segmentationCounters.current.attempts += 1;
             segmentationLastRunAt.current = now;
@@ -519,89 +884,146 @@ export const useOnDeviceModeration = () => {
               const segmentationModel = await loadSegmentationModel();
               if (segmentationModel) {
                 const maxInputPx = Math.max(96, Number(settings.segmentationMaxInputPx) || 256);
-                const downscaled = downscaleForSegmentation(image, maxInputPx);
-                segmentationInputWidth = downscaled.width;
-                segmentationInputHeight = downscaled.height;
+                const segmentationSourceUrl = cacheKey || (
+                  image instanceof HTMLImageElement
+                    ? (image.currentSrc || image.src || '')
+                    : ''
+                );
+                const preparedInput = await prepareSegmentationCanvas(
+                  image,
+                  maxInputPx,
+                  segmentationSourceUrl || undefined,
+                );
 
-                const segStart = performance.now();
-                const segmentPromise = segmentationModel.segmentPerson(downscaled.canvas, {
-                  internalResolution: 'medium',
-                  segmentationThreshold: 0.7,
-                  maxDetections: 1,
-                  scoreThreshold: 0.3,
-                  nmsRadius: 20,
-                });
-                const segmentTimeout = new Promise<never>((_, reject) => {
-                  setTimeout(() => reject(new Error('Segmentation timeout')), SEGMENTATION_TIMEOUT_MS);
-                });
-                const segmentation = await Promise.race([segmentPromise, segmentTimeout]);
-                segMs = performance.now() - segStart;
-
-                const ctx = downscaled.canvas.getContext('2d', { willReadFrequently: true });
-                if (ctx && segmentation?.data) {
-                  const skinStart = performance.now();
-                  const pixels = ctx.getImageData(0, 0, downscaled.width, downscaled.height).data;
-                  const mask = segmentation.data;
-                  const limit = Math.min(mask.length, downscaled.width * downscaled.height);
-                  let personPixels = 0;
-                  let skinPixels = 0;
-
-                  for (let i = 0; i < limit; i++) {
-                    if ((mask[i] ?? 0) <= 0) continue;
-                    personPixels++;
-                    const pxIdx = i * 4;
-                    if (isLikelySkinPixel(
-                      pixels[pxIdx] ?? 0,
-                      pixels[pxIdx + 1] ?? 0,
-                      pixels[pxIdx + 2] ?? 0,
-                    )) {
-                      skinPixels++;
-                    }
-                  }
-                  skinMs = performance.now() - skinStart;
-
-                  segmentationPersonPixels = personPixels;
-                  segmentationSkinPixels = skinPixels;
-                  if (personPixels >= SEGMENTATION_MIN_PERSON_PIXELS) {
-                    segmentationPersonPresent = true;
-                    segmentationSkinRatio = clamp01(skinPixels / Math.max(1, personPixels));
-                  } else {
-                    segmentationPersonPresent = false;
-                    segmentationSkinRatio = 0;
-                  }
-                  segmentationThirstScore = clamp01(
-                    NSFW_WEIGHT * nsfwRisk +
-                    SKIN_WEIGHT * segmentationSkinRatio +
-                    PERSON_WEIGHT * (segmentationPersonPresent ? 1 : 0)
+                if (!preparedInput.ok) {
+                  segmentationSkipReason = preparedInput.reason;
+                  stageBDiag(
+                    'skip',
+                    'reason=' + preparedInput.reason,
+                    'error=' + (preparedInput.error || 'none'),
                   );
+                } else {
+                  segmentationInputWidth = preparedInput.width;
+                  segmentationInputHeight = preparedInput.height;
+                  segmentationInputSource = preparedInput.source;
 
-                  if (cacheKey) {
-                    segmentationCache.current.set(cacheKey, {
-                      expiresAt: now + cacheTtlMs,
-                      value: {
-                        personPresent: segmentationPersonPresent,
-                        personPixels: segmentationPersonPixels,
-                        skinPixels: segmentationSkinPixels,
-                        skinRatio: segmentationSkinRatio,
-                        thirstScore: segmentationThirstScore,
-                        inputWidth: segmentationInputWidth,
-                        inputHeight: segmentationInputHeight,
-                        segMs,
-                        skinMs,
-                      },
-                    });
-                    if (segmentationCache.current.size > 400) {
-                      const firstSegKey = segmentationCache.current.keys().next().value;
-                      if (firstSegKey) segmentationCache.current.delete(firstSegKey);
+                  const segStart = performance.now();
+                  const segmentPromise = segmentationModel.segmentPerson(preparedInput.canvas, {
+                    internalResolution: 'medium',
+                    segmentationThreshold: 0.7,
+                    maxDetections: 1,
+                    scoreThreshold: 0.3,
+                    nmsRadius: 20,
+                  });
+                  const segmentTimeout = new Promise<never>((_, reject) => {
+                    setTimeout(() => reject(new Error('Segmentation timeout')), SEGMENTATION_TIMEOUT_MS);
+                  });
+                  const segmentation = await Promise.race([segmentPromise, segmentTimeout]);
+                  segMs = performance.now() - segStart;
+
+                  const ctx = preparedInput.canvas.getContext('2d', { willReadFrequently: true });
+                  if (!ctx) {
+                    segmentationSkipReason = 'canvas_ctx_unavailable';
+                    stageBDiag('skip', 'reason=canvas_ctx_unavailable');
+                  } else if (segmentation?.data) {
+                    let pixels: Uint8ClampedArray;
+                    try {
+                      pixels = ctx.getImageData(0, 0, preparedInput.width, preparedInput.height).data;
+                    } catch (pixelErr) {
+                      const pixelReason = isLikelyCorsError(pixelErr)
+                        ? 'cors_blocked'
+                        : 'canvas_getimagedata_failed';
+                      segmentationSkipReason = pixelReason;
+                      stageBDiag(
+                        'skip',
+                        'reason=' + pixelReason,
+                        'error=' + getErrorMessage(pixelErr),
+                      );
+                      pixels = new Uint8ClampedArray(0);
                     }
+
+                    if (pixels.length > 0) {
+                      const skinStart = performance.now();
+                      const mask = segmentation.data;
+                      const limit = Math.min(mask.length, preparedInput.width * preparedInput.height);
+                      let personPixels = 0;
+                      let skinPixels = 0;
+
+                      for (let i = 0; i < limit; i++) {
+                        if ((mask[i] ?? 0) <= 0) continue;
+                        personPixels++;
+                        const pxIdx = i * 4;
+                        if (isLikelySkinPixel(
+                          pixels[pxIdx] ?? 0,
+                          pixels[pxIdx + 1] ?? 0,
+                          pixels[pxIdx + 2] ?? 0,
+                        )) {
+                          skinPixels++;
+                        }
+                      }
+                      skinMs = performance.now() - skinStart;
+
+                      segmentationPersonPixels = personPixels;
+                      segmentationSkinPixels = skinPixels;
+                      if (personPixels >= SEGMENTATION_MIN_PERSON_PIXELS) {
+                        segmentationPersonPresent = true;
+                        segmentationSkinRatio = clamp01(skinPixels / Math.max(1, personPixels));
+                      } else {
+                        segmentationPersonPresent = false;
+                        segmentationSkinRatio = 0;
+                      }
+                      segmentationThirstScore = clamp01(
+                        NSFW_WEIGHT * nsfwRisk +
+                        SKIN_WEIGHT * segmentationSkinRatio +
+                        PERSON_WEIGHT * (segmentationPersonPresent ? 1 : 0)
+                      );
+                      segmentationSkipReason = '';
+
+                      stageBDiag(
+                        'run',
+                        'segMs=' + Math.round(segMs),
+                        'inputDimsUsed=' + segmentationInputWidth + 'x' + segmentationInputHeight,
+                        'inputSource=' + segmentationInputSource,
+                        'personPixels=' + segmentationPersonPixels,
+                        'personPresent=' + segmentationPersonPresent,
+                        'skinPixels=' + segmentationSkinPixels,
+                        'skinRatio=' + segmentationSkinRatio.toFixed(3),
+                      );
+
+                      if (cacheKey) {
+                        segmentationCache.current.set(cacheKey, {
+                          expiresAt: now + cacheTtlMs,
+                          value: {
+                            personPresent: segmentationPersonPresent,
+                            personPixels: segmentationPersonPixels,
+                            skinPixels: segmentationSkinPixels,
+                            skinRatio: segmentationSkinRatio,
+                            thirstScore: segmentationThirstScore,
+                            inputWidth: segmentationInputWidth,
+                            inputHeight: segmentationInputHeight,
+                            segMs,
+                            skinMs,
+                          },
+                        });
+                        if (segmentationCache.current.size > 400) {
+                          const firstSegKey = segmentationCache.current.keys().next().value;
+                          if (firstSegKey) segmentationCache.current.delete(firstSegKey);
+                        }
+                      }
+                    }
+                  } else {
+                    segmentationSkipReason = 'segmentation_empty_mask';
+                    stageBDiag('skip', 'reason=segmentation_empty_mask');
                   }
                 }
+              } else {
+                segmentationSkipReason = 'model_unavailable';
+                stageBDiag('skip', 'reason=model_unavailable');
               }
             } catch (segErr) {
               // Fail-open by design for Stage-B.
-              if (diagEnabled) {
-                console.debug('[OnDeviceAI][StageB] segmentation_fail_open:', segErr);
-              }
+              segmentationSkipReason = 'segmentation_fail_open';
+              stageBDiag('skip', 'reason=segmentation_fail_open', 'error=' + getErrorMessage(segErr));
             }
           }
         }
@@ -667,6 +1089,8 @@ export const useOnDeviceModeration = () => {
             host: sourceHost,
             segMs,
             skinMs,
+            inputSource: segmentationInputSource,
+            skipReason: segmentationSkipReason || undefined,
           },
           signals: estimateSignals(formattedPredictions),
         };
@@ -741,6 +1165,8 @@ export const useOnDeviceModeration = () => {
             host: sourceHost,
             segMs,
             skinMs,
+            inputSource: segmentationInputSource,
+            skipReason: segmentationSkipReason || undefined,
           },
           signals,
         };
@@ -833,6 +1259,8 @@ export const useOnDeviceModeration = () => {
           host: sourceHost,
           segMs,
           skinMs,
+          inputSource: segmentationInputSource,
+          skipReason: segmentationSkipReason || undefined,
         },
         signals,
       };
@@ -845,6 +1273,8 @@ export const useOnDeviceModeration = () => {
       if (diagEnabled) {
         console.debug(
           '[OnDeviceAI][2Stage]',
+          `requestId=${requestId}`,
+          `itemId=${itemId}`,
           `nsfwMs=${Math.round(inferenceTime - segMs - skinMs)}`,
           `segMs=${Math.round(segMs)}`,
           `skinMs=${Math.round(skinMs)}`,
@@ -860,6 +1290,8 @@ export const useOnDeviceModeration = () => {
           `segAttempted=${segmentationAttempted}`,
           `segCached=${segmentationCached}`,
           `segThrottled=${segmentationThrottled}`,
+          `segSkipReason=${segmentationSkipReason || 'none'}`,
+          `segInputSource=${segmentationInputSource}`,
           `segAttempts=${segmentationCounters.current.attempts}`,
           `segCacheHits=${segmentationCounters.current.cacheHits}`,
           `segThrottleSkips=${segmentationCounters.current.throttleSkips}`,

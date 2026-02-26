@@ -32,6 +32,7 @@ export interface ModerationScanResult {
   predictions: Record<string, number>;
   inferenceTime: number;
   reason?: string;
+  decisionReason?: string;
   modelVersion?: string;
   thresholdsUsed?: Record<string, unknown>;
   diagnostics?: Record<string, unknown>;

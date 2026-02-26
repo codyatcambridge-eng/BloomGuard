@@ -201,6 +201,7 @@ export const NativeWebViewBrowser = () => {
   const riskDecisionListenerRef = useRef<PluginListenerHandle | null>(null);
   const lastNsfwSignalAtRef = useRef(0);
   const webViewPageEpochRef = useRef(0);
+  const stageBFlagDiagEpochRef = useRef<string | null>(null);
 
   const UNSAFE_STREAK_REQUIRED = 2;
   const SAFE_STREAK_REQUIRED = 2;
@@ -1038,6 +1039,23 @@ export const NativeWebViewBrowser = () => {
     
     const startTime = performance.now();
     console.log('[MW-Host] request received', requestId, 'items=' + items.length, 'epoch=' + (requestEpoch ?? 'n/a'));
+    if (import.meta.env.DEV) {
+      const epochKey = String(requestEpoch ?? activeEpoch);
+      if (stageBFlagDiagEpochRef.current !== epochKey) {
+        stageBFlagDiagEpochRef.current = epochKey;
+        console.log(
+          '[MW-DIAG][StageB][Flag]',
+          'pageEpoch=' + epochKey,
+          'requestId=' + requestId,
+          'enableSegmentationSignal=' + localSettings.enableSegmentationSignal,
+          'grayZoneOnly=' + localSettings.segmentationGrayZoneOnly,
+          'throttleMs=' + localSettings.segmentationThrottleMs,
+          'maxInputPx=' + localSettings.segmentationMaxInputPx,
+          'cacheTtlMs=' + localSettings.segmentationCacheTtlMs,
+          'devBuild=' + String(!!import.meta.env.DEV),
+        );
+      }
+    }
     items.forEach(item => {
       console.log('[MW-Host]   -', item.itemId, '[' + item.sourceType + ']:', item.src.substring(0, 60));
     });
@@ -1065,7 +1083,12 @@ export const NativeWebViewBrowser = () => {
     // Process each item using the moderation bridge
     for (const item of items) {
       try {
-        const scanResult = await moderationBridge.scanImage(item.src, thresholds);
+        const scanResult = await moderationBridge.scanImage(item.src, thresholds, {
+          requestId,
+          itemId: item.itemId,
+          pageEpoch: requestEpoch ?? activeEpoch,
+          sourceType: item.sourceType,
+        });
         
         if (scanResult) {
           const categoryConfidence = Object.entries(scanResult.predictions || {}).reduce((matched, [label, value]) => {
@@ -1083,7 +1106,7 @@ export const NativeWebViewBrowser = () => {
             predictions: scanResult.predictions,
             model_version: scanResult.modelVersion,
             thresholds: scanResult.thresholdsUsed,
-            decision_reason: scanResult.reason,
+            decision_reason: scanResult.decisionReason || scanResult.reason,
             image_width: typeof scanResult.diagnostics?.imageWidth === 'number' ? scanResult.diagnostics.imageWidth : item.width,
             image_height: typeof scanResult.diagnostics?.imageHeight === 'number' ? scanResult.diagnostics.imageHeight : item.height,
             host: typeof scanResult.diagnostics?.host === 'string' ? scanResult.diagnostics.host : (() => {
@@ -1275,12 +1298,18 @@ export const NativeWebViewBrowser = () => {
     postMessageToWebView,
     debugLog,
     isDebugMode,
+    localSettings.fail_closed,
     localSettings.hard_overlay_confidence_threshold,
     localSettings.soft_overlay_ratio_threshold,
     localSettings.soft_overlay_min_hits,
     localSettings.blur_mode,
     localSettings.prototype_mode,
     localSettings.show_scan_notifications,
+    localSettings.enableSegmentationSignal,
+    localSettings.segmentationGrayZoneOnly,
+    localSettings.segmentationThrottleMs,
+    localSettings.segmentationMaxInputPx,
+    localSettings.segmentationCacheTtlMs,
     currentUrl,
     processModerationSafetySignal,
     setCentralBlurState,
@@ -1580,7 +1609,12 @@ export const NativeWebViewBrowser = () => {
           
           console.log('[MW-Host] Legacy processing:', src.substring(0, 60));
           
-          const scanResult = await moderationBridge.scanImage(src, thresholds);
+          const scanResult = await moderationBridge.scanImage(src, thresholds, {
+            requestId: 'legacy_poll',
+            itemId: typeof item.itemId === 'string' ? item.itemId : 'legacy_item',
+            pageEpoch: webViewPageEpochRef.current,
+            sourceType: typeof item.sourceType === 'string' ? item.sourceType : 'unknown',
+          });
           
           if (scanResult) {
             console.log('[MW-Host] Legacy scan result:', scanResult.shouldBlur, scanResult.category);
