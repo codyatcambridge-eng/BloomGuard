@@ -2,6 +2,10 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import * as tf from '@tensorflow/tfjs';
 import * as nsfwjs from 'nsfwjs';
 import { useLocalSettings } from '@/hooks/useLocalSettings';
+import {
+  readDevSegmentationSignalOverride,
+  resolveSegmentationSignal,
+} from '@/lib/segmentation-signal';
 
 export interface ModerationPrediction {
   className: string;
@@ -592,7 +596,7 @@ export const useOnDeviceModeration = () => {
   const segmentationCounters = useRef({ cacheHits: 0, throttleSkips: 0, attempts: 0 });
   const stageBFlagLoggedEpochs = useRef<Set<string>>(new Set());
   const initAttempted = useRef(false);
-  const { settings } = useLocalSettings();
+  const { settings, segmentationSignalResolution } = useLocalSettings();
 
   // Load model on mount with graceful error handling
   useEffect(() => {
@@ -764,8 +768,20 @@ export const useOnDeviceModeration = () => {
       const strictMode = dialBucket === 'strict';
       const inGrayZone = nsfwRisk >= SEGMENTATION_GRAY_ZONE_MIN && nsfwRisk <= SEGMENTATION_GRAY_ZONE_MAX;
       const forceStageB = consumeStageBForceNextCount();
+      const liveDevOverride = import.meta.env.DEV ? readDevSegmentationSignalOverride() : null;
+      const resolvedSegmentationSignal = resolveSegmentationSignal({
+        isDevBuild: !!import.meta.env.DEV,
+        defaultEnabled: !!import.meta.env.DEV,
+        hasPersistedValue: segmentationSignalResolution.hasPersistedValue,
+        persistedValue: segmentationSignalResolution.hasPersistedValue
+          ? segmentationSignalResolution.persistedValue
+          : settings.enableSegmentationSignal,
+        devOverrideValue: liveDevOverride !== null
+          ? liveDevOverride
+          : segmentationSignalResolution.devOverrideValue,
+      });
       const stageBEligibility = evaluateStageBEligibility({
-        segmentationEnabled: settings.enableSegmentationSignal === true,
+        segmentationEnabled: resolvedSegmentationSignal.enabled,
         strictMode,
         grayZoneOnly: settings.segmentationGrayZoneOnly === true,
         inGrayZone,
@@ -782,17 +798,31 @@ export const useOnDeviceModeration = () => {
         }
       })();
       const imageDims = getImageDimensions(image);
-      const stageBPageEpochKey = pageEpoch === 'n/a' ? null : pageEpoch;
-      if (diagEnabled && stageBPageEpochKey && !stageBFlagLoggedEpochs.current.has(stageBPageEpochKey)) {
+      const stageBPageEpochKey = pageEpoch === 'n/a' ? 'global' : pageEpoch;
+      if (diagEnabled && !stageBFlagLoggedEpochs.current.has(stageBPageEpochKey)) {
         stageBDiag(
           'flag_state',
-          'enableSegmentationSignal=' + settings.enableSegmentationSignal,
+          'rawEnableSegmentationSignal=' + settings.enableSegmentationSignal,
+          'resolvedEnableSegmentationSignal=' + resolvedSegmentationSignal.enabled,
+          'resolvedSource=' + resolvedSegmentationSignal.source,
+          'disabledSource=' + resolvedSegmentationSignal.disabledSource,
+          'disabledReason=' + resolvedSegmentationSignal.disabledReason,
+          'persistedEnableSegmentationSignal=' + String(segmentationSignalResolution.persistedValue),
+          'devOverride=' + String(resolvedSegmentationSignal.devOverrideValue),
           'grayZoneOnly=' + settings.segmentationGrayZoneOnly,
           'throttleMs=' + settings.segmentationThrottleMs,
           'maxInputPx=' + settings.segmentationMaxInputPx,
           'cacheTtlMs=' + settings.segmentationCacheTtlMs,
           'devDefault=' + String(!!import.meta.env.DEV),
         );
+        if (import.meta.env.DEV && settings.enableSegmentationSignal === false && resolvedSegmentationSignal.enabled) {
+          stageBDiag(
+            'dev_auto_heal',
+            'rawEnableSegmentationSignal=false',
+            'resolvedEnableSegmentationSignal=true',
+            'reason=dev_policy_auto_enable',
+          );
+        }
         stageBFlagLoggedEpochs.current.add(stageBPageEpochKey);
         if (stageBFlagLoggedEpochs.current.size > 48) {
           const oldestKey = stageBFlagLoggedEpochs.current.values().next().value;
@@ -808,6 +838,7 @@ export const useOnDeviceModeration = () => {
         'dial=' + dialBucket,
         'eligible=' + shouldTrySegmentation,
         'skipReason=' + (shouldTrySegmentation ? 'none' : stageBEligibility.reason),
+        'flagSource=' + resolvedSegmentationSignal.source,
         'strictMode=' + strictMode,
         'grayZoneOnly=' + settings.segmentationGrayZoneOnly,
         'grayZone=' + inGrayZone,
@@ -1325,7 +1356,7 @@ export const useOnDeviceModeration = () => {
         reason,
       };
     }
-  }, [modelState, settings]);
+  }, [modelState, settings, segmentationSignalResolution]);
 
   // Helper to limit cache size
   const limitCache = () => {

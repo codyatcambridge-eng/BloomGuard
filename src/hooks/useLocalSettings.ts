@@ -1,5 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { generateNonce, TriggerConfig } from '@/lib/moderation-request-utils';
+import {
+  readDevSegmentationSignalOverride,
+  resolveSegmentationSignal,
+  type SegmentationSignalResolution,
+} from '@/lib/segmentation-signal';
 
 export type BlurLevel = 'OFF' | 'LOW' | 'MEDIUM' | 'HIGH';
 export type AISensitivity = 'relaxed' | 'moderate' | 'strict';
@@ -93,6 +98,15 @@ const DEFAULT_SETTINGS: LocalProtectionSettings = {
 export const useLocalSettings = () => {
   const [settings, setSettings] = useState<LocalProtectionSettings>(DEFAULT_SETTINGS);
   const [isLoaded, setIsLoaded] = useState(false);
+  const [segmentationSignalResolution, setSegmentationSignalResolution] = useState<SegmentationSignalResolution>(() => (
+    resolveSegmentationSignal({
+      isDevBuild: !!import.meta.env.DEV,
+      defaultEnabled: DEFAULT_SETTINGS.enableSegmentationSignal,
+      hasPersistedValue: false,
+      persistedValue: null,
+      devOverrideValue: null,
+    })
+  ));
   
   // Per-session nonce for security - generated once per app session
   const sessionNonceRef = useRef<string>(generateNonce());
@@ -101,10 +115,48 @@ export const useLocalSettings = () => {
   useEffect(() => {
     try {
       const stored = localStorage.getItem(SETTINGS_KEY);
+      let parsedSettings: Partial<LocalProtectionSettings> = {};
       if (stored) {
         const parsed = JSON.parse(stored);
-        setSettings({ ...DEFAULT_SETTINGS, ...parsed });
+        if (parsed && typeof parsed === 'object') {
+          parsedSettings = parsed as Partial<LocalProtectionSettings>;
+        }
       }
+
+      const hasPersistedSegmentationSignal =
+        typeof parsedSettings.enableSegmentationSignal === 'boolean';
+      const persistedSegmentationSignal = hasPersistedSegmentationSignal
+        ? parsedSettings.enableSegmentationSignal
+        : null;
+      const devOverrideValue = readDevSegmentationSignalOverride();
+      const resolvedSignal = resolveSegmentationSignal({
+        isDevBuild: !!import.meta.env.DEV,
+        defaultEnabled: DEFAULT_SETTINGS.enableSegmentationSignal,
+        hasPersistedValue: hasPersistedSegmentationSignal,
+        persistedValue: persistedSegmentationSignal,
+        devOverrideValue,
+      });
+      const hydratedSettings: LocalProtectionSettings = {
+        ...DEFAULT_SETTINGS,
+        ...parsedSettings,
+        enableSegmentationSignal: resolvedSignal.enabled,
+      };
+
+      if (
+        import.meta.env.DEV &&
+        resolvedSignal.autoHealed &&
+        hasPersistedSegmentationSignal &&
+        persistedSegmentationSignal === false &&
+        devOverrideValue !== false
+      ) {
+        console.warn(
+          '[LocalSettings][StageB] enableSegmentationSignal persisted false in DEV; auto-healing to true',
+        );
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(hydratedSettings));
+      }
+
+      setSegmentationSignalResolution(resolvedSignal);
+      setSettings(hydratedSettings);
     } catch (error) {
       console.error('Failed to load local settings:', error);
     }
@@ -114,8 +166,34 @@ export const useLocalSettings = () => {
   // Save settings to localStorage
   const saveSettings = useCallback((newSettings: LocalProtectionSettings) => {
     try {
-      localStorage.setItem(SETTINGS_KEY, JSON.stringify(newSettings));
-      setSettings(newSettings);
+      const persistedSegmentationSignal =
+        typeof newSettings.enableSegmentationSignal === 'boolean'
+          ? newSettings.enableSegmentationSignal
+          : null;
+      const resolvedSignal = resolveSegmentationSignal({
+        isDevBuild: !!import.meta.env.DEV,
+        defaultEnabled: DEFAULT_SETTINGS.enableSegmentationSignal,
+        hasPersistedValue: persistedSegmentationSignal !== null,
+        persistedValue: persistedSegmentationSignal,
+        devOverrideValue: readDevSegmentationSignalOverride(),
+      });
+      const normalizedSettings: LocalProtectionSettings = {
+        ...newSettings,
+        enableSegmentationSignal: resolvedSignal.enabled,
+      };
+
+      if (
+        import.meta.env.DEV &&
+        resolvedSignal.autoHealed &&
+        newSettings.enableSegmentationSignal === false &&
+        resolvedSignal.devOverrideValue !== false
+      ) {
+        console.warn('[LocalSettings][StageB] enableSegmentationSignal forced on in DEV (auto-heal)');
+      }
+
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(normalizedSettings));
+      setSegmentationSignalResolution(resolvedSignal);
+      setSettings(normalizedSettings);
     } catch (error) {
       console.error('Failed to save local settings:', error);
     }
@@ -199,7 +277,7 @@ export const useLocalSettings = () => {
       prototypeMode: settings.prototype_mode,
       triggers: triggers || {},
       segmentation: {
-        enabled: settings.enableSegmentationSignal,
+        enabled: segmentationSignalResolution.enabled,
         grayZoneOnly: settings.segmentationGrayZoneOnly,
         throttleMs: settings.segmentationThrottleMs,
         maxInputPx: settings.segmentationMaxInputPx,
@@ -219,7 +297,7 @@ export const useLocalSettings = () => {
     settings.debug_mode,
     settings.blocking_mode,
     settings.prototype_mode,
-    settings.enableSegmentationSignal,
+    segmentationSignalResolution.enabled,
     settings.segmentationGrayZoneOnly,
     settings.segmentationThrottleMs,
     settings.segmentationMaxInputPx,
@@ -231,7 +309,7 @@ export const useLocalSettings = () => {
 
   const getSegmentationConfig = useCallback(() => {
     return {
-      enabled: settings.enableSegmentationSignal,
+      enabled: segmentationSignalResolution.enabled,
       grayZoneOnly: settings.segmentationGrayZoneOnly,
       throttleMs: settings.segmentationThrottleMs,
       maxInputPx: settings.segmentationMaxInputPx,
@@ -243,7 +321,7 @@ export const useLocalSettings = () => {
       },
     };
   }, [
-    settings.enableSegmentationSignal,
+    segmentationSignalResolution.enabled,
     settings.segmentationGrayZoneOnly,
     settings.segmentationThrottleMs,
     settings.segmentationMaxInputPx,
@@ -280,6 +358,7 @@ export const useLocalSettings = () => {
     isModerationEnabled,
     getModerationConfig,
     getSegmentationConfig,
+    segmentationSignalResolution,
     getNonce,
     shouldBlockCategory,
   };
