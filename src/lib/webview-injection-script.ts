@@ -1057,17 +1057,23 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
   }
 
-  function queueMutationScan(node) {
+  function queueMutationScan(node, reason) {
     if (!node || node.nodeType !== 1) return;
-    if (mutationScanSet.has(node)) return;
+    if (mutationScanSet.has(node)) {
+      diagMutationScheduleLog('skip_duplicate', node, reason || 'unknown', false);
+      return;
+    }
     if (mutationScanQueue.length >= MAX_MUTATION_QUEUE_ITEMS) {
       state.stats.skippedMutationQueueCap++;
+      diagMutationScheduleLog('skip_queue_cap', node, reason || 'unknown', false);
       return;
     }
     mutationScanSet.add(node);
     mutationScanQueue.push(node);
+    diagMutationScheduleLog('queued', node, reason || 'unknown', true);
     if (!mutationScanTimer) {
       mutationScanTimer = setTimeout(flushMutationScanQueue, MUTATION_SCAN_FLUSH_DELAY_MS);
+      diagMutationScheduleLog('timer_started', node, reason || 'unknown', true);
     }
   }
 
@@ -1174,6 +1180,96 @@ export function generateModerationScript(config: InjectionConfig): string {
     return isMobileYouTubeShortsUrl(window.location.href);
   }
 
+  function getShortsCardOrPlayerContainerFromNode(node) {
+    if (!isShortsModeActive()) return null;
+    const containerSelector = 'ytm-reel-video-renderer, ytm-shorts-lockup-view-model, #shorts-player';
+    if (node && node.nodeType === 1) {
+      if (typeof node.closest === 'function') {
+        const closest = node.closest(containerSelector);
+        if (closest) return closest;
+      }
+      if (node.id === 'shorts-player') return node;
+    }
+    const baseline = node ? diagNodeParentAtBlur.get(node) : null;
+    const baselineParent = baseline && baseline.parent ? baseline.parent : null;
+    if (baselineParent && baselineParent.nodeType === 1) {
+      if (typeof baselineParent.closest === 'function') {
+        const closestParent = baselineParent.closest(containerSelector);
+        if (closestParent) return closestParent;
+      }
+      if (baselineParent.id === 'shorts-player') return baselineParent;
+    }
+    return null;
+  }
+
+  function getActiveShortsPlayerContainer() {
+    if (!isShortsModeActive()) return null;
+    const selectors = [
+      '#shorts-player ytm-reel-video-renderer[aria-hidden="false"]',
+      '#shorts-player ytm-reel-video-renderer[selected]',
+      '#shorts-player ytm-reel-video-renderer[is-active]',
+      '#shorts-player ytm-reel-video-renderer',
+      '#shorts-player',
+    ];
+    for (let i = 0; i < selectors.length; i += 1) {
+      const found = document.querySelector(selectors[i]);
+      if (found && found.isConnected) return found;
+    }
+    const fallbackVideo = document.querySelector('#shorts-player video, ytm-reel-video-renderer video, video');
+    if (fallbackVideo && fallbackVideo.isConnected) {
+      const fallbackContainer = getShortsCardOrPlayerContainerFromNode(fallbackVideo);
+      return fallbackContainer || fallbackVideo;
+    }
+    return null;
+  }
+
+  function resolveShortsOverlayTarget(node, src) {
+    if (!isShortsModeActive()) return null;
+    const normalizedSrc = normalizeUrl(src || '');
+    const containers = [];
+    const localContainer = getShortsCardOrPlayerContainerFromNode(node);
+    if (localContainer && localContainer.isConnected) {
+      containers.push(localContainer);
+    }
+    const activeContainer = getActiveShortsPlayerContainer();
+    if (activeContainer && activeContainer.isConnected && containers.indexOf(activeContainer) === -1) {
+      containers.push(activeContainer);
+    }
+    for (let c = 0; c < containers.length; c += 1) {
+      const container = containers[c];
+      if (!container) continue;
+      const candidates = [];
+      if (container.nodeType === 1 && (container.tagName === 'IMG' || container.tagName === 'VIDEO')) {
+        candidates.push(container);
+      }
+      container.querySelectorAll('img, video').forEach(function(candidate) {
+        candidates.push(candidate);
+      });
+      let fallback = null;
+      for (let i = 0; i < candidates.length; i += 1) {
+        const candidate = candidates[i];
+        if (!candidate || !candidate.isConnected || candidate.dataset.mwRevealed === 'true') continue;
+        if (!fallback) fallback = candidate;
+        if (!normalizedSrc) continue;
+        const srcFields = getDiagSourceFields(candidate);
+        const candidateCurrentSrc = normalizeUrl(srcFields.currentSrc || '');
+        const candidatePoster = normalizeUrl(srcFields.poster || '');
+        const attrSrc = normalizeUrl((candidate.getAttribute && candidate.getAttribute('src')) || '');
+        const attrPoster = normalizeUrl((candidate.getAttribute && candidate.getAttribute('poster')) || '');
+        if (
+          candidateCurrentSrc === normalizedSrc ||
+          candidatePoster === normalizedSrc ||
+          attrSrc === normalizedSrc ||
+          attrPoster === normalizedSrc
+        ) {
+          return candidate;
+        }
+      }
+      if (fallback) return fallback;
+    }
+    return null;
+  }
+
   function getDiagNodeId(node) {
     if (!node || node.nodeType !== 1) return 'n/a';
     const existing = diagNodeIds.get(node);
@@ -1239,6 +1335,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   function diagScanRunLog(fnName, element, src, queued, extra) {
     if (!DIAG_YT_BLUR) return;
     if (!element || element.nodeType !== 1) return;
+    const normalizedSrc = normalizeUrl(src || '');
     console.log(
       '[MW-YT][DIAG][SCAN]',
       'fn=' + fnName,
@@ -1247,6 +1344,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       'hint=' + describeElementHint(element),
       'connected=' + (!!element.isConnected),
       'queued=' + (queued === true),
+      'scanned=' + (normalizedSrc ? state.scanned.has(normalizedSrc) : false),
       'src=' + String(src || '').substring(0, 160),
       extra || ''
     );
@@ -1263,6 +1361,148 @@ export function generateModerationScript(config: InjectionConfig): string {
       'hint=' + describeElementHint(element),
       'connected=' + (!!element.isConnected),
       'src=' + String(src || '').substring(0, 160),
+      extra || ''
+    );
+  }
+
+  function findRevealOverlayForElement(node, src) {
+    if (!node || node.nodeType !== 1) return null;
+    const nodeId = getDiagNodeId(node);
+    const shortsMode = isShortsModeActive();
+    const parents = [];
+    if (node.parentElement) {
+      parents.push(node.parentElement);
+    }
+    const baseline = diagNodeParentAtBlur.get(node);
+    if (baseline && baseline.parent && baseline.parent.nodeType === 1 && parents.indexOf(baseline.parent) === -1) {
+      parents.push(baseline.parent);
+    }
+    for (let p = 0; p < parents.length; p += 1) {
+      const parent = parents[p];
+      if (!parent || typeof parent.querySelectorAll !== 'function') continue;
+      const overlays = parent.querySelectorAll('.mw-reveal-overlay');
+      for (let i = 0; i < overlays.length; i += 1) {
+        const overlay = overlays[i];
+        if (!overlay || !overlay.isConnected) continue;
+        if (overlay.dataset.mwNodeId === nodeId) return overlay;
+        if (!shortsMode && src && overlay.dataset.mwFor === src) return overlay;
+      }
+    }
+    return null;
+  }
+
+  function getDiagOverlayState(node) {
+    if (!node || node.nodeType !== 1) {
+      return { hasOverlayFlag: false, overlayAttached: false, overlayVisible: false };
+    }
+    const overlay = findRevealOverlayForElement(node, node.dataset ? node.dataset.mwSrc || '' : '');
+    return {
+      hasOverlayFlag: node.dataset.mwHasOverlay === 'true',
+      overlayAttached: !!(overlay && overlay.isConnected),
+      overlayVisible: !!(overlay && overlay.style.display !== 'none'),
+    };
+  }
+
+  function removeRevealOverlay(node, src, reason) {
+    if (!node || node.nodeType !== 1) return false;
+    const overlay = findRevealOverlayForElement(node, src || node.dataset.mwSrc || '');
+    if (overlay && overlay.parentElement) {
+      overlay.parentElement.removeChild(overlay);
+      if (DIAG_YT_BLUR) {
+        console.log(
+          '[MW-YT][DIAG][OVERLAY]',
+          'action=remove',
+          'reason=' + (reason || 'unknown'),
+          'nodeId=' + getDiagNodeId(node),
+          'overlayNodeId=' + (overlay.dataset.mwNodeId || 'n/a')
+        );
+      }
+      node.dataset.mwHasOverlay = 'false';
+      return true;
+    }
+    node.dataset.mwHasOverlay = 'false';
+    return false;
+  }
+
+  function diagBlurStateLog(action, element, src, extra) {
+    if (!DIAG_YT_BLUR) return;
+    if (!element || element.nodeType !== 1) return;
+    const overlayState = getDiagOverlayState(element);
+    const normalizedSrc = normalizeUrl(src || element.dataset.mwSrc || '');
+    console.log(
+      '[MW-YT][DIAG][BLUR]',
+      'action=' + action,
+      'nodeId=' + getDiagNodeId(element),
+      'tag=' + (element.tagName || 'unknown'),
+      'src=' + String(src || '').substring(0, 160),
+      'normalizedSrc=' + String(normalizedSrc || '').substring(0, 160),
+      'scanned=' + (normalizedSrc ? state.scanned.has(normalizedSrc) : false),
+      'moderated=' + (element.dataset.mwModerated || ''),
+      'hasOverlayFlag=' + overlayState.hasOverlayFlag,
+      'overlayAttached=' + overlayState.overlayAttached,
+      'overlayVisible=' + overlayState.overlayVisible,
+      'filter=' + String(element.style.getPropertyValue('filter') || element.style.filter || '').substring(0, 80),
+      'webkit=' + String(element.style.getPropertyValue('-webkit-filter') || '').substring(0, 80),
+      'backdrop=' + String(element.style.getPropertyValue('backdrop-filter') || '').substring(0, 80),
+      extra || ''
+    );
+  }
+
+  function diagShortsBlurStackLog(action, element, src, extra) {
+    if (!DIAG_YT_BLUR || !isShortsModeActive()) return;
+    if (!element || element.nodeType !== 1) return;
+    let computedFilter = '';
+    let computedOpacity = '';
+    try {
+      const computed = window.getComputedStyle(element);
+      computedFilter = computed ? computed.filter || '' : '';
+      computedOpacity = computed ? computed.opacity || '' : '';
+    } catch (e) {}
+    console.log(
+      '[MW-YT][DIAG][BLUR_STACK]',
+      'action=' + action,
+      'nodeId=' + getDiagNodeId(element),
+      'tag=' + (element.tagName || 'unknown'),
+      'src=' + String(src || '').substring(0, 160),
+      'computedFilter=' + String(computedFilter || '').substring(0, 120),
+      'computedOpacity=' + String(computedOpacity || '').substring(0, 40),
+      'inlineFilter=' + String(element.style.getPropertyValue('filter') || element.style.filter || '').substring(0, 120),
+      'inlineBackdrop=' + String(element.style.getPropertyValue('backdrop-filter') || '').substring(0, 120),
+      extra || ''
+    );
+  }
+
+  function diagMutationScheduleLog(action, node, reason, queued) {
+    if (!DIAG_YT_BLUR) return;
+    if (!node || node.nodeType !== 1) return;
+    const source = getDiagSourceFields(node);
+    console.log(
+      '[MW-YT][DIAG][MUT_SCHED]',
+      'action=' + action,
+      'reason=' + (reason || 'unknown'),
+      'nodeId=' + getDiagNodeId(node),
+      'tag=' + (node.tagName || 'unknown'),
+      'queued=' + (queued === true),
+      'queueSize=' + mutationScanQueue.length,
+      'currentSrc=' + String(source.currentSrc || '').substring(0, 160),
+      'poster=' + String(source.poster || '').substring(0, 160)
+    );
+  }
+
+  function diagFailCaseLog(caseId, element, src, extra) {
+    if (!DIAG_YT_BLUR) return;
+    if (!element || element.nodeType !== 1) return;
+    const overlayState = getDiagOverlayState(element);
+    const normalizedSrc = normalizeUrl(src || element.dataset.mwSrc || '');
+    console.warn(
+      '[MW-YT][DIAG][CASE]',
+      'case=' + caseId,
+      'nodeId=' + getDiagNodeId(element),
+      'tag=' + (element.tagName || 'unknown'),
+      'src=' + String(src || '').substring(0, 160),
+      'normalizedSrc=' + String(normalizedSrc || '').substring(0, 160),
+      'scanned=' + (normalizedSrc ? state.scanned.has(normalizedSrc) : false),
+      'overlayAttached=' + overlayState.overlayAttached,
       extra || ''
     );
   }
@@ -1360,7 +1600,51 @@ export function generateModerationScript(config: InjectionConfig): string {
    * Apply soft blur (semantic delay) - light blur while waiting for result
    * After CONFIG.semanticDelayMs, if no result, keep soft blur only
    */
+  function clearAllBlurAndOverlay(element, src, reason, nextModeratedState) {
+    if (!element || element.nodeType !== 1) return false;
+    let changed = false;
+    try {
+      const beforeFilter = String(element.style.getPropertyValue('filter') || element.style.filter || '').toLowerCase();
+      const beforeWebkit = String(element.style.getPropertyValue('-webkit-filter') || '').toLowerCase();
+      const beforeBackdrop = String(element.style.getPropertyValue('backdrop-filter') || '').toLowerCase();
+      const beforeWebkitBackdrop = String(element.style.getPropertyValue('-webkit-backdrop-filter') || '').toLowerCase();
+      if (
+        beforeFilter.includes('blur(') ||
+        beforeWebkit.includes('blur(') ||
+        beforeBackdrop.includes('blur(') ||
+        beforeWebkitBackdrop.includes('blur(')
+      ) {
+        changed = true;
+      }
+      if (
+        element.classList.contains('mw-softblur') ||
+        element.classList.contains('mw-blurred') ||
+        element.dataset.mwModerated === 'blurred' ||
+        element.dataset.mwModerated === 'softblur' ||
+        element.dataset.mwHasOverlay === 'true'
+      ) {
+        changed = true;
+      }
+      element.style.removeProperty('filter');
+      element.style.removeProperty('-webkit-filter');
+      element.style.removeProperty('backdrop-filter');
+      element.style.removeProperty('-webkit-backdrop-filter');
+      element.style.removeProperty('opacity');
+      element.classList.remove('mw-softblur');
+      element.classList.remove('mw-blurred');
+      const removedOverlay = removeRevealOverlay(element, src || element.dataset.mwSrc || '', reason || 'clear_all');
+      if (removedOverlay) changed = true;
+      element.dataset.mwHasOverlay = 'false';
+      if (nextModeratedState) {
+        element.dataset.mwModerated = nextModeratedState;
+      }
+      element.dataset.mwPreblurClear = 'true';
+    } catch (e) {}
+    return changed;
+  }
+
   function applySoftBlur(element, src, itemId) {
+    diagBlurStateLog('applySoftBlur.enter', element, src, 'itemId=' + (itemId || 'none'));
     // Check persistence: if user revealed this, don't blur
     if (state.revealed.has(src)) {
       diagSoftBlurLog('apply_skip', element, src, 'reason=revealed_set itemId=' + (itemId || 'none'));
@@ -1380,6 +1664,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     
     try {
+      if (isShortsModeActive()) {
+        removeRevealOverlay(element, src, 'applySoftBlur_preclear_overlay');
+      }
       element.style.filter = 'blur(' + CONFIG.softBlurStrength + 'px)';
       element.style.transition = 'filter 0.2s ease';
       element.dataset.mwModerated = 'softblur';
@@ -1392,6 +1679,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         src,
         'itemId=' + (itemId || 'none') + ' state=' + (element.dataset.mwModerated || 'none')
       );
+      diagBlurStateLog('applySoftBlur.applied', element, src, 'itemId=' + (itemId || 'none'));
       
       if (CONFIG.debug) {
         console.log('[MW] soft blur applied:', src.substring(0, 50));
@@ -1405,10 +1693,13 @@ export function generateModerationScript(config: InjectionConfig): string {
   function removeSoftBlur(element, src) {
     let removed = false;
     try {
+      diagBlurStateLog('removeSoftBlur.enter', element, src, '');
       const beforeState = element.dataset.mwModerated || '';
       const beforeFilter = element.style.getPropertyValue('filter') || element.style.filter || '';
       const beforeHasBlur = beforeFilter.toLowerCase().includes('blur(');
-      if (element.dataset.mwModerated === 'softblur' || element.classList.contains('mw-softblur')) {
+      if (isShortsModeActive()) {
+        removed = clearAllBlurAndOverlay(element, src, 'removeSoftBlur_safe', 'safe');
+      } else if (element.dataset.mwModerated === 'softblur' || element.classList.contains('mw-softblur')) {
         element.style.filter = 'none';
         element.dataset.mwModerated = 'safe';
         element.classList.remove('mw-softblur');
@@ -1416,9 +1707,12 @@ export function generateModerationScript(config: InjectionConfig): string {
         element.dataset.mwPreblurClear = 'true';
         removed = true;
         
-        if (CONFIG.debug) {
-          console.log('[MW] soft blur removed (safe):', src.substring(0, 50));
-        }
+      if (CONFIG.debug) {
+        console.log('[MW] soft blur removed (safe):', src.substring(0, 50));
+      }
+      }
+      if (isShortsModeActive() && element.dataset.mwModerated !== 'blurred') {
+        removeRevealOverlay(element, src, 'removeSoftBlur_safe');
       }
       console.log(
         '[MW][JSBlur][AutoRemoveCheck]',
@@ -1429,6 +1723,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         'afterFilter=' + (element.style.getPropertyValue('filter') || element.style.filter || ''),
         'removed=' + removed
       );
+      diagBlurStateLog('removeSoftBlur.exit', element, src, 'removed=' + removed + ' beforeState=' + beforeState);
     } catch (e) {}
     return removed;
   }
@@ -1533,12 +1828,48 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (state.revealed.has(src)) return;
     if (element.dataset.mwRevealed === 'true') return;
     
+    const shortsMode = isShortsModeActive();
+    if (shortsMode) {
+      const tag = String(element.tagName || '').toUpperCase();
+      if (tag !== 'IMG' && tag !== 'VIDEO') {
+        const resolvedTarget = resolveShortsOverlayTarget(element, src);
+        if (resolvedTarget && resolvedTarget !== element && resolvedTarget.isConnected) {
+          element = resolvedTarget;
+        }
+      }
+      const alreadyFilter = String(element.style.getPropertyValue('filter') || element.style.filter || '').toLowerCase();
+      const alreadyBackdrop = String(element.style.getPropertyValue('backdrop-filter') || '').toLowerCase();
+      const alreadyHardBlurred =
+        element.dataset.mwModerated === 'blurred' &&
+        (alreadyFilter.includes('blur(') || alreadyBackdrop.includes('blur('));
+      if (alreadyHardBlurred) {
+        if (!findRevealOverlayForElement(element, src) && element.isConnected) {
+          createRevealOverlay(element, src, category, itemId, false);
+        }
+        return;
+      }
+    }
     const desiredBlur = blurStrengthPx || CONFIG.blurStrength || 30;
     const blurPx = IS_YOUTUBE ? 40 : Math.min(desiredBlur, 20);
     
     try {
+      diagBlurStateLog(
+        'applyBlur.enter',
+        element,
+        src,
+        'itemId=' + (itemId || 'N/A') + ' category=' + (category || 'flagged')
+      );
       diagNodeParentAtBlur.set(element, { parent: element.parentElement || null });
       diagNodeLifecycleLog('applyBlur', element, 'src=' + String(src || '').substring(0, 120));
+      if (shortsMode) {
+        diagShortsBlurStackLog('hard_before_clear', element, src, 'itemId=' + (itemId || 'N/A'));
+        element.classList.remove('mw-softblur');
+        element.style.removeProperty('filter');
+        element.style.removeProperty('-webkit-filter');
+        element.style.removeProperty('backdrop-filter');
+        element.style.removeProperty('-webkit-backdrop-filter');
+        diagShortsBlurStackLog('hard_after_clear', element, src, 'itemId=' + (itemId || 'N/A'));
+      }
       // Force blur with !important for iOS WebKit
       element.style.setProperty('filter', 'blur(' + blurPx + 'px)', 'important');
       element.style.setProperty('-webkit-filter', 'blur(' + blurPx + 'px)', 'important');
@@ -1556,6 +1887,12 @@ export function generateModerationScript(config: InjectionConfig): string {
       state.stats.blurred++;
       
       createRevealOverlay(element, src, category, itemId);
+      if (shortsMode && element.isConnected && !findRevealOverlayForElement(element, src)) {
+        createRevealOverlay(element, src, category, itemId, false);
+      }
+      if (shortsMode) {
+        diagShortsBlurStackLog('hard_after_apply', element, src, 'itemId=' + (itemId || 'N/A'));
+      }
       const appliedFilter = element.style.getPropertyValue('filter') || element.style.filter || '';
       const filterPriority = element.style.getPropertyPriority('filter') || 'none';
       console.log(
@@ -1565,6 +1902,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         'filter=' + appliedFilter,
         'priority=' + filterPriority
       );
+      diagBlurStateLog('applyBlur.exit', element, src, 'itemId=' + (itemId || 'N/A') + ' category=' + (category || 'flagged'));
       console.log('[MW] applied blur [' + category + '] itemId=' + (itemId || 'N/A') + ':', src.substring(0, 60));
     } catch (e) {
       console.error('[MW] Failed to apply blur:', e.message);
@@ -1574,7 +1912,8 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function removeBlur(element, src) {
     try {
-      const overlay = element.parentElement?.querySelector('.mw-reveal-overlay');
+      diagBlurStateLog('removeBlur.enter', element, src, '');
+      const overlay = findRevealOverlayForElement(element, src);
       diagNodeLifecycleLog(
         'removeBlur',
         element,
@@ -1582,19 +1921,26 @@ export function generateModerationScript(config: InjectionConfig): string {
         ' overlayFound=' + (!!overlay) +
         ' overlayConnected=' + (!!overlay?.isConnected)
       );
-      element.style.filter = 'none';
-      element.dataset.mwModerated = 'revealed';
+      if (isShortsModeActive()) {
+        clearAllBlurAndOverlay(element, src, 'removeBlur_reveal', 'revealed');
+      } else {
+        element.style.filter = 'none';
+        element.dataset.mwModerated = 'revealed';
+        element.dataset.mwPreblurClear = 'true';
+        element.classList.remove('mw-softblur');
+      }
       element.dataset.mwRevealed = 'true'; // Persistence marker
-      element.dataset.mwPreblurClear = 'true';
-      element.classList.remove('mw-softblur');
       
       // Add to revealed set for persistence
       state.revealed.add(src);
       
-      if (overlay) {
+      if (isShortsModeActive()) {
+        removeRevealOverlay(element, src, 'removeBlur_reveal');
+      } else if (overlay) {
         overlay.style.display = 'none';
       }
       
+      diagBlurStateLog('removeBlur.exit', element, src, 'overlayFound=' + (!!overlay));
       console.log('[MW] blur removed:', src.substring(0, 60));
     } catch (e) {}
   }
@@ -1602,34 +1948,135 @@ export function generateModerationScript(config: InjectionConfig): string {
   function clearElementBlur(element) {
     if (!element) return;
     try {
-      const overlay = element.parentElement?.querySelector('.mw-reveal-overlay');
+      diagBlurStateLog('clearElementBlur.enter', element, element.dataset.mwSrc || '', '');
+      const overlay = findRevealOverlayForElement(element, element.dataset.mwSrc || '');
       diagNodeLifecycleLog(
         'clearElementBlur',
         element,
         'overlayFound=' + (!!overlay) +
         ' overlayConnected=' + (!!overlay?.isConnected)
       );
-      element.style.filter = 'none';
-      element.dataset.mwModerated = 'safe';
+      if (isShortsModeActive()) {
+        clearAllBlurAndOverlay(element, element.dataset.mwSrc || '', 'clearElementBlur_safe', 'safe');
+      } else {
+        element.style.filter = 'none';
+        element.dataset.mwModerated = 'safe';
+      }
       element.dataset.mwRevealed = 'false';
       element.dataset.mwPreblurClear = 'true';
       element.classList.remove('mw-softblur');
       element.classList.remove('mw-blurred');
-      if (overlay) {
+      if (isShortsModeActive()) {
+        removeRevealOverlay(element, element.dataset.mwSrc || '', 'clearElementBlur_safe');
+      } else if (overlay) {
         overlay.style.display = 'none';
       }
+      diagBlurStateLog('clearElementBlur.exit', element, element.dataset.mwSrc || '', 'overlayFound=' + (!!overlay));
     } catch (e) {}
   }
 
-  function createRevealOverlay(element, src, category, itemId) {
+  function createRevealOverlay(element, src, category, itemId, allowShortsReresolve) {
+    const shortsMode = isShortsModeActive();
+    const allowReresolve = shortsMode && allowShortsReresolve !== false;
+    if (shortsMode) {
+      const tag = String(element.tagName || '').toUpperCase();
+      if (tag !== 'IMG' && tag !== 'VIDEO') {
+        const mediaTarget = resolveShortsOverlayTarget(element, src);
+        if (mediaTarget && mediaTarget !== element && mediaTarget.isConnected) {
+          createRevealOverlay(mediaTarget, src, category, itemId, false);
+          return;
+        }
+        return;
+      }
+    }
+    const attemptShortsReresolve = function(reason) {
+      if (!allowReresolve) return false;
+      const resolvedTarget = resolveShortsOverlayTarget(element, src);
+      if (!resolvedTarget || resolvedTarget === element || !resolvedTarget.isConnected) return false;
+      if (DIAG_YT_BLUR) {
+        console.log(
+          '[MW-YT][DIAG][OVERLAY]',
+          'action=reresolve_target',
+          'reason=' + (reason || 'unknown'),
+          'fromNodeId=' + getDiagNodeId(element),
+          'toNodeId=' + getDiagNodeId(resolvedTarget),
+          'src=' + String(src || '').substring(0, 120)
+        );
+      }
+      if (resolvedTarget.dataset.mwModerated !== 'blurred') {
+        const desiredBlur = CONFIG.blurStrength || 30;
+        const resolvedBlurPx = IS_YOUTUBE ? 40 : Math.min(desiredBlur, 20);
+        diagShortsBlurStackLog('overlay_reresolve_before_clear', resolvedTarget, src, 'reason=' + (reason || 'unknown'));
+        resolvedTarget.classList.remove('mw-softblur');
+        resolvedTarget.style.removeProperty('filter');
+        resolvedTarget.style.removeProperty('-webkit-filter');
+        resolvedTarget.style.removeProperty('backdrop-filter');
+        resolvedTarget.style.removeProperty('-webkit-backdrop-filter');
+        diagShortsBlurStackLog('overlay_reresolve_after_clear', resolvedTarget, src, 'reason=' + (reason || 'unknown'));
+        resolvedTarget.style.setProperty('filter', 'blur(' + resolvedBlurPx + 'px)', 'important');
+        resolvedTarget.style.setProperty('-webkit-filter', 'blur(' + resolvedBlurPx + 'px)', 'important');
+        resolvedTarget.style.setProperty('backdrop-filter', 'blur(' + resolvedBlurPx + 'px)', 'important');
+        resolvedTarget.style.setProperty('-webkit-backdrop-filter', 'blur(' + resolvedBlurPx + 'px)', 'important');
+        resolvedTarget.style.transition = 'filter 0.3s ease';
+        resolvedTarget.dataset.mwModerated = 'blurred';
+        resolvedTarget.dataset.mwCategory = category || 'flagged';
+        resolvedTarget.dataset.mwSrc = src;
+        resolvedTarget.dataset.mwItemId = itemId || '';
+        resolvedTarget.classList.add('mw-blurred');
+        diagNodeParentAtBlur.set(resolvedTarget, { parent: resolvedTarget.parentElement || null });
+        diagShortsBlurStackLog('overlay_reresolve_after_apply', resolvedTarget, src, 'reason=' + (reason || 'unknown'));
+      }
+      createRevealOverlay(resolvedTarget, src, category, itemId, false);
+      return true;
+    };
+    diagBlurStateLog(
+      'createRevealOverlay.enter',
+      element,
+      src,
+      'itemId=' + (itemId || 'N/A') + ' category=' + (category || 'flagged')
+    );
     diagNodeLifecycleLog(
       'createRevealOverlay.enter',
       element,
       'src=' + String(src || '').substring(0, 120) +
       ' hasOverlay=' + (element.dataset.mwHasOverlay === 'true')
     );
-    if (element.dataset.mwHasOverlay === 'true') return;
+    if (shortsMode && element.dataset.mwModerated !== 'blurred') {
+      removeRevealOverlay(element, src, 'createRevealOverlay_not_blurred');
+      if (DIAG_YT_BLUR) {
+        diagFailCaseLog(
+          'overlay_without_blurred_state',
+          element,
+          src,
+          'mwModerated=' + (element.dataset.mwModerated || 'none')
+        );
+      }
+      return;
+    }
+    if (DIAG_YT_BLUR && element.dataset.mwModerated !== 'blurred') {
+      diagFailCaseLog(
+        'overlay_without_blurred_state',
+        element,
+        src,
+        'mwModerated=' + (element.dataset.mwModerated || 'none')
+      );
+    }
+    const existingOverlay = findRevealOverlayForElement(element, src);
+    if (existingOverlay) {
+      element.dataset.mwHasOverlay = 'true';
+      if (shortsMode && element.dataset.mwModerated !== 'blurred') {
+        removeRevealOverlay(element, src, 'createRevealOverlay_existing_not_blurred');
+        return;
+      }
+      existingOverlay.style.pointerEvents = 'none';
+      existingOverlay.style.display = 'flex';
+      return;
+    }
+    if (element.dataset.mwHasOverlay === 'true') {
+      element.dataset.mwHasOverlay = 'false';
+    }
     if (!element.isConnected) {
+      if (attemptShortsReresolve('disconnected')) return;
       diagNodeLifecycleLog('createRevealOverlay.skip_disconnected', element, '');
       diagLog(
         'overlay-disconnected',
@@ -1642,6 +2089,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     const parent = element.parentElement;
     if (!parent) {
+      if (attemptShortsReresolve('missing_parent')) return;
       diagNodeLifecycleLog('createRevealOverlay.skip_no_parent', element, '');
       diagLog(
         'overlay-no-parent',
@@ -1661,6 +2109,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     const overlay = document.createElement('div');
     overlay.className = 'mw-reveal-overlay';
     overlay.dataset.mwFor = src;
+    overlay.dataset.mwNodeId = getDiagNodeId(element);
     overlay.style.cssText = [
       'position: absolute',
       'inset: 0',
@@ -1669,7 +2118,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       'justify-content: center',
       'background: rgba(0, 0, 0, 0.3)',
       'z-index: 9998',
-      'cursor: pointer',
+      'cursor: default',
+      'pointer-events: none',
     ].join(';');
     
     const badge = document.createElement('span');
@@ -1683,6 +2133,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       'border-radius: 4px',
       'font-size: 10px',
       'font-weight: bold',
+      'pointer-events: none',
     ].join(';');
     badge.textContent = (category || 'flagged').toUpperCase();
     overlay.appendChild(badge);
@@ -1699,6 +2150,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       'cursor: pointer',
       'font-size: 14px',
       'font-weight: bold',
+      'pointer-events: auto',
     ].join(';');
     
     btn.addEventListener('click', function(e) {
@@ -1775,6 +2227,12 @@ export function generateModerationScript(config: InjectionConfig): string {
     overlay.appendChild(btn);
     parent.appendChild(overlay);
     element.dataset.mwHasOverlay = 'true';
+    diagBlurStateLog(
+      'createRevealOverlay.exit',
+      element,
+      src,
+      'itemId=' + (itemId || 'N/A') + ' category=' + (category || 'flagged')
+    );
     diagNodeLifecycleLog(
       'createRevealOverlay.attached_target',
       element,
@@ -2384,6 +2842,12 @@ export function generateModerationScript(config: InjectionConfig): string {
       // Images
       document.querySelectorAll('img').forEach(img => {
         if ((img.src === src || img.dataset.mwOrigSrc === src) && !state.revealed.has(src)) {
+          if (img.dataset.mwModerated === 'blurred' && img.dataset.mwRevealed !== 'true' && isShortsModeActive()) {
+            if (!findRevealOverlayForElement(img, src) && img.isConnected) {
+              createRevealOverlay(img, src, category);
+            }
+            return;
+          }
           if (img.dataset.mwModerated !== 'blurred' && img.dataset.mwRevealed !== 'true') {
             applyBlur(img, src, category, blurStrengthPx);
           }
@@ -2393,6 +2857,12 @@ export function generateModerationScript(config: InjectionConfig): string {
       // Video posters
       document.querySelectorAll('video').forEach(video => {
         if ((video.poster === src || video.dataset.mwOrigPoster === src) && !state.revealed.has(src)) {
+          if (video.dataset.mwModerated === 'blurred' && video.dataset.mwRevealed !== 'true' && isShortsModeActive()) {
+            if (!findRevealOverlayForElement(video, src) && video.isConnected) {
+              createRevealOverlay(video, src, category);
+            }
+            return;
+          }
           if (video.dataset.mwModerated !== 'blurred' && video.dataset.mwRevealed !== 'true') {
             applyBlur(video, src, category, blurStrengthPx);
           }
@@ -2402,6 +2872,12 @@ export function generateModerationScript(config: InjectionConfig): string {
       // Background images
       document.querySelectorAll('[data-mw-bg-src]').forEach(el => {
         if (el.dataset.mwBgSrc === src && !state.revealed.has(src)) {
+          if (el.dataset.mwModerated === 'blurred' && el.dataset.mwRevealed !== 'true' && isShortsModeActive()) {
+            if (!findRevealOverlayForElement(el, src) && el.isConnected) {
+              createRevealOverlay(el, src, category);
+            }
+            return;
+          }
           if (el.dataset.mwModerated !== 'blurred' && el.dataset.mwRevealed !== 'true') {
             applyBlur(el, src, category, blurStrengthPx);
           }
@@ -2417,31 +2893,81 @@ export function generateModerationScript(config: InjectionConfig): string {
     try {
       let attempts = 0;
       let removedCount = 0;
+      let overlayAttachedCount = 0;
+      let overlayAttachedWithoutRemovalCount = 0;
       document.querySelectorAll('[data-mw-src="' + src + '"]').forEach(el => {
         attempts += 1;
+        const overlayState = getDiagOverlayState(el);
+        if (overlayState.overlayAttached) overlayAttachedCount += 1;
         const removed = removeSoftBlur(el, src);
         if (removed) removedCount += 1;
+        if (!removed && overlayState.overlayAttached) {
+          overlayAttachedWithoutRemovalCount += 1;
+        }
         diagSoftBlurLog(
           'find_remove_candidate',
           el,
           src,
-          'via=data-mw-src removed=' + removed
+          'via=data-mw-src removed=' + removed + ' overlayAttached=' + overlayState.overlayAttached
         );
       });
       
       document.querySelectorAll('img').forEach(img => {
         if (img.src === src || img.dataset.mwOrigSrc === src) {
           attempts += 1;
+          const overlayState = getDiagOverlayState(img);
+          if (overlayState.overlayAttached) overlayAttachedCount += 1;
           const removed = removeSoftBlur(img, src);
           if (removed) removedCount += 1;
+          if (!removed && overlayState.overlayAttached) {
+            overlayAttachedWithoutRemovalCount += 1;
+          }
           diagSoftBlurLog(
             'find_remove_candidate',
             img,
             src,
-            'via=img_match removed=' + removed
+            'via=img_match removed=' + removed + ' overlayAttached=' + overlayState.overlayAttached
           );
         }
       });
+      if (isShortsModeActive()) {
+        document.querySelectorAll('video').forEach(video => {
+          if (video.poster === src || video.dataset.mwOrigPoster === src || video.dataset.mwSrc === src) {
+            attempts += 1;
+            const overlayState = getDiagOverlayState(video);
+            if (overlayState.overlayAttached) overlayAttachedCount += 1;
+            const removed = removeSoftBlur(video, src);
+            if (removed) removedCount += 1;
+            if (!removed && overlayState.overlayAttached) {
+              overlayAttachedWithoutRemovalCount += 1;
+            }
+            diagSoftBlurLog(
+              'find_remove_candidate',
+              video,
+              src,
+              'via=video_match removed=' + removed + ' overlayAttached=' + overlayState.overlayAttached
+            );
+          }
+        });
+        document.querySelectorAll('[data-mw-bg-src]').forEach(el => {
+          if (el.dataset.mwBgSrc === src) {
+            attempts += 1;
+            const overlayState = getDiagOverlayState(el);
+            if (overlayState.overlayAttached) overlayAttachedCount += 1;
+            const removed = removeSoftBlur(el, src);
+            if (removed) removedCount += 1;
+            if (!removed && overlayState.overlayAttached) {
+              overlayAttachedWithoutRemovalCount += 1;
+            }
+            diagSoftBlurLog(
+              'find_remove_candidate',
+              el,
+              src,
+              'via=bg_match removed=' + removed + ' overlayAttached=' + overlayState.overlayAttached
+            );
+          }
+        });
+      }
       if (DIAG_YT_BLUR) {
         let videoMatches = 0;
         let bgMatches = 0;
@@ -2461,6 +2987,8 @@ export function generateModerationScript(config: InjectionConfig): string {
           'src=' + String(src || '').substring(0, 160),
           'attempts=' + attempts,
           'removed=' + removedCount,
+          'overlayAttached=' + overlayAttachedCount,
+          'overlayAttachedWithoutRemoval=' + overlayAttachedWithoutRemovalCount,
           'videoMatches=' + videoMatches,
           'bgMatches=' + bgMatches
         );
@@ -2614,7 +3142,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           const element = entry.target;
           if (element.dataset.mwViewportQueued !== 'true') {
             element.dataset.mwViewportQueued = 'true';
-            queueMutationScan(element);
+            queueMutationScan(element, 'viewport_intersection');
           }
         }
       });
@@ -2682,6 +3210,15 @@ export function generateModerationScript(config: InjectionConfig): string {
     
     if (!poster) {
       diagScanRunLog('scanVideoPoster', video, '', false, 'reason=no_poster');
+      if (isShortsModeActive()) {
+        const source = getDiagSourceFields(video);
+        diagFailCaseLog(
+          'video_without_poster_not_scanned',
+          video,
+          source.currentSrc || '',
+          'posterMissing=true'
+        );
+      }
       return;
     }
     if (video.dataset.mwPosterScanned === 'true' && video.dataset.mwLastPoster === poster) {
@@ -2847,6 +3384,32 @@ export function generateModerationScript(config: InjectionConfig): string {
     });
   }
 
+  function scanActiveShortsPlayerContainer(reason) {
+    if (!isShortsModeActive()) return false;
+    const container = getActiveShortsPlayerContainer();
+    if (!container || !container.isConnected) {
+      if (DIAG_YT_BLUR) {
+        console.log(
+          '[MW-YT][DIAG][SHORTS_TARGET]',
+          'action=scan_skip_no_container',
+          'reason=' + (reason || 'unknown')
+        );
+      }
+      return false;
+    }
+    if (DIAG_YT_BLUR) {
+      console.log(
+        '[MW-YT][DIAG][SHORTS_TARGET]',
+        'action=scan_container',
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + getDiagNodeId(container),
+        'tag=' + (container.tagName || 'unknown')
+      );
+    }
+    scanNode(container);
+    return true;
+  }
+
   function scheduleYouTubeScan(reason) {
     if (!isShortsModeActive()) return;
     if (timerState.paused || timerState.teardownDone) return;
@@ -2861,14 +3424,24 @@ export function generateModerationScript(config: InjectionConfig): string {
           'url=' + window.location.href
         );
       }
-      scanYouTubeThumbnails();
+      const allowHeavySweep = allowShortsHeavyScanSweep('scheduleYouTubeScan:' + (reason || 'mutation'));
+      scanActiveShortsPlayerContainer('scheduled:' + (reason || 'mutation'));
+      if (allowHeavySweep) {
+        scanYouTubeThumbnails();
+      } else if (DIAG_YT_BLUR) {
+        console.log(
+          '[MW-YT][DIAG][MUT_ATTR]',
+          'action=skip_heavy_thumbnail_sweep',
+          'reason=' + (reason || 'mutation')
+        );
+      }
     }, 120);
     timerLog('start', 'youtubeMutationScanTimeout:' + (reason || 'mutation'));
   }
 
   function setupMutationObserver(root) {
     const shortsAttrMode = isShortsModeActive();
-    const attributeFilter = ['src', 'srcset', 'poster', 'data-src', 'data-lazy-src'];
+    const attributeFilter = ['src', 'srcset', 'poster', 'data-src', 'data-lazy-src', 'style'];
     const observer = new MutationObserver(mutations => {
       if (timerState.paused) return;
       if (!CONFIG.enabled || CONFIG.sensitivity === 0) return;
@@ -2899,7 +3472,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           
           // Add to viewport observer for lazy scanning
           observeForViewport(node);
-          queueMutationScan(node);
+          queueMutationScan(node, 'mutation_added');
         });
         
         if (mutation.type === 'attributes') {
@@ -2920,14 +3493,30 @@ export function generateModerationScript(config: InjectionConfig): string {
               'poster=' + String(srcFields.poster || '').substring(0, 160)
             );
           }
-          if (
+          const shouldQueueAttrScan = (
             attr === 'src' ||
             attr === 'srcset' ||
             attr === 'poster' ||
             attr === 'data-src' ||
-            attr === 'data-lazy-src'
-          ) {
-            queueMutationScan(target);
+            attr === 'data-lazy-src' ||
+            attr === 'style'
+          );
+          if (DIAG_YT_BLUR) {
+            console.log(
+              '[MW-YT][DIAG][MUT_ATTR]',
+              'action=scan_schedule_decision',
+              'attr=' + attr,
+              'nodeId=' + getDiagNodeId(target),
+              'scheduled=' + shouldQueueAttrScan
+            );
+          }
+          if (shouldQueueAttrScan) {
+            queueMutationScan(target, 'attr:' + attr);
+            hasYouTubeChanges = true;
+            const shortsContainer = getShortsCardOrPlayerContainerFromNode(target);
+            if (shortsContainer && shortsContainer !== target) {
+              queueMutationScan(shortsContainer, 'attr_container:' + attr);
+            }
           }
         }
       }
@@ -3165,10 +3754,11 @@ export function generateModerationScript(config: InjectionConfig): string {
         justify-content: center !important;
         background: rgba(0, 0, 0, 0.25) !important;
         z-index: 9998 !important;
-        pointer-events: auto !important;
+        pointer-events: none !important;
       }
       .mw-reveal-btn {
         z-index: 9999 !important;
+        pointer-events: auto !important;
       }
       [data-mw-moderated="blurred"] {
         transition: filter 0.3s ease !important;
