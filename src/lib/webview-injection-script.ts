@@ -849,6 +849,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     mainScrollHandler: null,
     youtubeScrollTimeout: null,
     youtubeScrollHandler: null,
+    youtubeMutationScanTimeout: null,
     debugSummaryInterval: null,
     diagHeartbeatInterval: null,
     initialTimeouts: [],
@@ -869,6 +870,8 @@ export function generateModerationScript(config: InjectionConfig): string {
     scanNode: { sec: 0, count: 0 },
     mutationScan: { sec: 0, count: 0 },
   };
+  const SHORTS_HEAVY_SCAN_THROTTLE_MS = 1500;
+  let shortsHeavyScanLastAt = 0;
   let diagPrevRequests = 0;
   let diagPrevResponses = 0;
   const mutationScanQueue = [];
@@ -904,6 +907,33 @@ export function generateModerationScript(config: InjectionConfig): string {
     clearTimeout(id);
     timerState[key] = null;
     timerLog('stop', key + ':' + reason);
+  }
+
+  function allowShortsHeavyScanSweep(reason) {
+    if (!isShortsModeActive()) return true;
+    const now = Date.now();
+    if ((now - shortsHeavyScanLastAt) < SHORTS_HEAVY_SCAN_THROTTLE_MS) {
+      if (DIAG_YT_BLUR) {
+        console.log(
+          '[MW-YT][DIAG][THROTTLE]',
+          'action=skip_heavy_sweep',
+          'reason=' + (reason || 'unknown'),
+          'sinceMs=' + (now - shortsHeavyScanLastAt),
+          'minMs=' + SHORTS_HEAVY_SCAN_THROTTLE_MS
+        );
+      }
+      return false;
+    }
+    shortsHeavyScanLastAt = now;
+    if (DIAG_YT_BLUR) {
+      console.log(
+        '[MW-YT][DIAG][THROTTLE]',
+        'action=allow_heavy_sweep',
+        'reason=' + (reason || 'unknown'),
+        'at=' + now
+      );
+    }
+    return true;
   }
 
   const SAFE_RESOLVED_MAX = 1500;
@@ -1129,6 +1159,21 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
   }
 
+  function isMobileYouTubeShortsUrl(value) {
+    if (!value) return false;
+    try {
+      var parsed = new URL(value, window.location.href);
+      var host = String(parsed.hostname || '').toLowerCase();
+      return host === 'm.youtube.com' && parsed.pathname.indexOf('/shorts') === 0;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function isShortsModeActive() {
+    return isMobileYouTubeShortsUrl(window.location.href);
+  }
+
   function getDiagNodeId(node) {
     if (!node || node.nodeType !== 1) return 'n/a';
     const existing = diagNodeIds.get(node);
@@ -1187,6 +1232,37 @@ export function generateModerationScript(config: InjectionConfig): string {
       'poster=' + String(source.poster || '').substring(0, 160),
       'connected=' + (!!node.isConnected),
       'parentChanged=' + hasParentChangedSinceBlur(node),
+      extra || ''
+    );
+  }
+
+  function diagScanRunLog(fnName, element, src, queued, extra) {
+    if (!DIAG_YT_BLUR) return;
+    if (!element || element.nodeType !== 1) return;
+    console.log(
+      '[MW-YT][DIAG][SCAN]',
+      'fn=' + fnName,
+      'nodeId=' + getDiagNodeId(element),
+      'tag=' + (element.tagName || 'unknown'),
+      'hint=' + describeElementHint(element),
+      'connected=' + (!!element.isConnected),
+      'queued=' + (queued === true),
+      'src=' + String(src || '').substring(0, 160),
+      extra || ''
+    );
+  }
+
+  function diagSoftBlurLog(action, element, src, extra) {
+    if (!DIAG_YT_BLUR) return;
+    if (!element || element.nodeType !== 1) return;
+    console.log(
+      '[MW-YT][DIAG][SOFTBLUR]',
+      'action=' + action,
+      'nodeId=' + getDiagNodeId(element),
+      'tag=' + (element.tagName || 'unknown'),
+      'hint=' + describeElementHint(element),
+      'connected=' + (!!element.isConnected),
+      'src=' + String(src || '').substring(0, 160),
       extra || ''
     );
   }
@@ -1286,10 +1362,22 @@ export function generateModerationScript(config: InjectionConfig): string {
    */
   function applySoftBlur(element, src, itemId) {
     // Check persistence: if user revealed this, don't blur
-    if (state.revealed.has(src)) return;
-    if (element.dataset.mwRevealed === 'true') return;
-    if (element.dataset.mwModerated === 'blurred') return; // Already hard blurred
-    if (element.dataset.mwPreblurClear === 'true') return; // Already cleared due to prior safe decision
+    if (state.revealed.has(src)) {
+      diagSoftBlurLog('apply_skip', element, src, 'reason=revealed_set itemId=' + (itemId || 'none'));
+      return;
+    }
+    if (element.dataset.mwRevealed === 'true') {
+      diagSoftBlurLog('apply_skip', element, src, 'reason=element_revealed itemId=' + (itemId || 'none'));
+      return;
+    }
+    if (element.dataset.mwModerated === 'blurred') {
+      diagSoftBlurLog('apply_skip', element, src, 'reason=already_blurred itemId=' + (itemId || 'none'));
+      return; // Already hard blurred
+    }
+    if (element.dataset.mwPreblurClear === 'true') {
+      diagSoftBlurLog('apply_skip', element, src, 'reason=preblur_cleared itemId=' + (itemId || 'none'));
+      return; // Already cleared due to prior safe decision
+    }
     
     try {
       element.style.filter = 'blur(' + CONFIG.softBlurStrength + 'px)';
@@ -1298,6 +1386,12 @@ export function generateModerationScript(config: InjectionConfig): string {
       element.dataset.mwSrc = src;
       element.dataset.mwItemId = itemId || '';
       element.classList.add('mw-softblur');
+      diagSoftBlurLog(
+        'apply',
+        element,
+        src,
+        'itemId=' + (itemId || 'none') + ' state=' + (element.dataset.mwModerated || 'none')
+      );
       
       if (CONFIG.debug) {
         console.log('[MW] soft blur applied:', src.substring(0, 50));
@@ -1309,6 +1403,7 @@ export function generateModerationScript(config: InjectionConfig): string {
    * Remove all blur (after safe result)
    */
   function removeSoftBlur(element, src) {
+    let removed = false;
     try {
       const beforeState = element.dataset.mwModerated || '';
       const beforeFilter = element.style.getPropertyValue('filter') || element.style.filter || '';
@@ -1319,6 +1414,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         element.classList.remove('mw-softblur');
         element.dataset.mwPreblurClear = 'true';
         element.dataset.mwPreblurClear = 'true';
+        removed = true;
         
         if (CONFIG.debug) {
           console.log('[MW] soft blur removed (safe):', src.substring(0, 50));
@@ -1330,9 +1426,11 @@ export function generateModerationScript(config: InjectionConfig): string {
         'beforeState=' + beforeState,
         'beforeHasBlur=' + beforeHasBlur,
         'afterState=' + (element.dataset.mwModerated || ''),
-        'afterFilter=' + (element.style.getPropertyValue('filter') || element.style.filter || '')
+        'afterFilter=' + (element.style.getPropertyValue('filter') || element.style.filter || ''),
+        'removed=' + removed
       );
     } catch (e) {}
+    return removed;
   }
 
   // Marks elements that had pre-scan blur so we don't reapply soft blur on requeue.
@@ -1825,6 +1923,33 @@ export function generateModerationScript(config: InjectionConfig): string {
     postToHost(message);
   }
 
+  function cleanupRejectedOrTimedOutRequest(requestId, reason) {
+    if (!isShortsModeActive()) return;
+    const pendingRequest = state.pendingRequests.get(requestId);
+    if (!pendingRequest || !Array.isArray(pendingRequest.items)) return;
+    let cleanedElements = 0;
+    pendingRequest.items.forEach(item => {
+      const element = state.elements.get(item.itemId);
+      if (element && element.isConnected) {
+        const removed = removeSoftBlur(element, item.src);
+        if (removed) cleanedElements += 1;
+      }
+      findAndRemoveSoftBlur(item.src);
+      clearPendingItem(item.itemId, reason || 'request_reject_cleanup');
+    });
+    state.pendingRequests.delete(requestId);
+    if (DIAG_YT_BLUR) {
+      console.warn(
+        '[MW-YT][DIAG][REJECT_CLEANUP]',
+        'requestId=' + requestId,
+        'reason=' + (reason || 'unknown'),
+        'items=' + pendingRequest.items.length,
+        'cleanedElements=' + cleanedElements,
+        'url=' + window.location.href
+      );
+    }
+  }
+
   /**
    * Handle timeout for pending request
    * FAIL-OPEN by default: Do NOT apply blur on timeout
@@ -1834,7 +1959,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!pendingRequest) return;
     if (pendingRequest.state === 'handled') return;
     if (Number.isFinite(pendingRequest.pageEpoch) && pendingRequest.pageEpoch !== state.pageEpoch) {
-      state.pendingRequests.delete(requestId);
+      cleanupRejectedOrTimedOutRequest(requestId, 'timeout_epoch_mismatch');
       return;
     }
     
@@ -1933,6 +2058,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           'resultEpoch=' + resultEpoch,
           'activeEpoch=' + state.pageEpoch
         );
+        cleanupRejectedOrTimedOutRequest(requestId, 'reject_epoch');
         return;
       }
       if (resultEpoch !== null && resultEpoch !== state.pageEpoch && relaxedYouTubeEpochMode && DIAG_YT_BLUR) {
@@ -1964,6 +2090,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           'resultEpoch=' + (resultEpoch === null ? 'none' : resultEpoch),
           'activeEpoch=' + state.pageEpoch
         );
+        cleanupRejectedOrTimedOutRequest(requestId, 'reject_nonce');
         return;
       }
       
@@ -2288,15 +2415,56 @@ export function generateModerationScript(config: InjectionConfig): string {
    */
   function findAndRemoveSoftBlur(src) {
     try {
+      let attempts = 0;
+      let removedCount = 0;
       document.querySelectorAll('[data-mw-src="' + src + '"]').forEach(el => {
-        removeSoftBlur(el, src);
+        attempts += 1;
+        const removed = removeSoftBlur(el, src);
+        if (removed) removedCount += 1;
+        diagSoftBlurLog(
+          'find_remove_candidate',
+          el,
+          src,
+          'via=data-mw-src removed=' + removed
+        );
       });
       
       document.querySelectorAll('img').forEach(img => {
         if (img.src === src || img.dataset.mwOrigSrc === src) {
-          removeSoftBlur(img, src);
+          attempts += 1;
+          const removed = removeSoftBlur(img, src);
+          if (removed) removedCount += 1;
+          diagSoftBlurLog(
+            'find_remove_candidate',
+            img,
+            src,
+            'via=img_match removed=' + removed
+          );
         }
       });
+      if (DIAG_YT_BLUR) {
+        let videoMatches = 0;
+        let bgMatches = 0;
+        document.querySelectorAll('video').forEach(video => {
+          if (video.poster === src || video.dataset.mwOrigPoster === src || video.dataset.mwSrc === src) {
+            videoMatches += 1;
+          }
+        });
+        document.querySelectorAll('[data-mw-bg-src]').forEach(el => {
+          if (el.dataset.mwBgSrc === src) {
+            bgMatches += 1;
+          }
+        });
+        console.log(
+          '[MW-YT][DIAG][SOFTBLUR]',
+          'action=find_remove_summary',
+          'src=' + String(src || '').substring(0, 160),
+          'attempts=' + attempts,
+          'removed=' + removedCount,
+          'videoMatches=' + videoMatches,
+          'bgMatches=' + bgMatches
+        );
+      }
     } catch (e) {}
   }
 
@@ -2488,15 +2656,21 @@ export function generateModerationScript(config: InjectionConfig): string {
     
     if (!src) {
       state.stats.skipped++;
+      diagScanRunLog('scanImgElement', img, '', false, 'reason=no_src');
       return;
     }
-    if (img.dataset.mwScanned === 'true' && img.dataset.mwLastScanSrc === src) return;
+    if (img.dataset.mwScanned === 'true' && img.dataset.mwLastScanSrc === src) {
+      diagScanRunLog('scanImgElement', img, src, false, 'reason=duplicate_src');
+      return;
+    }
     
     img.dataset.mwScanned = 'true';
     img.dataset.mwLastScanSrc = src;
     img.dataset.mwOrigSrc = src;
     
-    if (queueForScan(src, img, 'img')) {
+    const queued = queueForScan(src, img, 'img');
+    diagScanRunLog('scanImgElement', img, src, queued, 'sourceType=img');
+    if (queued) {
       state.stats.imgTags++;
     }
   }
@@ -2506,28 +2680,43 @@ export function generateModerationScript(config: InjectionConfig): string {
                    video.dataset.poster ||
                    video.getAttribute('data-poster');
     
-    if (!poster) return;
-    if (video.dataset.mwPosterScanned === 'true' && video.dataset.mwLastPoster === poster) return;
+    if (!poster) {
+      diagScanRunLog('scanVideoPoster', video, '', false, 'reason=no_poster');
+      return;
+    }
+    if (video.dataset.mwPosterScanned === 'true' && video.dataset.mwLastPoster === poster) {
+      diagScanRunLog('scanVideoPoster', video, poster, false, 'reason=duplicate_poster');
+      return;
+    }
     
     video.dataset.mwPosterScanned = 'true';
     video.dataset.mwLastPoster = poster;
     video.dataset.mwOrigPoster = poster;
     
-    if (queueForScan(poster, video, 'video-poster')) {
+    const queued = queueForScan(poster, video, 'video-poster');
+    diagScanRunLog('scanVideoPoster', video, poster, queued, 'sourceType=video-poster');
+    if (queued) {
       state.stats.videoPosters++;
     }
   }
 
   function scanBgImage(element) {
     const bgUrl = extractBgImageUrl(element);
-    if (!bgUrl) return;
-    if (element.dataset.mwBgScanned === 'true' && element.dataset.mwLastBg === bgUrl) return;
+    if (!bgUrl) {
+      return;
+    }
+    if (element.dataset.mwBgScanned === 'true' && element.dataset.mwLastBg === bgUrl) {
+      diagScanRunLog('scanBgImage', element, bgUrl, false, 'reason=duplicate_bg');
+      return;
+    }
     
     element.dataset.mwBgScanned = 'true';
     element.dataset.mwLastBg = bgUrl;
     element.dataset.mwBgSrc = bgUrl;
     
-    if (queueForScan(bgUrl, element, 'bg-image')) {
+    const queued = queueForScan(bgUrl, element, 'bg-image');
+    diagScanRunLog('scanBgImage', element, bgUrl, queued, 'sourceType=bg-image');
+    if (queued) {
       state.stats.bgImages++;
     }
   }
@@ -2541,12 +2730,15 @@ export function generateModerationScript(config: InjectionConfig): string {
     try {
       shadowRoot.querySelectorAll('img').forEach(scanImgElement);
       shadowRoot.querySelectorAll('video').forEach(scanVideoPoster);
-      shadowRoot.querySelectorAll('*').forEach(el => {
-        scanBgImage(el);
-        if (el.shadowRoot) {
-          scanShadowRoot(el.shadowRoot);
-        }
-      });
+      const allowHeavySweep = allowShortsHeavyScanSweep('scanShadowRoot');
+      if (allowHeavySweep) {
+        shadowRoot.querySelectorAll('*').forEach(el => {
+          scanBgImage(el);
+          if (el.shadowRoot) {
+            scanShadowRoot(el.shadowRoot);
+          }
+        });
+      }
       
       setupMutationObserver(shadowRoot);
     } catch (e) {
@@ -2578,12 +2770,15 @@ export function generateModerationScript(config: InjectionConfig): string {
     try {
       node.querySelectorAll('img').forEach(scanImgElement);
       node.querySelectorAll('video').forEach(scanVideoPoster);
-      node.querySelectorAll('*').forEach(el => {
-        scanBgImage(el);
-        if (el.shadowRoot) {
-          scanShadowRoot(el.shadowRoot);
-        }
-      });
+      const allowHeavySweep = allowShortsHeavyScanSweep('scanNode');
+      if (allowHeavySweep) {
+        node.querySelectorAll('*').forEach(el => {
+          scanBgImage(el);
+          if (el.shadowRoot) {
+            scanShadowRoot(el.shadowRoot);
+          }
+        });
+      }
     } catch (e) {}
   }
 
@@ -2652,14 +2847,35 @@ export function generateModerationScript(config: InjectionConfig): string {
     });
   }
 
+  function scheduleYouTubeScan(reason) {
+    if (!isShortsModeActive()) return;
+    if (timerState.paused || timerState.teardownDone) return;
+    clearNamedTimeout('youtubeMutationScanTimeout', 'reschedule');
+    timerState.youtubeMutationScanTimeout = setTimeout(() => {
+      if (timerState.paused || timerState.teardownDone) return;
+      if (DIAG_YT_BLUR) {
+        console.log(
+          '[MW-YT][DIAG][MUT_ATTR]',
+          'action=scheduled_scan',
+          'reason=' + (reason || 'mutation'),
+          'url=' + window.location.href
+        );
+      }
+      scanYouTubeThumbnails();
+    }, 120);
+    timerLog('start', 'youtubeMutationScanTimeout:' + (reason || 'mutation'));
+  }
+
   function setupMutationObserver(root) {
+    const shortsAttrMode = isShortsModeActive();
+    const attributeFilter = ['src', 'srcset', 'poster', 'data-src', 'data-lazy-src'];
     const observer = new MutationObserver(mutations => {
       if (timerState.paused) return;
       if (!CONFIG.enabled || CONFIG.sensitivity === 0) return;
       
       let hasYouTubeChanges = false;
       
-      mutations.forEach(mutation => {
+      for (const mutation of mutations) {
         mutation.removedNodes.forEach(node => {
           if (node.nodeType !== 1) return;
           pruneDisconnectedPending('mutation_removed');
@@ -2688,27 +2904,48 @@ export function generateModerationScript(config: InjectionConfig): string {
         
         if (mutation.type === 'attributes') {
           const target = mutation.target;
-          const attr = mutation.attributeName;
-          
-          if ((attr === 'src' || attr === 'srcset') && target.tagName === 'IMG') {
-            queueMutationScan(target);
+          const attr = mutation.attributeName || '';
+          if (!shortsAttrMode || target.nodeType !== 1) {
+            continue;
           }
-          
-          if (attr === 'poster' && target.tagName === 'VIDEO') {
-            queueMutationScan(target);
+          if (DIAG_YT_BLUR) {
+            const srcFields = getDiagSourceFields(target);
+            console.log(
+              '[MW-YT][DIAG][MUT_ATTR]',
+              'action=attribute_hit',
+              'attr=' + attr,
+              'nodeId=' + getDiagNodeId(target),
+              'tag=' + (target.tagName || 'unknown'),
+              'currentSrc=' + String(srcFields.currentSrc || '').substring(0, 160),
+              'poster=' + String(srcFields.poster || '').substring(0, 160)
+            );
           }
-          
-          if (attr === 'data-src' || attr === 'data-lazy-src') {
+          if (
+            attr === 'src' ||
+            attr === 'srcset' ||
+            attr === 'poster' ||
+            attr === 'data-src' ||
+            attr === 'data-lazy-src'
+          ) {
             queueMutationScan(target);
           }
         }
-      });
+      }
       
-      if (hasYouTubeChanges) {
+      if (shortsAttrMode && hasYouTubeChanges) {
         scheduleYouTubeScan('mutation');
       }
     });
-    observer.observe(root, { childList: true, subtree: true, attributes: false });
+    if (shortsAttrMode) {
+      observer.observe(root, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: attributeFilter,
+      });
+    } else {
+      observer.observe(root, { childList: true, subtree: true, attributes: false });
+    }
     state.mutationObservers.push(observer);
     return observer;
   }
@@ -2824,6 +3061,27 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function startLegacyResultsPoll(reason) {
     if (timerState.legacyResultsInterval || timerState.paused) return;
+    if (isShortsModeActive()) {
+      if (DIAG_YT_BLUR) {
+        console.log(
+          '[MW-YT][DIAG][POLL]',
+          'path=legacyResultsInterval',
+          'mode=disabled_in_shorts',
+          'reason=' + (reason || 'init'),
+          'url=' + window.location.href
+        );
+      }
+      return;
+    }
+    if (DIAG_YT_BLUR) {
+      console.log(
+        '[MW-YT][DIAG][POLL]',
+        'path=legacyResultsInterval',
+        'mode=enabled',
+        'reason=' + (reason || 'init'),
+        'url=' + window.location.href
+      );
+    }
     timerState.legacyResultsInterval = setInterval(processLegacyResults, LEGACY_RESULTS_POLL_MS);
     timerLog('start', 'legacyResultsInterval:' + reason);
   }
@@ -2836,6 +3094,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (timerState.debugSummaryInterval) count++;
     if (timerState.mainScrollTimeout) count++;
     if (timerState.youtubeScrollTimeout) count++;
+    if (timerState.youtubeMutationScanTimeout) count++;
     count += timerState.initialTimeouts.length;
     if (batchTimer) count++;
     state.pendingRequests.forEach(req => { if (req && req.timeoutId) count++; });
@@ -3079,6 +3338,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     clearNamedInterval('debugSummaryInterval', reason);
     clearNamedTimeout('mainScrollTimeout', reason);
     clearNamedTimeout('youtubeScrollTimeout', reason);
+    clearNamedTimeout('youtubeMutationScanTimeout', reason);
     if (batchTimer) {
       clearTimeout(batchTimer);
       batchTimer = null;
