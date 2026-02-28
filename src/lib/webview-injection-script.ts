@@ -315,6 +315,7 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   const OVERLAY_ID = 'mw-blur-overlay';
   const OVERLAY_STYLE_ID = 'mw-blur-overlay-style';
+  const REVEAL_PORTAL_ID = 'mw-reveal-portal';
   const DOM_OVERLAY_ENABLED = false;
 
   const overlayState = window.__MW_BLUR_STATE__ || {
@@ -874,6 +875,8 @@ export function generateModerationScript(config: InjectionConfig): string {
   let shortsHeavyScanLastAt = 0;
   let diagPrevRequests = 0;
   let diagPrevResponses = 0;
+  let diagLastShortsScanBatchStartAt = 0;
+  const diagScanBatchStartAtByRequestId = new Map();
   const mutationScanQueue = [];
   const mutationScanSet = new Set();
   let mutationScanTimer = null;
@@ -891,6 +894,58 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function timerLog(action, name) {
     console.log('[MW][Timer]', action, name, 'navId=' + NAV_ID, 'url=' + window.location.href);
+  }
+
+  function logShortsScanSkip(reason, itemId, src, sourceType) {
+    if (!isShortsModeActive()) return;
+    console.log(
+      '[DIAG][SHORTS_SCAN] skip',
+      'reason=' + (reason || 'unknown'),
+      'itemId=' + (itemId || 'none'),
+      'src=' + String(src || '').substring(0, 180),
+      'sourceType=' + (sourceType || 'unknown')
+    );
+  }
+
+  function collectShortsDiscoveryItems(root) {
+    const collected = [];
+    const seen = new Set();
+    if (!root || root.nodeType !== 1) return collected;
+    const pushItem = function(sourceType, src, node) {
+      const normalizedSrc = normalizeUrl(src || '') || String(src || '');
+      const signature = sourceType + '|' + normalizedSrc;
+      if (seen.has(signature)) return;
+      seen.add(signature);
+      collected.push({
+        itemId: getDiagNodeId(node),
+        src: normalizedSrc.substring(0, 180),
+        sourceType: sourceType,
+      });
+    };
+    try {
+      if (root.tagName === 'IMG') {
+        pushItem('img', root.src || root.getAttribute('src') || '', root);
+      }
+      if (root.tagName === 'VIDEO') {
+        pushItem('video-poster', root.poster || root.getAttribute('poster') || root.currentSrc || '', root);
+      }
+      root.querySelectorAll('img').forEach(function(img) {
+        pushItem('img', img.src || img.getAttribute('src') || '', img);
+      });
+      root.querySelectorAll('video').forEach(function(video) {
+        pushItem('video-poster', video.poster || video.getAttribute('poster') || video.currentSrc || '', video);
+      });
+      root.querySelectorAll('*').forEach(function(node) {
+        const bgUrl = extractBgImageUrl(node);
+        if (bgUrl) {
+          pushItem('bg-image', bgUrl, node);
+        }
+      });
+      root.querySelectorAll('canvas').forEach(function(canvas) {
+        pushItem('canvas', 'canvas://pixel-buffer', canvas);
+      });
+    } catch (e) {}
+    return collected;
   }
 
   function clearNamedInterval(key, reason) {
@@ -1115,6 +1170,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     epochIncrementedCount: 0,
   };
   let diagNodeSeq = 0;
+  let diagRevealOverlaySeq = 0;
   function diagLog(key, message) {
     if (!DIAG_ENABLED) return;
     const now = Date.now();
@@ -1308,6 +1364,213 @@ export function generateModerationScript(config: InjectionConfig): string {
     return { currentSrc: currentSrc, poster: poster };
   }
 
+  function getDiagItemKey(src) {
+    const normalized = normalizeUrl(src || '') || String(src || '');
+    if (!normalized) return 'unknown';
+    try {
+      const parsed = new URL(normalized, window.location.href);
+      const host = String(parsed.hostname || '').toLowerCase();
+      const isYouTubeHost =
+        host.indexOf('youtube.com') !== -1 ||
+        host.indexOf('youtu.be') !== -1 ||
+        host.indexOf('ytimg.com') !== -1 ||
+        host.indexOf('googlevideo.com') !== -1;
+      if (isYouTubeHost) {
+        const queryId = parsed.searchParams.get('v');
+        if (queryId) return queryId;
+        const shortsMatch = String(parsed.pathname || '').match(/\\/shorts\\/([^/?#]+)/);
+        if (shortsMatch && shortsMatch[1]) return shortsMatch[1];
+        const viMatch = String(parsed.pathname || '').match(/\\/vi(?:_webp)?\\/([^/]+)/);
+        if (viMatch && viMatch[1]) return viMatch[1];
+      }
+    } catch (e) {}
+    return String(normalized).substring(0, 220);
+  }
+
+  function getDiagTargetDescriptor(target) {
+    if (!target || target.nodeType !== 1) return 'unknown';
+    const tag = String(target.tagName || 'unknown').toLowerCase();
+    let classSuffix = '';
+    try {
+      const className = String(target.className || '').trim();
+      if (className) {
+        const tokens = className.split(/\\s+/).filter(Boolean).slice(0, 3);
+        if (tokens.length) {
+          classSuffix = '.' + tokens.join('.');
+        }
+      }
+    } catch (e) {}
+    return tag + classSuffix;
+  }
+
+  function countBlurredNodesForItemKey(src) {
+    if (!src) return 0;
+    let count = 0;
+    const nodes = document.querySelectorAll('[data-mw-src]');
+    for (let i = 0; i < nodes.length; i += 1) {
+      const node = nodes[i];
+      if (!node || node.nodeType !== 1) continue;
+      if ((node.dataset && node.dataset.mwSrc) !== src) continue;
+      const inlineFilter = String(node.style.getPropertyValue('filter') || node.style.filter || '').toLowerCase();
+      const inlineBackdrop = String(node.style.getPropertyValue('backdrop-filter') || '').toLowerCase();
+      if (
+        inlineFilter.includes('blur(') ||
+        inlineBackdrop.includes('blur(') ||
+        node.dataset.mwModerated === 'blurred' ||
+        node.dataset.mwModerated === 'softblur' ||
+        node.classList.contains('mw-blurred') ||
+        node.classList.contains('mw-softblur')
+      ) {
+        count += 1;
+      }
+    }
+    return count;
+  }
+
+  function logRevealHittestSnapshot(overlay, btn, overlayId, phase, event) {
+    if (!overlay || !btn) return;
+    let overlayComputed = null;
+    let buttonComputed = null;
+    let buttonRect = { x: 0, y: 0, width: 0, height: 0 };
+    try {
+      overlayComputed = window.getComputedStyle(overlay);
+    } catch (e) {}
+    try {
+      buttonComputed = window.getComputedStyle(btn);
+    } catch (e) {}
+    try {
+      buttonRect = btn.getBoundingClientRect();
+    } catch (e) {}
+    console.log(
+      '[DIAG][HITTEST] overlay_style',
+      'overlayId=' + (overlayId || 'unknown'),
+      'phase=' + (phase || 'unknown'),
+      'z-index=' + (overlayComputed ? overlayComputed.zIndex : 'n/a'),
+      'position=' + (overlayComputed ? overlayComputed.position : 'n/a'),
+      'pointer-events=' + (overlayComputed ? overlayComputed.pointerEvents : 'n/a'),
+      'opacity=' + (overlayComputed ? overlayComputed.opacity : 'n/a')
+    );
+    console.log(
+      '[DIAG][HITTEST] button_style',
+      'overlayId=' + (overlayId || 'unknown'),
+      'phase=' + (phase || 'unknown'),
+      'z-index=' + (buttonComputed ? buttonComputed.zIndex : 'n/a'),
+      'position=' + (buttonComputed ? buttonComputed.position : 'n/a'),
+      'pointer-events=' + (buttonComputed ? buttonComputed.pointerEvents : 'n/a'),
+      'opacity=' + (buttonComputed ? buttonComputed.opacity : 'n/a'),
+      'rect=' + Math.round(buttonRect.x) + ',' + Math.round(buttonRect.y) + ',' + Math.round(buttonRect.width) + 'x' + Math.round(buttonRect.height)
+    );
+    if (event && Number.isFinite(event.clientX) && Number.isFinite(event.clientY)) {
+      let topElement = null;
+      try {
+        topElement = document.elementFromPoint(event.clientX, event.clientY);
+      } catch (e) {}
+      console.log(
+        '[DIAG][HITTEST] elementFromPoint=' + getDiagTargetDescriptor(topElement),
+        'overlayId=' + (overlayId || 'unknown'),
+        'x=' + event.clientX,
+        'y=' + event.clientY
+      );
+    }
+  }
+
+  function ensureRevealDocClickCapture() {
+    if (window.__MW_REVEAL_DOC_CAPTURE__) return;
+    window.__MW_REVEAL_DOC_CAPTURE__ = true;
+    document.addEventListener('click', function(e) {
+      const target = e && e.target && e.target.nodeType === 1 ? e.target : null;
+      const targetOverlay = target && typeof target.closest === 'function' ? target.closest('.mw-reveal-overlay') : null;
+      let pointElement = null;
+      try {
+        if (Number.isFinite(e.clientX) && Number.isFinite(e.clientY)) {
+          pointElement = document.elementFromPoint(e.clientX, e.clientY);
+        }
+      } catch (err) {}
+      const pointOverlay = pointElement && typeof pointElement.closest === 'function' ? pointElement.closest('.mw-reveal-overlay') : null;
+      const overlay = targetOverlay || pointOverlay;
+      if (!overlay) return;
+      const overlayId = overlay.dataset && overlay.dataset.mwOverlayId ? overlay.dataset.mwOverlayId : 'unknown';
+      console.log(
+        '[DIAG][REVEAL_EVT] doc_click_capture',
+        'hit=' + (targetOverlay ? 'target_overlay' : 'point_overlay'),
+        'overlayId=' + overlayId,
+        'target=' + getDiagTargetDescriptor(target),
+        'x=' + (Number.isFinite(e.clientX) ? e.clientX : 'n/a'),
+        'y=' + (Number.isFinite(e.clientY) ? e.clientY : 'n/a')
+      );
+      const button = overlay.querySelector ? overlay.querySelector('.mw-reveal-btn') : null;
+      if (button && button.nodeType === 1) {
+        logRevealHittestSnapshot(overlay, button, overlayId, 'doc_click_capture', e);
+      }
+    }, true);
+  }
+
+  function ensureRevealPortal() {
+    let portal = document.getElementById(REVEAL_PORTAL_ID);
+    if (portal) return portal;
+    portal = document.createElement('div');
+    portal.id = REVEAL_PORTAL_ID;
+    portal.style.cssText = [
+      'position: fixed',
+      'inset: 0',
+      'z-index: 2147483647',
+      'pointer-events: none',
+      'overflow: hidden',
+      'filter: none',
+      '-webkit-filter: none',
+      'backdrop-filter: none',
+      '-webkit-backdrop-filter: none',
+    ].join(';');
+    (document.documentElement || document.body || document.documentElement).appendChild(portal);
+    console.log('[DIAG][REVEAL_UI] portal_created');
+    return portal;
+  }
+
+  function positionShortsRevealOverlay(overlay, element) {
+    if (!overlay || !element || typeof element.getBoundingClientRect !== 'function') return;
+    let rect = null;
+    try {
+      rect = element.getBoundingClientRect();
+    } catch (e) {
+      rect = null;
+    }
+    if (!rect) return;
+    const badge = overlay.querySelector('span');
+    const btn = overlay.querySelector('.mw-reveal-btn');
+    const viewportWidth = Math.max(window.innerWidth || 0, 1);
+    const viewportHeight = Math.max(window.innerHeight || 0, 1);
+    const centerX = Math.max(24, Math.min(viewportWidth - 24, Math.round(rect.left + (rect.width / 2))));
+    const centerY = Math.max(28, Math.min(viewportHeight - 28, Math.round(rect.top + (rect.height / 2))));
+    if (badge && badge.nodeType === 1) {
+      badge.style.position = 'absolute';
+      badge.style.left = Math.max(8, Math.min(viewportWidth - 100, Math.round(rect.left + 8))) + 'px';
+      badge.style.top = Math.max(8, Math.min(viewportHeight - 28, Math.round(rect.top + 8))) + 'px';
+    }
+    if (btn && btn.nodeType === 1) {
+      btn.style.position = 'absolute';
+      btn.style.left = centerX + 'px';
+      btn.style.top = centerY + 'px';
+      btn.style.transform = 'translate(-50%, -50%)';
+    }
+  }
+
+  function diagShortsRecycleLog(node, field, prevSrc, nextSrc) {
+    if (!isShortsModeActive()) return;
+    if (!node || node.nodeType !== 1) return;
+    const prev = String(prevSrc || '');
+    const next = String(nextSrc || '');
+    if (!prev || !next || prev === next) return;
+    console.log(
+      '[DIAG][SHORTS_RECYCLE]',
+      'node=' + getDiagNodeId(node),
+      'field=' + (field || 'src'),
+      'prevSrc=' + prev.substring(0, 180),
+      'nextSrc=' + next.substring(0, 180),
+      'navId=' + NAV_ID,
+      'pageEpoch=' + state.pageEpoch
+    );
+  }
+
   function hasParentChangedSinceBlur(node) {
     const baseline = diagNodeParentAtBlur.get(node);
     if (!baseline) return false;
@@ -1369,6 +1632,18 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!node || node.nodeType !== 1) return null;
     const nodeId = getDiagNodeId(node);
     const shortsMode = isShortsModeActive();
+    if (shortsMode) {
+      const portal = document.getElementById(REVEAL_PORTAL_ID);
+      if (portal && typeof portal.querySelectorAll === 'function') {
+        const overlays = portal.querySelectorAll('.mw-reveal-overlay');
+        for (let i = 0; i < overlays.length; i += 1) {
+          const overlay = overlays[i];
+          if (!overlay || !overlay.isConnected) continue;
+          if (overlay.dataset.mwNodeId === nodeId) return overlay;
+          if (src && overlay.dataset.mwFor === src) return overlay;
+        }
+      }
+    }
     const parents = [];
     if (node.parentElement) {
       parents.push(node.parentElement);
@@ -1407,7 +1682,14 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!node || node.nodeType !== 1) return false;
     const overlay = findRevealOverlayForElement(node, src || node.dataset.mwSrc || '');
     if (overlay && overlay.parentElement) {
+      const overlayId = overlay.dataset && overlay.dataset.mwOverlayId ? overlay.dataset.mwOverlayId : 'unknown';
       overlay.parentElement.removeChild(overlay);
+      console.log(
+        '[DIAG][REVEAL_UI] overlay_removed',
+        'overlayId=' + overlayId,
+        'reason=' + (reason || 'unknown'),
+        'node=' + getDiagNodeId(node)
+      );
       if (DIAG_YT_BLUR) {
         console.log(
           '[MW-YT][DIAG][OVERLAY]',
@@ -1694,6 +1976,8 @@ export function generateModerationScript(config: InjectionConfig): string {
     let removed = false;
     try {
       diagBlurStateLog('removeSoftBlur.enter', element, src, '');
+      const overlay = findRevealOverlayForElement(element, src || element.dataset.mwSrc || '');
+      const overlayId = overlay && overlay.dataset ? overlay.dataset.mwOverlayId || 'none' : 'none';
       const beforeState = element.dataset.mwModerated || '';
       const beforeFilter = element.style.getPropertyValue('filter') || element.style.filter || '';
       const beforeHasBlur = beforeFilter.toLowerCase().includes('blur(');
@@ -1721,6 +2005,14 @@ export function generateModerationScript(config: InjectionConfig): string {
         'beforeHasBlur=' + beforeHasBlur,
         'afterState=' + (element.dataset.mwModerated || ''),
         'afterFilter=' + (element.style.getPropertyValue('filter') || element.style.filter || ''),
+        'removed=' + removed
+      );
+      console.log(
+        '[DIAG][BLUR] remove',
+        'itemKey=' + getDiagItemKey(src || element.dataset.mwSrc || ''),
+        'node=' + getDiagNodeId(element),
+        'overlayId=' + overlayId,
+        'reason=removeSoftBlur',
         'removed=' + removed
       );
       diagBlurStateLog('removeSoftBlur.exit', element, src, 'removed=' + removed + ' beforeState=' + beforeState);
@@ -1885,11 +2177,27 @@ export function generateModerationScript(config: InjectionConfig): string {
       
       state.blurred.add(src);
       state.stats.blurred++;
+      const containsOverlay = !!(typeof element.querySelector === 'function' && element.querySelector('.mw-reveal-overlay'));
       
       createRevealOverlay(element, src, category, itemId);
       if (shortsMode && element.isConnected && !findRevealOverlayForElement(element, src)) {
         createRevealOverlay(element, src, category, itemId, false);
       }
+      const parentContainsOverlay = !!(element.parentElement && typeof element.parentElement.querySelector === 'function' && element.parentElement.querySelector('.mw-reveal-overlay'));
+      console.log(
+        '[DIAG][BLUR_LAYER] apply',
+        'targetNode=' + getDiagNodeId(element),
+        'containsOverlay=' + containsOverlay,
+        'parentContainsOverlay=' + parentContainsOverlay
+      );
+      const overlayAfterApply = findRevealOverlayForElement(element, src);
+      console.log(
+        '[DIAG][BLUR] apply',
+        'itemKey=' + getDiagItemKey(src),
+        'node=' + getDiagNodeId(element),
+        'overlayId=' + (overlayAfterApply && overlayAfterApply.dataset ? overlayAfterApply.dataset.mwOverlayId || 'none' : 'none'),
+        'itemId=' + (itemId || 'none')
+      );
       if (shortsMode) {
         diagShortsBlurStackLog('hard_after_apply', element, src, 'itemId=' + (itemId || 'N/A'));
       }
@@ -1914,12 +2222,20 @@ export function generateModerationScript(config: InjectionConfig): string {
     try {
       diagBlurStateLog('removeBlur.enter', element, src, '');
       const overlay = findRevealOverlayForElement(element, src);
+      const overlayId = overlay && overlay.dataset ? overlay.dataset.mwOverlayId || 'none' : 'none';
       diagNodeLifecycleLog(
         'removeBlur',
         element,
         'src=' + String(src || '').substring(0, 120) +
         ' overlayFound=' + (!!overlay) +
         ' overlayConnected=' + (!!overlay?.isConnected)
+      );
+      console.log(
+        '[DIAG][BLUR] remove',
+        'itemKey=' + getDiagItemKey(src),
+        'node=' + getDiagNodeId(element),
+        'overlayId=' + overlayId,
+        'reason=removeBlur'
       );
       if (isShortsModeActive()) {
         clearAllBlurAndOverlay(element, src, 'removeBlur_reveal', 'revealed');
@@ -1950,11 +2266,19 @@ export function generateModerationScript(config: InjectionConfig): string {
     try {
       diagBlurStateLog('clearElementBlur.enter', element, element.dataset.mwSrc || '', '');
       const overlay = findRevealOverlayForElement(element, element.dataset.mwSrc || '');
+      const overlayId = overlay && overlay.dataset ? overlay.dataset.mwOverlayId || 'none' : 'none';
       diagNodeLifecycleLog(
         'clearElementBlur',
         element,
         'overlayFound=' + (!!overlay) +
         ' overlayConnected=' + (!!overlay?.isConnected)
+      );
+      console.log(
+        '[DIAG][BLUR] remove',
+        'itemKey=' + getDiagItemKey(element.dataset.mwSrc || ''),
+        'node=' + getDiagNodeId(element),
+        'overlayId=' + overlayId,
+        'reason=clearElementBlur'
       );
       if (isShortsModeActive()) {
         clearAllBlurAndOverlay(element, element.dataset.mwSrc || '', 'clearElementBlur_safe', 'safe');
@@ -2041,6 +2365,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       'src=' + String(src || '').substring(0, 120) +
       ' hasOverlay=' + (element.dataset.mwHasOverlay === 'true')
     );
+    ensureRevealDocClickCapture();
     if (shortsMode && element.dataset.mwModerated !== 'blurred') {
       removeRevealOverlay(element, src, 'createRevealOverlay_not_blurred');
       if (DIAG_YT_BLUR) {
@@ -2068,8 +2393,28 @@ export function generateModerationScript(config: InjectionConfig): string {
         removeRevealOverlay(element, src, 'createRevealOverlay_existing_not_blurred');
         return;
       }
+      existingOverlay.dataset.mwFor = src;
+      existingOverlay.dataset.mwNodeId = getDiagNodeId(element);
       existingOverlay.style.pointerEvents = 'none';
       existingOverlay.style.display = 'flex';
+      if (shortsMode) {
+        const portal = ensureRevealPortal();
+        if (portal && existingOverlay.parentElement !== portal) {
+          portal.appendChild(existingOverlay);
+        }
+        if (portal) {
+          const activeOverlays = portal.querySelectorAll('.mw-reveal-overlay');
+          for (let i = 0; i < activeOverlays.length; i += 1) {
+            const active = activeOverlays[i];
+            if (!active || active === existingOverlay) continue;
+            if (active.parentElement) {
+              active.parentElement.removeChild(active);
+            }
+          }
+        }
+        positionShortsRevealOverlay(existingOverlay, element);
+        console.log('[DIAG][REVEAL_UI] portal_update', 'itemKey=' + getDiagItemKey(src));
+      }
       return;
     }
     if (element.dataset.mwHasOverlay === 'true') {
@@ -2088,7 +2433,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       return;
     }
     const parent = element.parentElement;
-    if (!parent) {
+    if (!shortsMode && !parent) {
       if (attemptShortsReresolve('missing_parent')) return;
       diagNodeLifecycleLog('createRevealOverlay.skip_no_parent', element, '');
       diagLog(
@@ -2100,27 +2445,60 @@ export function generateModerationScript(config: InjectionConfig): string {
       );
       return;
     }
-    
-    const parentPos = window.getComputedStyle(parent).position;
-    if (parentPos === 'static') {
-      parent.style.position = 'relative';
+    const overlayParent = shortsMode ? ensureRevealPortal() : parent;
+    if (!overlayParent) return;
+    const overlayCountBefore = document.querySelectorAll('.mw-reveal-overlay').length;
+    const itemKey = getDiagItemKey(src);
+    let parentLooksBlurred = false;
+    try {
+      const parentInlineFilter = String(overlayParent.style.getPropertyValue('filter') || overlayParent.style.filter || '').toLowerCase();
+      const parentInlineBackdrop = String(overlayParent.style.getPropertyValue('backdrop-filter') || '').toLowerCase();
+      parentLooksBlurred =
+        parentInlineFilter.includes('blur(') ||
+        parentInlineBackdrop.includes('blur(') ||
+        overlayParent.classList.contains('mw-blurred') ||
+        overlayParent.classList.contains('mw-softblur') ||
+        overlayParent.dataset.mwModerated === 'blurred' ||
+        overlayParent.dataset.mwModerated === 'softblur';
+    } catch (e) {}
+    console.log(
+      '[DIAG][REVEAL_LAYER] overlay_parent=' + getDiagTargetDescriptor(overlayParent),
+      'blurred_parent=' + parentLooksBlurred,
+      'parentNode=' + getDiagNodeId(overlayParent),
+      'targetNode=' + getDiagNodeId(element)
+    );
+    if (!shortsMode) {
+      const parentPos = window.getComputedStyle(parent).position;
+      if (parentPos === 'static') {
+        parent.style.position = 'relative';
+      }
     }
     
     const overlay = document.createElement('div');
+    diagRevealOverlaySeq += 1;
+    const overlayId = 'mwov_' + Date.now().toString(36) + '_' + diagRevealOverlaySeq;
     overlay.className = 'mw-reveal-overlay';
     overlay.dataset.mwFor = src;
     overlay.dataset.mwNodeId = getDiagNodeId(element);
+    overlay.dataset.mwOverlayId = overlayId;
     overlay.style.cssText = [
-      'position: absolute',
+      shortsMode ? 'position: fixed' : 'position: absolute',
       'inset: 0',
       'display: flex',
       'align-items: center',
       'justify-content: center',
-      'background: rgba(0, 0, 0, 0.3)',
-      'z-index: 9998',
+      shortsMode ? 'background: transparent' : 'background: rgba(0, 0, 0, 0.3)',
+      shortsMode ? 'z-index: 2147483647' : 'z-index: 9998',
       'cursor: default',
       'pointer-events: none',
     ].join(';');
+    console.log(
+      '[DIAG][REVEAL_UI] created',
+      'overlayId=' + overlayId,
+      'itemKey=' + itemKey,
+      'navId=' + NAV_ID,
+      'pageEpoch=' + state.pageEpoch
+    );
     
     const badge = document.createElement('span');
     badge.style.cssText = [
@@ -2152,10 +2530,40 @@ export function generateModerationScript(config: InjectionConfig): string {
       'font-weight: bold',
       'pointer-events: auto',
     ].join(';');
+
+    overlay.addEventListener('click', function(e) {
+      let overlayComputed = null;
+      try {
+        overlayComputed = window.getComputedStyle(overlay);
+      } catch (err) {}
+      console.log(
+        '[DIAG][REVEAL_EVT] overlay_click',
+        'overlayId=' + overlayId,
+        'target=' + getDiagTargetDescriptor(e.target),
+        'x/y=' + (Number.isFinite(e.clientX) ? e.clientX : 'n/a') + '/' + (Number.isFinite(e.clientY) ? e.clientY : 'n/a'),
+        'pointerEvents=' + (overlayComputed ? overlayComputed.pointerEvents : 'n/a')
+      );
+      logRevealHittestSnapshot(overlay, btn, overlayId, 'overlay_click', e);
+    });
+    console.log('[DIAG][REVEAL_UI] bind_overlay', 'overlayId=' + overlayId);
     
     btn.addEventListener('click', function(e) {
       e.preventDefault();
       e.stopPropagation();
+      console.log(
+        '[DIAG][REVEAL_EVT] button_click',
+        'overlayId=' + overlayId,
+        'target=' + getDiagTargetDescriptor(e.target)
+      );
+      logRevealHittestSnapshot(overlay, btn, overlayId, 'button_click', e);
+      const revealAllowed = !state.revealed.has(src);
+      const revealGateReason = revealAllowed ? 'not_revealed' : 'already_revealed_reblur_path';
+      console.log(
+        '[DIAG][REVEAL_EVT] reveal_allowed=' + revealAllowed,
+        'reason=' + revealGateReason,
+        'overlayId=' + overlayId,
+        'itemKey=' + itemKey
+      );
       
       if (state.revealed.has(src)) {
         // Re-blur
@@ -2166,10 +2574,25 @@ export function generateModerationScript(config: InjectionConfig): string {
         overlay.style.display = 'flex';
       } else {
         // Reveal and trigger feedback
+        const beforeBlurCount = countBlurredNodesForItemKey(src);
+        console.log(
+          '[DIAG][REVEAL_EVT] reveal_apply_start',
+          'overlayId=' + overlayId,
+          'itemKey=' + itemKey,
+          'beforeBlurCount=' + beforeBlurCount
+        );
         state.revealed.add(src);
         element.dataset.mwRevealed = 'true'; // Persistence
         removeBlur(element, src);
         btn.textContent = '🔒 Hide';
+        const afterBlurCount = countBlurredNodesForItemKey(src);
+        const removedBlurCount = beforeBlurCount > afterBlurCount ? (beforeBlurCount - afterBlurCount) : 0;
+        console.log(
+          '[DIAG][REVEAL_EVT] reveal_apply_done',
+          'overlayId=' + overlayId,
+          'itemKey=' + itemKey,
+          'removedBlurCount=' + removedBlurCount
+        );
         
         // POST a label request message so the host can open the labeling modal
         var labelItemId = itemId || element.dataset.mwItemId || 'unknown_' + Date.now();
@@ -2223,10 +2646,30 @@ export function generateModerationScript(config: InjectionConfig): string {
         showCorrectionOverlay(element, src, category, labelItemId);
       }
     });
+    console.log('[DIAG][REVEAL_UI] bind_button', 'overlayId=' + overlayId);
     
     overlay.appendChild(btn);
-    parent.appendChild(overlay);
+    if (shortsMode) {
+      const activeOverlays = overlayParent.querySelectorAll('.mw-reveal-overlay');
+      for (let i = 0; i < activeOverlays.length; i += 1) {
+        const active = activeOverlays[i];
+        if (!active || active === overlay) continue;
+        if (active.parentElement) {
+          active.parentElement.removeChild(active);
+        }
+      }
+      positionShortsRevealOverlay(overlay, element);
+      console.log('[DIAG][REVEAL_UI] portal_update', 'itemKey=' + itemKey);
+    }
+    overlayParent.appendChild(overlay);
     element.dataset.mwHasOverlay = 'true';
+    const overlayCountAfter = document.querySelectorAll('.mw-reveal-overlay').length;
+    console.log(
+      '[DIAG][REVEAL_UI] overlay_count_before=' + overlayCountBefore,
+      'overlay_count_after=' + overlayCountAfter,
+      'overlayId=' + overlayId
+    );
+    logRevealHittestSnapshot(overlay, btn, overlayId, 'created', null);
     diagBlurStateLog(
       'createRevealOverlay.exit',
       element,
@@ -2326,6 +2769,21 @@ export function generateModerationScript(config: InjectionConfig): string {
     
     const requestId = generateRequestId();
     const timestamp = Date.now();
+    if (isShortsModeActive()) {
+      console.log(
+        '[DIAG][SHORTS_SCAN] scanBatch_start',
+        'requestId=' + requestId,
+        'itemCount=' + items.length
+      );
+      if (diagLastShortsScanBatchStartAt > 0) {
+        console.log(
+          '[DIAG][SHORTS_SCAN] delta_since_last_scan=' + (timestamp - diagLastShortsScanBatchStartAt) + 'ms',
+          'requestId=' + requestId
+        );
+      }
+      diagLastShortsScanBatchStartAt = timestamp;
+      diagScanBatchStartAtByRequestId.set(requestId, timestamp);
+    }
     
     const message = {
       type: 'gc-moderation-request',
@@ -2383,6 +2841,7 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function cleanupRejectedOrTimedOutRequest(requestId, reason) {
     if (!isShortsModeActive()) return;
+    diagScanBatchStartAtByRequestId.delete(requestId);
     const pendingRequest = state.pendingRequests.get(requestId);
     if (!pendingRequest || !Array.isArray(pendingRequest.items)) return;
     let cleanedElements = 0;
@@ -2416,7 +2875,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     const pendingRequest = state.pendingRequests.get(requestId);
     if (!pendingRequest) return;
     if (pendingRequest.state === 'handled') return;
+    diagScanBatchStartAtByRequestId.delete(requestId);
     if (Number.isFinite(pendingRequest.pageEpoch) && pendingRequest.pageEpoch !== state.pageEpoch) {
+      logShortsScanSkip('epoch_mismatch', null, 'request:' + String(requestId || 'none'), 'timeout');
       cleanupRejectedOrTimedOutRequest(requestId, 'timeout_epoch_mismatch');
       return;
     }
@@ -2495,6 +2956,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       const relaxedYouTubeEpochMode = isYouTubeDomainUrl(window.location.href);
       if (resultEpoch !== null && resultEpoch !== state.pageEpoch && !relaxedYouTubeEpochMode) {
         state.stats.staleEpochDiscarded++;
+        logShortsScanSkip('epoch_mismatch', null, 'request:' + String(requestId || 'none'), 'result');
         if (DIAG_YT_BLUR) {
           diagEpochCounters.staleInjectedDiscardCount += 1;
           console.warn(
@@ -2539,6 +3001,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       // SECURITY: Validate nonce
       if (nonce !== CONFIG.nonce) {
         state.stats.nonceRejected++;
+        logShortsScanSkip('nonce_mismatch', null, 'request:' + String(requestId || 'none'), 'result');
         console.warn(
           '[MW][RejectResult]',
           'reason=nonce',
@@ -2561,6 +3024,24 @@ export function generateModerationScript(config: InjectionConfig): string {
       
       state.stats.responsesReceived++;
       console.log('[MW] received result', requestId, 'count=' + results.length);
+      if (isShortsModeActive()) {
+        const startedAt = diagScanBatchStartAtByRequestId.get(requestId);
+        if (Number.isFinite(startedAt)) {
+          const elapsed = Date.now() - startedAt;
+          console.log(
+            '[DIAG][SHORTS_SCAN] scanBatch_end',
+            'requestId=' + requestId,
+            'elapsed=' + elapsed + 'ms'
+          );
+          diagScanBatchStartAtByRequestId.delete(requestId);
+        } else {
+          console.log(
+            '[DIAG][SHORTS_SCAN] scanBatch_end',
+            'requestId=' + requestId,
+            'elapsed=unknown'
+          );
+        }
+      }
       
       results.forEach(result => {
       const {
@@ -3015,6 +3496,18 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (batchQueue.length === 0) return;
     
     const itemsToSend = batchQueue.splice(0, CONFIG.batchSize);
+    if (isShortsModeActive()) {
+      const discoveredItems = itemsToSend.map(item => ({
+        itemId: item.itemId,
+        src: String(item.src || '').substring(0, 180),
+        sourceType: item.sourceType || 'unknown',
+      }));
+      console.log(
+        '[DIAG][SHORTS_SCAN] discovered',
+        'count=' + discoveredItems.length,
+        'items=' + JSON.stringify(discoveredItems)
+      );
+    }
     sendModerationRequest(itemsToSend);
     
     // If more items remain, schedule another flush
@@ -3029,18 +3522,21 @@ export function generateModerationScript(config: InjectionConfig): string {
     const url = normalizeUrl(src);
     if (!url) {
       state.stats.skipped++;
+      logShortsScanSkip('invalid_url', null, src, sourceType);
       return false;
     }
     
     // Skip tiny data URLs
     if (url.startsWith('data:') && url.length < 1000) {
       state.stats.skipped++;
+      logShortsScanSkip('tiny_data_url', null, url, sourceType);
       return false;
     }
     
     // FAIL-OPEN: Skip tiny images (< 80x80)
     if (isTinyImage(element)) {
       state.stats.skippedTiny++;
+      logShortsScanSkip('tinyExcluded', null, url, sourceType);
       if (CONFIG.debug) {
         console.log('[MW] skipped tiny image (fail-open, <80x80):', url.substring(0, 50));
       }
@@ -3050,6 +3546,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     // Conservative skip for obvious avatars/icons/logos (fail-open).
     if (isLikelyAvatarLike(element)) {
       state.stats.skipped++;
+      logShortsScanSkip('avatar_like', null, url, sourceType);
       if (CONFIG.debug) {
         console.log('[MW] skipped avatar-like element:', url.substring(0, 50));
       }
@@ -3058,20 +3555,24 @@ export function generateModerationScript(config: InjectionConfig): string {
     
     // Skip already processed
     if (state.scanned.has(url)) {
+      logShortsScanSkip('cache_scanned', null, url, sourceType);
       return false;
     }
     
     // Skip if already revealed by user (persistence)
     if (state.revealed.has(url) || element.dataset.mwRevealed === 'true') {
+      logShortsScanSkip('revealed_persistence', null, url, sourceType);
       return false;
     }
     
     if (state.pending.size >= MAX_PENDING_ITEMS || batchQueue.length >= MAX_BATCH_QUEUE_ITEMS) {
       state.stats.skippedQueueCap++;
+      logShortsScanSkip('queue_cap', null, url, sourceType);
       return false;
     }
     if (!allowPerSecond(rateLimiter.enqueue, MAX_ENQUEUE_PER_SEC)) {
       state.stats.skippedRateLimited++;
+      logShortsScanSkip('rate_limit', null, url, sourceType);
       return false;
     }
 
@@ -3079,6 +3580,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (existingPendingId) {
       const existingPending = state.pending.get(existingPendingId);
       if (existingPending && existingPending.src === url) {
+        logShortsScanSkip('pending_duplicate_src', existingPendingId, url, sourceType);
         return false;
       }
       state.pendingBySrc.delete(url);
@@ -3187,6 +3689,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       diagScanRunLog('scanImgElement', img, '', false, 'reason=no_src');
       return;
     }
+    const prevSrc = img.dataset.mwLastScanSrc || '';
+    diagShortsRecycleLog(img, 'src', prevSrc, src);
     if (img.dataset.mwScanned === 'true' && img.dataset.mwLastScanSrc === src) {
       diagScanRunLog('scanImgElement', img, src, false, 'reason=duplicate_src');
       return;
@@ -3204,6 +3708,19 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function scanVideoPoster(video) {
+    if (isShortsModeActive()) {
+      console.log(
+        '[DIAG][VIDEO] found video element',
+        'id=' + getDiagNodeId(video),
+        'readyState=' + (Number.isFinite(video.readyState) ? video.readyState : 'n/a'),
+        'currentTime=' + (Number.isFinite(video.currentTime) ? video.currentTime.toFixed(3) : 'n/a')
+      );
+      console.log(
+        '[DIAG][VIDEO] frame_capture_attempt',
+        'success=false',
+        'currentTime=' + (Number.isFinite(video.currentTime) ? video.currentTime.toFixed(3) : 'n/a')
+      );
+    }
     const poster = video.poster ||
                    video.dataset.poster ||
                    video.getAttribute('data-poster');
@@ -3221,6 +3738,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       return;
     }
+    const prevPoster = video.dataset.mwLastPoster || '';
+    diagShortsRecycleLog(video, 'poster', prevPoster, poster);
     if (video.dataset.mwPosterScanned === 'true' && video.dataset.mwLastPoster === poster) {
       diagScanRunLog('scanVideoPoster', video, poster, false, 'reason=duplicate_poster');
       return;
@@ -3229,6 +3748,12 @@ export function generateModerationScript(config: InjectionConfig): string {
     video.dataset.mwPosterScanned = 'true';
     video.dataset.mwLastPoster = poster;
     video.dataset.mwOrigPoster = poster;
+    if (isShortsModeActive()) {
+      console.log(
+        '[DIAG][VIDEO] using_thumbnail_only',
+        'src=' + String(poster || '').substring(0, 180)
+      );
+    }
     
     const queued = queueForScan(poster, video, 'video-poster');
     diagScanRunLog('scanVideoPoster', video, poster, queued, 'sourceType=video-poster');
@@ -3242,6 +3767,8 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!bgUrl) {
       return;
     }
+    const prevBg = element.dataset.mwLastBg || '';
+    diagShortsRecycleLog(element, 'bg', prevBg, bgUrl);
     if (element.dataset.mwBgScanned === 'true' && element.dataset.mwLastBg === bgUrl) {
       diagScanRunLog('scanBgImage', element, bgUrl, false, 'reason=duplicate_bg');
       return;
@@ -3287,6 +3814,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!node || node.nodeType !== 1) return;
     if (!allowPerSecond(rateLimiter.scanNode, MAX_SCAN_NODE_PER_SEC)) {
       state.stats.skippedRateLimited++;
+      logShortsScanSkip('scan_node_rate_limit', null, 'node:' + getDiagNodeId(node), 'node');
       return;
     }
     
@@ -3323,6 +3851,15 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!CONFIG.enabled || CONFIG.sensitivity === 0) {
       console.log('[MW] Scanning disabled (sensitivity: ' + CONFIG.sensitivity + ')');
       return;
+    }
+    if (isShortsModeActive()) {
+      console.log(
+        '[DIAG][SHORTS_SCAN] discovery_run',
+        'navId=' + NAV_ID,
+        'pageEpoch=' + state.pageEpoch,
+        'url=' + window.location.href,
+        'reason=scanFullPage'
+      );
     }
     
     console.log('[MW] ========== FULL PAGE SCAN ==========');
@@ -3367,6 +3904,15 @@ export function generateModerationScript(config: InjectionConfig): string {
    */
   function scanYouTubeThumbnails() {
     if (!isYouTube()) return;
+    if (isShortsModeActive()) {
+      console.log(
+        '[DIAG][SHORTS_SCAN] discovery_run',
+        'navId=' + NAV_ID,
+        'pageEpoch=' + state.pageEpoch,
+        'url=' + window.location.href,
+        'reason=scanYouTubeThumbnails'
+      );
+    }
     
     console.log('[MW] === YOUTUBE THUMBNAIL SCAN ===');
     
@@ -3386,6 +3932,13 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function scanActiveShortsPlayerContainer(reason) {
     if (!isShortsModeActive()) return false;
+    console.log(
+      '[DIAG][SHORTS_SCAN] discovery_run',
+      'navId=' + NAV_ID,
+      'pageEpoch=' + state.pageEpoch,
+      'url=' + window.location.href,
+      'reason=' + (reason || 'unknown')
+    );
     const container = getActiveShortsPlayerContainer();
     if (!container || !container.isConnected) {
       if (DIAG_YT_BLUR) {
@@ -3397,6 +3950,12 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       return false;
     }
+    const discoveredItems = collectShortsDiscoveryItems(container);
+    console.log(
+      '[DIAG][SHORTS_SCAN] discovered',
+      'count=' + discoveredItems.length,
+      'items=' + JSON.stringify(discoveredItems)
+    );
     if (DIAG_YT_BLUR) {
       console.log(
         '[MW-YT][DIAG][SHORTS_TARGET]',

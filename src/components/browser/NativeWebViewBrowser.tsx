@@ -202,6 +202,7 @@ export const NativeWebViewBrowser = () => {
   const lastNsfwSignalAtRef = useRef(0);
   const webViewPageEpochRef = useRef(0);
   const stageBFlagDiagEpochRef = useRef<string | null>(null);
+  const shortsScanDiagRef = useRef<{ lastScanBatchStartAt: number }>({ lastScanBatchStartAt: 0 });
 
   const UNSAFE_STREAK_REQUIRED = 2;
   const SAFE_STREAK_REQUIRED = 2;
@@ -517,6 +518,13 @@ export const NativeWebViewBrowser = () => {
         'navId=' + navId,
         'reason=' + reason,
         'targetUrl=' + (targetUrl || 'unknown'),
+      );
+      console.log(
+        '[DIAG][INJECT] dispatch',
+        'reason=' + reason,
+        'navId=' + navId,
+        'pageEpoch=' + webViewPageEpochRef.current,
+        'url=' + (targetUrl || 'unknown'),
       );
     } catch (error) {
       console.error('[MW-Bridge] Moderation script injection failed:', error);
@@ -973,6 +981,14 @@ export const NativeWebViewBrowser = () => {
     pendingRequestsRef.current.add(requestId);
 
     if (requestEpoch !== null && requestEpoch !== activeEpoch && !relaxedYouTubeEpochMode) {
+      if (stickyShortsMode) {
+        console.log(
+          '[DIAG][SHORTS_SCAN] skip',
+          'reason=epoch_mismatch',
+          'itemId=batch',
+          'src=request:' + requestId,
+        );
+      }
       if (isDiagYtBlurEnabledForUrl(activeUrl)) {
         diagYtBlurEpochRef.current.staleHostRejectCount += 1;
         console.log(
@@ -1038,6 +1054,22 @@ export const NativeWebViewBrowser = () => {
     }
     
     const startTime = performance.now();
+    const scanBatchStartTs = Date.now();
+    if (stickyShortsMode) {
+      console.log(
+        '[DIAG][SHORTS_SCAN] scanBatch_start',
+        'requestId=' + requestId,
+        'itemCount=' + items.length,
+      );
+      const previousStart = shortsScanDiagRef.current.lastScanBatchStartAt;
+      if (previousStart > 0) {
+        console.log(
+          '[DIAG][SHORTS_SCAN] delta_since_last_scan=' + (scanBatchStartTs - previousStart) + 'ms',
+          'requestId=' + requestId,
+        );
+      }
+      shortsScanDiagRef.current.lastScanBatchStartAt = scanBatchStartTs;
+    }
     console.log('[MW-Host] request received', requestId, 'items=' + items.length, 'epoch=' + (requestEpoch ?? 'n/a'));
     if (import.meta.env.DEV) {
       const epochKey = String(requestEpoch ?? activeEpoch);
@@ -1144,6 +1176,13 @@ export const NativeWebViewBrowser = () => {
     
     const elapsedMs = performance.now() - startTime;
     console.log('[MW-Host] scan complete', requestId, 'elapsed=' + elapsedMs.toFixed(0) + 'ms');
+    if (stickyShortsMode) {
+      console.log(
+        '[DIAG][SHORTS_SCAN] scanBatch_end',
+        'requestId=' + requestId,
+        'elapsed=' + elapsedMs.toFixed(0) + 'ms',
+      );
+    }
 
     const blurMode = localSettings.blur_mode || 'balanced';
     const modePolicy = blurMode === 'strict'
@@ -1203,6 +1242,15 @@ export const NativeWebViewBrowser = () => {
     });
     const denominator = eligibleResults.length > 0 ? eligibleResults.length : results.length;
     const tinyExcludedCount = Math.max(results.length - eligibleResults.length, 0);
+    if (stickyShortsMode && tinyExcludedCount > 0) {
+      console.log(
+        '[DIAG][SHORTS_SCAN] skip',
+        'reason=tinyExcluded',
+        'itemId=batch',
+        'src=request:' + requestId,
+        'count=' + tinyExcludedCount,
+      );
+    }
 
     const hardResults = eligibleResults.filter(item => item.shouldBlur && item.severity === 'hard');
     const hardStrongHits = hardResults.filter(item => item.confidence >= hardConfThreshold);
@@ -1544,6 +1592,11 @@ export const NativeWebViewBrowser = () => {
         'delayMs=' + delayMs,
         'navId=' + activeNavIdRef.current,
         'url=' + (webViewState.currentUrl || 'unknown'),
+      );
+      console.log(
+        '[DIAG][TIMER] start',
+        'delayMs=' + delayMs,
+        'navId=' + activeNavIdRef.current,
       );
     };
 

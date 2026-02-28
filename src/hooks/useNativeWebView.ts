@@ -577,6 +577,10 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
         void messageFromWebviewHandle.remove();
         messageFromWebviewHandle = null;
       }
+      console.log(
+        '[DIAG][CHURN] removeAllListeners',
+        'navId=unknown',
+      );
       InAppBrowser.removeAllListeners();
       listenersSetupRef.current = false;
     };
