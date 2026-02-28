@@ -686,6 +686,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       staleEpochDiscarded: 0,
     },
   };
+  const shortsRevealedItemKeys = new Set();
 
   function safeScore(value) {
     const n = toFiniteNumber(value);
@@ -1079,6 +1080,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     state.safeResolvedAt.clear();
     state.blurred.clear();
     state.scanned.clear();
+    shortsRevealedItemKeys.clear();
     state.elements.forEach(function(element) {
       if (element && element.isConnected) {
         clearElementBlur(element);
@@ -1385,6 +1387,46 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
     } catch (e) {}
     return String(normalized).substring(0, 220);
+  }
+
+  function getShortsRevealItemKey(src, node) {
+    if (!isShortsModeActive()) return getDiagItemKey(src || '');
+    const urlKey = getDiagItemKey(window.location.href);
+    if (urlKey && urlKey !== 'unknown') return urlKey;
+    const nodeSrc = (node && node.dataset && node.dataset.mwSrc) || src || '';
+    const srcKey = getDiagItemKey(nodeSrc);
+    if (srcKey && srcKey !== 'unknown') return srcKey;
+    return normalizeUrl(nodeSrc || '') || String(nodeSrc || '') || 'unknown';
+  }
+
+  function getShortsNodePrimarySrc(node) {
+    if (!node || node.nodeType !== 1) return '';
+    const sourceFields = getDiagSourceFields(node);
+    const rawSource =
+      (node.dataset && node.dataset.mwSrc) ||
+      sourceFields.currentSrc ||
+      sourceFields.poster ||
+      (typeof node.getAttribute === 'function' ? (node.getAttribute('src') || node.getAttribute('poster') || '') : '');
+    return normalizeUrl(rawSource || '') || String(rawSource || '');
+  }
+
+  function collectShortsItemContext(targetNode) {
+    const nodes = [];
+    const seen = new Set();
+    const pushNode = function(candidate) {
+      if (!candidate || candidate.nodeType !== 1 || seen.has(candidate)) return;
+      seen.add(candidate);
+      nodes.push(candidate);
+    };
+    const container = getShortsCardOrPlayerContainerFromNode(targetNode) || getActiveShortsPlayerContainer();
+    pushNode(targetNode);
+    pushNode(container);
+    if (container && typeof container.querySelectorAll === 'function') {
+      container.querySelectorAll('img, video, [data-mw-src], [data-mw-bg-src], [data-mw-moderated]').forEach(function(node) {
+        pushNode(node);
+      });
+    }
+    return { container: container || targetNode, nodes: nodes };
   }
 
   function getDiagTargetDescriptor(target) {
@@ -1925,6 +1967,117 @@ export function generateModerationScript(config: InjectionConfig): string {
     return changed;
   }
 
+  function clearShortsBlurForItem(itemKey, targetNode) {
+    const removed = {
+      blurNodes: 0,
+      inlineStyles: 0,
+      overlays: 0,
+      flashShields: 0,
+    };
+    if (!targetNode || targetNode.nodeType !== 1) return removed;
+    const context = collectShortsItemContext(targetNode);
+    const persistentOverlay = findRevealOverlayForElement(targetNode, targetNode.dataset ? targetNode.dataset.mwSrc || '' : '');
+    for (let i = 0; i < context.nodes.length; i += 1) {
+      const node = context.nodes[i];
+      if (!node || node.nodeType !== 1) continue;
+      const beforeFilter = String(node.style.getPropertyValue('filter') || node.style.filter || '').toLowerCase();
+      const beforeWebkit = String(node.style.getPropertyValue('-webkit-filter') || '').toLowerCase();
+      const beforeBackdrop = String(node.style.getPropertyValue('backdrop-filter') || '').toLowerCase();
+      const beforeWebkitBackdrop = String(node.style.getPropertyValue('-webkit-backdrop-filter') || '').toLowerCase();
+      const hadInlineBlur =
+        beforeFilter.includes('blur(') ||
+        beforeWebkit.includes('blur(') ||
+        beforeBackdrop.includes('blur(') ||
+        beforeWebkitBackdrop.includes('blur(');
+      const hadBlurClasses =
+        node.classList.contains('mw-softblur') ||
+        node.classList.contains('mw-blurred') ||
+        node.dataset.mwModerated === 'blurred' ||
+        node.dataset.mwModerated === 'softblur';
+      if (hadInlineBlur) removed.inlineStyles += 1;
+      if (hadBlurClasses) removed.blurNodes += 1;
+      node.style.removeProperty('filter');
+      node.style.removeProperty('-webkit-filter');
+      node.style.removeProperty('backdrop-filter');
+      node.style.removeProperty('-webkit-backdrop-filter');
+      node.style.removeProperty('opacity');
+      node.classList.remove('mw-softblur');
+      node.classList.remove('mw-blurred');
+      node.dataset.mwModerated = 'revealed';
+      node.dataset.mwPreblurClear = 'true';
+      node.dataset.mwRevealed = 'true';
+      if (!persistentOverlay || node !== targetNode) {
+        node.dataset.mwHasOverlay = 'false';
+      }
+      const nodeSrc = getShortsNodePrimarySrc(node);
+      if (nodeSrc) {
+        state.revealed.add(nodeSrc);
+      }
+    }
+    const portal = document.getElementById(REVEAL_PORTAL_ID);
+    if (portal && typeof portal.querySelectorAll === 'function') {
+      const overlays = portal.querySelectorAll('.mw-reveal-overlay');
+      for (let i = 0; i < overlays.length; i += 1) {
+        const overlay = overlays[i];
+        if (!overlay || !overlay.isConnected || overlay === persistentOverlay) continue;
+        const overlayItemKey =
+          (overlay.dataset && overlay.dataset.mwItemKey) ||
+          getDiagItemKey((overlay.dataset && overlay.dataset.mwFor) || '');
+        if (itemKey && overlayItemKey !== itemKey) continue;
+        if (overlay.parentElement) {
+          overlay.parentElement.removeChild(overlay);
+          removed.overlays += 1;
+        }
+      }
+    }
+    const flashSelector = '[data-mw-flashshield="true"], [data-mw-cover="true"], .mw-flash-shield, .mw-shield-cover';
+    const flashNodes = document.querySelectorAll(flashSelector);
+    for (let i = 0; i < flashNodes.length; i += 1) {
+      const flashNode = flashNodes[i];
+      if (!flashNode || flashNode.nodeType !== 1 || !flashNode.isConnected) continue;
+      if (context.container && context.container !== flashNode && !context.container.contains(flashNode)) continue;
+      if (flashNode.parentElement) {
+        flashNode.parentElement.removeChild(flashNode);
+        removed.flashShields += 1;
+      }
+    }
+    if (persistentOverlay) {
+      persistentOverlay.style.display = 'flex';
+      persistentOverlay.style.pointerEvents = 'none';
+    }
+    console.log(
+      '[DIAG][REVEAL_TOGGLE] action=clear_all_blur itemKey=' + (itemKey || 'unknown'),
+      'removed=' + JSON.stringify(removed)
+    );
+    return removed;
+  }
+
+  function applyShortsBlurForItem(itemKey, targetNode, mode) {
+    if (!targetNode || targetNode.nodeType !== 1) return;
+    const context = collectShortsItemContext(targetNode);
+    for (let i = 0; i < context.nodes.length; i += 1) {
+      const node = context.nodes[i];
+      if (!node || node.nodeType !== 1) continue;
+      node.dataset.mwRevealed = 'false';
+      const nodeSrc = getShortsNodePrimarySrc(node);
+      if (nodeSrc) {
+        state.revealed.delete(nodeSrc);
+      }
+    }
+    shortsRevealedItemKeys.delete(itemKey);
+    const targetSrc = getShortsNodePrimarySrc(targetNode) || targetNode.dataset.mwSrc || '';
+    const blurTarget = resolveShortsOverlayTarget(targetNode, targetSrc) || targetNode;
+    blurTarget.dataset.mwRevealed = 'false';
+    applyBlur(
+      blurTarget,
+      targetSrc,
+      blurTarget.dataset.mwCategory || targetNode.dataset.mwCategory || 'flagged',
+      CONFIG.blurStrength,
+      blurTarget.dataset.mwItemId || targetNode.dataset.mwItemId || ''
+    );
+    console.log('[DIAG][REVEAL_TOGGLE] action=reblur itemKey=' + (itemKey || getShortsRevealItemKey(targetSrc, blurTarget)));
+  }
+
   function applySoftBlur(element, src, itemId) {
     diagBlurStateLog('applySoftBlur.enter', element, src, 'itemId=' + (itemId || 'none'));
     // Check persistence: if user revealed this, don't blur
@@ -2366,6 +2519,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       ' hasOverlay=' + (element.dataset.mwHasOverlay === 'true')
     );
     ensureRevealDocClickCapture();
+    const itemKey = shortsMode ? getShortsRevealItemKey(src, element) : getDiagItemKey(src);
     if (shortsMode && element.dataset.mwModerated !== 'blurred') {
       removeRevealOverlay(element, src, 'createRevealOverlay_not_blurred');
       if (DIAG_YT_BLUR) {
@@ -2395,8 +2549,13 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       existingOverlay.dataset.mwFor = src;
       existingOverlay.dataset.mwNodeId = getDiagNodeId(element);
+      existingOverlay.dataset.mwItemKey = itemKey;
       existingOverlay.style.pointerEvents = 'none';
       existingOverlay.style.display = 'flex';
+      const existingBtn = existingOverlay.querySelector('.mw-reveal-btn');
+      if (existingBtn && existingBtn.nodeType === 1) {
+        existingBtn.textContent = (shortsMode && shortsRevealedItemKeys.has(itemKey)) ? '🔒 Re-blur' : '👁 Reveal';
+      }
       if (shortsMode) {
         const portal = ensureRevealPortal();
         if (portal && existingOverlay.parentElement !== portal) {
@@ -2413,7 +2572,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           }
         }
         positionShortsRevealOverlay(existingOverlay, element);
-        console.log('[DIAG][REVEAL_UI] portal_update', 'itemKey=' + getDiagItemKey(src));
+        console.log('[DIAG][REVEAL_UI] portal_update', 'itemKey=' + itemKey);
       }
       return;
     }
@@ -2448,7 +2607,6 @@ export function generateModerationScript(config: InjectionConfig): string {
     const overlayParent = shortsMode ? ensureRevealPortal() : parent;
     if (!overlayParent) return;
     const overlayCountBefore = document.querySelectorAll('.mw-reveal-overlay').length;
-    const itemKey = getDiagItemKey(src);
     let parentLooksBlurred = false;
     try {
       const parentInlineFilter = String(overlayParent.style.getPropertyValue('filter') || overlayParent.style.filter || '').toLowerCase();
@@ -2481,6 +2639,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     overlay.dataset.mwFor = src;
     overlay.dataset.mwNodeId = getDiagNodeId(element);
     overlay.dataset.mwOverlayId = overlayId;
+    overlay.dataset.mwItemKey = itemKey;
     overlay.style.cssText = [
       shortsMode ? 'position: fixed' : 'position: absolute',
       'inset: 0',
@@ -2518,7 +2677,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     
     const btn = document.createElement('button');
     btn.className = 'mw-reveal-btn';
-    btn.textContent = '👁 Reveal';
+    btn.textContent = (shortsMode && shortsRevealedItemKeys.has(itemKey)) ? '🔒 Re-blur' : '👁 Reveal';
     btn.style.cssText = [
       'background: rgba(0, 0, 0, 0.9)',
       'color: white',
@@ -2556,20 +2715,29 @@ export function generateModerationScript(config: InjectionConfig): string {
         'target=' + getDiagTargetDescriptor(e.target)
       );
       logRevealHittestSnapshot(overlay, btn, overlayId, 'button_click', e);
-      const revealAllowed = !state.revealed.has(src);
+      const currentItemKey = shortsMode ? getShortsRevealItemKey(src, element) : itemKey;
+      if (shortsMode) {
+        overlay.dataset.mwItemKey = currentItemKey;
+      }
+      const isCurrentlyRevealed = shortsMode ? shortsRevealedItemKeys.has(currentItemKey) : state.revealed.has(src);
+      const revealAllowed = !isCurrentlyRevealed;
       const revealGateReason = revealAllowed ? 'not_revealed' : 'already_revealed_reblur_path';
       console.log(
         '[DIAG][REVEAL_EVT] reveal_allowed=' + revealAllowed,
         'reason=' + revealGateReason,
         'overlayId=' + overlayId,
-        'itemKey=' + itemKey
+        'itemKey=' + currentItemKey
       );
       
-      if (state.revealed.has(src)) {
+      if (isCurrentlyRevealed) {
         // Re-blur
-        state.revealed.delete(src);
-        element.dataset.mwRevealed = 'false';
-        applyBlur(element, src, category, CONFIG.blurStrength, itemId);
+        if (shortsMode) {
+          applyShortsBlurForItem(currentItemKey, element, 'toggle');
+        } else {
+          state.revealed.delete(src);
+          element.dataset.mwRevealed = 'false';
+          applyBlur(element, src, category, CONFIG.blurStrength, itemId);
+        }
         btn.textContent = '👁 Reveal';
         overlay.style.display = 'flex';
       } else {
@@ -2578,19 +2746,27 @@ export function generateModerationScript(config: InjectionConfig): string {
         console.log(
           '[DIAG][REVEAL_EVT] reveal_apply_start',
           'overlayId=' + overlayId,
-          'itemKey=' + itemKey,
+          'itemKey=' + currentItemKey,
           'beforeBlurCount=' + beforeBlurCount
         );
-        state.revealed.add(src);
-        element.dataset.mwRevealed = 'true'; // Persistence
-        removeBlur(element, src);
-        btn.textContent = '🔒 Hide';
+        if (shortsMode) {
+          shortsRevealedItemKeys.add(currentItemKey);
+          state.revealed.add(src);
+          clearShortsBlurForItem(currentItemKey, element);
+          btn.textContent = '🔒 Re-blur';
+          overlay.style.display = 'flex';
+        } else {
+          state.revealed.add(src);
+          element.dataset.mwRevealed = 'true'; // Persistence
+          removeBlur(element, src);
+          btn.textContent = '🔒 Hide';
+        }
         const afterBlurCount = countBlurredNodesForItemKey(src);
         const removedBlurCount = beforeBlurCount > afterBlurCount ? (beforeBlurCount - afterBlurCount) : 0;
         console.log(
           '[DIAG][REVEAL_EVT] reveal_apply_done',
           'overlayId=' + overlayId,
-          'itemKey=' + itemKey,
+          'itemKey=' + currentItemKey,
           'removedBlurCount=' + removedBlurCount
         );
         
@@ -4467,6 +4643,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       // Clear scanned state for fresh scan
       state.scanned.clear();
       state.elements.clear();
+      shortsRevealedItemKeys.clear();
       scheduleInitTimeout('spaFullScan', scanFullPage, 300);
       if (isYouTube()) {
         scheduleInitTimeout('spaYouTubeScan', scanYouTubeThumbnails, 500);
