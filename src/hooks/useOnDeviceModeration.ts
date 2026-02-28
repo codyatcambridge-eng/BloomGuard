@@ -20,11 +20,13 @@ export type ModerationReason =
   | 'fail_open_tiny'
   | 'model_not_ready'
   | 'swimwear_detected'
-  | 'thirst_detected';
+  | 'thirst_detected'
+  | 'unknown_input';
 
 export interface ModerationResult {
   isExplicit: boolean;
   shouldBlur: boolean;
+  category?: string;
   predictions: ModerationPrediction[];
   dominantClass: string;
   confidence: number;
@@ -763,6 +765,7 @@ export const useOnDeviceModeration = () => {
       const sexyScore = predMap['sexy'] || 0;
       const hentaiScore = predMap['hentai'] || 0;
       const neutralScore = predMap['neutral'] || 0;
+      const drawingScore = predMap['drawing'] || 0;
       const nsfwRisk = computeNsfwRisk(pornScore, sexyScore, hentaiScore);
       const dialBucket = toDialBucket(thresholds);
       const strictMode = dialBucket === 'strict';
@@ -1220,6 +1223,94 @@ export const useOnDeviceModeration = () => {
       const sorted = [...predictions].sort((a, b) => b.probability - a.probability);
       let dominantClass = sorted[0]?.className || 'Unknown';
       let confidence = sorted[0]?.probability || 0;
+
+      const allZeroPredictions =
+        pornScore === 0 &&
+        sexyScore === 0 &&
+        hentaiScore === 0 &&
+        neutralScore === 0 &&
+        drawingScore === 0;
+      const unknownByInputSource = segmentationInputSource === 'none' && predictions.length === 0;
+      const unknownByZeroConfidence = confidence === 0 && allZeroPredictions;
+      if (unknownByInputSource || unknownByZeroConfidence) {
+        const unknownWhy = unknownByInputSource
+          ? 'inputSource_none'
+          : 'confidence_zero_all_zero_predictions';
+        const sourceForDiag = cacheKey || (
+          image instanceof HTMLImageElement
+            ? (image.currentSrc || image.src || '')
+            : 'canvas'
+        );
+
+        if (diagEnabled) {
+          console.debug(
+            '[DIAG][UNKNOWN_INPUT]',
+            `requestId=${requestId}`,
+            `itemId=${itemId}`,
+            `src=${sourceForDiag || 'unknown'}`,
+            `why=${unknownWhy}`,
+          );
+        }
+
+        inferenceTime = performance.now() - startTime;
+        const result: ModerationResult = {
+          isExplicit: false,
+          shouldBlur: false,
+          category: 'unknown_input',
+          predictions: formattedPredictions,
+          dominantClass: 'unknown_input',
+          confidence: 0,
+          inferenceTime,
+          reason: 'unknown_input',
+          nsfwRisk,
+          decisionReason: 'unknown_input_no_pixels',
+          modelVersion: `${NSFW_MODEL_VERSION}+${SEGMENTATION_MODEL_VERSION}`,
+          thresholdsUsed: {
+            nsfwGrayZoneMin: SEGMENTATION_GRAY_ZONE_MIN,
+            nsfwGrayZoneMax: SEGMENTATION_GRAY_ZONE_MAX,
+            explicitOverride: NSFW_EXPLICIT_OVERRIDE_THRESHOLD,
+            skinRatio: segmentationThreshold,
+            thirstWeights: {
+              nsfw: NSFW_WEIGHT,
+              skin: SKIN_WEIGHT,
+              person: PERSON_WEIGHT,
+            },
+          },
+          segmentation: {
+            attempted: segmentationAttempted,
+            applied: segmentationApplied,
+            personPresent: segmentationPersonPresent,
+            personPixels: segmentationPersonPixels,
+            skinPixels: segmentationSkinPixels,
+            skinRatio: segmentationSkinRatio,
+            thirstScore: segmentationThirstScore,
+            threshold: segmentationThreshold,
+            strictMode,
+            grayZone: inGrayZone,
+            throttled: segmentationThrottled,
+            cached: segmentationCached,
+            modelVersion: SEGMENTATION_MODEL_VERSION,
+            imageWidth: imageDims.width,
+            imageHeight: imageDims.height,
+            inputWidth: segmentationInputWidth,
+            inputHeight: segmentationInputHeight,
+            host: sourceHost,
+            segMs,
+            skinMs,
+            inputSource: segmentationInputSource,
+            skipReason: segmentationSkipReason || undefined,
+          },
+          signals,
+        };
+
+        if (cacheKey) {
+          imageCache.current.set(cacheKey, result);
+          limitCache();
+        }
+
+        return result;
+      }
+
       let reason: ModerationReason = shouldBlur ? 'threshold_hit' : 'threshold_safe';
       let decisionReason = shouldBlur ? 'stage_a_threshold' : 'stage_a_safe';
 
