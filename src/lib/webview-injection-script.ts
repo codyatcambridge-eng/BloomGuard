@@ -1164,6 +1164,10 @@ export function generateModerationScript(config: InjectionConfig): string {
   const diagLogTimestamps = {};
   const diagNodeIds = new WeakMap();
   const diagNodeParentAtBlur = new WeakMap();
+  const diagShortsTimelineStartAt = Date.now();
+  const diagShortsBlurParentObserverByNode = new WeakMap();
+  const diagShortsBlurredHtml5MainVideoNodeIds = new Set();
+  const diagShortsLastBlurNodeIdBySrc = {};
   const diagEpochCounters = {
     staleInjectedDiscardCount: 0,
     epochHeldCount: 0,
@@ -1401,6 +1405,337 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
     } catch (e) {}
     return tag + classSuffix;
+  }
+
+  function diagShortsTimeline(eventName, details) {
+    if (!DIAG_YT_BLUR || !isShortsModeActive()) return;
+    const elapsedMs = Date.now() - diagShortsTimelineStartAt;
+    console.log(
+      '[MW-YT][DIAG][SHORTS_TIMELINE]',
+      't+' + elapsedMs + 'ms',
+      'event=' + (eventName || 'unknown'),
+      details || ''
+    );
+  }
+
+  function getDiagClassList(node) {
+    if (!node || node.nodeType !== 1) return '';
+    try {
+      if (node.classList && node.classList.length) {
+        return Array.prototype.slice.call(node.classList, 0, 12).join(' ');
+      }
+      return String(node.className || '').trim();
+    } catch (e) {
+      return String(node.className || '').trim();
+    }
+  }
+
+  function getDiagDatasetSnapshot(node) {
+    if (!node || node.nodeType !== 1 || !node.dataset) return '{}';
+    const snapshot = {};
+    let keys = [];
+    try {
+      keys = Object.keys(node.dataset).sort();
+    } catch (e) {
+      keys = [];
+    }
+    const maxKeys = 20;
+    for (let i = 0; i < keys.length && i < maxKeys; i += 1) {
+      const key = keys[i];
+      snapshot[key] = String(node.dataset[key] || '').substring(0, 140);
+    }
+    if (keys.length > maxKeys) {
+      snapshot.__extraKeys = String(keys.length - maxKeys);
+    }
+    try {
+      return JSON.stringify(snapshot);
+    } catch (e) {
+      return '{}';
+    }
+  }
+
+  function getDiagNodeSignature(node) {
+    if (!node || node.nodeType !== 1) return 'unknown';
+    const tag = String(node.tagName || 'unknown').toLowerCase();
+    const idSuffix = node.id ? ('#' + node.id) : '';
+    const classes = getDiagClassList(node);
+    let classSuffix = '';
+    if (classes) {
+      const classTokens = classes.split(/\\s+/).filter(Boolean).slice(0, 3);
+      if (classTokens.length) {
+        classSuffix = '.' + classTokens.join('.');
+      }
+    }
+    return tag + idSuffix + classSuffix;
+  }
+
+  function getDiagParentChain(node, depth) {
+    const chain = [];
+    let current = node && node.parentElement ? node.parentElement : null;
+    const maxDepth = Number.isFinite(depth) ? Math.max(0, depth) : 3;
+    for (let i = 0; i < maxDepth && current; i += 1) {
+      chain.push(getDiagNodeSignature(current) + '(nodeId=' + getDiagNodeId(current) + ')');
+      current = current.parentElement;
+    }
+    return chain.join(' <= ');
+  }
+
+  function isDiagBlurActiveOnNode(node) {
+    if (!node || node.nodeType !== 1) return false;
+    const inlineFilter = String(node.style.getPropertyValue('filter') || node.style.filter || '').toLowerCase();
+    const inlineBackdrop = String(node.style.getPropertyValue('backdrop-filter') || '').toLowerCase();
+    return (
+      inlineFilter.indexOf('blur(') !== -1 ||
+      inlineBackdrop.indexOf('blur(') !== -1 ||
+      (node.dataset && node.dataset.mwModerated === 'blurred') ||
+      (node.classList && node.classList.contains('mw-blurred'))
+    );
+  }
+
+  function isHtml5MainVideoNode(node) {
+    if (!node || node.nodeType !== 1) return false;
+    if (String(node.tagName || '').toUpperCase() !== 'VIDEO') return false;
+    return !!(node.classList && node.classList.contains('html5-main-video'));
+  }
+
+  function diagCollectDescendantTagNodes(root, tagNameLower) {
+    const matches = [];
+    if (!root || root.nodeType !== 1) return matches;
+    const normalizedTag = String(tagNameLower || '').toUpperCase();
+    if (String(root.tagName || '').toUpperCase() === normalizedTag) {
+      matches.push(root);
+    }
+    if (typeof root.querySelectorAll === 'function') {
+      const descendants = root.querySelectorAll(String(tagNameLower || '').toLowerCase());
+      for (let i = 0; i < descendants.length; i += 1) {
+        matches.push(descendants[i]);
+      }
+    }
+    return matches;
+  }
+
+  function diagLogHtml5MainVideoAppearance(videoNode, reason, relatedBlurNodeId, src, itemId) {
+    if (!DIAG_YT_BLUR || !isShortsModeActive()) return;
+    if (!videoNode || videoNode.nodeType !== 1) return;
+    if (!isHtml5MainVideoNode(videoNode)) return;
+    const videoNodeId = getDiagNodeId(videoNode);
+    const classList = getDiagClassList(videoNode);
+    const alreadyBlurred = isDiagBlurActiveOnNode(videoNode);
+    const everBlurredThisNode = diagShortsBlurredHtml5MainVideoNodeIds.has(videoNodeId);
+    diagShortsTimeline(
+      'html5_main_video_appeared',
+      'nodeId=' + videoNodeId +
+      ' reason=' + (reason || 'unknown') +
+      ' classList=' + String(classList || '').substring(0, 200) +
+      ' blurredNow=' + alreadyBlurred +
+      ' everBlurredThisNode=' + everBlurredThisNode +
+      ' everBlurredAnyHtml5=' + (diagShortsBlurredHtml5MainVideoNodeIds.size > 0) +
+      ' relatedBlurNodeId=' + (relatedBlurNodeId || 'none') +
+      ' src=' + String(src || '').substring(0, 180) +
+      ' itemId=' + (itemId || 'none')
+    );
+  }
+
+  function diagLogVideoInserted(node, reason, relatedBlurNodeId, src, itemId) {
+    if (!DIAG_YT_BLUR || !isShortsModeActive()) return;
+    const videos = diagCollectDescendantTagNodes(node, 'video');
+    for (let i = 0; i < videos.length; i += 1) {
+      const video = videos[i];
+      if (!video || video.nodeType !== 1) continue;
+      const nodeId = getDiagNodeId(video);
+      const classList = getDiagClassList(video);
+      const dataset = getDiagDatasetSnapshot(video);
+      const source = getDiagSourceFields(video);
+      const html5Main = isHtml5MainVideoNode(video);
+      const blurActive = isDiagBlurActiveOnNode(video);
+      diagShortsTimeline(
+        'video_inserted',
+        'nodeId=' + nodeId +
+        ' reason=' + (reason || 'unknown') +
+        ' classList=' + String(classList || '').substring(0, 200) +
+        ' dataset=' + dataset +
+        ' currentSrc=' + String(source.currentSrc || '').substring(0, 180) +
+        ' poster=' + String(source.poster || '').substring(0, 180) +
+        ' html5MainVideo=' + html5Main +
+        ' blurredNow=' + blurActive +
+        ' relatedBlurNodeId=' + (relatedBlurNodeId || 'none') +
+        ' src=' + String(src || '').substring(0, 180) +
+        ' itemId=' + (itemId || 'none')
+      );
+      if (html5Main) {
+        diagLogHtml5MainVideoAppearance(video, reason, relatedBlurNodeId, src, itemId);
+      }
+    }
+  }
+
+  function diagLogImgRemoved(node, reason, relatedBlurNodeId, src, itemId) {
+    if (!DIAG_YT_BLUR || !isShortsModeActive()) return;
+    const imgs = diagCollectDescendantTagNodes(node, 'img');
+    for (let i = 0; i < imgs.length; i += 1) {
+      const img = imgs[i];
+      if (!img || img.nodeType !== 1) continue;
+      const source = getDiagSourceFields(img);
+      diagShortsTimeline(
+        'img_removed',
+        'nodeId=' + getDiagNodeId(img) +
+        ' reason=' + (reason || 'unknown') +
+        ' classList=' + String(getDiagClassList(img) || '').substring(0, 200) +
+        ' dataset=' + getDiagDatasetSnapshot(img) +
+        ' currentSrc=' + String(source.currentSrc || '').substring(0, 180) +
+        ' relatedBlurNodeId=' + (relatedBlurNodeId || 'none') +
+        ' src=' + String(src || '').substring(0, 180) +
+        ' itemId=' + (itemId || 'none')
+      );
+    }
+  }
+
+  function diagScheduleBlurredNodePresenceChecks(node, src, itemId) {
+    if (!DIAG_YT_BLUR || !isShortsModeActive()) return;
+    if (!node || node.nodeType !== 1) return;
+    const nodeId = getDiagNodeId(node);
+    [1000, 2000].forEach(function(delayMs) {
+      setTimeout(function() {
+        const connected = !!(node && node.isConnected);
+        let parentNode = null;
+        let replacementVideo = null;
+        if (node && node.parentElement && node.parentElement.nodeType === 1) {
+          parentNode = node.parentElement;
+          if (typeof parentNode.querySelector === 'function') {
+            replacementVideo = parentNode.querySelector('video.html5-main-video, video');
+          }
+        }
+        const replacementId = replacementVideo ? getDiagNodeId(replacementVideo) : 'none';
+        const replacementHtml5Main = !!(replacementVideo && isHtml5MainVideoNode(replacementVideo));
+        const replacementBlurred = !!(replacementVideo && isDiagBlurActiveOnNode(replacementVideo));
+        diagShortsTimeline(
+          'blurred_node_presence_check',
+          'delayMs=' + delayMs +
+          ' nodeId=' + nodeId +
+          ' connected=' + connected +
+          ' parentNodeId=' + (parentNode ? getDiagNodeId(parentNode) : 'none') +
+          ' replacementVideoNodeId=' + replacementId +
+          ' replacementVideoHtml5Main=' + replacementHtml5Main +
+          ' replacementVideoBlurred=' + replacementBlurred +
+          ' src=' + String(src || '').substring(0, 180) +
+          ' itemId=' + (itemId || 'none')
+        );
+      }, delayMs);
+    });
+  }
+
+  function attachDiagBlurredNodeParentObserver(node, src, itemId) {
+    if (!DIAG_YT_BLUR || !isShortsModeActive()) return;
+    if (!node || node.nodeType !== 1) return;
+    const parent = node.parentElement;
+    const nodeId = getDiagNodeId(node);
+    if (!parent || parent.nodeType !== 1) {
+      diagShortsTimeline(
+        'parent_observer_skip',
+        'reason=no_parent nodeId=' + nodeId + ' src=' + String(src || '').substring(0, 180)
+      );
+      return;
+    }
+    const parentId = getDiagNodeId(parent);
+    const existing = diagShortsBlurParentObserverByNode.get(node);
+    if (existing && existing.observer && existing.parent === parent) {
+      diagShortsTimeline(
+        'parent_observer_reused',
+        'nodeId=' + nodeId + ' parentNodeId=' + parentId + ' itemId=' + (itemId || 'none')
+      );
+      return;
+    }
+    if (existing && existing.observer) {
+      try {
+        existing.observer.disconnect();
+      } catch (e) {}
+    }
+    const observer = new MutationObserver(function(mutations) {
+      for (let i = 0; i < mutations.length; i += 1) {
+        const mutation = mutations[i];
+        if (!mutation || mutation.type !== 'childList') continue;
+        for (let r = 0; r < mutation.removedNodes.length; r += 1) {
+          const removedNode = mutation.removedNodes[r];
+          if (!removedNode || removedNode.nodeType !== 1) continue;
+          diagLogImgRemoved(removedNode, 'parent_observer_removed', nodeId, src, itemId);
+        }
+        for (let a = 0; a < mutation.addedNodes.length; a += 1) {
+          const addedNode = mutation.addedNodes[a];
+          if (!addedNode || addedNode.nodeType !== 1) continue;
+          diagLogVideoInserted(addedNode, 'parent_observer_added', nodeId, src, itemId);
+        }
+      }
+      if (!node.isConnected) {
+        diagShortsTimeline(
+          'blurred_node_detached',
+          'nodeId=' + nodeId +
+          ' parentNodeId=' + parentId +
+          ' isConnected=false' +
+          ' src=' + String(src || '').substring(0, 180) +
+          ' itemId=' + (itemId || 'none')
+        );
+      }
+    });
+    observer.observe(parent, { childList: true, subtree: true });
+    diagShortsBlurParentObserverByNode.set(node, { observer: observer, parent: parent });
+    diagShortsTimeline(
+      'parent_observer_attached',
+      'nodeId=' + nodeId +
+      ' parentNodeId=' + parentId +
+      ' parentChain=' + getDiagParentChain(node, 3) +
+      ' src=' + String(src || '').substring(0, 180) +
+      ' itemId=' + (itemId || 'none')
+    );
+  }
+
+  function diagLogBlurAppliedNodeDetails(node, src, category, itemId) {
+    if (!DIAG_YT_BLUR || !isShortsModeActive()) return;
+    if (!node || node.nodeType !== 1) return;
+    const nodeId = getDiagNodeId(node);
+    const normalizedSrc = normalizeUrl(src || '');
+    const srcKey = normalizedSrc || String(src || '');
+    const previousNodeId = srcKey ? (diagShortsLastBlurNodeIdBySrc[srcKey] || '') : '';
+    if (srcKey) {
+      diagShortsLastBlurNodeIdBySrc[srcKey] = nodeId;
+    }
+    const classList = getDiagClassList(node);
+    const dataset = getDiagDatasetSnapshot(node);
+    const parentChain = getDiagParentChain(node, 3);
+    const html5MainVideo = isHtml5MainVideoNode(node);
+    if (html5MainVideo) {
+      diagShortsBlurredHtml5MainVideoNodeIds.add(nodeId);
+    }
+    if (previousNodeId && previousNodeId !== nodeId) {
+      diagShortsTimeline(
+        'blur_reattached',
+        'srcKey=' + String(srcKey).substring(0, 180) +
+        ' prevNodeId=' + previousNodeId +
+        ' nextNodeId=' + nodeId +
+        ' itemId=' + (itemId || 'none')
+      );
+    }
+    diagShortsTimeline(
+      'blur_applied',
+      'nodeId=' + nodeId +
+      ' tagName=' + String(node.tagName || 'unknown') +
+      ' classList=' + String(classList || '').substring(0, 200) +
+      ' dataset=' + dataset +
+      ' parentChain=' + parentChain +
+      ' connected=' + (!!node.isConnected) +
+      ' html5MainVideo=' + html5MainVideo +
+      ' src=' + String(src || '').substring(0, 180) +
+      ' category=' + (category || 'flagged') +
+      ' itemId=' + (itemId || 'none')
+    );
+    if (html5MainVideo) {
+      diagShortsTimeline(
+        'blur_attached_html5_main_video',
+        'nodeId=' + nodeId +
+        ' src=' + String(src || '').substring(0, 180) +
+        ' itemId=' + (itemId || 'none')
+      );
+    }
+    diagScheduleBlurredNodePresenceChecks(node, src, itemId);
+    attachDiagBlurredNodeParentObserver(node, src, itemId);
   }
 
   function countBlurredNodesForItemKey(src) {
@@ -2174,6 +2509,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       element.dataset.mwItemId = itemId || '';
       element.classList.remove('mw-softblur');
       element.classList.add('mw-blurred');
+      diagLogBlurAppliedNodeDetails(element, src, category, itemId);
       
       state.blurred.add(src);
       state.stats.blurred++;
@@ -4014,6 +4350,9 @@ export function generateModerationScript(config: InjectionConfig): string {
         });
         mutation.addedNodes.forEach(node => {
           if (node.nodeType !== 1) return;
+          if (shortsAttrMode && DIAG_YT_BLUR) {
+            diagLogVideoInserted(node, 'global_mutation_added', null, '', '');
+          }
           
           // Check if this is a YouTube thumbnail element
           if (isYouTube()) {
