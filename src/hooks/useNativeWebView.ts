@@ -230,6 +230,12 @@ export interface UseNativeWebViewOptions {
   onNavigationRequest?: (url: string) => Promise<boolean> | boolean; // Return false to block navigation
   onClose?: () => void;
   onMessageFromWebview?: (payload: unknown) => void;
+  onActiveInstanceIdChange?: (activeInstanceId: number | null) => void;
+  getListenerDiagContext?: () => {
+    navId?: number | null;
+    url?: string;
+    activeInstanceId?: number | null;
+  };
 }
 
 export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
@@ -241,6 +247,8 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     onNavigationRequest,
     onClose,
     onMessageFromWebview,
+    onActiveInstanceIdChange,
+    getListenerDiagContext,
   } = options;
 
   const [state, setState] = useState<WebViewState>({
@@ -268,12 +276,51 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
   const executeScript60sWindowStartRef = useRef(0);
   const executeScript60sCountRef = useRef(0);
   const flashDiagLogAtRef = useRef(0);
+  const listenerAttachSeqRef = useRef(0);
+  const listenerHandlesRef = useRef<PluginListenerHandle[]>([]);
+  const listenerOwnerRef = useRef<{ navId: number | null; instanceId: number | null }>({
+    navId: null,
+    instanceId: null,
+  });
+  const [listenersAttached, setListenersAttached] = useState(false);
+  const listenersAttachedRef = useRef(false);
+  const onLoadStartRef = useRef(onLoadStart);
+  const onLoadEndRef = useRef(onLoadEnd);
+  const onLoadErrorRef = useRef(onLoadError);
+  const onUrlChangeRef = useRef(onUrlChange);
+  const onNavigationRequestRef = useRef(onNavigationRequest);
+  const onCloseRef = useRef(onClose);
+  const onMessageFromWebviewRef = useRef(onMessageFromWebview);
+  const onActiveInstanceIdChangeRef = useRef(onActiveInstanceIdChange);
+  const getListenerDiagContextRef = useRef(getListenerDiagContext);
   const pageLoadErrorRecoveryRef = useRef<{ url: string; count: number; at: number }>({
     url: '',
     count: 0,
     at: 0,
   });
   const flashGuardInstalledRef = useRef(false);
+
+  useEffect(() => {
+    onLoadStartRef.current = onLoadStart;
+    onLoadEndRef.current = onLoadEnd;
+    onLoadErrorRef.current = onLoadError;
+    onUrlChangeRef.current = onUrlChange;
+    onNavigationRequestRef.current = onNavigationRequest;
+    onCloseRef.current = onClose;
+    onMessageFromWebviewRef.current = onMessageFromWebview;
+    onActiveInstanceIdChangeRef.current = onActiveInstanceIdChange;
+    getListenerDiagContextRef.current = getListenerDiagContext;
+  }, [
+    onLoadStart,
+    onLoadEnd,
+    onLoadError,
+    onUrlChange,
+    onNavigationRequest,
+    onClose,
+    onMessageFromWebview,
+    onActiveInstanceIdChange,
+    getListenerDiagContext,
+  ]);
 
   const markClosed = useCallback((reason: string) => {
     const previousId = activeInstanceIdRef.current;
@@ -287,8 +334,59 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
       'reason=' + reason,
     );
     activeInstanceIdRef.current = null;
+    onActiveInstanceIdChangeRef.current?.(null);
     isOpenRef.current = false;
   }, []);
+
+  const readListenerDiagContext = useCallback(() => {
+    const context = getListenerDiagContextRef.current?.();
+    const navId = context && typeof context.navId === 'number' && Number.isFinite(context.navId)
+      ? context.navId
+      : null;
+    const hostInstanceId = context && typeof context.activeInstanceId === 'number' && Number.isFinite(context.activeInstanceId)
+      ? context.activeInstanceId
+      : null;
+    const url =
+      (context && typeof context.url === 'string' && context.url) ||
+      currentUrlRef.current ||
+      'unknown';
+    const hookInstanceId = activeInstanceIdRef.current;
+    const instanceId = hookInstanceId ?? hostInstanceId;
+    return {
+      navId,
+      url,
+      activeInstanceId: instanceId,
+      hookActiveInstanceId: hookInstanceId,
+      browserActiveInstanceId: hostInstanceId,
+    };
+  }, []);
+
+  const setListenersAttachedState = useCallback((attached: boolean) => {
+    if (listenersAttachedRef.current === attached) return;
+    listenersAttachedRef.current = attached;
+    setListenersAttached(attached);
+  }, []);
+
+  const logChurnDiag = useCallback((
+    action: string,
+    reason: string,
+    stackTag: string,
+    listenerKey?: string,
+  ) => {
+    const context = readListenerDiagContext();
+    console.log(
+      '[DIAG][CHURN]',
+      'action=' + action,
+      'reason=' + reason,
+      'stack=' + stackTag,
+      'listenerKey=' + (listenerKey || 'none'),
+      'navId=' + (context.navId ?? 'unknown'),
+      'url=' + context.url,
+      'activeInstanceId=' + (context.activeInstanceId ?? 'none'),
+      'hookActiveInstanceId=' + (context.hookActiveInstanceId ?? 'none'),
+      'browserActiveInstanceId=' + (context.browserActiveInstanceId ?? 'none'),
+    );
+  }, [readListenerDiagContext]);
 
   const flashDiagLog = useCallback((...args: unknown[]) => {
     const now = Date.now();
@@ -448,143 +546,216 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
   useEffect(() => {
     if (!isNative || listenersSetupRef.current) return;
     listenersSetupRef.current = true;
-    let messageFromWebviewHandle: PluginListenerHandle | null = null;
     let disposed = false;
+    listenerHandlesRef.current = [];
 
-    // URL change listener
-    InAppBrowser.addListener('urlChangeEvent', (event) => {
-      const url = event.url;
-      console.log('[NativeWebView] URL changed:', url);
-      currentUrlRef.current = url;
+    const addListener = InAppBrowser.addListener as unknown as (
+      eventName: string,
+      listener: (event: unknown) => void,
+    ) => Promise<PluginListenerHandle>;
 
-      setState(prev => ({ ...prev, currentUrl: url }));
-      onUrlChange?.(url);
-
-      // Update history
-      if (historyIndexRef.current === historyStackRef.current.length - 1) {
-        historyStackRef.current.push(url);
-        historyIndexRef.current++;
-      } else {
-        // User navigated from middle of history
-        historyStackRef.current = historyStackRef.current.slice(0, historyIndexRef.current + 1);
-        historyStackRef.current.push(url);
-        historyIndexRef.current = historyStackRef.current.length - 1;
+    const attachListener = async (
+      eventName: string,
+      listener: (event: unknown) => void,
+      stackTag: string,
+    ) => {
+      const listenerKey = eventName + ':' + (++listenerAttachSeqRef.current);
+      logChurnDiag('addListener_call', 'setup', stackTag, listenerKey);
+      try {
+        const handle = await addListener(eventName, listener);
+        if (disposed) {
+          await handle.remove().catch(() => undefined);
+          logChurnDiag('addListener_disposed', 'setup_disposed', stackTag, listenerKey);
+          return;
+        }
+        listenerHandlesRef.current.push(handle);
+        logChurnDiag('addListener_attached', 'setup_complete', stackTag, listenerKey);
+      } catch (error) {
+        console.error('[NativeWebView] Failed to add listener:', eventName, error);
+        logChurnDiag('addListener_failed', 'setup_error', stackTag, listenerKey);
       }
+    };
 
-      // Update navigation state
-      setState(prev => ({
-        ...prev,
-        canGoBack: historyIndexRef.current > 0,
-        canGoForward: historyIndexRef.current < historyStackRef.current.length - 1,
-      }));
+    const attachAllListeners = async () => {
+      logChurnDiag('attach_begin', 'setup_start', 'useNativeWebView.listeners.setup');
 
-      if (FLASH_GUARD_ENABLED) {
-        void probeFlashGuard('url_change');
-        void installFlashGuard().then((installed) => {
-          flashDiagLog('url_change install complete', installed);
-          void probeFlashGuard('url_change_post_install');
-        });
-        void runFlashGuardDiagProof('url_change_force');
-      }
-    });
+      await attachListener('urlChangeEvent', (event) => {
+        const payload = event as { url?: string };
+        const url = payload.url || '';
+        console.log('[NativeWebView] URL changed:', url);
+        currentUrlRef.current = url;
 
-    // Page load complete listener
-    InAppBrowser.addListener('browserPageLoaded', () => {
-      console.log('[NativeWebView] Page loaded');
-      pageLoadErrorRecoveryRef.current = {
-        url: currentUrlRef.current || pageLoadErrorRecoveryRef.current.url,
-        count: 0,
-        at: Date.now(),
-      };
-      setState(prev => ({ ...prev, isLoading: false, error: null }));
-      if (FLASH_GUARD_ENABLED) {
-        void (async () => {
-          await probeFlashGuard('load_end_pre_toggle');
-          await setFlashGuardState(false, 'load_end');
-          await probeFlashGuard('load_end_post_toggle');
-        })();
-      }
-      if (currentUrlRef.current) {
-        onLoadEnd?.(currentUrlRef.current);
-      }
-    });
+        const context = readListenerDiagContext();
+        listenerOwnerRef.current = {
+          navId: context.navId,
+          instanceId: context.activeInstanceId,
+        };
+        logChurnDiag('urlChangeEvent', 'event_received', 'useNativeWebView.listeners.urlChangeEvent');
 
-    InAppBrowser.addListener('pageLoadError', () => {
-      const failedUrl = currentUrlRef.current || '';
-      const now = Date.now();
-      const previous = pageLoadErrorRecoveryRef.current;
-      const isSameBurst = previous.url === failedUrl && (now - previous.at) < 15000;
-      const attempts = isSameBurst ? previous.count : 0;
-      if (attempts < 1 && isOpenRef.current) {
+        setState(prev => ({ ...prev, currentUrl: url }));
+        onUrlChangeRef.current?.(url);
+
+        // Update history
+        if (historyIndexRef.current === historyStackRef.current.length - 1) {
+          historyStackRef.current.push(url);
+          historyIndexRef.current++;
+        } else {
+          // User navigated from middle of history
+          historyStackRef.current = historyStackRef.current.slice(0, historyIndexRef.current + 1);
+          historyStackRef.current.push(url);
+          historyIndexRef.current = historyStackRef.current.length - 1;
+        }
+
+        // Update navigation state
+        setState(prev => ({
+          ...prev,
+          canGoBack: historyIndexRef.current > 0,
+          canGoForward: historyIndexRef.current < historyStackRef.current.length - 1,
+        }));
+
+        if (FLASH_GUARD_ENABLED) {
+          void probeFlashGuard('url_change');
+          void installFlashGuard().then((installed) => {
+            flashDiagLog('url_change install complete', installed);
+            void probeFlashGuard('url_change_post_install');
+          });
+          void runFlashGuardDiagProof('url_change_force');
+        }
+      }, 'useNativeWebView.listeners.urlChangeEvent');
+
+      await attachListener('browserPageLoaded', () => {
+        console.log('[NativeWebView] Page loaded');
+        pageLoadErrorRecoveryRef.current = {
+          url: currentUrlRef.current || pageLoadErrorRecoveryRef.current.url,
+          count: 0,
+          at: Date.now(),
+        };
+        setState(prev => ({ ...prev, isLoading: false, error: null }));
+        if (FLASH_GUARD_ENABLED) {
+          void (async () => {
+            await probeFlashGuard('load_end_pre_toggle');
+            await setFlashGuardState(false, 'load_end');
+            await probeFlashGuard('load_end_post_toggle');
+          })();
+        }
+        if (currentUrlRef.current) {
+          onLoadEndRef.current?.(currentUrlRef.current);
+        }
+      }, 'useNativeWebView.listeners.browserPageLoaded');
+
+      await attachListener('pageLoadError', () => {
+        const failedUrl = currentUrlRef.current || '';
+        const now = Date.now();
+        const previous = pageLoadErrorRecoveryRef.current;
+        const isSameBurst = previous.url === failedUrl && (now - previous.at) < 15000;
+        const attempts = isSameBurst ? previous.count : 0;
+        if (attempts < 1 && isOpenRef.current) {
+          pageLoadErrorRecoveryRef.current = {
+            url: failedUrl,
+            count: attempts + 1,
+            at: now,
+          };
+          void InAppBrowser.reload()
+            .then(() => {
+              setState(prev => ({ ...prev, isLoading: true, error: null }));
+              void setFlashGuardState(true, 'reload_after_error');
+            })
+            .catch(() => {
+              setState(prev => ({ ...prev, isLoading: false, error: 'pageLoadError' }));
+              onLoadErrorRef.current?.(failedUrl, 'pageLoadError');
+            });
+          return;
+        }
+
         pageLoadErrorRecoveryRef.current = {
           url: failedUrl,
-          count: attempts + 1,
+          count: attempts,
           at: now,
         };
-        void InAppBrowser.reload()
-          .then(() => {
-            setState(prev => ({ ...prev, isLoading: true, error: null }));
-            void setFlashGuardState(true, 'reload_after_error');
-          })
-          .catch(() => {
-            setState(prev => ({ ...prev, isLoading: false, error: 'pageLoadError' }));
-            onLoadError?.(failedUrl, 'pageLoadError');
-          });
-        return;
-      }
+        setState(prev => ({ ...prev, isLoading: false, error: 'pageLoadError' }));
+        onLoadErrorRef.current?.(failedUrl, 'pageLoadError');
+      }, 'useNativeWebView.listeners.pageLoadError');
 
-      pageLoadErrorRecoveryRef.current = {
-        url: failedUrl,
-        count: attempts,
-        at: now,
+      await attachListener('closeEvent', () => {
+        console.log('[NativeWebView] Browser closed');
+        markClosed('closeEvent');
+        flashGuardInstalledRef.current = false;
+        setState(prev => ({ ...prev, isOpen: false }));
+        onCloseRef.current?.();
+      }, 'useNativeWebView.listeners.closeEvent');
+
+      await attachListener('messageFromWebview', (event) => {
+        const payload = (
+          event &&
+          typeof event === 'object' &&
+          'detail' in event &&
+          (event as { detail?: unknown }).detail !== undefined
+        )
+          ? (event as { detail?: unknown }).detail
+          : event;
+        onMessageFromWebviewRef.current?.(payload);
+      }, 'useNativeWebView.listeners.messageFromWebview');
+
+      if (disposed) return;
+      setListenersAttachedState(true);
+      const context = readListenerDiagContext();
+      listenerOwnerRef.current = {
+        navId: context.navId,
+        instanceId: context.activeInstanceId,
       };
-      setState(prev => ({ ...prev, isLoading: false, error: 'pageLoadError' }));
-      onLoadError?.(failedUrl, 'pageLoadError');
-    });
+      logChurnDiag('attach_complete', 'all_listeners_attached', 'useNativeWebView.listeners.setup');
+    };
 
-    // Close listener
-    InAppBrowser.addListener('closeEvent', () => {
-      console.log('[NativeWebView] Browser closed');
-      markClosed('closeEvent');
-      flashGuardInstalledRef.current = false;
-      setState(prev => ({ ...prev, isOpen: false }));
-      onClose?.();
-    });
-
-    void InAppBrowser.addListener('messageFromWebview', (event) => {
-      const payload = (
-        event &&
-        typeof event === 'object' &&
-        'detail' in event &&
-        (event as { detail?: unknown }).detail !== undefined
-      )
-        ? (event as { detail?: unknown }).detail
-        : event;
-      onMessageFromWebview?.(payload);
-    }).then((handle) => {
-      if (disposed) {
-        void handle.remove();
-        return;
-      }
-      messageFromWebviewHandle = handle;
-    }).catch((error) => {
-      console.error('[NativeWebView] Failed to add messageFromWebview listener:', error);
-    });
+    void attachAllListeners();
 
     return () => {
       disposed = true;
-      if (messageFromWebviewHandle) {
-        void messageFromWebviewHandle.remove();
-        messageFromWebviewHandle = null;
-      }
+      setListenersAttachedState(false);
+      const stackTag = 'useNativeWebView.listeners.cleanup';
+      const handles = listenerHandlesRef.current;
+      listenerHandlesRef.current = [];
+      handles.forEach((handle) => {
+        void handle.remove().catch(() => undefined);
+      });
+      const context = readListenerDiagContext();
+      const owner = listenerOwnerRef.current;
+      logChurnDiag('cleanup', 'cleanup_begin', stackTag);
+      const sameNav = owner.navId !== null && context.navId !== null && owner.navId === context.navId;
+      const sameInstance =
+        owner.instanceId !== null &&
+        context.activeInstanceId !== null &&
+        owner.instanceId === context.activeInstanceId;
       console.log(
-        '[DIAG][CHURN] removeAllListeners',
-        'navId=unknown',
+        '[DIAG][CHURN]',
+        'action=cleanup_owner_check',
+        'reason=before_removeAllListeners',
+        'stack=' + stackTag,
+        'ownerNavId=' + (owner.navId ?? 'none'),
+        'ownerActiveInstanceId=' + (owner.instanceId ?? 'none'),
+        'contextNavId=' + (context.navId ?? 'none'),
+        'contextActiveInstanceId=' + (context.activeInstanceId ?? 'none'),
+        'isOpen=' + isOpenRef.current,
       );
-      InAppBrowser.removeAllListeners();
+      if (sameNav && sameInstance) {
+        logChurnDiag('removeAllListeners_call', 'cleanup_same_owner', stackTag);
+        InAppBrowser.removeAllListeners();
+      } else {
+        logChurnDiag('removeAllListeners_skip', 'cleanup_owner_mismatch', stackTag);
+      }
       listenersSetupRef.current = false;
     };
-  }, [isNative, onUrlChange, onLoadEnd, onLoadError, onClose, onMessageFromWebview, markClosed, setFlashGuardState, probeFlashGuard, flashDiagLog]);
+  }, [
+    isNative,
+    markClosed,
+    setFlashGuardState,
+    probeFlashGuard,
+    installFlashGuard,
+    runFlashGuardDiagProof,
+    flashDiagLog,
+    setListenersAttachedState,
+    readListenerDiagContext,
+    logChurnDiag,
+  ]);
 
   // Open URL in native WebView
   const open = useCallback(async (url: string, inApp: boolean = true) => {
@@ -595,8 +766,8 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     }
 
     // Check if navigation should be blocked
-    if (onNavigationRequest) {
-      const allowed = await Promise.resolve(onNavigationRequest(url));
+    if (onNavigationRequestRef.current) {
+      const allowed = await Promise.resolve(onNavigationRequestRef.current(url));
       if (!allowed) {
         console.log('[NativeWebView] Navigation blocked by handler:', url);
         return false;
@@ -616,7 +787,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     }
 
     setState(prev => ({ ...prev, isLoading: true, error: null }));
-    onLoadStart?.(url);
+    onLoadStartRef.current?.(url);
     pageLoadErrorRecoveryRef.current = { url, count: 0, at: Date.now() };
     void setFlashGuardState(true, 'nav_start');
 
@@ -655,6 +826,12 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
       isOpenRef.current = true;
       const instanceId = ++instanceSeqRef.current;
       activeInstanceIdRef.current = instanceId;
+      onActiveInstanceIdChangeRef.current?.(instanceId);
+      const context = readListenerDiagContext();
+      listenerOwnerRef.current = {
+        navId: context.navId,
+        instanceId,
+      };
       openCountRef.current += 1;
       executeScript60sWindowStartRef.current = Date.now();
       executeScript60sCountRef.current = 0;
@@ -665,16 +842,17 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
         'activeInstanceId=' + instanceId,
         'url=' + url,
       );
+      logChurnDiag('open', 'open_success', 'useNativeWebView.open');
 
       return true;
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : 'Failed to open WebView';
       console.error('[NativeWebView] Open error:', error);
       setState(prev => ({ ...prev, isLoading: false, error: errorMsg }));
-      onLoadError?.(url, errorMsg);
+      onLoadErrorRef.current?.(url, errorMsg);
       return false;
     }
-  }, [isNative, onLoadStart, onLoadError, onNavigationRequest, installFlashGuard, markClosed, setFlashGuardState]);
+  }, [isNative, installFlashGuard, markClosed, setFlashGuardState, readListenerDiagContext, logChurnDiag]);
 
   // Close the WebView
   const close = useCallback(async () => {
@@ -847,6 +1025,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
   return {
     isNative,
     state,
+    listenersAttached,
     open,
     close,
     goBack,

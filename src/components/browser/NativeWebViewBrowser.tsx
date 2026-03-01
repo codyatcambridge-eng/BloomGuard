@@ -310,6 +310,7 @@ export const NativeWebViewBrowser = () => {
   const navigationSeqRef = useRef(0);
   const activeNavIdRef = useRef(0);
   const currentUrlRef = useRef('');
+  const webViewActiveInstanceIdRef = useRef<number | null>(null);
   const diagYtBlurEpochRef = useRef({
     staleHostRejectCount: 0,
     epochHeldCount: 0,
@@ -533,8 +534,17 @@ export const NativeWebViewBrowser = () => {
     }
   }, [ENABLE_SIGNAL_PIPELINE, settingsLoaded, isModerationEnabled, getModerationConfig]);
 
+  const getWebViewListenerDiagContext = useCallback(() => {
+    return {
+      navId: activeNavIdRef.current || null,
+      url: currentUrlRef.current || '',
+      activeInstanceId: webViewActiveInstanceIdRef.current,
+    };
+  }, []);
+
   const {
     state: webViewState,
+    listenersAttached: webViewListenersAttached,
     open: openWebView,
     close: closeWebView,
     goBack: webViewGoBack,
@@ -644,11 +654,48 @@ export const NativeWebViewBrowser = () => {
       }
       messageFromWebViewHandlerRef.current?.(payload);
     },
+    onActiveInstanceIdChange: (activeInstanceId) => {
+      webViewActiveInstanceIdRef.current = activeInstanceId;
+    },
+    getListenerDiagContext: getWebViewListenerDiagContext,
   });
 
   useEffect(() => {
     currentUrlRef.current = webViewState.currentUrl || '';
   }, [webViewState.currentUrl]);
+
+  const lastListenerStateRef = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (lastListenerStateRef.current === webViewListenersAttached) return;
+    lastListenerStateRef.current = webViewListenersAttached;
+    const diagUrl = webViewState.currentUrl || currentUrlRef.current || 'unknown';
+    console.log(
+      '[DIAG][CHURN]',
+      'action=listener_state',
+      'reason=' + (webViewListenersAttached ? 'listeners_attached' : 'listeners_detached'),
+      'stack=NativeWebViewBrowser.listener_state',
+      'listenerKey=messageFromWebview',
+      'navId=' + activeNavIdRef.current,
+      'url=' + diagUrl,
+      'activeInstanceId=' + (webViewActiveInstanceIdRef.current ?? 'none'),
+    );
+  }, [webViewListenersAttached, webViewState.currentUrl]);
+
+  useEffect(() => {
+    if (!webViewState.isOpen) return;
+    if (!webViewListenersAttached) return;
+    const diagUrl = webViewState.currentUrl || currentUrlRef.current || 'unknown';
+    console.log(
+      '[DIAG][CHURN]',
+      'action=listeners_attached_for_nav',
+      'reason=nav_context_update',
+      'stack=NativeWebViewBrowser.nav_listener_order',
+      'listenerKey=messageFromWebview',
+      'navId=' + activeNavIdRef.current,
+      'url=' + diagUrl,
+      'activeInstanceId=' + (webViewActiveInstanceIdRef.current ?? 'none'),
+    );
+  }, [webViewState.isOpen, webViewState.currentUrl, webViewListenersAttached]);
 
   const diagLogTimestampsRef = useRef<Record<string, number>>({});
   const diagLog = useCallback((key: string, message: string) => {
@@ -846,6 +893,18 @@ export const NativeWebViewBrowser = () => {
   useEffect(() => {
     if (!ENABLE_SIGNAL_PIPELINE) return;
     if (!isNative || !webViewState.isOpen || !executeScript) return;
+    if (!webViewListenersAttached) {
+      const diagUrl = webViewState.currentUrl || currentUrlRef.current || 'about:blank';
+      console.log(
+        '[DIAG][CHURN_WINDOW]',
+        'action=reinjectTimer_blocked',
+        'reason=listeners_not_attached',
+        'stack=NativeWebViewBrowser.reinjectTimer',
+        'navId=' + activeNavIdRef.current,
+        'url=' + diagUrl,
+      );
+      return;
+    }
 
     const urlHint = webViewState.currentUrl || currentUrlRef.current || 'about:blank';
 
@@ -867,6 +926,14 @@ export const NativeWebViewBrowser = () => {
       }
     };
 
+    console.log(
+      '[DIAG][ORDER]',
+      'step=listeners_attached',
+      'name=reinjectTimer',
+      'navId=' + activeNavIdRef.current,
+      'url=' + urlHint,
+      'listenersAttached=' + webViewListenersAttached,
+    );
     const timer = setTimeout(reinjectAndPing, 250);
     console.log(
       '[MW-Host][Timer] start',
@@ -890,6 +957,7 @@ export const NativeWebViewBrowser = () => {
     webViewState.isOpen,
     webViewState.currentUrl,
     executeScript,
+    webViewListenersAttached,
     injectModerationScript,
     requestBlurHandshake,
     clearLoadEndInjectTimer,
@@ -1517,6 +1585,18 @@ export const NativeWebViewBrowser = () => {
     if (!ENABLE_SIGNAL_PIPELINE || !isNative || !webViewState.isOpen || !isModerationEnabled()) {
       return;
     }
+    if (!webViewListenersAttached) {
+      const diagUrl = webViewState.currentUrl || currentUrlRef.current || 'unknown';
+      console.log(
+        '[DIAG][CHURN_WINDOW]',
+        'action=legacyPoll_blocked',
+        'reason=listeners_not_attached',
+        'stack=NativeWebViewBrowser.legacyPoll',
+        'navId=' + activeNavIdRef.current,
+        'url=' + diagUrl,
+      );
+      return;
+    }
 
     console.log('[MW-Host] Starting adaptive legacy queue polling (fallback)...');
     const MIN_POLL_MS = 300;
@@ -1591,6 +1671,7 @@ export const NativeWebViewBrowser = () => {
         'name=legacyPollTimer',
         'delayMs=' + delayMs,
         'navId=' + activeNavIdRef.current,
+        'listenersAttached=' + webViewListenersAttached,
         'url=' + (webViewState.currentUrl || 'unknown'),
       );
       console.log(
@@ -1603,6 +1684,18 @@ export const NativeWebViewBrowser = () => {
     const pollForRequests = async (): Promise<boolean> => {
       if (!executeScript) return false;
       if (pollInFlight) return false;
+      if (!webViewListenersAttached) {
+        const diagUrl = webViewState.currentUrl || currentUrlRef.current || 'unknown';
+        console.warn(
+          '[DIAG][CHURN_WINDOW]',
+          'action=legacyPoll_execute_blocked',
+          'reason=listeners_detached_before_execute',
+          'stack=NativeWebViewBrowser.legacyPoll.pollForRequests',
+          'navId=' + activeNavIdRef.current,
+          'url=' + diagUrl,
+        );
+        return false;
+      }
       pollInFlight = true;
       
       try {
@@ -1728,6 +1821,14 @@ export const NativeWebViewBrowser = () => {
       }
       scheduleNextPoll(pollDelayMs);
     };
+    console.log(
+      '[DIAG][ORDER]',
+      'step=listeners_attached',
+      'name=legacyPollTimer',
+      'navId=' + activeNavIdRef.current,
+      'url=' + (webViewState.currentUrl || currentUrlRef.current || 'unknown'),
+      'listenersAttached=' + webViewListenersAttached,
+    );
     scheduleNextPoll(MIN_POLL_MS);
 
     return () => {
@@ -1747,7 +1848,7 @@ export const NativeWebViewBrowser = () => {
       window.removeEventListener('hashchange', onHashChange);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [ENABLE_SIGNAL_PIPELINE, isNative, webViewState.isOpen, isModerationEnabled, executeScript, moderationBridge, localSettings.blur_strength_px, webViewState.currentUrl]);
+  }, [ENABLE_SIGNAL_PIPELINE, isNative, webViewState.isOpen, webViewListenersAttached, isModerationEnabled, executeScript, moderationBridge, localSettings.blur_strength_px, webViewState.currentUrl]);
 
   /**
    * Determine if input is a URL vs search query
