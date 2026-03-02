@@ -510,7 +510,21 @@ export const NativeWebViewBrowser = () => {
     // Full moderation script: request scanning + host bridge + DOM blur/reveal behavior.
     const mainScript = generateModerationScript(config);
     try {
-      await scriptExecutor(mainScript);
+      const dispatchResult = await scriptExecutor(mainScript);
+      const dispatchConfirmed =
+        dispatchResult !== null &&
+        String(dispatchResult).trim().length > 0;
+      if (!dispatchConfirmed) {
+        console.warn(
+          '[DIAG][INJECT] dispatch_unconfirmed',
+          'reason=' + reason,
+          'navId=' + navId,
+          'pageEpoch=' + webViewPageEpochRef.current,
+          'url=' + (targetUrl || 'unknown'),
+          'result=' + String(dispatchResult),
+        );
+        return;
+      }
       injectionDoneRef.current = true;
       lastInjectedUrlRef.current = targetUrl;
       lastInjectionAtRef.current = Date.now();
