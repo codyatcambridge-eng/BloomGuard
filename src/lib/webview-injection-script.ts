@@ -247,8 +247,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     drawing: 'drawing',
   };
   const TRACE_UNSAFE_LABELS = new Set(['porn', 'sexy', 'hentai', 'thirst']);
-  const LEGACY_RESULTS_POLL_MS = 250;
-  const URL_CHANGE_POLL_MS = 1200;
+  const LEGACY_RESULTS_POLL_MS = 1000;
   console.log('[MW] Effective config:', JSON.stringify({
     blurDial: CONFIG.sensitivity,
     thresholds: effectiveThresholds,
@@ -844,13 +843,19 @@ export function generateModerationScript(config: InjectionConfig): string {
   );
   const timerState = {
     legacyResultsInterval: null,
-    urlChangeInterval: null,
     youtubePeriodicInterval: null,
     mainScrollTimeout: null,
     mainScrollHandler: null,
     youtubeScrollTimeout: null,
     youtubeScrollHandler: null,
     youtubeMutationScanTimeout: null,
+    urlChangeHooksInstalled: false,
+    urlChangePopStateHandler: null,
+    urlChangeHashChangeHandler: null,
+    urlChangePageShowHandler: null,
+    urlChangeLoadHandler: null,
+    rawPushState: null,
+    rawReplaceState: null,
     debugSummaryInterval: null,
     diagHeartbeatInterval: null,
     initialTimeouts: [],
@@ -5357,7 +5362,9 @@ export function generateModerationScript(config: InjectionConfig): string {
   function scanShadowRoot(shadowRoot) {
     if (!shadowRoot) return;
     
-    console.log('[MW] Scanning Shadow DOM');
+    if (CONFIG.debug) {
+      console.log('[MW] Scanning Shadow DOM');
+    }
     state.stats.shadowDom++;
     
     try {
@@ -5418,7 +5425,9 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function scanFullPage() {
     if (!CONFIG.enabled || CONFIG.sensitivity === 0) {
-      console.log('[MW] Scanning disabled (sensitivity: ' + CONFIG.sensitivity + ')');
+      if (CONFIG.debug) {
+        console.log('[MW] Scanning disabled (sensitivity: ' + CONFIG.sensitivity + ')');
+      }
       return;
     }
     if (isShortsModeActive()) {
@@ -5431,9 +5440,13 @@ export function generateModerationScript(config: InjectionConfig): string {
       );
     }
     
-    console.log('[MW] ========== FULL PAGE SCAN ==========');
+    if (CONFIG.debug) {
+      console.log('[MW] ========== FULL PAGE SCAN ==========');
+    }
     scanNode(document.body);
-    console.log('[MW] Stats:', JSON.stringify(state.stats));
+    if (CONFIG.debug) {
+      console.log('[MW] Stats:', JSON.stringify(state.stats));
+    }
   }
 
   // ==================== MUTATION OBSERVER ====================
@@ -5483,7 +5496,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       );
     }
     
-    console.log('[MW] === YOUTUBE THUMBNAIL SCAN ===');
+    if (CONFIG.debug) {
+      console.log('[MW] === YOUTUBE THUMBNAIL SCAN ===');
+    }
     
     YOUTUBE_SELECTORS.forEach(selector => {
       try {
@@ -5748,7 +5763,9 @@ export function generateModerationScript(config: InjectionConfig): string {
         return;
       }
       
-      console.log('[MW] legacy result:', src.substring(0, 50), '-> blur:', shouldBlur, 'cat:', category);
+      if (CONFIG.debug) {
+        console.log('[MW] legacy result:', src.substring(0, 50), '-> blur:', shouldBlur, 'cat:', category);
+      }
       
       state.scanned.add(src);
       const rawCategory = normalizePolicyCategory(category);
@@ -5758,13 +5775,15 @@ export function generateModerationScript(config: InjectionConfig): string {
       const policyDecision = applyFailOpenAndModePolicy(!!shouldBlur, rawCategory, rawCategory, isError);
       let shouldApplyBlur = CONFIG.forcedBlur || (policyDecision.shouldBlur && CONFIG.enabled && CONFIG.sensitivity > 0);
       const hasEpoch = Number.isFinite(pageEpoch) || Number.isFinite(epoch);
-      console.log(
-        '[MW][LegacyResult][Decision]',
-        'src=' + String(src || '').substring(0, 120),
-        'applyBlur=' + shouldApplyBlur,
-        'hasNonce=' + (!!nonce),
-        'hasEpoch=' + hasEpoch
-      );
+      if (CONFIG.debug) {
+        console.log(
+          '[MW][LegacyResult][Decision]',
+          'src=' + String(src || '').substring(0, 120),
+          'applyBlur=' + shouldApplyBlur,
+          'hasNonce=' + (!!nonce),
+          'hasEpoch=' + hasEpoch
+        );
+      }
       if (shouldApplyBlur && isSafeResolvedActive(src)) {
         shouldApplyBlur = false;
         if (CONFIG.debug) {
@@ -5831,7 +5850,6 @@ export function generateModerationScript(config: InjectionConfig): string {
   function countActiveTimerHandles() {
     let count = 0;
     if (timerState.legacyResultsInterval) count++;
-    if (timerState.urlChangeInterval) count++;
     if (timerState.youtubePeriodicInterval) count++;
     if (timerState.debugSummaryInterval) count++;
     if (timerState.mainScrollTimeout) count++;
@@ -5939,8 +5957,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   setupMutationObserver(document.body);
   state.viewportObserver = setupViewportObserver();
   
-  // YouTube-specific: Set up scroll handler for infinite scroll
-  setupYouTubeScrollHandler();
+  // Dedicated YouTube scroll handler intentionally disabled to avoid duplicate rescans.
 
   function scheduleInitTimeout(label, fn, delayMs) {
     const id = setTimeout(() => {
@@ -5984,23 +6001,26 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function startYouTubePeriodicScan(reason) {
     if (!isYT || timerState.paused || timerState.youtubePeriodicInterval) return;
-    timerState.youtubePeriodicInterval = setInterval(scanYouTubeThumbnails, 5000);
+    timerState.youtubePeriodicInterval = setInterval(scanYouTubeThumbnails, 10000);
     timerLog('start', 'youtubePeriodicInterval:' + reason);
   }
 
-  // Scroll-triggered rescans
-  timerState.mainScrollHandler = () => {
-    if (timerState.paused) return;
-    clearNamedTimeout('mainScrollTimeout', 'reschedule');
-    timerState.mainScrollTimeout = setTimeout(() => {
-      scanFullPage();
-      if (isYouTube()) {
-        scanYouTubeThumbnails();
-      }
-    }, 150);
-    timerLog('start', 'mainScrollTimeout');
-  };
-  window.addEventListener('scroll', timerState.mainScrollHandler, { passive: true });
+  // Scroll-triggered rescans (YouTube only).
+  if (isYT) {
+    timerState.mainScrollHandler = () => {
+      if (timerState.paused) return;
+      clearNamedTimeout('mainScrollTimeout', 'reschedule');
+      timerState.mainScrollTimeout = setTimeout(() => {
+        const allowHeavySweep = allowShortsHeavyScanSweep('mainScroll');
+        scanActiveShortsPlayerContainer('main_scroll');
+        if (allowHeavySweep) {
+          scanYouTubeThumbnails();
+        }
+      }, 220);
+      timerLog('start', 'mainScrollTimeout');
+    };
+    window.addEventListener('scroll', timerState.mainScrollHandler, { passive: true });
+  }
 
   ensureSensitivityToggle();
 
@@ -6072,15 +6092,36 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
   };
 
-  function startUrlChangePoll(reason) {
-    if (timerState.urlChangeInterval || timerState.paused) return;
-    timerState.urlChangeInterval = setInterval(checkUrlChange, URL_CHANGE_POLL_MS);
-    timerLog('start', 'urlChangeInterval:' + reason);
+  function installUrlChangeHooks(reason) {
+    if (timerState.urlChangeHooksInstalled) return;
+    timerState.urlChangeHooksInstalled = true;
+    timerState.rawPushState = history.pushState;
+    timerState.rawReplaceState = history.replaceState;
+
+    history.pushState = function() {
+      const result = timerState.rawPushState.apply(this, arguments);
+      checkUrlChange();
+      return result;
+    };
+    history.replaceState = function() {
+      const result = timerState.rawReplaceState.apply(this, arguments);
+      checkUrlChange();
+      return result;
+    };
+
+    timerState.urlChangePopStateHandler = function() { checkUrlChange(); };
+    timerState.urlChangeHashChangeHandler = function() { checkUrlChange(); };
+    timerState.urlChangePageShowHandler = function() { checkUrlChange(); };
+    timerState.urlChangeLoadHandler = function() { checkUrlChange(); };
+    window.addEventListener('popstate', timerState.urlChangePopStateHandler);
+    window.addEventListener('hashchange', timerState.urlChangeHashChangeHandler);
+    window.addEventListener('pageshow', timerState.urlChangePageShowHandler);
+    window.addEventListener('load', timerState.urlChangeLoadHandler);
+    timerLog('start', 'urlChangeHooks:' + (reason || 'init'));
   }
 
   function stopManagedTimers(reason) {
     clearNamedInterval('legacyResultsInterval', reason);
-    clearNamedInterval('urlChangeInterval', reason);
     clearNamedInterval('youtubePeriodicInterval', reason);
     clearNamedInterval('debugSummaryInterval', reason);
     clearNamedTimeout('mainScrollTimeout', reason);
@@ -6114,8 +6155,8 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function startManagedTimers(reason) {
     if (timerState.paused || timerState.teardownDone) return;
+    installUrlChangeHooks(reason);
     startLegacyResultsPoll(reason);
-    startUrlChangePoll(reason);
     startYouTubePeriodicScan(reason);
     startDebugSummary(reason);
     startDiagHeartbeat(reason);
@@ -6156,6 +6197,31 @@ export function generateModerationScript(config: InjectionConfig): string {
       window.removeEventListener('scroll', timerState.youtubeScrollHandler);
       timerState.youtubeScrollHandler = null;
     }
+    if (timerState.urlChangePopStateHandler) {
+      window.removeEventListener('popstate', timerState.urlChangePopStateHandler);
+      timerState.urlChangePopStateHandler = null;
+    }
+    if (timerState.urlChangeHashChangeHandler) {
+      window.removeEventListener('hashchange', timerState.urlChangeHashChangeHandler);
+      timerState.urlChangeHashChangeHandler = null;
+    }
+    if (timerState.urlChangePageShowHandler) {
+      window.removeEventListener('pageshow', timerState.urlChangePageShowHandler);
+      timerState.urlChangePageShowHandler = null;
+    }
+    if (timerState.urlChangeLoadHandler) {
+      window.removeEventListener('load', timerState.urlChangeLoadHandler);
+      timerState.urlChangeLoadHandler = null;
+    }
+    if (timerState.rawPushState) {
+      history.pushState = timerState.rawPushState;
+      timerState.rawPushState = null;
+    }
+    if (timerState.rawReplaceState) {
+      history.replaceState = timerState.rawReplaceState;
+      timerState.rawReplaceState = null;
+    }
+    timerState.urlChangeHooksInstalled = false;
     if (state.viewportObserver && typeof state.viewportObserver.disconnect === 'function') {
       state.viewportObserver.disconnect();
       state.viewportObserver = null;
@@ -6169,6 +6235,7 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
+      checkUrlChange();
       resumeManagedTimers('visibility_visible');
       return;
     }

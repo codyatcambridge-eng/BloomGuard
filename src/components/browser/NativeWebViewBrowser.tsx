@@ -298,6 +298,15 @@ export const NativeWebViewBrowser = () => {
       }
     },
   });
+
+  const scanImageRef = useRef(moderationBridge.scanImage);
+  const handleWebViewMessageRef = useRef(moderationBridge.handleWebViewMessage);
+  const clearModerationCacheRef = useRef(moderationBridge.clearCache);
+  useEffect(() => {
+    scanImageRef.current = moderationBridge.scanImage;
+    handleWebViewMessageRef.current = moderationBridge.handleWebViewMessage;
+    clearModerationCacheRef.current = moderationBridge.clearCache;
+  }, [moderationBridge.scanImage, moderationBridge.handleWebViewMessage, moderationBridge.clearCache]);
   
   // Track if moderation script was injected
   const injectionDoneRef = useRef(false);
@@ -307,16 +316,68 @@ export const NativeWebViewBrowser = () => {
   const duplicateInjectionSkipsRef = useRef(0);
   const didInjectAfterSettingsLoadedRef = useRef(false);
   const loadEndInjectTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const transportProbeTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const transportProbeIssuedAtRef = useRef(0);
+  const lastDirectTransportAtRef = useRef(0);
+  const legacyPollHoldUntilRef = useRef(0);
   const navigationSeqRef = useRef(0);
   const activeNavIdRef = useRef(0);
   const currentUrlRef = useRef('');
   const webViewActiveInstanceIdRef = useRef<number | null>(null);
+  const [legacyPollEnabled, setLegacyPollEnabled] = useState(false);
+  const legacyPollEnabledRef = useRef(false);
   const diagYtBlurEpochRef = useRef({
     staleHostRejectCount: 0,
     epochHeldCount: 0,
     epochIncrementedCount: 0,
   });
   const messageFromWebViewHandlerRef = useRef<((payload: unknown) => void) | null>(null);
+
+  const setLegacyPollFallback = useCallback((enabled: boolean, reason: string) => {
+    if (legacyPollEnabledRef.current === enabled) return;
+    legacyPollEnabledRef.current = enabled;
+    if (enabled) {
+      legacyPollHoldUntilRef.current = Date.now() + 20000;
+    }
+    setLegacyPollEnabled(enabled);
+    console.log(
+      '[MW-Host][FallbackPoll]',
+      enabled ? 'enabled' : 'disabled',
+      'reason=' + reason,
+      'navId=' + activeNavIdRef.current,
+      'url=' + (currentUrlRef.current || 'unknown'),
+    );
+  }, []);
+
+  const clearTransportProbeTimer = useCallback(() => {
+    if (!transportProbeTimerRef.current) return;
+    clearTimeout(transportProbeTimerRef.current);
+    transportProbeTimerRef.current = null;
+  }, []);
+
+  const scheduleTransportProbe = useCallback((reason: string, targetUrl: string) => {
+    clearTransportProbeTimer();
+    const issuedAt = Date.now();
+    transportProbeIssuedAtRef.current = issuedAt;
+    transportProbeTimerRef.current = setTimeout(() => {
+      transportProbeTimerRef.current = null;
+      if (lastDirectTransportAtRef.current >= issuedAt) return;
+      console.warn(
+        '[MW-Host][Transport] probe timeout; enabling fallback poll',
+        'reason=' + reason,
+        'targetUrl=' + (targetUrl || 'unknown'),
+        'navId=' + activeNavIdRef.current,
+      );
+      setLegacyPollFallback(true, 'transport_probe_timeout:' + reason);
+    }, 3500);
+  }, [clearTransportProbeTimer, setLegacyPollFallback]);
+
+  const markDirectTransportHealthy = useCallback((reason: string) => {
+    lastDirectTransportAtRef.current = Date.now();
+    if (legacyPollEnabledRef.current && Date.now() >= legacyPollHoldUntilRef.current) {
+      setLegacyPollFallback(false, 'direct_transport:' + reason);
+    }
+  }, [setLegacyPollFallback]);
   
   const {
     currentView,
@@ -528,6 +589,7 @@ export const NativeWebViewBrowser = () => {
       injectionDoneRef.current = true;
       lastInjectedUrlRef.current = targetUrl;
       lastInjectionAtRef.current = Date.now();
+      scheduleTransportProbe(reason, targetUrl);
       console.log(
         '[MW-Inject][InjectedDispatch]',
         'navId=' + navId,
@@ -546,7 +608,7 @@ export const NativeWebViewBrowser = () => {
     } finally {
       injectionInFlightRef.current = false;
     }
-  }, [ENABLE_SIGNAL_PIPELINE, settingsLoaded, isModerationEnabled, getModerationConfig]);
+  }, [ENABLE_SIGNAL_PIPELINE, settingsLoaded, isModerationEnabled, getModerationConfig, scheduleTransportProbe]);
 
   const getWebViewListenerDiagContext = useCallback(() => {
     return {
@@ -580,6 +642,8 @@ export const NativeWebViewBrowser = () => {
       blurReadyRef.current = false;
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       setCentralBlurState(false, 'navigation_load_start');
+      clearTransportProbeTimer();
+      setLegacyPollFallback(false, 'navigation_start');
       setFlashGuardState?.(true, 'navigation_start');
       // Early inject to attach per-element pre-blur before first paint.
       if (executeScript) {
@@ -628,6 +692,7 @@ export const NativeWebViewBrowser = () => {
       setIsLoading(false);
       setFlashGuardState?.(true, 'load_error');
       clearLoadEndInjectTimer();
+      clearTransportProbeTimer();
       injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
       setFallbackUrl(url);
@@ -652,7 +717,9 @@ export const NativeWebViewBrowser = () => {
       console.log('[Browser] ======= WEBVIEW CLOSED =======');
       teardownWebViewScheduling('webview_closed', webViewState.currentUrl).catch(() => undefined);
       clearLoadEndInjectTimer();
-      moderationBridge.clearCache();
+      clearTransportProbeTimer();
+      setLegacyPollFallback(false, 'webview_closed');
+      clearModerationCacheRef.current();
       injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
       blurReadyRef.current = false;
@@ -980,7 +1047,9 @@ export const NativeWebViewBrowser = () => {
   useEffect(() => {
     if (webViewState.isOpen) return;
     didInjectAfterSettingsLoadedRef.current = false;
-  }, [webViewState.isOpen]);
+    clearTransportProbeTimer();
+    setLegacyPollFallback(false, 'webview_not_open');
+  }, [webViewState.isOpen, clearTransportProbeTimer, setLegacyPollFallback]);
 
   useEffect(() => {
     if (!ENABLE_SIGNAL_PIPELINE) return;
@@ -1020,11 +1089,12 @@ export const NativeWebViewBrowser = () => {
   useEffect(() => {
     return () => {
       clearLoadEndInjectTimer();
+      clearTransportProbeTimer();
       if (blurRetryTimerRef.current) {
         clearTimeout(blurRetryTimerRef.current);
       }
     };
-  }, [clearLoadEndInjectTimer]);
+  }, [clearLoadEndInjectTimer, clearTransportProbeTimer]);
 
   // ==================== MODERATION MESSAGE HANDLING ====================
   // 
@@ -1197,7 +1267,7 @@ export const NativeWebViewBrowser = () => {
     // Process each item using the moderation bridge
     for (const item of items) {
       try {
-        const scanResult = await moderationBridge.scanImage(item.src, thresholds, {
+        const scanResult = await scanImageRef.current(item.src, thresholds, {
           requestId,
           itemId: item.itemId,
           pageEpoch: requestEpoch ?? activeEpoch,
@@ -1424,7 +1494,6 @@ export const NativeWebViewBrowser = () => {
     setFlashGuardState?.(false, 'moderation_results');
     flashLog('disarm after results');
   }, [
-    moderationBridge,
     postMessageToWebView,
     debugLog,
     isDebugMode,
@@ -1473,6 +1542,7 @@ export const NativeWebViewBrowser = () => {
 
       const typedMessage = message as Record<string, unknown>;
       if (typedMessage.type === 'MW_INJECTED_ACK') {
+        markDirectTransportHealthy('injected_ack:' + source);
         console.log(
           '[MW-Host][ACK] MW_INJECTED_ACK',
           'source=' + source,
@@ -1484,6 +1554,7 @@ export const NativeWebViewBrowser = () => {
         return;
       }
       if (typedMessage.type === 'MW_REQ_SENT') {
+        markDirectTransportHealthy('req_sent:' + source);
         console.log(
           '[MW-Host][REQ] MW_REQ_SENT',
           'source=' + source,
@@ -1496,6 +1567,7 @@ export const NativeWebViewBrowser = () => {
         return;
       }
       if (typedMessage.type === 'MW_REQ_TIMEOUT') {
+        setLegacyPollFallback(true, 'mw_req_timeout:' + source);
         console.warn(
           '[MW-Host][REQ] MW_REQ_TIMEOUT',
           'source=' + source,
@@ -1523,6 +1595,7 @@ export const NativeWebViewBrowser = () => {
       }
 
       if (typedMessage.type === 'gc-correction-feedback') {
+        markDirectTransportHealthy('correction_feedback:' + source);
         console.log('[MW-Host] correction feedback received');
         return;
       }
@@ -1540,6 +1613,7 @@ export const NativeWebViewBrowser = () => {
           'pageEpoch=' + String(message.pageEpoch ?? 'none'),
           'source=' + source,
         );
+        markDirectTransportHealthy('moderation_request:' + source);
         await processModerationRequest(message, message.nonce);
         return;
       }
@@ -1554,8 +1628,9 @@ export const NativeWebViewBrowser = () => {
       }
       
       if (typedMessage.type === 'gc-moderation-request' && typedMessage.action === 'scan') {
+        markDirectTransportHealthy('legacy_scan_request:' + source);
         console.log('[MW-Host] Received legacy moderation request via postMessage');
-        const result = await moderationBridge.handleWebViewMessage(message);
+        const result = await handleWebViewMessageRef.current(message);
         
         if (result) {
           const rawSrc = String(result.src || '');
@@ -1589,19 +1664,29 @@ export const NativeWebViewBrowser = () => {
       messageFromWebViewHandlerRef.current = null;
       window.removeEventListener('message', handleWindowMessage);
     };
-  }, [ENABLE_SIGNAL_PIPELINE, ENABLE_DOM_BLUR, processModerationRequest, moderationBridge, postMessageToWebView, getNonce, queueCurrentBlurState, flushBlurStateToWebView]);
+  }, [
+    ENABLE_SIGNAL_PIPELINE,
+    ENABLE_DOM_BLUR,
+    processModerationRequest,
+    postMessageToWebView,
+    getNonce,
+    queueCurrentBlurState,
+    flushBlurStateToWebView,
+    markDirectTransportHealthy,
+    setLegacyPollFallback,
+  ]);
 
   /**
    * Fallback: Poll for moderation requests from legacy global queue
    * This is used when postMessage doesn't work reliably
    */
   useEffect(() => {
-    if (!ENABLE_SIGNAL_PIPELINE || !isNative || !webViewState.isOpen || !isModerationEnabled()) {
+    if (!ENABLE_SIGNAL_PIPELINE || !isNative || !webViewState.isOpen || !isModerationEnabled() || !legacyPollEnabled) {
       return;
     }
     if (!webViewListenersAttached) {
       const diagUrl = webViewState.currentUrl || currentUrlRef.current || 'unknown';
-      console.log(
+      debugLog(
         '[DIAG][CHURN_WINDOW]',
         'action=legacyPoll_blocked',
         'reason=listeners_not_attached',
@@ -1612,7 +1697,7 @@ export const NativeWebViewBrowser = () => {
       return;
     }
 
-    console.log('[MW-Host] Starting adaptive legacy queue polling (fallback)...');
+    console.log('[MW-Host] Starting adaptive legacy queue polling...');
     const MIN_POLL_MS = 300;
     const MAX_POLL_MS = 3000;
     const EMPTY_BACKOFF_MS = 250;
@@ -1680,7 +1765,7 @@ export const NativeWebViewBrowser = () => {
         clearTimeout(pollTimer);
       }
       pollTimer = setTimeout(runPollLoop, delayMs);
-      console.log(
+      debugLog(
         '[MW-Host][Timer] start',
         'name=legacyPollTimer',
         'delayMs=' + delayMs,
@@ -1688,7 +1773,7 @@ export const NativeWebViewBrowser = () => {
         'listenersAttached=' + webViewListenersAttached,
         'url=' + (webViewState.currentUrl || 'unknown'),
       );
-      console.log(
+      debugLog(
         '[DIAG][TIMER] start',
         'delayMs=' + delayMs,
         'navId=' + activeNavIdRef.current,
@@ -1759,17 +1844,15 @@ export const NativeWebViewBrowser = () => {
           return false;
         }
         
-        console.log('[MW-Host] Legacy poll: found', items.length, 'items in queue');
+        debugLog('[MW-Host] Legacy poll found items', 'count=' + items.length);
         
         // Process each scan request
         for (const item of items) {
           const { src, thresholds } = item;
           
           if (!src) continue;
-          
-          console.log('[MW-Host] Legacy processing:', src.substring(0, 60));
-          
-          const scanResult = await moderationBridge.scanImage(src, thresholds, {
+
+          const scanResult = await scanImageRef.current(src, thresholds, {
             requestId: 'legacy_poll',
             itemId: typeof item.itemId === 'string' ? item.itemId : 'legacy_item',
             pageEpoch: webViewPageEpochRef.current,
@@ -1777,7 +1860,11 @@ export const NativeWebViewBrowser = () => {
           });
           
           if (scanResult) {
-            console.log('[MW-Host] Legacy scan result:', scanResult.shouldBlur, scanResult.category);
+            debugLog(
+              '[MW-Host] Legacy scan result',
+              'blur=' + scanResult.shouldBlur,
+              'category=' + scanResult.category,
+            );
             
             // Push result back to WebView's results queue
             const escapedSrc = escapeForJs(src);
@@ -1797,7 +1884,7 @@ export const NativeWebViewBrowser = () => {
             
             try {
               await executeScript(pushResultScript);
-              console.log('[MW-Host] Legacy result pushed for:', src.substring(0, 50));
+              debugLog('[MW-Host] Legacy result pushed', src.substring(0, 50));
             } catch (e) {
               console.debug('[MW-Host] Failed to push legacy result:', e);
             }
@@ -1850,7 +1937,7 @@ export const NativeWebViewBrowser = () => {
       if (pollTimer) {
         clearTimeout(pollTimer);
         pollTimer = null;
-        console.log(
+        debugLog(
           '[MW-Host][Timer] stop',
           'name=legacyPollTimer',
           'navId=' + activeNavIdRef.current,
@@ -1862,7 +1949,18 @@ export const NativeWebViewBrowser = () => {
       window.removeEventListener('hashchange', onHashChange);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [ENABLE_SIGNAL_PIPELINE, isNative, webViewState.isOpen, webViewListenersAttached, isModerationEnabled, executeScript, moderationBridge, localSettings.blur_strength_px, webViewState.currentUrl]);
+  }, [
+    ENABLE_SIGNAL_PIPELINE,
+    isNative,
+    webViewState.isOpen,
+    webViewListenersAttached,
+    isModerationEnabled,
+    executeScript,
+    localSettings.blur_strength_px,
+    webViewState.currentUrl,
+    legacyPollEnabled,
+    debugLog,
+  ]);
 
   /**
    * Determine if input is a URL vs search query
@@ -2260,7 +2358,9 @@ export const NativeWebViewBrowser = () => {
     if (isNative && webViewState.isOpen) {
       await closeWebView();
     }
-    moderationBridge.clearCache();
+    clearTransportProbeTimer();
+    setLegacyPollFallback(false, 'home_reset');
+    clearModerationCacheRef.current();
     injectionDoneRef.current = false;
     blurReadyRef.current = false;
     blurPendingRef.current = null;
@@ -2276,7 +2376,17 @@ export const NativeWebViewBrowser = () => {
     setUrlInput('');
     setFallbackUrl('');
     goHome();
-  }, [isNative, webViewState.isOpen, webViewState.currentUrl, closeWebView, goHome, moderationBridge, setCentralBlurState, teardownWebViewScheduling]);
+  }, [
+    isNative,
+    webViewState.isOpen,
+    webViewState.currentUrl,
+    closeWebView,
+    goHome,
+    setCentralBlurState,
+    teardownWebViewScheduling,
+    clearTransportProbeTimer,
+    setLegacyPollFallback,
+  ]);
 
   // Manual scan trigger for current page
   const handleScanPage = useCallback(async () => {
