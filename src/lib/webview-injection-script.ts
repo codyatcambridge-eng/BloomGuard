@@ -33,6 +33,7 @@ export interface InjectionConfig {
   blockingMode?: 'mvp' | 'full';
   pageEpoch?: number;
   diagYouTubeShorts?: boolean;
+  enableShortsHealthHeal?: boolean;
 }
 
 export interface FailOpenModePolicyInput {
@@ -195,6 +196,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     blockingMode: '${config.blockingMode || 'mvp'}',
     pageEpoch: ${pageEpoch},
     diagYouTubeShorts: ${config.diagYouTubeShorts ? 'true' : 'false'},
+    enableShortsHealthHeal: ${config.enableShortsHealthHeal ? 'true' : 'false'},
     minImageSize: 80, // Minimum image dimension (fail-open below this - 80x80)
     semanticDelayMs: 0, // Apply blur immediately; no delay to avoid flash of unblurred content
     // Neutral fast-pass removed for strict/YouTube mode
@@ -853,6 +855,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     youtubeMutationScanTimeout: null,
     debugSummaryInterval: null,
     diagHeartbeatInterval: null,
+    shortsHealthHealInterval: null,
     initialTimeouts: [],
     paused: document.visibilityState !== 'visible',
     teardownDone: false,
@@ -1177,7 +1180,16 @@ export function generateModerationScript(config: InjectionConfig): string {
   ];
   const SHORTS_STABLE_CONTAINER_TAG_SELECTOR = 'ytm-reel-video-renderer, ytm-shorts-lockup-view-model, #shorts-player';
   const SHORTS_SWAP_REATTACH_WINDOW_MS = 2600;
+  const SHORTS_HEALTH_HEAL_COOLDOWN_MS = 1500;
+  const SHORTS_HEALTH_HEAL_MAX_ATTEMPTS = 5;
+  const SHORTS_HEALTH_HEAL_WINDOW_MS = 30000;
+  const SHORTS_HEALTH_HEAL_GIVEUP_MS = 30000;
+  const SHORTS_HEALTH_HEAL_INTERVAL_MS = 2000;
+  const SHORTS_HEALTH_HEAL_ENABLED = CONFIG.enableShortsHealthHeal === true;
+  const SHORTS_HEALTH_LOG_PREFIX = '[MW-YT][DIAG][SHORTS_HEALTH]';
   let shortsBlurContextByContainer = new WeakMap();
+  let shortsBlurContextCount = 0;
+  let shortsHealthStateByContainer = new WeakMap();
   const diagEpochCounters = {
     staleInjectedDiscardCount: 0,
     epochHeldCount: 0,
@@ -1247,7 +1259,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function isShortsModeActive() {
-    return isMobileYouTubeShortsUrl(window.location.href);
+    return isYouTubeShortsUrl(window.location.href);
   }
 
   function getCurrentShortsUrlId() {
@@ -1487,11 +1499,58 @@ export function generateModerationScript(config: InjectionConfig): string {
     return null;
   }
 
+  function setShortsBlurContextEntry(container, context) {
+    if (!container || container.nodeType !== 1) return;
+    const hadExisting = !!shortsBlurContextByContainer.get(container);
+    shortsBlurContextByContainer.set(container, context);
+    if (!hadExisting) shortsBlurContextCount += 1;
+    if (shortsBlurContextCount > 0) {
+      maybeStartShortsHealthHealInterval('context_set');
+    }
+  }
+
+  function deleteShortsBlurContextEntry(container) {
+    if (!container || container.nodeType !== 1) return null;
+    const existing = shortsBlurContextByContainer.get(container);
+    if (!existing) return null;
+    shortsBlurContextByContainer.delete(container);
+    shortsHealthStateByContainer.delete(container);
+    shortsBlurContextCount = Math.max(0, shortsBlurContextCount - 1);
+    if (shortsBlurContextCount <= 0) {
+      stopShortsHealthHealInterval('no_contexts');
+    }
+    return existing;
+  }
+
+  function getShortsHealthHealState(container) {
+    if (!container || container.nodeType !== 1) return null;
+    let healthState = shortsHealthStateByContainer.get(container);
+    if (!healthState) {
+      healthState = {
+        lastAttemptAt: 0,
+        windowStartAt: 0,
+        attemptsInWindow: 0,
+        giveupUntil: 0,
+      };
+      shortsHealthStateByContainer.set(container, healthState);
+    }
+    return healthState;
+  }
+
+  function logShortsHealthEvent(eventName, details) {
+    if (!DIAG_YT_BLUR || !isShortsModeActive()) return;
+    console.log(
+      SHORTS_HEALTH_LOG_PREFIX,
+      'event=' + (eventName || 'unknown'),
+      details || ''
+    );
+  }
+
   function setShortsBlurContextForNode(node, src, category, itemId, blurPx, selectorUsed, reason) {
     if (!isShortsModeActive()) return;
     const container = getShortsBlurContextContainerForNode(node);
     if (!container || container.nodeType !== 1) return;
-    const existing = shortsBlurContextByContainer.get(container) || {};
+    const existing = shortsBlurContextByContainer.get(container);
     const updatedAt = Date.now();
     const context = {
       src: src || '',
@@ -1504,10 +1563,10 @@ export function generateModerationScript(config: InjectionConfig): string {
       targetNodeId: getDiagNodeId(node),
       updatedAt: updatedAt,
       shortsUrlId: getCurrentShortsUrlId(),
-      lastReattachAt: existing.lastReattachAt || 0,
-      lastReattachVideoId: existing.lastReattachVideoId || '',
+      lastReattachAt: (existing && existing.lastReattachAt) || 0,
+      lastReattachVideoId: (existing && existing.lastReattachVideoId) || '',
     };
-    shortsBlurContextByContainer.set(container, context);
+    setShortsBlurContextEntry(container, context);
     if (DIAG_YT_BLUR) {
       diagShortsTimeline(
         'shorts_blur_context_set',
@@ -1529,9 +1588,8 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!isShortsModeActive()) return;
     const container = getShortsBlurContextContainerForNode(node);
     if (!container || container.nodeType !== 1) return;
-    const existing = shortsBlurContextByContainer.get(container);
+    const existing = deleteShortsBlurContextEntry(container);
     if (!existing) return;
-    shortsBlurContextByContainer.delete(container);
     if (DIAG_YT_BLUR) {
       diagShortsTimeline(
         'shorts_blur_context_cleared',
@@ -1546,6 +1604,9 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function resetShortsBlurContext(reason) {
     shortsBlurContextByContainer = new WeakMap();
+    shortsBlurContextCount = 0;
+    shortsHealthStateByContainer = new WeakMap();
+    stopShortsHealthHealInterval('context_reset');
     if (DIAG_YT_BLUR) {
       diagShortsTimeline(
         'shorts_blur_context_reset',
@@ -1605,7 +1666,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     const now = Date.now();
     if (context.updatedAt && (now - context.updatedAt) > SHORTS_SWAP_REATTACH_WINDOW_MS) {
-      shortsBlurContextByContainer.delete(container);
+      deleteShortsBlurContextEntry(container);
       diagShortsSwapMarker(videoNode, reason || 'unknown', true, false, 'stale_context');
       if (DIAG_YT_BLUR) {
         diagShortsTimeline(
@@ -1620,7 +1681,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     const currentShortsUrlId = getCurrentShortsUrlId();
     if (context.shortsUrlId && currentShortsUrlId && context.shortsUrlId !== currentShortsUrlId) {
-      shortsBlurContextByContainer.delete(container);
+      deleteShortsBlurContextEntry(container);
       diagShortsSwapMarker(videoNode, reason || 'unknown', true, false, 'shorts_url_changed');
       if (DIAG_YT_BLUR) {
         diagShortsTimeline(
@@ -1986,64 +2047,274 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
   }
 
-  function diagScheduleBlurredNodePresenceChecks(node, src, itemId) {
-    if (!DIAG_YT_BLUR || !isShortsModeActive()) return;
-    if (!node || node.nodeType !== 1) return;
-    const nodeId = getDiagNodeId(node);
-    [1000, 2000].forEach(function(delayMs) {
-      setTimeout(function() {
-        const connected = !!(node && node.isConnected);
-        const nodeComputed = getDiagComputedBlurState(node);
-        let parentNode = null;
-        let replacementVideo = null;
-        if (node && node.parentElement && node.parentElement.nodeType === 1) {
-          parentNode = node.parentElement;
-          if (typeof parentNode.querySelector === 'function') {
-            replacementVideo = parentNode.querySelector('video.html5-main-video, video');
-          }
-        }
-        const replacementId = replacementVideo ? getDiagNodeId(replacementVideo) : 'none';
-        const replacementHtml5Main = !!(replacementVideo && isHtml5MainVideoNode(replacementVideo));
-        const replacementBlurred = !!(replacementVideo && isDiagBlurActiveOnNode(replacementVideo));
-        const replacementComputed = getDiagComputedBlurState(replacementVideo);
-        diagShortsTimeline(
-          'blurred_node_presence_check',
-          'delayMs=' + delayMs +
-          ' nodeId=' + nodeId +
-          ' nodeTagName=' + String(node && node.tagName ? node.tagName : 'none') +
-          ' connected=' + connected +
-          ' nodeComputedFilter=' + String(nodeComputed.filter || '').substring(0, 120) +
-          ' nodeComputedBackdrop=' + String(nodeComputed.backdropFilter || '').substring(0, 120) +
-          ' parentNodeId=' + (parentNode ? getDiagNodeId(parentNode) : 'none') +
-          ' replacementVideoNodeId=' + replacementId +
-          ' replacementTagName=' + String(replacementVideo && replacementVideo.tagName ? replacementVideo.tagName : 'none') +
-          ' replacementComputedFilter=' + String(replacementComputed.filter || '').substring(0, 120) +
-          ' replacementComputedBackdrop=' + String(replacementComputed.backdropFilter || '').substring(0, 120) +
-          ' replacementVideoHtml5Main=' + replacementHtml5Main +
-          ' replacementVideoBlurred=' + replacementBlurred +
-          ' src=' + String(src || '').substring(0, 180) +
-          ' itemId=' + (itemId || 'none')
+  function isShortsHealthHealIntervalEligible() {
+    if (!SHORTS_HEALTH_HEAL_ENABLED) return false;
+    if (timerState.paused || timerState.teardownDone) return false;
+    if (document.visibilityState !== 'visible') return false;
+    if (!isShortsModeActive()) return false;
+    if (shortsBlurContextCount <= 0) return false;
+    return true;
+  }
+
+  function stopShortsHealthHealInterval(reason) {
+    const id = timerState.shortsHealthHealInterval;
+    if (!id) return;
+    clearInterval(id);
+    timerState.shortsHealthHealInterval = null;
+    logShortsHealthEvent(
+      'shorts_health_interval_stop',
+      'reason=' + (reason || 'stop')
+    );
+  }
+
+  function maybeStartShortsHealthHealInterval(reason) {
+    if (!isShortsHealthHealIntervalEligible()) return;
+    if (timerState.shortsHealthHealInterval) return;
+    timerState.shortsHealthHealInterval = setInterval(function() {
+      if (!isShortsHealthHealIntervalEligible()) {
+        stopShortsHealthHealInterval('ineligible');
+        return;
+      }
+      runShortsHealthHealCycle('interval');
+    }, SHORTS_HEALTH_HEAL_INTERVAL_MS);
+    logShortsHealthEvent(
+      'shorts_health_interval_start',
+      'reason=' + (reason || 'unknown') +
+      ' intervalMs=' + SHORTS_HEALTH_HEAL_INTERVAL_MS
+    );
+    runShortsHealthHealCycle('start');
+  }
+
+  function runShortsHealthHealCycle(reason) {
+    if (!isShortsHealthHealIntervalEligible()) return;
+    const container = getActiveShortsPlayerContainer();
+    if (!container || container.nodeType !== 1 || !container.isConnected) return;
+    runShortsHealthHealForContainer(container, reason || 'interval');
+  }
+
+  function runShortsHealthHealForContainer(container, reason) {
+    if (!container || container.nodeType !== 1) return;
+    const context = shortsBlurContextByContainer.get(container);
+    if (!context || !context.src) return;
+    const targetNode = context.targetNode && context.targetNode.nodeType === 1 ? context.targetNode : null;
+    const connected = !!(targetNode && targetNode.isConnected);
+    const nodeComputed = getDiagComputedBlurState(targetNode);
+    const nodeFilterLower = String(nodeComputed.filter || '').toLowerCase();
+    const nodeBackdropLower = String(nodeComputed.backdropFilter || '').toLowerCase();
+    const hasComputedBlur = (
+      nodeFilterLower.indexOf('blur(') !== -1 ||
+      nodeBackdropLower.indexOf('blur(') !== -1
+    );
+    const revealed = !!(
+      (context.src && state.revealed.has(context.src)) ||
+      (targetNode && targetNode.dataset && targetNode.dataset.mwRevealed === 'true')
+    );
+    const moderatedBlurred = !!(targetNode && targetNode.dataset && targetNode.dataset.mwModerated === 'blurred');
+    const overlayExpected = !revealed && moderatedBlurred;
+    const overlayState = getDiagOverlayState(targetNode);
+    const overlayPresent = !overlayExpected || overlayState.overlayAttached;
+    const healthy = connected && !revealed && moderatedBlurred && hasComputedBlur && overlayPresent;
+
+    let parentNode = null;
+    if (targetNode && targetNode.parentElement && targetNode.parentElement.nodeType === 1) {
+      parentNode = targetNode.parentElement;
+    } else if (container.parentElement && container.parentElement.nodeType === 1) {
+      parentNode = container.parentElement;
+    }
+    let replacementVideo = null;
+    if (container && typeof container.querySelector === 'function') {
+      replacementVideo = container.querySelector('video.html5-main-video, video');
+    }
+    if (!replacementVideo && parentNode && typeof parentNode.querySelector === 'function') {
+      replacementVideo = parentNode.querySelector('video.html5-main-video, video');
+    }
+    const replacementId = replacementVideo ? getDiagNodeId(replacementVideo) : 'none';
+    const replacementHtml5Main = !!(replacementVideo && isHtml5MainVideoNode(replacementVideo));
+    const replacementBlurred = !!(replacementVideo && isDiagBlurActiveOnNode(replacementVideo));
+    const replacementComputed = getDiagComputedBlurState(replacementVideo);
+
+    logShortsHealthEvent(
+      'shorts_health_check',
+      'reason=' + (reason || 'unknown') +
+      ' healthy=' + healthy +
+      ' containerNodeId=' + getDiagNodeId(container) +
+      ' targetNodeId=' + getDiagNodeId(targetNode) +
+      ' nodeTagName=' + String(targetNode && targetNode.tagName ? targetNode.tagName : 'none') +
+      ' connected=' + connected +
+      ' revealed=' + revealed +
+      ' moderatedBlurred=' + moderatedBlurred +
+      ' hasComputedBlur=' + hasComputedBlur +
+      ' overlayExpected=' + overlayExpected +
+      ' overlayAttached=' + overlayState.overlayAttached +
+      ' overlayVisible=' + overlayState.overlayVisible +
+      ' nodeComputedFilter=' + String(nodeComputed.filter || '').substring(0, 120) +
+      ' nodeComputedBackdrop=' + String(nodeComputed.backdropFilter || '').substring(0, 120) +
+      ' parentNodeId=' + (parentNode ? getDiagNodeId(parentNode) : 'none') +
+      ' replacementVideoNodeId=' + replacementId +
+      ' replacementTagName=' + String(replacementVideo && replacementVideo.tagName ? replacementVideo.tagName : 'none') +
+      ' replacementComputedFilter=' + String(replacementComputed.filter || '').substring(0, 120) +
+      ' replacementComputedBackdrop=' + String(replacementComputed.backdropFilter || '').substring(0, 120) +
+      ' replacementVideoHtml5Main=' + replacementHtml5Main +
+      ' replacementVideoBlurred=' + replacementBlurred +
+      ' contextSrc=' + String(context.src || '').substring(0, 180) +
+      ' contextItemId=' + (context.itemId || 'none')
+    );
+    if (healthy) return;
+
+    const now = Date.now();
+    const healState = getShortsHealthHealState(container);
+    if (!healState) return;
+    if (healState.giveupUntil && now < healState.giveupUntil) {
+      logShortsHealthEvent(
+        'shorts_health_heal_giveup',
+        'reason=giveup_window_active' +
+        ' containerNodeId=' + getDiagNodeId(container) +
+        ' attemptsInWindow=' + healState.attemptsInWindow +
+        ' giveupRemainingMs=' + (healState.giveupUntil - now) +
+        ' contextSrc=' + String(context.src || '').substring(0, 180)
+      );
+      return;
+    }
+    if (!healState.windowStartAt || (now - healState.windowStartAt) > SHORTS_HEALTH_HEAL_WINDOW_MS) {
+      healState.windowStartAt = now;
+      healState.attemptsInWindow = 0;
+    }
+    if (healState.attemptsInWindow >= SHORTS_HEALTH_HEAL_MAX_ATTEMPTS) {
+      healState.giveupUntil = now + SHORTS_HEALTH_HEAL_GIVEUP_MS;
+      healState.windowStartAt = now;
+      healState.attemptsInWindow = 0;
+      logShortsHealthEvent(
+        'shorts_health_heal_giveup',
+        'reason=max_attempts_window' +
+        ' containerNodeId=' + getDiagNodeId(container) +
+        ' giveupMs=' + SHORTS_HEALTH_HEAL_GIVEUP_MS +
+        ' contextSrc=' + String(context.src || '').substring(0, 180)
+      );
+      return;
+    }
+    if (healState.lastAttemptAt && (now - healState.lastAttemptAt) < SHORTS_HEALTH_HEAL_COOLDOWN_MS) {
+      return;
+    }
+
+    healState.lastAttemptAt = now;
+    healState.attemptsInWindow += 1;
+    const attemptNumber = healState.attemptsInWindow;
+    logShortsHealthEvent(
+      'shorts_health_heal_attempt',
+      'reason=' + (reason || 'unknown') +
+      ' attempt=' + attemptNumber +
+      ' attemptMax=' + SHORTS_HEALTH_HEAL_MAX_ATTEMPTS +
+      ' windowMs=' + SHORTS_HEALTH_HEAL_WINDOW_MS +
+      ' containerNodeId=' + getDiagNodeId(container) +
+      ' targetNodeId=' + getDiagNodeId(targetNode) +
+      ' contextSrc=' + String(context.src || '').substring(0, 180) +
+      ' contextItemId=' + (context.itemId || 'none')
+    );
+
+    let healTriggered = false;
+    const relatedNodeId = getDiagNodeId(targetNode || container);
+    const healReason = 'shorts_health_unhealthy:' + (reason || 'unknown');
+    healTriggered = reattachShortsBlurForInsertedNode(container, healReason, relatedNodeId);
+    if (!healTriggered && targetNode && targetNode.nodeType === 1) {
+      healTriggered = reattachShortsBlurForInsertedNode(targetNode, healReason, relatedNodeId);
+    }
+    if (!healTriggered && replacementVideo && String(replacementVideo.tagName || '').toUpperCase() === 'VIDEO') {
+      healTriggered = maybeReattachShortsBlurForVideoNode(replacementVideo, healReason, relatedNodeId);
+    }
+    if (!healTriggered && targetNode && String(targetNode.tagName || '').toUpperCase() === 'VIDEO') {
+      healTriggered = maybeReattachShortsBlurForVideoNode(targetNode, healReason, relatedNodeId);
+    }
+    if (!healTriggered) {
+      const healTarget = (
+        (replacementVideo && replacementVideo.nodeType === 1 && replacementVideo.isConnected ? replacementVideo : null) ||
+        (targetNode && targetNode.nodeType === 1 ? targetNode : null) ||
+        container
+      );
+      if (healTarget && healTarget.nodeType === 1 && context.src) {
+        applyBlur(
+          healTarget,
+          context.src,
+          context.category || 'flagged',
+          context.blurPx || CONFIG.blurStrength,
+          context.itemId || ''
         );
-        if (
-          connected &&
-          node &&
-          node.dataset &&
-          node.dataset.mwModerated === 'blurred' &&
-          String(nodeComputed.filter || '').toLowerCase().indexOf('blur(') === -1 &&
-          String(nodeComputed.backdropFilter || '').toLowerCase().indexOf('blur(') === -1
-        ) {
-          diagShortsTimeline(
-            'blur_style_missing',
-            'nodeId=' + nodeId +
-            ' nodeTagName=' + String(node.tagName || 'unknown') +
-            ' nodeComputedFilter=' + String(nodeComputed.filter || '').substring(0, 120) +
-            ' nodeComputedBackdrop=' + String(nodeComputed.backdropFilter || '').substring(0, 120) +
-            ' src=' + String(src || '').substring(0, 180) +
-            ' itemId=' + (itemId || 'none')
-          );
-        }
-      }, delayMs);
-    });
+        healTriggered = true;
+      }
+    }
+
+    const refreshedContext = shortsBlurContextByContainer.get(container) || context;
+    const refreshedTarget = (
+      refreshedContext &&
+      refreshedContext.targetNode &&
+      refreshedContext.targetNode.nodeType === 1
+    ) ? refreshedContext.targetNode : targetNode;
+    const refreshedConnected = !!(refreshedTarget && refreshedTarget.isConnected);
+    const refreshedComputed = getDiagComputedBlurState(refreshedTarget);
+    const refreshedFilter = String(refreshedComputed.filter || '').toLowerCase();
+    const refreshedBackdrop = String(refreshedComputed.backdropFilter || '').toLowerCase();
+    const refreshedHasBlur = (
+      refreshedFilter.indexOf('blur(') !== -1 ||
+      refreshedBackdrop.indexOf('blur(') !== -1
+    );
+    const refreshedRevealed = !!(
+      (refreshedContext && refreshedContext.src && state.revealed.has(refreshedContext.src)) ||
+      (refreshedTarget && refreshedTarget.dataset && refreshedTarget.dataset.mwRevealed === 'true')
+    );
+    const refreshedModerated = !!(
+      refreshedTarget &&
+      refreshedTarget.dataset &&
+      refreshedTarget.dataset.mwModerated === 'blurred'
+    );
+    const refreshedOverlayExpected = !refreshedRevealed && refreshedModerated;
+    const refreshedOverlayState = getDiagOverlayState(refreshedTarget);
+    const refreshedOverlayPresent = !refreshedOverlayExpected || refreshedOverlayState.overlayAttached;
+    const healed = (
+      healTriggered &&
+      refreshedConnected &&
+      !refreshedRevealed &&
+      refreshedModerated &&
+      refreshedHasBlur &&
+      refreshedOverlayPresent
+    );
+    if (healed) {
+      healState.attemptsInWindow = 0;
+      healState.windowStartAt = now;
+      logShortsHealthEvent(
+        'shorts_health_heal_success',
+        'reason=' + (reason || 'unknown') +
+        ' attempt=' + attemptNumber +
+        ' containerNodeId=' + getDiagNodeId(container) +
+        ' targetNodeId=' + getDiagNodeId(refreshedTarget) +
+        ' contextSrc=' + String((refreshedContext && refreshedContext.src) || context.src || '').substring(0, 180)
+      );
+      return;
+    }
+    if (healState.attemptsInWindow >= SHORTS_HEALTH_HEAL_MAX_ATTEMPTS) {
+      const giveupNow = Date.now();
+      healState.giveupUntil = giveupNow + SHORTS_HEALTH_HEAL_GIVEUP_MS;
+      healState.windowStartAt = giveupNow;
+      healState.attemptsInWindow = 0;
+      logShortsHealthEvent(
+        'shorts_health_heal_giveup',
+        'reason=max_attempts_after_attempt' +
+        ' containerNodeId=' + getDiagNodeId(container) +
+        ' giveupMs=' + SHORTS_HEALTH_HEAL_GIVEUP_MS +
+        ' contextSrc=' + String((refreshedContext && refreshedContext.src) || context.src || '').substring(0, 180)
+      );
+    }
+  }
+
+  function diagScheduleBlurredNodePresenceChecks(node, src, itemId) {
+    if (!isShortsModeActive()) return;
+    if (!SHORTS_HEALTH_HEAL_ENABLED) return;
+    if (!node || node.nodeType !== 1) return;
+    logShortsHealthEvent(
+      'shorts_health_schedule',
+      'nodeId=' + getDiagNodeId(node) +
+      ' src=' + String(src || '').substring(0, 180) +
+      ' itemId=' + (itemId || 'none')
+    );
+    maybeStartShortsHealthHealInterval('schedule_blur_check');
   }
 
   function attachDiagBlurredNodeParentObserver(node, src, itemId) {
@@ -2169,7 +2440,6 @@ export function generateModerationScript(config: InjectionConfig): string {
         ' itemId=' + (itemId || 'none')
       );
     }
-    diagScheduleBlurredNodePresenceChecks(node, src, itemId);
     attachDiagBlurredNodeParentObserver(node, src, itemId);
   }
 
@@ -2946,6 +3216,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         if (!findRevealOverlayForElement(element, src) && element.isConnected) {
           createRevealOverlay(element, src, category, itemId, false);
         }
+        diagScheduleBlurredNodePresenceChecks(element, src, itemId);
         return;
       }
     }
@@ -2995,6 +3266,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           shortsStableSelectorUsed,
           'applyBlur'
         );
+        diagScheduleBlurredNodePresenceChecks(element, src, itemId);
       }
       diagLogBlurAppliedNodeDetails(element, src, category, itemId, shortsStableSelectorUsed);
       
@@ -5112,6 +5384,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (timerState.legacyResultsInterval) count++;
     if (timerState.urlChangeInterval) count++;
     if (timerState.youtubePeriodicInterval) count++;
+    if (timerState.shortsHealthHealInterval) count++;
     if (timerState.debugSummaryInterval) count++;
     if (timerState.mainScrollTimeout) count++;
     if (timerState.youtubeScrollTimeout) count++;
@@ -5360,6 +5633,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     clearNamedInterval('legacyResultsInterval', reason);
     clearNamedInterval('urlChangeInterval', reason);
     clearNamedInterval('youtubePeriodicInterval', reason);
+    stopShortsHealthHealInterval(reason);
     clearNamedInterval('debugSummaryInterval', reason);
     clearNamedTimeout('mainScrollTimeout', reason);
     clearNamedTimeout('youtubeScrollTimeout', reason);
@@ -5395,6 +5669,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     startLegacyResultsPoll(reason);
     startUrlChangePoll(reason);
     startYouTubePeriodicScan(reason);
+    maybeStartShortsHealthHealInterval(reason);
     startDebugSummary(reason);
     startDiagHeartbeat(reason);
   }
