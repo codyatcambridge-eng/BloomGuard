@@ -346,7 +346,7 @@ export const SearchResultsView = ({
                           className="mt-2 text-xs text-silver hover:text-foreground transition-colors flex items-center gap-1"
                         >
                           <ExternalLink className="w-3 h-3" />
-                          Open in Safe Browser
+                          Open in Focus Browser
                         </button>
                       )}
                     </div>

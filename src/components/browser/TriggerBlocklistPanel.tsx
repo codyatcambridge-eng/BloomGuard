@@ -82,7 +82,7 @@ export const TriggerBlocklistPanel = ({ compact = false }: TriggerBlocklistPanel
       {settings.blur_dial === 0 && (
         <div className="p-3 bg-yellow-500/10 border border-yellow-500/20 rounded-lg mb-4">
           <p className="text-xs text-yellow-500">
-            ⚠️ AI Sensitivity is OFF. Enable it in settings for triggers to work.
+            ⚠️ AI Filter Intensity is OFF. Enable it in settings for triggers to work.
           </p>
         </div>
       )}
@@ -160,7 +160,7 @@ export const TriggerBlocklistPanel = ({ compact = false }: TriggerBlocklistPanel
                                       </TooltipTrigger>
                                       <TooltipContent>
                                         <p className="text-xs">
-                                          Requires sensitivity level {item.minSensitivity}+
+                                          Requires filter intensity level {item.minSensitivity}+
                                         </p>
                                       </TooltipContent>
                                     </Tooltip>
@@ -188,7 +188,7 @@ export const TriggerBlocklistPanel = ({ compact = false }: TriggerBlocklistPanel
 
       <div className="pt-4 border-t border-border">
         <p className="text-xs text-muted-foreground">
-          Triggers work with the AI sensitivity dial. Higher sensitivity = more triggers active.
+          Triggers work with the AI filter intensity dial. Higher filter intensity = more triggers active.
         </p>
       </div>
     </div>

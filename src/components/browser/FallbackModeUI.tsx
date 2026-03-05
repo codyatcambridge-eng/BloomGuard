@@ -143,7 +143,7 @@ export const FallbackModeUI = ({
         <p className="text-sm text-muted-foreground mb-4">
           {isSocialPlatform
             ? `${platformName || 'This platform'} cannot be embedded. View a safe preview with image moderation.`
-            : 'This site cannot be displayed securely inside the Safe Browser due to security restrictions.'}
+            : 'This site cannot be displayed securely inside the Focus Browser due to security restrictions.'}
         </p>
         
         <div className="px-4 py-2 bg-card border border-border rounded-sm mb-6 text-xs text-muted-foreground font-mono truncate">

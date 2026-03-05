@@ -64,7 +64,7 @@ const Home = () => {
         {/* Header Text */}
         <div className="text-center mb-2 animate-fade-in">
           <h1 className="font-display text-3xl text-gold tracking-widest uppercase drop-shadow-md">
-            Miracle Worker
+            Bloom Guard
           </h1>
           <div className="flex items-center justify-center gap-2 mt-1">
             <div className="h-px w-8 bg-gradient-to-r from-transparent to-gold/50" />

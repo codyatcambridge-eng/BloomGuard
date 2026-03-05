@@ -50,10 +50,10 @@ export const SafeBrowserHomepage = ({ onSearch, isSearching = false }: SafeBrows
             <Shield className="w-16 h-16 text-aqua" />
           </div>
           <h1 className="font-display text-5xl tracking-wider text-foreground mb-2">
-            GOODCREATION.NET
+            Focus Browser
           </h1>
-          <p className="text-sm text-muted-foreground font-display tracking-widest">
-            SAFE BROWSER
+          <p className="italic" style={{ fontSize: '14px', color: '#E0E0E0' }}>
+            Algorithms are noisy, real life is quiet where Focus Browser is.
           </p>
         </div>
 
@@ -185,7 +185,7 @@ export const SafeBrowserHomepage = ({ onSearch, isSearching = false }: SafeBrows
           </button>
         </div>
         <p className="text-center text-[10px] text-muted-foreground/60 mt-3 font-display tracking-wider">
-          GOODCREATION.NET SAFE BROWSER © 2025
+          FOCUS BROWSER © 2026
         </p>
       </footer>
     </div>

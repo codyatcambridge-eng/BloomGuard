@@ -75,7 +75,7 @@ export const ReaderModeView = ({ content, images, title, sourceUrl, onBack }: Re
 
     console.log('[ReaderMode] Starting image scan:', {
       imageCount: uniqueImages.length,
-      aiSensitivity: settings.ai_sensitivity,
+      aiFilterIntensity: settings.ai_sensitivity,
       blurLevel: settings.blur_level,
     });
 
@@ -352,7 +352,7 @@ export const ReaderModeView = ({ content, images, title, sourceUrl, onBack }: Re
                   Images ({uniqueImages.length})
                 </span>
                 <span className="text-xs text-muted-foreground">
-                  Blur: {settings.blur_level} | Sensitivity: {settings.ai_sensitivity}
+                  Blur: {settings.blur_level} | Filter Intensity: {settings.ai_sensitivity}
                 </span>
               </div>
               

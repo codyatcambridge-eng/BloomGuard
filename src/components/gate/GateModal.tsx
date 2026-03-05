@@ -60,12 +60,12 @@ export function GateModal({
   const gateCopy = getGateCopy(gateState.level);
 
   // Determine initial step based on level
-  const getInitialStep = (): GateStep => {
+  const getInitialStep = useCallback((): GateStep => {
     if (gateState.level >= 2) return 'intention';
     return 'cooldown';
-  };
+  }, [gateState.level]);
 
-  const [step, setStep] = useState<GateStep>(getInitialStep);
+  const [step, setStep] = useState<GateStep>(() => getInitialStep());
   const [intention, setIntention] = useState<string>('');
   const [cooldownComplete, setCooldownComplete] = useState(false);
   const [selectedReplacement, setSelectedReplacement] = useState<ReplacementOption | null>(null);
@@ -78,7 +78,7 @@ export function GateModal({
       setCooldownComplete(false);
       setSelectedReplacement(null);
     }
-  }, [isOpen, gateState.level]);
+  }, [isOpen, getInitialStep]);
 
   // Get cooldown duration
   const getCooldownDuration = (): number => {
@@ -264,7 +264,7 @@ export function GateModal({
           <div className="flex flex-col items-center space-y-8">
             <div className="text-center">
               <h2 className="font-display text-xl text-gold tracking-wide">
-                {gateCopy.title}
+                The Clearing
               </h2>
               <p className="text-sm text-muted-foreground mt-2">
                 {gateCopy.subtitle}
@@ -334,7 +334,7 @@ export function GateModal({
                 onClick={handleResist}
                 className="w-full py-4 rounded-xl border border-gold/30 bg-gold/10 text-gold font-display text-sm tracking-wider hover:bg-gold/20 transition-colors"
               >
-                Actually, I'll resist
+                I Chose Peace
               </button>
             </div>
           </div>

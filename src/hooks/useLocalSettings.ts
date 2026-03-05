@@ -29,6 +29,7 @@ export type BlockingMode = 'mvp' | 'full';
 
 export interface LocalProtectionSettings {
   shield_active: boolean;
+  isEnhancedVisibility: boolean;
   blur_level: BlurLevel;
   ai_sensitivity: AISensitivity;
   block_adult_sites: boolean;
@@ -64,6 +65,7 @@ const SETTINGS_KEY = 'iron_watch_local_settings';
 
 const DEFAULT_SETTINGS: LocalProtectionSettings = {
   shield_active: true,
+  isEnhancedVisibility: false,
   blur_level: 'HIGH',
   ai_sensitivity: 'moderate',
   block_adult_sites: true,
@@ -198,6 +200,13 @@ export const useLocalSettings = () => {
       console.error('Failed to save local settings:', error);
     }
   }, []);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const enabled = settings.isEnhancedVisibility === true;
+    document.documentElement.classList.toggle('mw-large-text', enabled);
+    document.body.classList.toggle('mw-large-text', enabled);
+  }, [settings.isEnhancedVisibility]);
 
   // Update a single setting
   const updateSetting = useCallback(<K extends keyof LocalProtectionSettings>(

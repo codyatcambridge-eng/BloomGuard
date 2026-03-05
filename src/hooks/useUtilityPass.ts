@@ -1,29 +1,21 @@
 /**
  * Utility Pass Hook
  * 
- * Manages utility pass state with localStorage persistence
- * and automatic expiry checking.
+ * Uses GateRuntime as the single pass/shield source of truth.
  */
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useCallback, useMemo } from 'react';
 import { toast } from '@/hooks/use-toast';
 import {
   UtilityPassState,
   UtilityPassReason,
   UtilityPassDuration,
-  DEFAULT_PASS_STATE,
-  createUtilityPass,
-  isPassActive,
-  getRemainingSeconds,
-  checkPassExpiry,
-  endPassEarly as endPassEarlyLogic,
   formatRemainingTime,
   UTILITY_PASS_PLATFORM,
 } from '@/logic/utilityPass';
 import { createTriggerEvent } from '@/models/TriggerEvent';
 import { appendTriggerEvent } from '@/storage/eventsRepo';
-
-const STORAGE_KEY = 'utility_pass_state';
+import { useGateRuntime } from './useGateRuntime';
 
 interface UseUtilityPassReturn {
   passState: UtilityPassState;
@@ -34,74 +26,51 @@ interface UseUtilityPassReturn {
   endPassEarly: () => void;
 }
 
+function isUtilityPassReason(value: string | null | undefined): value is UtilityPassReason {
+  return value === 'SCHOOL' || value === 'WORK' || value === 'BILLS_BANK' || value === 'MEDICAL' || value === 'FAMILY';
+}
+
+function toUtilityPassDuration(value: number | null | undefined): UtilityPassDuration | null {
+  if (value === 5 || value === 10 || value === 15) {
+    return value;
+  }
+  return null;
+}
+
 export function useUtilityPass(): UseUtilityPassReturn {
-  const [passState, setPassState] = useState<UtilityPassState>(() => {
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      if (stored) {
-        const parsed = JSON.parse(stored) as UtilityPassState;
-        // Check if still valid
-        return checkPassExpiry(parsed, Date.now());
-      }
-    } catch {
-      // Ignore parse errors
-    }
-    return DEFAULT_PASS_STATE;
-  });
-  
-  const [remainingSeconds, setRemainingSeconds] = useState(0);
-  const intervalRef = useRef<NodeJS.Timeout | null>(null);
-  
-  // Persist state changes
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(passState));
-  }, [passState]);
-  
-  // Update remaining time every second when active
-  useEffect(() => {
-    if (passState.isActive && passState.expiresAt) {
-      const updateRemaining = () => {
-        const nowTs = Date.now();
-        const remaining = getRemainingSeconds(passState, nowTs);
-        setRemainingSeconds(remaining);
-        
-        // Check expiry
-        if (remaining <= 0) {
-          setPassState(DEFAULT_PASS_STATE);
-          toast({
-            title: 'Reset. Rebuild. Return.',
-            description: 'Utility Pass ended. Protection restored.',
-            duration: 3000,
-          });
-          if (intervalRef.current) {
-            clearInterval(intervalRef.current);
-            intervalRef.current = null;
-          }
-        }
+  const { gateState, startPass: startGatePass, endPass } = useGateRuntime();
+  const nowTs = Date.now();
+
+  const activePass = gateState.activePass && gateState.activePass.endsAt > nowTs ? gateState.activePass : null;
+  const isActive = Boolean(activePass);
+  const remainingSeconds = activePass ? Math.max(0, Math.floor((activePass.endsAt - nowTs) / 1000)) : 0;
+
+  const passState = useMemo<UtilityPassState>(() => {
+    if (!activePass) {
+      return {
+        isActive: false,
+        reason: null,
+        startedAt: null,
+        expiresAt: null,
+        durationMinutes: null,
       };
-      
-      updateRemaining();
-      intervalRef.current = setInterval(updateRemaining, 1000);
-      
-      return () => {
-        if (intervalRef.current) {
-          clearInterval(intervalRef.current);
-          intervalRef.current = null;
-        }
-      };
-    } else {
-      setRemainingSeconds(0);
     }
-  }, [passState.isActive, passState.expiresAt]);
+
+    return {
+      isActive: true,
+      reason: isUtilityPassReason(activePass.reason) ? activePass.reason : null,
+      startedAt: activePass.startedAt,
+      expiresAt: activePass.endsAt,
+      durationMinutes: toUtilityPassDuration(activePass.durationMinutes),
+    };
+  }, [activePass]);
   
   const startPass = useCallback(async (
     reason: UtilityPassReason,
     duration: UtilityPassDuration,
     gateLevel: number
   ) => {
-    const nowTs = Date.now();
-    const newState = createUtilityPass(reason, duration, nowTs);
-    setPassState(newState);
+    startGatePass({ reason, duration });
     
     // Log trigger event (privacy-safe)
     const event = createTriggerEvent(
@@ -119,20 +88,20 @@ export function useUtilityPass(): UseUtilityPassReturn {
       description: `Shield engaged for ${duration} minutes`,
       duration: 2000,
     });
-  }, []);
+  }, [startGatePass]);
   
   const endPassEarly = useCallback(() => {
-    setPassState(endPassEarlyLogic());
+    endPass();
     toast({
       title: 'Reset. Rebuild. Return.',
       description: 'Utility Pass ended early. Protection restored.',
       duration: 3000,
     });
-  }, []);
+  }, [endPass]);
   
   return {
     passState,
-    isActive: isPassActive(passState, Date.now()),
+    isActive,
     remainingSeconds,
     remainingFormatted: formatRemainingTime(remainingSeconds),
     startPass,

@@ -131,7 +131,7 @@ export const YouTubePreviewView = ({
           <div>
             <p className="text-sm text-red-600 font-medium">YouTube Preview Mode — Video playback disabled</p>
             <p className="text-xs text-red-600/80 mt-1">
-              For your protection, videos cannot be played inside Safe Browser. Use "Watch on YouTube" to view the video.
+              For your protection, videos cannot be played inside Focus Browser. Use "Watch on YouTube" to view the video.
             </p>
           </div>
         </div>
@@ -241,7 +241,7 @@ export const YouTubePreviewView = ({
               <h3 className="font-display font-bold text-lg">External Link Warning</h3>
             </div>
             <p className="text-sm text-muted-foreground mb-6">
-              This link will open YouTube in an external browser. Safe Browser protections will not apply.
+              This link will open YouTube in an external browser. Focus Browser protections will not apply.
             </p>
             <div className="flex gap-3">
               <Button

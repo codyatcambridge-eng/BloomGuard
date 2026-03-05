@@ -40,7 +40,7 @@ export const ExternalLinkWarning = ({
           <div className="flex items-start gap-2 p-3 bg-amber-500/5 border border-amber-500/20 rounded-lg">
             <Shield className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
             <p className="text-xs text-amber-600">
-              Safe Browser protections will <strong>not apply</strong> outside this app. Browse carefully.
+              Focus Browser protections will <strong>not apply</strong> outside this app. Browse carefully.
             </p>
           </div>
           

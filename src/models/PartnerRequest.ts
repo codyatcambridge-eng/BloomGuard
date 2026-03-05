@@ -83,7 +83,7 @@ export function updateRequestStatus(
 export function getRequestTypeLabel(type: PartnerRequestType): string {
   const labels: Record<PartnerRequestType, string> = {
     DISABLE_SHIELD: 'Pause Protection',
-    DISABLE_SAFE_BROWSER: 'Disable Safe Browser',
+    DISABLE_SAFE_BROWSER: 'Disable Focus Browser',
     UNBLUR_HIGH_RISK: 'Access Override',
     CHANGE_SECURITY_SETTINGS: 'Modify Settings',
   };

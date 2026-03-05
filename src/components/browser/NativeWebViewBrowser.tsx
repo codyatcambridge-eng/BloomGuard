@@ -9,12 +9,12 @@ import {
 } from 'lucide-react';
 import { useNativeWebView } from '@/hooks/useNativeWebView';
 import { useContentProtection } from '@/hooks/useContentProtection';
-import { useSettings } from '@/hooks/useSettings';
 import { useLocalSettings } from '@/hooks/useLocalSettings';
 import { useDeviceId } from '@/hooks/useDeviceId';
 import { useBrowserNavigation } from '@/hooks/useBrowserNavigation';
 import { useCapacitor } from '@/hooks/useCapacitor';
 import { useModerationBridge } from '@/hooks/useModerationBridge';
+import { useGateRuntime } from '@/hooks/useGateRuntime';
 import { supabase } from '@/integrations/supabase/client';
 import { generateModerationScript } from '@/lib/webview-injection-script';
 import {
@@ -145,8 +145,8 @@ interface SocialContent {
  */
 export const NativeWebViewBrowser = () => {
   const { isNative } = useCapacitor();
-  // Page-wide DOM blur/overlay is disabled; per-element blur remains in injection script.
-  const ENABLE_DOM_BLUR = false;
+  // Enable page-wide DOM blur/overlay bridge in addition to per-element blur.
+  const ENABLE_DOM_BLUR = true;
   const ENABLE_SIGNAL_PIPELINE = true;
   
   const [urlInput, setUrlInput] = useState('');
@@ -176,16 +176,17 @@ export const NativeWebViewBrowser = () => {
   
   // Hooks
   const { checkBlockedSite, isChecking } = useContentProtection();
-  const { settings } = useSettings();
   const {
     settings: localSettings,
     isLoaded: settingsLoaded,
     getModerationConfig,
-    isModerationEnabled,
     getNonce,
     updateSetting,
   } = useLocalSettings();
+  const { effectiveShieldState } = useGateRuntime();
   const deviceId = useDeviceId();
+  const effectiveShieldEnabled = effectiveShieldState.shieldEnabled;
+  const isRuntimeModerationEnabled = effectiveShieldEnabled && localSettings.blur_dial > 0;
 
   // Central blur source-of-truth with hysteresis to avoid flicker.
   const blurStateRef = useRef<{ enabled: boolean; reason: string; timestamp: number }>({
@@ -262,6 +263,12 @@ export const NativeWebViewBrowser = () => {
       setCentralBlurState(false, reason);
     }
   }, [setCentralBlurState]);
+
+  useEffect(() => {
+    if (isRuntimeModerationEnabled) return;
+    blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
+    setCentralBlurState(false, effectiveShieldEnabled ? 'moderation_disabled' : 'shield_pass_active');
+  }, [isRuntimeModerationEnabled, effectiveShieldEnabled, setCentralBlurState]);
 
   const pushNativeSignalCapped = useCallback(async (probs: Partial<NsfwProbabilities>) => {
     const now = Date.now();
@@ -466,7 +473,7 @@ export const NativeWebViewBrowser = () => {
       console.log('[MW-Inject][Gate] settings not loaded; skipping inject', 'reason=' + reason);
       return;
     }
-    if (!isModerationEnabled()) {
+    if (!isRuntimeModerationEnabled) {
       console.log('[MW-Bridge] Moderation disabled, skipping injection');
       return;
     }
@@ -495,6 +502,7 @@ export const NativeWebViewBrowser = () => {
     injectionInFlightRef.current = true;
     const config = {
       ...getModerationConfig(),
+      enabled: isRuntimeModerationEnabled,
       pageEpoch: webViewPageEpochRef.current,
       diagYouTubeShorts: localSettings.diag_youtube_shorts === true && isYouTubeUrl(targetUrl),
     };
@@ -532,7 +540,7 @@ export const NativeWebViewBrowser = () => {
     } finally {
       injectionInFlightRef.current = false;
     }
-  }, [ENABLE_SIGNAL_PIPELINE, settingsLoaded, isModerationEnabled, getModerationConfig]);
+  }, [ENABLE_SIGNAL_PIPELINE, settingsLoaded, isRuntimeModerationEnabled, getModerationConfig, localSettings.diag_youtube_shorts]);
 
   const getWebViewListenerDiagContext = useCallback(() => {
     return {
@@ -746,14 +754,12 @@ export const NativeWebViewBrowser = () => {
   }, [isNative, executeScript, webViewState.currentUrl]);
 
   useEffect(() => {
-    const moderationEnabled = isModerationEnabled();
+    const moderationEnabled = isRuntimeModerationEnabled;
     const gate =
       settingsLoaded &&
       isNative &&
       webViewState.isOpen &&
-      moderationEnabled &&
-      localSettings.shield_active &&
-      localSettings.blur_dial > 0;
+      moderationEnabled;
 
     if (!gate) {
       console.log(
@@ -763,7 +769,7 @@ export const NativeWebViewBrowser = () => {
             isNative,
             webViewOpen: webViewState.isOpen,
             moderationEnabled,
-            shieldActive: localSettings.shield_active,
+            shieldActive: effectiveShieldEnabled,
             blurDialActive: localSettings.blur_dial > 0,
           }),
       );
@@ -783,7 +789,7 @@ export const NativeWebViewBrowser = () => {
               isNative,
               webViewOpen: webViewState.isOpen,
               moderationEnabled,
-              shieldActive: localSettings.shield_active,
+              shieldActive: effectiveShieldEnabled,
               blurDialActive: localSettings.blur_dial > 0,
             }),
         );
@@ -814,7 +820,7 @@ export const NativeWebViewBrowser = () => {
             isNative,
             webViewOpen: webViewState.isOpen,
             moderationEnabled,
-            shieldActive: localSettings.shield_active,
+            shieldActive: effectiveShieldEnabled,
             blurDialActive: localSettings.blur_dial > 0,
           }),
       );
@@ -822,7 +828,7 @@ export const NativeWebViewBrowser = () => {
       riskDecisionListenerRef.current = null;
       stopNativeContentFilter().catch(() => undefined);
     };
-  }, [settingsLoaded, isNative, webViewState.isOpen, debugLog, isDebugMode, isModerationEnabled, localSettings.shield_active, localSettings.blur_dial, localSettings.blocking_mode]);
+  }, [settingsLoaded, isNative, webViewState.isOpen, debugLog, isDebugMode, isRuntimeModerationEnabled, effectiveShieldEnabled, localSettings.blur_dial, localSettings.blocking_mode]);
 
   const requestBlurHandshake = useCallback(async (source: string) => {
     if (!ENABLE_DOM_BLUR) return;
@@ -1582,7 +1588,7 @@ export const NativeWebViewBrowser = () => {
    * This is used when postMessage doesn't work reliably
    */
   useEffect(() => {
-    if (!ENABLE_SIGNAL_PIPELINE || !isNative || !webViewState.isOpen || !isModerationEnabled()) {
+    if (!ENABLE_SIGNAL_PIPELINE || !isNative || !webViewState.isOpen || !isRuntimeModerationEnabled) {
       return;
     }
     if (!webViewListenersAttached) {
@@ -1848,7 +1854,7 @@ export const NativeWebViewBrowser = () => {
       window.removeEventListener('hashchange', onHashChange);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [ENABLE_SIGNAL_PIPELINE, isNative, webViewState.isOpen, webViewListenersAttached, isModerationEnabled, executeScript, moderationBridge, localSettings.blur_strength_px, webViewState.currentUrl]);
+  }, [ENABLE_SIGNAL_PIPELINE, isNative, webViewState.isOpen, webViewListenersAttached, isRuntimeModerationEnabled, executeScript, moderationBridge, localSettings.blur_strength_px, webViewState.currentUrl]);
 
   /**
    * Determine if input is a URL vs search query
@@ -2266,7 +2272,7 @@ export const NativeWebViewBrowser = () => {
 
   // Manual scan trigger for current page
   const handleScanPage = useCallback(async () => {
-    if (!isNative || !isModerationEnabled()) {
+    if (!isNative || !isRuntimeModerationEnabled) {
       setIsScanning(true);
       setTimeout(() => setIsScanning(false), 500);
       return;
@@ -2295,7 +2301,7 @@ export const NativeWebViewBrowser = () => {
     }
     
     setTimeout(() => setIsScanning(false), 1500);
-  }, [isNative, isModerationEnabled, executeScript]);
+  }, [isNative, isRuntimeModerationEnabled, executeScript]);
 
   const handleFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -2394,7 +2400,7 @@ export const NativeWebViewBrowser = () => {
           canGoBack={true}
           canGoForward={navCanGoForward}
           isLoading={isLoading}
-          isProtected={settings.shield_active}
+          isProtected={effectiveShieldEnabled}
           modeLabel="PDF Viewer"
           modeColor="text-blue-500"
         />
@@ -2484,13 +2490,13 @@ export const NativeWebViewBrowser = () => {
         canGoForward={navCanGoForward}
         isLoading={isLoading || isChecking || webViewState.isLoading}
         isScanning={isScanning}
-        isProtected={settings.shield_active}
+        isProtected={effectiveShieldEnabled}
         modeLabel={getModeLabel()}
         modeColor={getModeColor()}
       />
       
       {/* AI Moderation Status Bar - shown during browse mode */}
-      {currentView === 'browse' && isModerationEnabled() && (
+      {currentView === 'browse' && isRuntimeModerationEnabled && (
         <AIStatusBar
           modelState={moderationBridge.modelState}
           isScanning={moderationBridge.isScanning || isScanning}

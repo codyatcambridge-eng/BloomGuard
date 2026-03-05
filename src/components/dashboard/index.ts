@@ -9,6 +9,7 @@ export { StrengthPointsCard } from './StrengthPointsCard';
 export { QuickWinCTA } from './QuickWinCTA';
 export { WeeklyChallengeMiniCard } from './WeeklyChallengeMiniCard';
 export { StatsMiniRow } from './StatsMiniRow';
+export { GrowthTree } from './GrowthTree';
 
 // Keep existing exports
 export { StreakDisplay } from './StreakDisplay';

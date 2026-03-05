@@ -107,7 +107,7 @@ const Logs = () => {
             <FileText className="w-12 h-12 mx-auto mb-4 text-silver/30" />
             <p className="text-muted-foreground">No activity logged yet</p>
             <p className="text-xs text-silver mt-2">
-              Browse with Safe Browser to see logs here
+              Browse with Focus Browser to see logs here
             </p>
           </div>
         ) : (

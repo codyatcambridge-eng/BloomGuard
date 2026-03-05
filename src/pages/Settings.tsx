@@ -1,52 +1,26 @@
-import { useState } from "react";
-import { Shield, DollarSign, CreditCard, AlertTriangle, Eye, EyeOff, Coffee, Clock, Lock } from "lucide-react";
-import { FrictionUnlockModal } from "@/components/settings/FrictionUnlockModal";
+import { Shield, DollarSign, AlertTriangle, Eye, EyeOff, Coffee, Clock, Lock } from "lucide-react";
 import { useSettings, BlurLevel } from "@/hooks/useSettings";
-import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { UTILITY_PASS_DURATIONS, UTILITY_PASS_REASONS } from "@/logic/utilityPass";
+import { useNavigate } from "react-router-dom";
+import { useGateRuntime } from "@/hooks/useGateRuntime";
 
 const Settings = () => {
-  const { settings, updateSetting, isLoading, deviceId } = useSettings();
-  const [showFrictionModal, setShowFrictionModal] = useState(false);
+  const { settings, updateSetting, isLoading } = useSettings();
+  const navigate = useNavigate();
+  const { effectiveShieldState, endPass } = useGateRuntime();
+
+  const effectiveShieldEnabled = effectiveShieldState.shieldEnabled;
+  const passRemainingMinutes = Math.max(1, Math.ceil(effectiveShieldState.passRemainingSeconds / 60));
 
   const handleShieldToggle = () => {
-    if (settings.shield_active) {
-      // Trying to turn OFF - show friction modal
-      setShowFrictionModal(true);
-    } else {
-      // Turning ON - no friction
-      updateSetting('shield_active', true);
-      toast.success('Shield activated!');
+    if (effectiveShieldEnabled) {
+      navigate('/defense?context=DisableShield&tool=reflect');
+      return;
     }
-  };
 
-  const handleUnlock = async () => {
-    // Generate unlock token (15 minutes)
-    const expiresAt = new Date();
-    expiresAt.setMinutes(expiresAt.getMinutes() + 15);
-    
-    const token = crypto.randomUUID();
-    
-    await supabase.from('unlock_tokens').insert({
-      device_id: deviceId,
-      token: token,
-      expires_at: expiresAt.toISOString(),
-      reason: 'friction_gate_passed',
-    });
-
-    // Log the event
-    await supabase.from('content_moderation_logs').insert({
-      device_id: deviceId,
-      content_type: 'shield',
-      classification: 'unlocked',
-      action_taken: 'friction_gate_passed',
-      confidence: 1.0,
-    });
-
-    updateSetting('shield_active', false);
-    setShowFrictionModal(false);
-    toast.success('Shield deactivated for 15 minutes');
+    endPass();
+    toast.success('Shield activated!');
   };
 
   const blurLevels: BlurLevel[] = ['OFF', 'LOW', 'HIGH'];
@@ -66,10 +40,9 @@ const Settings = () => {
 
   return (
     <div className="min-h-screen bg-background pb-24">
-      {/* Header */}
       <header className="px-4 pt-8 pb-4 border-b border-border">
         <div className="flex items-center gap-3">
-            <Shield className="w-8 h-8 text-aqua" />
+          <Shield className="w-8 h-8 text-aqua" />
           <div>
             <h1 className="font-display text-2xl tracking-wider">SETTINGS</h1>
             <p className="text-xs text-muted-foreground uppercase tracking-widest">
@@ -80,14 +53,13 @@ const Settings = () => {
       </header>
 
       <main className="px-4 py-6 space-y-6">
-        {/* Iron Shield Toggle */}
         <section className="cathedral-card">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <div className={`w-10 h-10 rounded-sm flex items-center justify-center ${
-                settings.shield_active ? "bg-aqua" : "bg-secondary"
+                effectiveShieldEnabled ? "bg-aqua" : "bg-secondary"
               }`}>
-                <Shield className={`w-5 h-5 ${settings.shield_active ? "text-accent-foreground" : "text-muted-foreground"}`} />
+                <Shield className={`w-5 h-5 ${effectiveShieldEnabled ? "text-accent-foreground" : "text-muted-foreground"}`} />
               </div>
               <div>
                 <h3 className="font-display text-sm tracking-wider">THE GOODCREATION SHIELD</h3>
@@ -97,36 +69,44 @@ const Settings = () => {
             <button
               onClick={handleShieldToggle}
               className={`w-14 h-8 rounded-full transition-all duration-300 ${
-                settings.shield_active ? "bg-aqua" : "bg-secondary"
+                effectiveShieldEnabled ? "bg-aqua" : "bg-secondary"
               }`}
             >
               <div
                 className={`w-6 h-6 rounded-full bg-foreground transition-transform duration-300 ${
-                  settings.shield_active ? "translate-x-7" : "translate-x-1"
+                  effectiveShieldEnabled ? "translate-x-7" : "translate-x-1"
                 }`}
               />
             </button>
           </div>
-          
-          {settings.shield_active && (
+
+          {effectiveShieldEnabled ? (
             <div className="mt-4 pt-4 border-t border-border">
               <div className="flex items-center gap-2 text-aqua">
                 <div className="w-2 h-2 rounded-full bg-aqua animate-pulse" />
                 <span className="text-xs font-display tracking-wider">PROTECTION ACTIVE</span>
               </div>
             </div>
+          ) : (
+            <div className="mt-4 pt-4 border-t border-border">
+              <div className="flex items-center gap-2 text-gold">
+                <div className="w-2 h-2 rounded-full bg-gold animate-pulse" />
+                <span className="text-xs font-display tracking-wider">
+                  PASS ACTIVE — SHIELD OFF FOR {passRemainingMinutes} MIN
+                </span>
+              </div>
+            </div>
           )}
         </section>
 
-        {/* Blur Dial */}
         <section className="cathedral-card">
           <div className="flex items-center gap-3 mb-4">
             <div className="w-10 h-10 rounded-sm bg-secondary flex items-center justify-center">
               <Eye className="w-5 h-5 text-gold" />
             </div>
             <div>
-              <h3 className="font-display text-sm tracking-wider">BLUR DIAL</h3>
-              <p className="text-xs text-muted-foreground">Image blur sensitivity</p>
+              <h3 className="font-display text-sm tracking-wider">SHIELD STRENGTH</h3>
+              <p className="text-xs text-muted-foreground">Image filter intensity</p>
             </div>
           </div>
 
@@ -158,12 +138,11 @@ const Settings = () => {
           </div>
         </section>
 
-        {/* Blocking Options */}
         <section className="cathedral-card">
           <h3 className="font-display text-xs tracking-widest text-muted-foreground mb-4">
             BLOCKING OPTIONS
           </h3>
-          
+
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <div>
@@ -224,7 +203,6 @@ const Settings = () => {
           </div>
         </section>
 
-        {/* Utility Pass Rules (Read-only summary) */}
         <section className="cathedral-card">
           <div className="flex items-center gap-3 mb-4">
             <div className="w-10 h-10 rounded-sm bg-techBlue/20 flex items-center justify-center">
@@ -249,7 +227,7 @@ const Settings = () => {
               <Lock className="w-4 h-4 mt-0.5 text-gold" />
               <div>
                 <p className="text-foreground font-medium">Gate requirement</p>
-                <p className="text-xs">Level 2+ friction (intention + cooldown)</p>
+                <p className="text-xs">Defense Room approval required</p>
               </div>
             </div>
 
@@ -257,7 +235,7 @@ const Settings = () => {
               <Shield className="w-4 h-4 mt-0.5 text-aqua" />
               <div>
                 <p className="text-foreground font-medium">Protection status</p>
-                <p className="text-xs">Shield stays engaged during pass</p>
+                <p className="text-xs">Active pass temporarily suspends shield enforcement</p>
               </div>
             </div>
           </div>
@@ -269,22 +247,21 @@ const Settings = () => {
           </div>
         </section>
 
-        {/* Focus Fine Warning */}
-        <section 
+        <section
           className={`cathedral-card transition-all duration-300 ${
-            settings.shield_active 
-              ? 'border-silver/20' 
+            effectiveShieldEnabled
+              ? 'border-silver/20'
               : 'border-gold/50 shadow-[0_0_30px_hsl(45_100%_50%/0.2)]'
           }`}
         >
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <div 
+              <div
                 className={`w-10 h-10 rounded-sm flex items-center justify-center transition-all ${
-                  settings.shield_active ? 'bg-secondary' : 'bg-gold'
+                  effectiveShieldEnabled ? 'bg-secondary' : 'bg-gold'
                 }`}
               >
-                <DollarSign className={`w-5 h-5 ${settings.shield_active ? 'text-gold' : 'text-cathedral-midnight'}`} />
+                <DollarSign className={`w-5 h-5 ${effectiveShieldEnabled ? 'text-gold' : 'text-cathedral-midnight'}`} />
               </div>
               <div>
                 <h3 className="font-display text-sm tracking-wider">FOCUS FINE</h3>
@@ -292,16 +269,16 @@ const Settings = () => {
               </div>
             </div>
             <div className="text-right">
-              <p className={`font-display text-lg ${settings.shield_active ? 'text-gold' : 'text-gold animate-pulse'}`}>$1.00</p>
+              <p className={`font-display text-lg ${effectiveShieldEnabled ? 'text-gold' : 'text-gold animate-pulse'}`}>$1.00</p>
               <p className="text-xs text-muted-foreground">per fine</p>
             </div>
           </div>
           <div className="mt-4 pt-4 border-t border-border">
-            <div className={`flex items-center gap-2 ${settings.shield_active ? 'text-muted-foreground' : 'text-gold'}`}>
+            <div className={`flex items-center gap-2 ${effectiveShieldEnabled ? 'text-muted-foreground' : 'text-gold'}`}>
               <AlertTriangle className="w-4 h-4" />
               <span className="text-xs font-display tracking-wide">
-                {settings.shield_active 
-                  ? 'Fine activated upon shield deactivation' 
+                {effectiveShieldEnabled
+                  ? 'Fine activated upon shield deactivation'
                   : 'SHIELD INACTIVE — FINE PENDING'
                 }
               </span>
@@ -309,12 +286,6 @@ const Settings = () => {
           </div>
         </section>
       </main>
-
-      <FrictionUnlockModal
-        isOpen={showFrictionModal}
-        onClose={() => setShowFrictionModal(false)}
-        onUnlock={handleUnlock}
-      />
     </div>
   );
 };

@@ -83,7 +83,7 @@ export function getActionLabel(action: ProtectedActionType): string {
     case 'TURN_OFF_PROTECTION':
       return 'Pause Protection';
     case 'DISABLE_SAFE_BROWSER':
-      return 'Disable Safe Browser';
+      return 'Disable Focus Browser';
     case 'UNBLUR_HIGH_RISK':
       return 'Access Override';
     case 'CHANGE_SECURITY_SETTINGS':

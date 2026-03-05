@@ -7,10 +7,10 @@ import { Slider } from '@/components/ui/slider';
 
 const SENSITIVITY_LABELS: Record<BlurDialLevel, { label: string; description: string; color: string }> = {
   0: { label: 'Off', description: 'No image scanning', color: 'text-muted-foreground' },
-  1: { label: 'Relaxed', description: 'Only explicit content', color: 'text-green-500' },
-  2: { label: 'Moderate', description: 'Explicit + suggestive', color: 'text-yellow-500' },
-  3: { label: 'Strict', description: 'All questionable content', color: 'text-orange-500' },
-  4: { label: 'Maximum', description: 'Aggressive filtering', color: 'text-red-500' },
+  1: { label: 'Relaxed', description: 'Only explicit content', color: 'text-[#8ea893]' },
+  2: { label: 'Moderate', description: 'Explicit + suggestive', color: 'text-aqua' },
+  3: { label: 'Strict', description: 'All questionable content', color: 'text-[#76937C]' },
+  4: { label: 'Maximum', description: 'Aggressive filtering', color: 'text-[#66826c]' },
 };
 
 interface ModerationSettingsPanelProps {
@@ -65,12 +65,12 @@ export const ModerationSettingsPanel = ({ compact = false }: ModerationSettingsP
         />
       </div>
 
-      {/* Sensitivity Dial (0-4) */}
+      {/* Filter Intensity Dial (0-4) */}
       <div className="space-y-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Gauge className="w-4 h-4 text-muted-foreground" />
-            <Label className="text-sm font-medium">Sensitivity Level</Label>
+            <Label className="text-sm font-medium">Filter Intensity</Label>
           </div>
           <span className={`text-sm font-display tracking-wider ${currentLevel.color}`}>
             {currentLevel.label.toUpperCase()}
@@ -169,7 +169,7 @@ export const ModerationSettingsPanel = ({ compact = false }: ModerationSettingsP
       {/* Status info */}
       <div className="p-3 bg-muted/50 rounded-lg">
         <div className="flex items-center gap-2">
-          <div className={`w-2 h-2 rounded-full ${isEnabled ? 'bg-green-500' : 'bg-muted-foreground'}`} />
+          <div className={`w-2 h-2 rounded-full ${isEnabled ? 'bg-aqua' : 'bg-muted-foreground'}`} />
           <span className="text-xs text-muted-foreground">
             {isEnabled 
               ? 'AI moderation active - images will be scanned in real-time'

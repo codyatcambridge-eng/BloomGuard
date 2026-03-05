@@ -175,8 +175,8 @@ export function generateModerationScript(config: InjectionConfig): string {
   
   console.log('[MW] ========================================');
   console.log('[MW] injected - Moderation Script v3.0');
-  console.log('[MW] Sensitivity:', ${config.sensitivity});
-  console.log('[MW] Blur Strength:', CLAMPED_BLUR_STRENGTH, 'px', '(requested:', REQUESTED_BLUR_STRENGTH + 'px)');
+  console.log('[MW] Filter Intensity:', ${config.sensitivity});
+  console.log('[MW] Shield Strength:', CLAMPED_BLUR_STRENGTH, 'px', '(requested:', REQUESTED_BLUR_STRENGTH + 'px)');
   console.log('[MW] Enabled:', ${config.enabled});
   console.log('[MW] Forced Blur:', ${config.forcedBlur || false});
   console.log('[MW] Fail-Closed:', ${failClosed}, '(default: fail-open)');
@@ -318,7 +318,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   const OVERLAY_ID = 'mw-blur-overlay';
   const OVERLAY_STYLE_ID = 'mw-blur-overlay-style';
   const REVEAL_PORTAL_ID = 'mw-reveal-portal';
-  const DOM_OVERLAY_ENABLED = false;
+  const DOM_OVERLAY_ENABLED = true;
 
   const overlayState = window.__MW_BLUR_STATE__ || {
     enabled: false,
@@ -423,11 +423,11 @@ export function generateModerationScript(config: InjectionConfig): string {
     4: 'Maximum',
   };
   const SENSITIVITY_ACCENTS = {
-    0: { background: 'rgba(148,163,184,0.85)', border: 'rgba(148,163,184,0.9)' },
-    1: { background: 'rgba(16,185,129,0.9)', border: 'rgba(16,185,129,1)' },
-    2: { background: 'rgba(234,179,8,0.9)', border: 'rgba(234,179,8,1)' },
-    3: { background: 'rgba(249,115,22,0.95)', border: 'rgba(249,115,22,1)' },
-    4: { background: 'rgba(239,68,68,0.95)', border: 'rgba(239,68,68,1)' },
+    0: { background: 'rgba(26,27,30,0.9)', border: 'rgba(98,101,108,0.9)' },
+    1: { background: 'rgba(26,27,30,0.9)', border: 'rgba(118,147,124,0.75)' },
+    2: { background: 'rgba(26,27,30,0.9)', border: 'rgba(118,147,124,0.82)' },
+    3: { background: 'rgba(26,27,30,0.9)', border: 'rgba(118,147,124,0.9)' },
+    4: { background: 'rgba(26,27,30,0.92)', border: 'rgba(118,147,124,1)' },
   };
   const SENSITIVITY_TOGGLE_ID = 'mw-sensitivity-toggle';
   const SENSITIVITY_TOGGLE_STYLE_ID = 'mw-sensitivity-toggle-style';
@@ -450,7 +450,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     const accent = getSensitivityAccent(level);
     button.style.background = accent.background;
     button.style.borderColor = accent.border;
-    button.setAttribute('aria-label', 'Shield sensitivity: ' + getSensitivityLabel(level));
+    button.setAttribute('aria-label', 'Shield Strength / Filter Intensity: ' + getSensitivityLabel(level));
     button.dataset.mwSensitivityLevel = String(level);
   }
 
@@ -463,7 +463,21 @@ export function generateModerationScript(config: InjectionConfig): string {
       " bottom: 18px; " +
       " right: 18px; " +
       " z-index: 2147483647; " +
-      " } ";
+      " display: inline-flex; " +
+      " align-items: center; " +
+      " gap: 8px; " +
+      " padding: 10px 14px; " +
+      " border-radius: 999px; " +
+      " border: 1px solid rgba(118,147,124,0.85); " +
+      " color: #E0E0E0; " +
+      " background: rgba(26,27,30,0.82); " +
+      " box-shadow: 0 10px 24px rgba(0,0,0,0.35); " +
+      " backdrop-filter: blur(8px); " +
+      " -webkit-backdrop-filter: blur(8px); " +
+      " font-weight: 600; " +
+      " } " +
+      "#".concat(SENSITIVITY_TOGGLE_ID, " .mw-sensitivity-icon { font-size: 16px; line-height: 1; } ") +
+      "#".concat(SENSITIVITY_TOGGLE_ID, " .mw-sensitivity-label { color: #E0E0E0; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; } ");
     (document.head || document.documentElement || document.body || document.documentElement).appendChild(style);
   }
 
@@ -511,7 +525,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (toggle) {
       updateSensitivityToggleButton(toggle);
     }
-    console.log('[MW] Sensitivity dial set to', normalized, 'label=' + getSensitivityLabel(normalized), 'reason=' + (reason || 'toggle'));
+    console.log('[MW] Filter Intensity set to', normalized, 'label=' + getSensitivityLabel(normalized), 'reason=' + (reason || 'toggle'));
     if (CONFIG.enabled) {
       scanFullPage();
       if (isYouTube()) {
@@ -569,7 +583,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     return false;
   }
 
-  if (DOM_OVERLAY_ENABLED && !window.__MW_BLUR_LISTENER__) {
+  if (!window.__MW_BLUR_LISTENER__) {
     window.__MW_BLUR_LISTENER__ = true;
     const onBlurCommandEvent = function(event) {
       handleBlurCommand(readHostEventPayload(event));

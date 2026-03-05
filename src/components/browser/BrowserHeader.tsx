@@ -82,7 +82,7 @@ export const BrowserHeader = ({
             type="text"
             value={urlInput}
             onChange={(e) => onUrlChange(e.target.value)}
-            placeholder={isHome || isSearch ? "Search or enter URL (Safe Browser)" : "Enter URL..."}
+            placeholder={isHome || isSearch ? "Search or enter URL (Focus Browser)" : "Enter URL..."}
             className="w-full bg-input border border-silver/30 rounded-sm pl-10 pr-4 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-aqua transition-colors"
           />
           {isLoading && (

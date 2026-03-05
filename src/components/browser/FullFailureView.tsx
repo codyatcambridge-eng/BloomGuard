@@ -42,7 +42,7 @@ export const FullFailureView = ({ sourceUrl, error, onBack, onRetry }: FullFailu
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
               <Shield className="w-4 h-4 text-aqua flex-shrink-0" />
-              <span className="text-xs font-display text-aqua tracking-wider">SAFE BROWSER</span>
+              <span className="text-xs font-display text-aqua tracking-wider">FOCUS BROWSER</span>
             </div>
             <p className="text-xs text-muted-foreground truncate mt-0.5">{sourceUrl}</p>
           </div>
@@ -107,7 +107,7 @@ export const FullFailureView = ({ sourceUrl, error, onBack, onRetry }: FullFailu
           <div className="mt-8 p-4 bg-amber-500/10 border border-amber-500/20 rounded-lg">
             <p className="text-xs text-amber-600">
               <AlertTriangle className="w-3 h-3 inline mr-1" />
-              Opening in an external browser will bypass Safe Browser protections.
+              Opening in an external browser will bypass Focus Browser protections.
               Browse carefully.
             </p>
           </div>

@@ -1,5 +1,5 @@
 /**
- * Miracle Worker Rank System
+ * Bloom Guard Rank System
  * 
  * A one-way progression ladder. Once you unlock a rank, you keep it forever.
  * Ranks are earned through consistent effort, not perfection.
@@ -64,14 +64,14 @@ export const RANKS: Rank[] = [
   },
   {
     id: 'miracle',
-    name: 'Miracle Worker',
-    title: 'Miracle Worker Champion',
+    name: 'Bloom Guard',
+    title: 'Bloom Guard Champion',
     requiredSP: 4000,
     requiredDays: 91,
     color: 'hsl(280, 80%, 60%)',
     glowColor: 'hsl(280, 80%, 60% / 0.5)',
     description: 'Master of self. Transformer of habits. Living proof that change is possible.',
-    unlockMessage: 'MIRACLE WORKER! You\'ve achieved what once seemed impossible.',
+    unlockMessage: 'BLOOM GUARD! You\'ve achieved what once seemed impossible.',
   },
 ];
 

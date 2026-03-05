@@ -30,7 +30,7 @@ const MODE_CONFIG: Record<string, {
   fallback: {
     icon: <AlertTriangle className="w-4 h-4" />,
     title: "Protected Mode Required",
-    description: "This site cannot load in the Safe Browser iframe. Use Reader Mode to view content safely.",
+    description: "This site cannot load in the Focus Browser iframe. Use Reader Mode to view content safely.",
     bgClass: "bg-amber-500/10 border-amber-500/20",
     textClass: "text-amber-600",
   },

@@ -179,7 +179,7 @@ export const SocialPreviewView = ({
               Social Preview Mode — Interactivity Disabled
             </p>
             <p className="text-xs text-muted-foreground mt-1">
-              For your protection, interactive content is disabled inside Safe Browser.
+              For your protection, interactive content is disabled inside Focus Browser.
               Use "View on {config.name}" to access full functionality.
             </p>
           </div>
@@ -297,7 +297,7 @@ export const SocialPreviewView = ({
               <h3 className="font-display font-bold text-lg">External Link Warning</h3>
             </div>
             <p className="text-sm text-muted-foreground mb-6">
-              This link will open {config.name} in an external browser. Safe Browser protections will not apply.
+              This link will open {config.name} in an external browser. Focus Browser protections will not apply.
             </p>
             <div className="flex gap-3">
             <Button

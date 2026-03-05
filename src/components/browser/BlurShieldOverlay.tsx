@@ -40,6 +40,7 @@ export const BlurShieldOverlay = ({ executeScript }: BlurShieldOverlayProps) => 
   const { settings, updateSetting } = useLocalSettings();
   const preset = useMemo(() => DIAL_PRESETS[settings.blur_dial] || DIAL_PRESETS[2], [settings.blur_dial]);
   const actionsDisabled = !settings.shield_active || !executeScript;
+  const isLargeText = settings.isEnhancedVisibility === true;
 
   const sendShieldCommand = useCallback((action: 'report' | 'false_positive' | 'deep_scan') => {
     if (!executeScript) return;
@@ -59,16 +60,16 @@ export const BlurShieldOverlay = ({ executeScript }: BlurShieldOverlayProps) => 
     <div className="pointer-events-none fixed inset-0 z-[60]">
       <div className="pointer-events-auto fixed bottom-4 right-4 flex flex-col items-end gap-3">
         {open && (
-          <div className="w-72 rounded-2xl border border-border bg-background/95 shadow-2xl shadow-black/40 backdrop-blur-lg p-4 space-y-3">
+          <div className={`${isLargeText ? 'w-80' : 'w-72'} rounded-2xl border border-[#2c3330] bg-[#1A1B1E]/90 text-[#E0E0E0] shadow-2xl shadow-black/40 backdrop-blur-lg p-4 space-y-3`}>
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-[0.65rem] uppercase tracking-[0.2em] text-muted-foreground">Blur Dial</p>
-                <p className="text-sm font-display text-foreground leading-snug">{preset.name}</p>
+                <p className="text-[0.65rem] uppercase tracking-[0.2em] text-[#E0E0E0]/70">Shield Strength</p>
+                <p className="text-sm font-display text-[#E0E0E0] leading-snug">{preset.name}</p>
               </div>
               <button
                 onClick={() => setOpen(false)}
-                className="rounded-full border border-silver/20 p-1 text-muted-foreground hover:text-foreground"
-                aria-label="Close blur dial"
+                className="rounded-full border border-[#2c3330] p-1 text-[#E0E0E0]/70 hover:text-[#E0E0E0]"
+                aria-label="Close shield strength controls"
               >
                 <X className="w-3 h-3" />
               </button>
@@ -83,12 +84,28 @@ export const BlurShieldOverlay = ({ executeScript }: BlurShieldOverlayProps) => 
               className="w-full"
             />
 
-            <div className="grid grid-cols-3 gap-2 text-[0.65rem] uppercase tracking-[0.2em]">
+            <div className="flex items-center justify-between rounded-lg border border-[#2c3330] bg-[#22252a] px-3 py-2">
+              <span className="text-xs uppercase tracking-[0.16em] text-[#E0E0E0]/75">Enhanced Visibility</span>
+              <button
+                type="button"
+                onClick={() => updateSetting('isEnhancedVisibility', !settings.isEnhancedVisibility)}
+                className={`rounded-full px-3 py-1 text-xs font-semibold transition ${
+                  settings.isEnhancedVisibility
+                    ? 'bg-[#76937C] text-[#1A1B1E]'
+                    : 'bg-[#2c3330] text-[#E0E0E0]'
+                }`}
+                aria-label="Toggle enhanced visibility"
+              >
+                {settings.isEnhancedVisibility ? 'ON' : 'OFF'}
+              </button>
+            </div>
+
+            <div className={`grid ${isLargeText ? 'grid-cols-1' : 'grid-cols-3'} gap-2 text-[0.65rem] uppercase tracking-[0.2em]`}>
               <button
                 type="button"
                 disabled={actionsDisabled}
                 onClick={() => sendShieldCommand('report')}
-                className="rounded-lg border border-border/60 bg-destructive/10 px-2 py-1 text-center text-destructive transition hover:bg-destructive/20 disabled:cursor-not-allowed disabled:opacity-50"
+                className="mw-break-button rounded-lg border border-[#6b2f37] bg-[#3f1f24] px-2 py-1 text-center text-[#ffb4c1] transition hover:bg-[#4b252b] disabled:cursor-not-allowed disabled:opacity-50"
                 aria-label="Report potential leak"
               >
                 <span className="block text-base leading-none">[!]</span>
@@ -98,7 +115,7 @@ export const BlurShieldOverlay = ({ executeScript }: BlurShieldOverlayProps) => 
                 type="button"
                 disabled={actionsDisabled}
                 onClick={() => sendShieldCommand('false_positive')}
-                className="rounded-lg border border-border/60 bg-emerald/10 px-2 py-1 text-center text-emerald transition hover:bg-emerald/20 disabled:cursor-not-allowed disabled:opacity-50"
+                className="mw-controls-button rounded-lg border border-[#76937C]/80 bg-[#76937C]/20 px-2 py-1 text-center text-[#9fc0a7] transition hover:bg-[#76937C]/30 disabled:cursor-not-allowed disabled:opacity-50"
                 aria-label="Mark as false positive"
               >
                 <span className="block text-base leading-none">[✓]</span>
@@ -108,7 +125,7 @@ export const BlurShieldOverlay = ({ executeScript }: BlurShieldOverlayProps) => 
                 type="button"
                 disabled={actionsDisabled}
                 onClick={() => sendShieldCommand('deep_scan')}
-                className="rounded-lg border border-border/60 bg-sky/10 px-2 py-1 text-center text-sky transition hover:bg-sky/20 disabled:cursor-not-allowed disabled:opacity-50"
+                className="rounded-lg border border-[#2c3330] bg-[#22252a] px-2 py-1 text-center text-[#E0E0E0] transition hover:bg-[#282d33] disabled:cursor-not-allowed disabled:opacity-50"
                 aria-label="Trigger high resolution deep scan"
               >
                 <span className="block text-base leading-none">[👁]</span>
@@ -116,12 +133,12 @@ export const BlurShieldOverlay = ({ executeScript }: BlurShieldOverlayProps) => 
               </button>
             </div>
 
-            <p className="text-[10px] leading-snug text-muted-foreground">{preset.description}</p>
+            <p className="text-[10px] leading-snug text-[#E0E0E0]/70">{preset.description}</p>
             <div className="flex flex-wrap gap-2">
               {preset.focus.map((tag) => (
                 <span
                   key={tag}
-                  className="text-[10px] rounded-full border border-border/70 px-2 py-0.5 text-muted-foreground"
+                  className="text-[10px] rounded-full border border-[#2c3330] px-2 py-0.5 text-[#E0E0E0]/70"
                 >
                   {tag}
                 </span>
@@ -129,8 +146,8 @@ export const BlurShieldOverlay = ({ executeScript }: BlurShieldOverlayProps) => 
             </div>
 
             <div className="space-y-2">
-              <div className="flex items-center justify-between text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
-                <span>Blur strength</span>
+              <div className="flex items-center justify-between text-[10px] uppercase tracking-[0.2em] text-[#E0E0E0]/70">
+                <span>Shield Strength</span>
                 <span>{settings.blur_strength_px}px</span>
               </div>
               <Slider
@@ -148,8 +165,8 @@ export const BlurShieldOverlay = ({ executeScript }: BlurShieldOverlayProps) => 
 
         <button
           onClick={() => setOpen((prev) => !prev)}
-          className="flex items-center justify-center rounded-full bg-aqua p-3 text-accent-foreground shadow-2xl shadow-black/40 hover:bg-aqua/90"
-          aria-label="Blur shield dial"
+          className="mw-controls-button flex items-center justify-center rounded-full bg-[#76937C] p-3 text-[#1A1B1E] shadow-2xl shadow-black/40 hover:bg-[#76937C]/90"
+          aria-label="Shield strength controls"
         >
           <Shield className="w-5 h-5" />
         </button>

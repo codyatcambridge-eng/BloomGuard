@@ -70,7 +70,7 @@ export const RANKS: Rank[] = [
   {
     id: 'CHAMP',
     name: 'Champ',
-    title: 'Miracle Worker Champion',
+    title: 'Bloom Guard Champion',
     requiredSP: 4000,
     requiredDays: 91,
     color: 'hsl(280, 80%, 60%)',

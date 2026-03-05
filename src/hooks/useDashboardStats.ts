@@ -5,11 +5,11 @@
  * Memoizes heavy aggregations to avoid re-query loops.
  */
 
-import { useMemo, useEffect, useState } from 'react';
-import { getTriggerEvents, getFocusSessions } from '@/storage/eventsRepo';
+import { useMemo, useEffect, useState, useCallback } from 'react';
+import { getTriggerEvents, getFocusSessions, appendTriggerEvent } from '@/storage/eventsRepo';
 import { loadUserProgress } from '@/storage/userRepo';
 import { UserProgress } from '@/models/UserProgress';
-import { TriggerEvent } from '@/models/TriggerEvent';
+import { TriggerEvent, createTriggerEvent } from '@/models/TriggerEvent';
 import { FocusSession } from '@/models/FocusSession';
 import { getWeekStartISO, getEndOfDayTs, getStartOfDayTs, getTodayISO } from '@/logic/dateUtils';
 import { calculateRankProgress, RankProgress } from '@/logic/rank';
@@ -48,6 +48,9 @@ export interface DashboardStats {
   
   // Loading state
   isLoading: boolean;
+
+  // Waiting room resist action -> updates local tree signal and persisted event log
+  incrementResistedCount: () => Promise<void>;
 }
 
 export function useDashboardStats(): DashboardStats {
@@ -85,8 +88,25 @@ export function useDashboardStats(): DashboardStats {
     return () => { mounted = false; };
   }, []);
 
+  const incrementResistedCount = useCallback(async () => {
+    const event = createTriggerEvent(1, 'RESISTED', {
+      platform: 'clearing',
+      recoveryCompleted: false,
+    });
+
+    await appendTriggerEvent(event);
+
+    const weekStart = getStartOfDayTs(getWeekStartISO());
+    const today = getTodayISO();
+    const weekEnd = getEndOfDayTs(today);
+
+    if (event.ts >= weekStart && event.ts <= weekEnd) {
+      setTriggerEvents((previous) => [...previous, event]);
+    }
+  }, []);
+
   // Memoized calculations to avoid re-computing on every render
-  const stats = useMemo((): Omit<DashboardStats, 'isLoading'> => {
+  const stats = useMemo((): Omit<DashboardStats, 'isLoading' | 'incrementResistedCount'> => {
     if (!progress) {
       return {
         progress: null,
@@ -141,6 +161,7 @@ export function useDashboardStats(): DashboardStats {
   return {
     ...stats,
     isLoading,
+    incrementResistedCount,
   };
 }
 

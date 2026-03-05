@@ -6,86 +6,86 @@
 
 @layer base {
   :root {
-    /* Cathedral-Tech War Room Color System */
-    --background: 220 60% 4%;
-    --foreground: 40 30% 95%;
+    /* Peace Eyes: Charcoal + Cloud + Sage */
+    --background: 225 7% 11%;
+    --foreground: 0 0% 88%;
 
-    --card: 220 50% 8%;
-    --card-foreground: 40 30% 95%;
+    --card: 225 7% 13%;
+    --card-foreground: 0 0% 88%;
 
-    --popover: 220 50% 6%;
-    --popover-foreground: 40 30% 95%;
+    --popover: 225 7% 12%;
+    --popover-foreground: 0 0% 88%;
 
-    --primary: 220 100% 15%;
-    --primary-foreground: 40 30% 95%;
+    --primary: 130 14% 52%;
+    --primary-foreground: 225 7% 11%;
 
-    --secondary: 220 40% 12%;
-    --secondary-foreground: 40 30% 95%;
+    --secondary: 225 7% 16%;
+    --secondary-foreground: 0 0% 88%;
 
-    --muted: 220 30% 18%;
-    --muted-foreground: 220 15% 55%;
+    --muted: 225 6% 19%;
+    --muted-foreground: 0 0% 70%;
 
-    --accent: 200 100% 50%;
-    --accent-foreground: 220 100% 8%;
+    --accent: 130 14% 52%;
+    --accent-foreground: 225 7% 11%;
 
     --destructive: 0 84% 60%;
     --destructive-foreground: 0 0% 100%;
 
-    --border: 220 30% 20%;
-    --input: 220 40% 12%;
-    --ring: 45 100% 50%;
+    --border: 225 7% 24%;
+    --input: 225 7% 16%;
+    --ring: 130 14% 52%;
 
     --radius: 0.375rem;
 
-    /* Cathedral Stone Colors */
-    --cathedral-deep: 220 60% 8%;
-    --cathedral-midnight: 220 60% 4%;
-    --cathedral-steel: 220 20% 25%;
-    --cathedral-stone: 30 15% 12%;
+    /* Charcoal Foundation */
+    --cathedral-deep: 225 7% 12%;
+    --cathedral-midnight: 225 7% 11%;
+    --cathedral-steel: 225 6% 26%;
+    --cathedral-stone: 225 5% 16%;
     
-    /* Tech Blue Accents */
-    --tech-blue: 200 100% 50%;
-    --tech-blue-dim: 200 60% 35%;
-    --tech-blue-bright: 200 100% 60%;
+    /* Sage Accent Family */
+    --tech-blue: 130 14% 52%;
+    --tech-blue-dim: 130 12% 40%;
+    --tech-blue-bright: 130 18% 62%;
     
-    /* Radiant Gold - Primary Action */
-    --gold: 45 100% 50%;
-    --gold-dim: 45 80% 40%;
-    --gold-bright: 45 100% 60%;
+    /* Primary Action (Sage) */
+    --gold: 130 14% 52%;
+    --gold-dim: 130 12% 42%;
+    --gold-bright: 130 18% 60%;
     
-    /* Aqua Accents */
-    --aqua-glow: 180 100% 50%;
-    --aqua-dim: 180 60% 35%;
-    --aqua-bright: 180 100% 60%;
+    /* Active/Success States (Sage) */
+    --aqua-glow: 130 14% 52%;
+    --aqua-dim: 130 12% 40%;
+    --aqua-bright: 130 18% 60%;
     
-    /* Brushed Silver */
-    --silver: 220 10% 65%;
-    --silver-dim: 220 10% 45%;
-    --silver-bright: 220 5% 80%;
+    /* Cloud Gray */
+    --silver: 0 0% 88%;
+    --silver-dim: 0 0% 68%;
+    --silver-bright: 0 0% 94%;
 
     /* Flame Orange for Strength */
     --flame: 25 100% 55%;
     --flame-dim: 25 80% 45%;
     
-    /* Cathedral Gradients */
-    --gradient-cathedral: linear-gradient(180deg, hsl(220 50% 10%) 0%, hsl(220 60% 4%) 50%, hsl(220 50% 6%) 100%);
-    --gradient-marble: radial-gradient(ellipse at 30% 20%, hsl(30 20% 12%) 0%, hsl(220 60% 4%) 50%, hsl(220 70% 2%) 100%);
-    --gradient-gold: linear-gradient(135deg, hsl(45 100% 55%) 0%, hsl(45 80% 40%) 100%);
-    --gradient-gold-shine: linear-gradient(135deg, hsl(45 100% 65%) 0%, hsl(45 100% 50%) 50%, hsl(45 80% 40%) 100%);
-    --gradient-silver: linear-gradient(135deg, hsl(220 10% 70%) 0%, hsl(220 15% 50%) 100%);
-    --gradient-tech: linear-gradient(180deg, hsl(200 100% 50% / 0.1) 0%, transparent 100%);
+    /* Calm charcoal gradients */
+    --gradient-cathedral: linear-gradient(180deg, hsl(225 7% 14%) 0%, hsl(225 7% 11%) 50%, hsl(225 7% 9%) 100%);
+    --gradient-marble: radial-gradient(ellipse at 30% 20%, hsl(225 7% 16%) 0%, hsl(225 7% 11%) 50%, hsl(225 7% 9%) 100%);
+    --gradient-gold: linear-gradient(135deg, hsl(130 18% 60%) 0%, hsl(130 12% 42%) 100%);
+    --gradient-gold-shine: linear-gradient(135deg, hsl(130 22% 66%) 0%, hsl(130 14% 52%) 50%, hsl(130 12% 42%) 100%);
+    --gradient-silver: linear-gradient(135deg, hsl(0 0% 92%) 0%, hsl(0 0% 70%) 100%);
+    --gradient-tech: linear-gradient(180deg, hsl(130 14% 52% / 0.14) 0%, transparent 100%);
     
-    /* Cathedral Shadows */
-    --shadow-glow: 0 0 30px hsl(45 100% 50% / 0.3);
-    --shadow-card: 0 4px 30px hsl(220 100% 3% / 0.8);
-    --shadow-gold: 0 0 25px hsl(45 100% 50% / 0.4);
-    --shadow-silver: inset 0 1px 0 hsl(220 10% 60% / 0.15), 0 4px 20px hsl(220 100% 3% / 0.6);
-    --shadow-inner: inset 0 2px 8px hsl(220 100% 2% / 0.5);
+    /* Soft charcoal shadows */
+    --shadow-glow: 0 0 30px hsl(130 14% 52% / 0.26);
+    --shadow-card: 0 4px 30px hsl(225 10% 4% / 0.8);
+    --shadow-gold: 0 0 25px hsl(130 14% 52% / 0.34);
+    --shadow-silver: inset 0 1px 0 hsl(0 0% 92% / 0.09), 0 4px 20px hsl(225 10% 4% / 0.6);
+    --shadow-inner: inset 0 2px 8px hsl(225 10% 4% / 0.5);
   }
 
   .dark {
-    --background: 220 60% 4%;
-    --foreground: 40 30% 95%;
+    --background: 225 7% 11%;
+    --foreground: 0 0% 88%;
   }
 }
 
@@ -97,8 +97,34 @@
   body {
     @apply bg-background text-foreground font-sans antialiased;
     font-family: 'Inter', sans-serif;
-    background: var(--gradient-marble);
+    background: linear-gradient(180deg, #1a1b1e 0%, #1d1f23 50%, #1a1b1e 100%);
     background-attachment: fixed;
+    font-size: 18px;
+  }
+
+  button,
+  [role='button'] {
+    font-size: 20px;
+  }
+
+  .mw-large-text body,
+  body.mw-large-text {
+    font-size: 24px;
+  }
+
+  .mw-large-text button,
+  .mw-large-text [role='button'],
+  body.mw-large-text button,
+  body.mw-large-text [role='button'] {
+    font-size: 24px;
+  }
+
+  .mw-large-text .mw-break-button,
+  .mw-large-text .mw-controls-button,
+  body.mw-large-text .mw-break-button,
+  body.mw-large-text .mw-controls-button {
+    font-size: 32px;
+    line-height: 1.1;
   }
 
   h1, h2, h3, h4, h5, h6 {
