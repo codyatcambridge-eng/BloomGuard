@@ -148,6 +148,11 @@ export const NativeWebViewBrowser = () => {
   // Enable page-wide DOM blur/overlay bridge in addition to per-element blur.
   const ENABLE_DOM_BLUR = true;
   const ENABLE_SIGNAL_PIPELINE = true;
+  const browserMainRef = useRef<HTMLElement | null>(null);
+  const hostLayerDiagLogAtRef = useRef(0);
+  const topLayerLabelRef = useRef('none');
+  const [diagTopLayerLabel, setDiagTopLayerLabel] = useState('none');
+  const [showDiagLayerBadge, setShowDiagLayerBadge] = useState(false);
   
   const [urlInput, setUrlInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -231,6 +236,13 @@ export const NativeWebViewBrowser = () => {
       reason,
       timestamp: Date.now(),
     };
+    console.log(
+      '[DIAG][OVERLAY_HOST_STATE]',
+      'enabled=' + enabled,
+      'reason=' + reason,
+      'prevEnabled=' + prev.enabled,
+      'prevReason=' + prev.reason,
+    );
     queueCurrentBlurState(reason);
   }, [queueCurrentBlurState]);
 
@@ -339,7 +351,38 @@ export const NativeWebViewBrowser = () => {
     getModeColor,
   } = useBrowserNavigation();
 
+  useEffect(() => {
+    console.log('[DIAG][BROWSER] mount component=NativeWebViewBrowser');
+    try {
+      const enabled = window.localStorage?.getItem('MW_DIAG_LAYER_BADGE') === '1';
+      setShowDiagLayerBadge(enabled);
+    } catch {
+      setShowDiagLayerBadge(false);
+    }
+    return () => {
+      console.log('[DIAG][BROWSER] unmount component=NativeWebViewBrowser');
+    };
+  }, []);
+
+  useEffect(() => {
+    console.log('[DIAG][BROWSER] platform isNative=' + isNative);
+  }, [isNative]);
+
   // Utility functions
+  const toDiagUrl = useCallback((input: string): string => {
+    const trimmed = input.trim();
+    if (!trimmed) return 'empty';
+    try {
+      const normalized = trimmed.startsWith('http://') || trimmed.startsWith('https://')
+        ? trimmed
+        : `https://${trimmed}`;
+      const parsed = new URL(normalized);
+      return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+    } catch {
+      return trimmed.slice(0, 120);
+    }
+  }, []);
+
   const normalizeUrl = (input: string): string => {
     let normalized = input.trim();
     if (!normalized.startsWith('http://') && !normalized.startsWith('https://')) {
@@ -360,6 +403,74 @@ export const NativeWebViewBrowser = () => {
   const isPdfUrl = (urlString: string): boolean => {
     return urlString.toLowerCase().endsWith('.pdf');
   };
+
+  const logHostLayerDiagnostics = useCallback((reason: string) => {
+    if (typeof window === 'undefined' || typeof document === 'undefined') return;
+    const now = Date.now();
+    if (now - hostLayerDiagLogAtRef.current < 250) return;
+    hostLayerDiagLogAtRef.current = now;
+
+    const containerRect = browserMainRef.current?.getBoundingClientRect();
+    const containerWidth = Math.round(containerRect?.width || 0);
+    const containerHeight = Math.round(containerRect?.height || 0);
+    const hasNonZeroContainer = containerWidth > 0 && containerHeight > 0;
+    console.log(
+      '[DIAG][HOST_LAYOUT]',
+      'reason=' + reason,
+      'container=' + containerWidth + 'x' + containerHeight,
+      'nonZero=' + hasNonZeroContainer,
+      'view=' + currentView,
+    );
+
+    const x = Math.max(0, Math.min(window.innerWidth - 1, Math.floor(window.innerWidth / 2)));
+    const y = Math.max(0, Math.min(window.innerHeight - 1, Math.floor(window.innerHeight / 2)));
+    const stack = document.elementsFromPoint(x, y) as HTMLElement[];
+    const top = stack[0];
+    if (!top) return;
+
+    const topStyle = window.getComputedStyle(top);
+    const topClass = typeof top.className === 'string'
+      ? top.className.trim().replace(/\s+/g, '.').slice(0, 80)
+      : '';
+    const topLabel = `${top.tagName.toLowerCase()}#${top.id || 'none'}.${topClass || 'none'}`;
+    if (topLayerLabelRef.current !== topLabel) {
+      topLayerLabelRef.current = topLabel;
+      setDiagTopLayerLabel(topLabel);
+    }
+
+    let highestElement: HTMLElement | null = null;
+    let highestZ = Number.NEGATIVE_INFINITY;
+    stack.slice(0, 10).forEach((el) => {
+      const z = Number.parseInt(window.getComputedStyle(el).zIndex || '', 10);
+      if (Number.isFinite(z) && z > highestZ) {
+        highestZ = z;
+        highestElement = el;
+      }
+    });
+
+    const covering = stack.find((el) => {
+      const cs = window.getComputedStyle(el);
+      if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+      const opacity = Number.parseFloat(cs.opacity || '1');
+      if (!Number.isFinite(opacity) || opacity <= 0.01) return false;
+      const rect = el.getBoundingClientRect();
+      const fillsViewport = rect.width >= window.innerWidth * 0.95 && rect.height >= window.innerHeight * 0.95;
+      const positioned = cs.position === 'fixed' || cs.position === 'absolute';
+      return fillsViewport && positioned;
+    });
+
+    console.log(
+      '[DIAG][HOST_LAYER]',
+      'reason=' + reason,
+      'top=' + topLabel,
+      'topZ=' + (topStyle.zIndex || 'auto'),
+      'topOpacity=' + (topStyle.opacity || '1'),
+      'topVisibility=' + (topStyle.visibility || 'visible'),
+      'highestZ=' + (highestElement ? highestZ : 'none'),
+      'highestZTag=' + (highestElement ? highestElement.tagName.toLowerCase() : 'none'),
+      'fullscreenCover=' + (covering ? 'yes' : 'no'),
+    );
+  }, [currentView]);
 
   const logEvent = useCallback(async (eventType: string, domain: string, action: string) => {
     if (!deviceId) return;
@@ -382,9 +493,15 @@ export const NativeWebViewBrowser = () => {
     const domain = extractDomain(url);
     
     // Check blocklist
-    if (settings.block_adult_sites) {
+    if (localSettings.block_adult_sites) {
       const result = await checkBlockedSite(url, deviceId);
       if (result?.isBlocked) {
+        console.log(
+          '[DIAG][SHIELD_STATE]',
+          'blocked=true',
+          'category=' + String(result.category || 'blocked'),
+          'domain=' + domain,
+        );
         setBlockedReason(result.reason);
         setBlockedCategory(result.category || 'blocked');
         navigate('blocked', '', url);
@@ -395,7 +512,7 @@ export const NativeWebViewBrowser = () => {
     
     // All navigation allowed in native WebView (including social platforms)
     return true;
-  }, [settings, checkBlockedSite, deviceId, navigate, logEvent]);
+  }, [localSettings.block_adult_sites, checkBlockedSite, deviceId, navigate, logEvent]);
 
   // Inject moderation script into WebView
   const clearLoadEndInjectTimer = useCallback(() => {
@@ -500,6 +617,12 @@ export const NativeWebViewBrowser = () => {
     }
 
     injectionInFlightRef.current = true;
+    console.log(
+      '[DIAG][INJECT] start',
+      'reason=' + reason,
+      'navId=' + navId,
+      'url=' + (targetUrl || 'unknown'),
+    );
     const config = {
       ...getModerationConfig(),
       enabled: isRuntimeModerationEnabled,
@@ -535,8 +658,21 @@ export const NativeWebViewBrowser = () => {
         'pageEpoch=' + webViewPageEpochRef.current,
         'url=' + (targetUrl || 'unknown'),
       );
+      console.log(
+        '[DIAG][INJECT] success',
+        'reason=' + reason,
+        'navId=' + navId,
+        'url=' + (targetUrl || 'unknown'),
+      );
     } catch (error) {
       console.error('[MW-Bridge] Moderation script injection failed:', error);
+      console.log(
+        '[DIAG][INJECT] error',
+        'reason=' + reason,
+        'navId=' + navId,
+        'url=' + (targetUrl || 'unknown'),
+        'message=' + (error instanceof Error ? error.message : String(error)),
+      );
     } finally {
       injectionInFlightRef.current = false;
     }
@@ -563,10 +699,12 @@ export const NativeWebViewBrowser = () => {
     setFlashGuardState,
   } = useNativeWebView({
     onLoadStart: (url) => {
+      console.log('[DIAG][LOAD] stage=start url=' + toDiagUrl(url));
       console.log('[Browser] ======= LOAD START =======');
       console.log('[Browser] URL:', url);
       markNavigation('onLoadStart', url);
       teardownWebViewScheduling('navigation_start', url).catch(() => undefined);
+      logHostLayerDiagnostics('load_start');
       setIsLoading(true);
       clearLoadEndInjectTimer();
       injectionDoneRef.current = false;
@@ -581,8 +719,10 @@ export const NativeWebViewBrowser = () => {
       }
     },
     onLoadEnd: async (url) => {
+      console.log('[DIAG][LOAD] stage=success url=' + toDiagUrl(url));
       console.log('[Browser] ======= LOAD END =======');
       console.log('[Browser] URL:', url);
+      logHostLayerDiagnostics('load_end');
       setIsLoading(false);
       setFlashGuardState?.(false, 'load_end');
       if (!ENABLE_SIGNAL_PIPELINE) return;
@@ -616,9 +756,11 @@ export const NativeWebViewBrowser = () => {
       }
     },
     onLoadError: (url, error) => {
+      console.log('[DIAG][LOAD] stage=error url=' + toDiagUrl(url) + ' error=' + String(error));
       console.error('[Browser] ======= LOAD ERROR =======');
       console.error('[Browser] URL:', url);
       console.error('[Browser] Error:', error);
+      logHostLayerDiagnostics('load_error');
       setIsLoading(false);
       setFlashGuardState?.(true, 'load_error');
       clearLoadEndInjectTimer();
@@ -630,7 +772,9 @@ export const NativeWebViewBrowser = () => {
     onUrlChange: (url) => {
       console.log('[Browser] ======= URL CHANGE =======');
       console.log('[Browser] New URL:', url);
+      console.log('[DIAG][LOAD] stage=url_change url=' + toDiagUrl(url));
       markNavigation('onUrlChange', url);
+      logHostLayerDiagnostics('url_change');
       setUrlInput(url);
       navigate('browse', url, url);
       // Reset injection for new page navigation
@@ -671,6 +815,69 @@ export const NativeWebViewBrowser = () => {
   useEffect(() => {
     currentUrlRef.current = webViewState.currentUrl || '';
   }, [webViewState.currentUrl]);
+
+  useEffect(() => {
+    console.log(
+      '[DIAG][SHIELD_STATE]',
+      'shieldEnabled=' + effectiveShieldEnabled,
+      'runtimeModeration=' + isRuntimeModerationEnabled,
+      'blurDial=' + localSettings.blur_dial,
+      'currentView=' + currentView,
+      'webViewOpen=' + webViewState.isOpen,
+    );
+  }, [
+    effectiveShieldEnabled,
+    isRuntimeModerationEnabled,
+    localSettings.blur_dial,
+    currentView,
+    webViewState.isOpen,
+  ]);
+
+  const probeWebViewOverlayState = useCallback(async (reason: string) => {
+    if (!isNative || !webViewState.isOpen || !executeScript) return;
+    const payload = await executeScript(`
+      (function() {
+        try {
+          var overlay = document.getElementById('mw-blur-overlay');
+          var overlayStyle = overlay ? window.getComputedStyle(overlay) : null;
+          var x = Math.max(0, Math.min(window.innerWidth - 1, Math.floor(window.innerWidth / 2)));
+          var y = Math.max(0, Math.min(window.innerHeight - 1, Math.floor(window.innerHeight / 2)));
+          var top = document.elementFromPoint(x, y);
+          var topStyle = top ? window.getComputedStyle(top) : null;
+          var topClass = top && typeof top.className === 'string' ? top.className.trim().replace(/\\s+/g, '.').slice(0, 80) : '';
+          return JSON.stringify({
+            overlayPresent: !!overlay,
+            overlayEnabled: !!(overlay && overlay.classList.contains('mw-enabled')),
+            overlayDisplay: overlayStyle ? overlayStyle.display : null,
+            overlayOpacity: overlayStyle ? overlayStyle.opacity : null,
+            overlayVisibility: overlayStyle ? overlayStyle.visibility : null,
+            viewport: { width: window.innerWidth, height: window.innerHeight },
+            top: top ? {
+              tag: top.tagName ? String(top.tagName).toLowerCase() : 'unknown',
+              id: top.id || null,
+              className: topClass || null,
+              zIndex: topStyle ? topStyle.zIndex : null,
+              opacity: topStyle ? topStyle.opacity : null,
+              visibility: topStyle ? topStyle.visibility : null
+            } : null
+          });
+        } catch (e) {
+          return JSON.stringify({ error: String(e) });
+        }
+      })();
+    `);
+    console.log(
+      '[DIAG][WEBVIEW_LAYER]',
+      'reason=' + reason,
+      'payload=' + String(payload || 'null'),
+    );
+  }, [isNative, webViewState.isOpen, executeScript]);
+
+  useEffect(() => {
+    if (currentView !== 'browse') return;
+    logHostLayerDiagnostics('browse_view_active');
+    void probeWebViewOverlayState('browse_view_active');
+  }, [currentView, webViewState.isOpen, logHostLayerDiagnostics, probeWebViewOverlayState]);
 
   const lastListenerStateRef = useRef<boolean | null>(null);
   useEffect(() => {
@@ -1473,6 +1680,13 @@ export const NativeWebViewBrowser = () => {
           'noncePrefix=' + String(typedMessage.noncePrefix ?? 'none'),
           'url=' + String(typedMessage.url ?? 'unknown'),
         );
+        console.log(
+          '[DIAG][INJECT] ack_received',
+          'source=' + source,
+          'navId=' + String(typedMessage.navId ?? 'none'),
+          'pageEpoch=' + String(typedMessage.pageEpoch ?? 'none'),
+          'url=' + String(typedMessage.url ?? 'unknown'),
+        );
         return;
       }
       if (typedMessage.type === 'MW_REQ_SENT') {
@@ -1907,6 +2121,7 @@ export const NativeWebViewBrowser = () => {
     const targetUrl = isUrlInput(trimmed)
       ? (trimmed.startsWith('http') ? trimmed : `https://${trimmed}`)
       : `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`;
+    console.log('[DIAG][NAV_REQUEST] source=search target=' + toDiagUrl(targetUrl));
     
     console.log('[Browser] Starting navigation:', targetUrl);
     
@@ -1943,7 +2158,7 @@ export const NativeWebViewBrowser = () => {
     }
     
     setIsLoading(false);
-  }, [navigate, logEvent, isNative, openWebView, isUrlInput]);
+  }, [navigate, logEvent, isNative, openWebView, isUrlInput, toDiagUrl]);
 
   // Main navigation handler - immediately navigate to browse view (fail-open)
   const handleNavigate = useCallback(async (targetUrl?: string, e?: React.FormEvent) => {
@@ -1961,6 +2176,7 @@ export const NativeWebViewBrowser = () => {
     // Normalize URL immediately (add https:// if missing)
     const normalizedUrl = normalizeUrl(urlToNavigate);
     const domain = extractDomain(urlToNavigate);
+    console.log('[DIAG][NAV_REQUEST] source=form target=' + toDiagUrl(normalizedUrl));
     setUrlInput(normalizedUrl);
 
     // Reset states
@@ -1977,7 +2193,7 @@ export const NativeWebViewBrowser = () => {
     setIsLoading(true);
 
     // Check blocklist asynchronously (non-blocking)
-    if (settings.block_adult_sites) {
+    if (localSettings.block_adult_sites) {
       checkBlockedSite(normalizedUrl, deviceId).then(result => {
         if (result?.isBlocked) {
           setBlockedReason(result.reason);
@@ -2028,7 +2244,7 @@ export const NativeWebViewBrowser = () => {
     }
     
     setIsLoading(false);
-  }, [urlInput, settings, checkBlockedSite, deviceId, isNative, openWebView, handleSearch, navigate, logEvent, isUrlInput]);
+  }, [urlInput, localSettings.block_adult_sites, checkBlockedSite, deviceId, isNative, openWebView, handleSearch, navigate, logEvent, isUrlInput, toDiagUrl]);
 
   // Reader Mode handler
   const handleReaderMode = useCallback(async () => {
@@ -2474,6 +2690,11 @@ export const NativeWebViewBrowser = () => {
     <div className="min-h-screen bg-background flex flex-col">
       {/* Global label listener for prototype mode */}
       <LabelListener />
+      {showDiagLayerBadge && (
+        <div className="fixed right-2 top-2 z-[70] rounded bg-black/80 px-2 py-1 text-[10px] text-white pointer-events-none">
+          TOP {diagTopLayerLabel}
+        </div>
+      )}
       {isNative && currentView === 'browse' && <BlurShieldOverlay executeScript={executeScript} />}
       <BrowserHeader
         currentView={currentView}
@@ -2509,7 +2730,7 @@ export const NativeWebViewBrowser = () => {
         />
       )}
 
-      <main className="flex-1 relative pb-16">
+      <main ref={browserMainRef} className="flex-1 relative pb-16">
         {currentView === 'blocked' ? (
           <div className="absolute inset-0 flex items-center justify-center p-6 bg-gradient-to-b from-destructive/10 to-background">
             <div className="text-center max-w-sm">

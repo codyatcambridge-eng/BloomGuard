@@ -17,3 +17,6 @@ verify_jwt = false
 
 [functions.moderation-labels]
 verify_jwt = true
+
+[functions.waiting-room-ai]
+verify_jwt = false

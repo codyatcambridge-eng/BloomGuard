@@ -21,6 +21,7 @@ import { createPartnerRequest } from '@/models/PartnerRequest';
 import { savePartnerRequest } from '@/storage/eventsRepo';
 import { toast } from '@/hooks/use-toast';
 import { shouldReduceMotion } from '@/ui/theme';
+import { requestHfChatCompletion, type HfChatMessage } from '@/lib/hfChatClient';
 
 interface UtilityPassModalProps {
   isOpen: boolean;
@@ -31,9 +32,9 @@ interface UtilityPassModalProps {
   className?: string;
 }
 
-type SparkSmithResponseType = 'concise' | 'explanatory';
 type SparkSmithToneState = 'hot' | 'reflective';
 type ChatRole = 'assistant' | 'user';
+type ChatInputMode = 'type' | 'clarity';
 
 interface ChatMessage {
   id: string;
@@ -42,18 +43,19 @@ interface ChatMessage {
 }
 
 const SPARKSMITH_NAME = 'SparkSmith';
-const SPARKSMITH_ROLE = 'Life Coach + Health Advisor';
-const SPARKSMITH_SPECIALIZATION = 'Life transitions and behavioral breakthroughs';
-const SPARKSMITH_BASELINE_IDENTITY =
-  'Tutor first, Breakthrough Creator second. I try to remember :)';
+const SPARKSMITH_ROLE = 'Calm Reflection Assistant';
+const SPARKSMITH_SPECIALIZATION = 'Friction-moment reflection and grounded next steps';
+const SPARKSMITH_BASELINE_IDENTITY = 'Calm, practical, and concise.';
 const SPARKSMITH_GREETING =
-  `I am ${SPARKSMITH_NAME}, an expert Life Coach and Surgeon General-level Health Advisor. ` +
-  `Specialization: ${SPARKSMITH_SPECIALIZATION}. ${SPARKSMITH_BASELINE_IDENTITY}`;
+  `I am ${SPARKSMITH_NAME}. I help you pause, reflect, and pick one grounded next step. ${SPARKSMITH_BASELINE_IDENTITY}`;
 const SPARKSMITH_SYSTEM_PROMPT =
-  `Name: ${SPARKSMITH_NAME}. Role: ${SPARKSMITH_ROLE}. ` +
-  `Specialization: ${SPARKSMITH_SPECIALIZATION}. ` +
-  `Core Identity: "${SPARKSMITH_BASELINE_IDENTITY}". ` +
-  'Stability Rule: Always revert to core identity after temporary tone shifts.';
+  'You are SparkSmith, a calm and grounded reflection assistant in a break waiting room. ' +
+  'Be supportive, practical, and concise. Keep most responses to 2-4 short sentences. ' +
+  'Do not be preachy, manipulative, melodramatic, or shaming. ' +
+  'Focus on helping the user name what is happening and choose one realistic next step for the next five minutes. ' +
+  'Ask a clarifying question when it improves usefulness. ' +
+  'Do not claim to be a therapist, crisis service, doctor, or legal authority. ' +
+  'Do not overclaim certainty. If information is incomplete, say so briefly.';
 
 const DEFAULT_REASON: UtilityPassReason = 'WORK';
 const DEFAULT_DURATION: UtilityPassDuration = 5;
@@ -61,8 +63,16 @@ const HANDSHAKE_EXPIRY_MS = 5 * 60 * 1000;
 const RUN_ONE_START_SECONDS = 45;
 const RUN_ONE_STAGNATION_SECONDS = 1;
 const RUN_ONE_LABEL = 'RUN 1: PROVE INTENT';
-const CLARITY_QUICK_PICKS = ['Check Likes', 'Doomscrolling', 'Boredom', 'Work Anxiety'] as const;
+const CLARITY_QUICK_PICKS = [
+  'Anxious',
+  'Restless',
+  'Bored',
+  'Lonely',
+  'Tempted',
+  'Want to relax',
+] as const;
 const DEFAULT_TONE_STATE: SparkSmithToneState = 'reflective';
+const DEFAULT_INPUT_MODE: ChatInputMode = 'type';
 const MIN_TYPING_WINDOW_MS = 350;
 const HOT_SENTIMENT_PATTERNS: RegExp[] = [
   /\bright now\b/i,
@@ -123,6 +133,12 @@ function cleanTopic(topic: string): string {
   const normalized = topic.replace(/\s+/g, ' ').trim();
   if (!normalized) return 'the current topic';
   return normalized.length > 100 ? `${normalized.slice(0, 97)}...` : normalized;
+}
+
+function buildClarityDraft(pick: ConflictHeader): string {
+  const normalized = pick.toLowerCase();
+  const lead = normalized === 'want to relax' ? 'I want to relax.' : `I feel ${normalized}.`;
+  return `${lead} Help me pick one grounded next action for the next 5 minutes.`;
 }
 
 function isValidRunOneInput(input: string): boolean {
@@ -222,27 +238,20 @@ function buildHotStateReply(): string {
 
 function buildReflectiveReply(
   topic: string,
-  responseType: SparkSmithResponseType,
   conflictHeader: ConflictHeader | null
 ): string {
   const safeTopic = cleanTopic(topic);
   const conflictContext = conflictHeader ? `Conflict Header: ${conflictHeader}. ` : '';
-
-  if (responseType === 'concise') {
-    return `${conflictContext}Wisdom Mode: In "${safeTopic}", what outcome matters most in the next 5 minutes, and which belief is stealing your first move? Choose one behavior that proves your intent, then execute it now.\n\n${SPARKSMITH_BASELINE_IDENTITY}`;
-  }
-
-  return `${conflictContext}Wisdom Mode: Treat "${safeTopic}" as a life-transition decision point, not a character flaw. Which value do you want the next 5 minutes to represent, and what repeating friction pattern appears right before you avoid that value? Commit to one concrete action, start immediately, and evaluate what changed in your body and attention after 5 minutes.\n\n${SPARKSMITH_BASELINE_IDENTITY}`;
+  return `${conflictContext}Wisdom Mode: In "${safeTopic}", what outcome matters most in the next 5 minutes, and which belief is stealing your first move? Choose one behavior that proves your intent, then execute it now.\n\n${SPARKSMITH_BASELINE_IDENTITY}`;
 }
 
 function buildSparkSmithReply(
   topic: string,
-  responseType: SparkSmithResponseType,
   toneState: SparkSmithToneState,
   conflictHeader: ConflictHeader | null
 ): string {
   if (toneState === 'hot') return buildHotStateReply();
-  return buildReflectiveReply(topic, responseType, conflictHeader);
+  return buildReflectiveReply(topic, conflictHeader);
 }
 
 export function UtilityPassModal({
@@ -259,10 +268,12 @@ export function UtilityPassModal({
   const gateLevel = getUtilityPassGateLevel();
   const [remainingSeconds, setRemainingSeconds] = useState(RUN_ONE_START_SECONDS);
   const [draft, setDraft] = useState('');
-  const [responseType, setResponseType] = useState<SparkSmithResponseType>('concise');
+  const [inputMode, setInputMode] = useState<ChatInputMode>(DEFAULT_INPUT_MODE);
   const [runOneToneState, setRunOneToneState] = useState<SparkSmithToneState>(DEFAULT_TONE_STATE);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isChatActive, setIsChatActive] = useState(false);
+  const [isAiPending, setIsAiPending] = useState(false);
+  const [keyboardInset, setKeyboardInset] = useState(0);
   const [hasRunOneSubmission, setHasRunOneSubmission] = useState(false);
   const [hasInputInteraction, setHasInputInteraction] = useState(false);
   const [conflictHeader, setConflictHeader] = useState<ConflictHeader | null>(null);
@@ -271,6 +282,7 @@ export function UtilityPassModal({
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
   const hasCompletedRef = useRef(false);
   const messageIdRef = useRef(0);
   const draftStartedAtRef = useRef<number | null>(null);
@@ -305,14 +317,16 @@ export function UtilityPassModal({
     hasCompletedRef.current = false;
     setRemainingSeconds(RUN_ONE_START_SECONDS);
     setDraft('');
-    setResponseType('concise');
+    setInputMode(DEFAULT_INPUT_MODE);
     setRunOneToneState(DEFAULT_TONE_STATE);
     setMessages(buildInitialMessages());
     setIsChatActive(false);
+    setIsAiPending(false);
     setHasRunOneSubmission(false);
     setHasInputInteraction(false);
     setConflictHeader(null);
     setIsClarityMenuOpen(false);
+    setKeyboardInset(0);
     draftStartedAtRef.current = null;
   }, [buildInitialMessages]);
 
@@ -342,38 +356,82 @@ export function UtilityPassModal({
   }, [onClose, resetState]);
 
   const handleSend = useCallback(
-    (event: FormEvent<HTMLFormElement>) => {
+    async (event: FormEvent<HTMLFormElement>) => {
       event.preventDefault();
+      if (isAiPending) return;
 
       const userText = draft.trim();
       if (!isValidRunOneInput(userText)) return;
 
       const typingCharsPerSecond = estimateTypingCharsPerSecond(userText, draftStartedAtRef.current);
       const detectedToneState = analyzeSparkSmithTone(userText, typingCharsPerSecond);
-
-      setHasInputInteraction(true);
-      appendMessage('user', userText);
-      setRunOneToneState(detectedToneState);
+      const nextMessages: ChatMessage[] = [
+        ...messages,
+        { id: nextMessageId(), role: 'user', content: userText },
+      ];
 
       if (!hasRunOneSubmission) {
         if (detectedToneState !== runOneToneState) {
-          appendMessage('assistant', buildRunOneTask(conflictHeader, detectedToneState));
+          nextMessages.push({
+            id: nextMessageId(),
+            role: 'assistant',
+            content: buildRunOneTask(conflictHeader, detectedToneState),
+          });
         }
 
+        nextMessages.push({
+          id: nextMessageId(),
+          role: 'assistant',
+          content: buildRunOneAcknowledgement(detectedToneState, conflictHeader),
+        });
         setHasRunOneSubmission(true);
-        appendMessage('assistant', buildRunOneAcknowledgement(detectedToneState, conflictHeader));
       }
 
-      appendMessage(
-        'assistant',
-        buildSparkSmithReply(userText, responseType, detectedToneState, conflictHeader)
-      );
+      setHasInputInteraction(true);
+      setRunOneToneState(detectedToneState);
+      setInputMode('type');
+      setIsClarityMenuOpen(false);
+      setMessages(nextMessages);
       setDraft('');
       draftStartedAtRef.current = null;
-      setIsClarityMenuOpen(false);
 
       if (!hasRunOneSubmission && remainingSeconds <= RUN_ONE_STAGNATION_SECONDS) {
         setRemainingSeconds(0);
+      }
+
+      const aiMessages: HfChatMessage[] = nextMessages.map((message) => ({
+        role: message.role,
+        content: message.content,
+      }));
+      const lastPayloadUserMessage = [...aiMessages].reverse().find((message) => message.role === 'user');
+      const currentUserTypedControlToken = /^(clarity|type)$/i.test(userText);
+      const accidentalUiControlTokenInjected = Boolean(
+        lastPayloadUserMessage &&
+          /^(clarity|type)$/i.test(lastPayloadUserMessage.content.trim()) &&
+          lastPayloadUserMessage.content.trim() !== userText
+      );
+
+      console.info('[DIAG][WAITING_ROOM][PAYLOAD_GUARD]', {
+        mode: inputMode,
+        currentUserTypedControlToken,
+        accidentalUiControlTokenInjected,
+        messageCount: aiMessages.length,
+      });
+
+      setIsAiPending(true);
+      try {
+        const result = await requestHfChatCompletion({
+          systemPrompt: SPARKSMITH_SYSTEM_PROMPT,
+          messages: aiMessages,
+        });
+        appendMessage('assistant', result.assistantMessage);
+      } catch (error) {
+        console.warn('[DIAG][HF_CHAT][ERROR]', {
+          reason: error instanceof Error ? error.message : 'unknown_error',
+        });
+        appendMessage('assistant', buildSparkSmithReply(userText, detectedToneState, conflictHeader));
+      } finally {
+        setIsAiPending(false);
       }
     },
     [
@@ -381,37 +439,42 @@ export function UtilityPassModal({
       conflictHeader,
       draft,
       hasRunOneSubmission,
+      inputMode,
+      isAiPending,
+      messages,
+      nextMessageId,
       remainingSeconds,
-      responseType,
       runOneToneState,
     ]
   );
 
   const handleClarity = useCallback(() => {
+    setInputMode('clarity');
     setIsClarityMenuOpen((prev) => !prev);
   }, []);
 
-  const handleConflictHeaderSelect = useCallback(
-    (reason: ConflictHeader) => {
-      setConflictHeader(reason);
-      setIsClarityMenuOpen(false);
-      console.info('[UtilityPass] Conflict Header:', reason);
-      appendMessage('assistant', `Conflict Header logged: ${reason}. Routed to ${SPARKSMITH_NAME}.`);
-      appendMessage('assistant', buildRunOneTask(reason, runOneToneState));
-    },
-    [appendMessage, runOneToneState]
-  );
+  const handleConflictHeaderSelect = useCallback((reason: ConflictHeader) => {
+    setInputMode('clarity');
+    setConflictHeader(reason);
+    setIsClarityMenuOpen(false);
+    setDraft((prev) => (prev.trim().length > 0 ? prev : buildClarityDraft(reason)));
+    setHasInputInteraction(true);
+    console.info('[DIAG][WAITING_ROOM][MODE]', {
+      mode: 'clarity',
+      quickPickApplied: true,
+    });
+    window.requestAnimationFrame(() => inputRef.current?.focus());
+  }, []);
 
   const handleToggleType = useCallback(() => {
-    const nextType: SparkSmithResponseType = responseType === 'concise' ? 'explanatory' : 'concise';
-    setResponseType(nextType);
+    setInputMode('type');
     setIsClarityMenuOpen(false);
-
-    appendMessage(
-      'assistant',
-      `Type switched to ${nextType === 'concise' ? 'Concise' : 'Explanatory'}.`
-    );
-  }, [appendMessage, responseType]);
+    console.info('[DIAG][WAITING_ROOM][MODE]', {
+      mode: 'type',
+      quickPickApplied: false,
+    });
+    window.requestAnimationFrame(() => inputRef.current?.focus());
+  }, []);
 
   const handleOpenDefenseRoom = useCallback(() => {
     handleClose();
@@ -530,6 +593,31 @@ export function UtilityPassModal({
     });
   }, [isOpen, messages, prefersReducedMotion]);
 
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const viewport = window.visualViewport;
+    if (!viewport) {
+      setKeyboardInset(0);
+      return;
+    }
+
+    const syncKeyboardInset = () => {
+      const occludedHeight = Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop);
+      setKeyboardInset(Math.round(occludedHeight));
+    };
+
+    syncKeyboardInset();
+    viewport.addEventListener('resize', syncKeyboardInset);
+    viewport.addEventListener('scroll', syncKeyboardInset);
+
+    return () => {
+      viewport.removeEventListener('resize', syncKeyboardInset);
+      viewport.removeEventListener('scroll', syncKeyboardInset);
+      setKeyboardInset(0);
+    };
+  }, [isOpen]);
+
   if (!isOpen) return null;
   const isRunOneFrozen =
     !hasRunOneSubmission && remainingSeconds <= RUN_ONE_STAGNATION_SECONDS && !hasInputInteraction;
@@ -581,7 +669,13 @@ export function UtilityPassModal({
           </p>
         </div>
 
-        <div ref={chatScrollRef} className="flex-1 overflow-y-auto px-4 pb-40 pt-4">
+        <div
+          ref={chatScrollRef}
+          className="flex-1 overflow-y-auto px-4 pt-4"
+          style={{
+            paddingBottom: `calc(env(safe-area-inset-bottom, 0px) + ${keyboardInset + 232}px)`,
+          }}
+        >
           <div className="space-y-3">
             {messages.map((message) => (
               <div
@@ -620,7 +714,7 @@ export function UtilityPassModal({
       <div
         className="pointer-events-none absolute inset-0 z-20"
         style={{
-          backgroundColor: isChatActive ? 'rgba(26, 27, 30, 0.2)' : 'rgba(26, 27, 30, 0.84)',
+          backgroundColor: isChatActive ? 'transparent' : 'rgba(26, 27, 30, 0.84)',
           transition: prefersReducedMotion ? 'none' : 'background-color 220ms ease',
         }}
       />
@@ -643,14 +737,12 @@ export function UtilityPassModal({
 
         <div
           className={cn(
-            'pointer-events-auto absolute left-1/2 w-full max-w-md px-4 transition-transform',
+            'pointer-events-auto absolute left-1/2 w-full max-w-md px-4 transition-[bottom] ease-out',
             transitionDurationClass,
           )}
           style={{
-            top: '50%',
-            transform: isChatActive
-              ? 'translate(-50%, calc(-50% + 170px))'
-              : 'translate(-50%, calc(-50% + 140px))',
+            bottom: `calc(env(safe-area-inset-bottom, 0px) + ${keyboardInset + 128}px)`,
+            transform: 'translateX(-50%)',
           }}
         >
           <div className="relative">
@@ -679,7 +771,10 @@ export function UtilityPassModal({
             <div className="grid grid-cols-3 gap-2">
               <button
                 onClick={handleClarity}
-                className="rounded-2xl px-2 py-3 text-center transition hover:bg-white/15"
+                className={cn(
+                  'rounded-2xl px-2 py-3 text-center transition',
+                  inputMode === 'clarity' ? 'bg-white/20' : 'hover:bg-white/15'
+                )}
                 style={liquidGlassStyle}
                 aria-label="Open clarity quick pick"
               >
@@ -688,13 +783,16 @@ export function UtilityPassModal({
 
               <button
                 onClick={handleToggleType}
-                className="rounded-2xl px-2 py-3 text-center transition hover:bg-white/15"
+                className={cn(
+                  'rounded-2xl px-2 py-3 text-center transition',
+                  inputMode === 'type' ? 'bg-white/20' : 'hover:bg-white/15'
+                )}
                 style={liquidGlassStyle}
-                aria-label="Toggle response type"
+                aria-label="Switch to typing mode"
               >
                 <span className="block text-sm font-medium text-[#EAF3FF]">Type</span>
                 <span className="mt-0.5 block text-[11px] uppercase tracking-[0.08em] text-[#EAF3FF]/80">
-                  {responseType === 'concise' ? 'Concise' : 'Explanatory'}
+                  {inputMode === 'type' ? 'Typing' : 'Switch'}
                 </span>
               </button>
 
@@ -714,13 +812,11 @@ export function UtilityPassModal({
       <form
         onSubmit={handleSend}
         className={cn(
-          'absolute inset-x-0 z-40 px-4 transition-[top,bottom,transform] ease-out',
+          'absolute inset-x-0 z-40 px-4 transition-[bottom] ease-out',
           transitionDurationClass,
         )}
         style={{
-          top: isChatActive ? '50%' : 'auto',
-          bottom: isChatActive ? 'auto' : '52px',
-          transform: isChatActive ? 'translateY(-50%)' : 'translateY(0)',
+          bottom: `calc(env(safe-area-inset-bottom, 0px) + ${keyboardInset + 52}px)`,
         }}
       >
         <div className="mx-auto w-full max-w-md">
@@ -741,6 +837,7 @@ export function UtilityPassModal({
             style={liquidGlassStyle}
           >
             <input
+              ref={inputRef}
               value={draft}
               onChange={(event) => {
                 const nextValue = event.target.value;
@@ -760,8 +857,15 @@ export function UtilityPassModal({
                 setIsClarityMenuOpen(false);
                 setHasInputInteraction(true);
               }}
+              onBlur={() => {
+                setIsChatActive(false);
+              }}
               placeholder={
-                hasRunOneSubmission ? 'Continue the task thread...' : 'Answer Run 1 to release the countdown...'
+                hasRunOneSubmission
+                  ? inputMode === 'clarity'
+                    ? 'Use a clarity signal or write your next step...'
+                    : 'Continue the task thread...'
+                  : 'Answer Run 1 to release the countdown...'
               }
               className="h-9 flex-1 bg-transparent px-2 text-sm text-[#EAF3FF] placeholder:text-[#EAF3FF]/65 outline-none"
               aria-label="Message SparkSmith"
@@ -773,7 +877,7 @@ export function UtilityPassModal({
                 ...liquidGlassStyle,
                 backgroundColor: 'rgba(10, 132, 255, 0.2)',
               }}
-              disabled={!draft.trim()}
+              disabled={!draft.trim() || isAiPending}
               aria-label="Send message"
             >
               <Send className="h-4 w-4" />
@@ -785,7 +889,7 @@ export function UtilityPassModal({
       <button
         onClick={handleReturnToNoise}
         className="absolute left-1/2 z-40 -translate-x-1/2 bg-transparent px-1 py-0.5 text-[10px] tracking-[0.18em] text-[#E0E0E0]"
-        style={{ bottom: '20px' }}
+        style={{ bottom: `calc(env(safe-area-inset-bottom, 0px) + ${keyboardInset + 18}px)` }}
       >
         Return to Noise
       </button>

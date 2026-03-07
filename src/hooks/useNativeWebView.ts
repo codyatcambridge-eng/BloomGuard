@@ -299,6 +299,9 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     at: 0,
   });
   const flashGuardInstalledRef = useRef(false);
+  const presentAfterLoadWatchdogTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const PRESENT_AFTER_LOAD_WATCHDOG_MS = 2600;
+  const NAVIGATION_GUARD_TIMEOUT_MS = 1500;
 
   useEffect(() => {
     onLoadStartRef.current = onLoadStart;
@@ -322,7 +325,52 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     getListenerDiagContext,
   ]);
 
+  const clearPresentAfterLoadWatchdog = useCallback(() => {
+    if (!presentAfterLoadWatchdogTimerRef.current) return;
+    clearTimeout(presentAfterLoadWatchdogTimerRef.current);
+    presentAfterLoadWatchdogTimerRef.current = null;
+  }, []);
+
+  const ensureBrowserPresented = useCallback(async (reason: string, urlHint?: string): Promise<boolean> => {
+    if (!isNative) return false;
+    try {
+      await InAppBrowser.show();
+      console.log(
+        '[DIAG][WEBVIEW_PRESENT]',
+        'action=show_ok',
+        'reason=' + reason,
+        'url=' + (urlHint || currentUrlRef.current || 'unknown'),
+        'activeInstanceId=' + (activeInstanceIdRef.current ?? 'none'),
+      );
+      return true;
+    } catch (error) {
+      console.warn(
+        '[DIAG][WEBVIEW_PRESENT]',
+        'action=show_failed',
+        'reason=' + reason,
+        'url=' + (urlHint || currentUrlRef.current || 'unknown'),
+        'activeInstanceId=' + (activeInstanceIdRef.current ?? 'none'),
+        error,
+      );
+      return false;
+    }
+  }, [isNative]);
+
+  const armPresentAfterLoadWatchdog = useCallback((url: string) => {
+    clearPresentAfterLoadWatchdog();
+    presentAfterLoadWatchdogTimerRef.current = setTimeout(() => {
+      if (!isOpenRef.current) return;
+      console.warn(
+        '[NativeWebView][Lifecycle] present-after-load watchdog fired; forcing show',
+        'url=' + url,
+        'timeoutMs=' + PRESENT_AFTER_LOAD_WATCHDOG_MS,
+      );
+      void ensureBrowserPresented('watchdog_timeout', url);
+    }, PRESENT_AFTER_LOAD_WATCHDOG_MS);
+  }, [clearPresentAfterLoadWatchdog, ensureBrowserPresented]);
+
   const markClosed = useCallback((reason: string) => {
+    clearPresentAfterLoadWatchdog();
     const previousId = activeInstanceIdRef.current;
     if (previousId == null) return;
     closeCountRef.current += 1;
@@ -336,7 +384,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     activeInstanceIdRef.current = null;
     onActiveInstanceIdChangeRef.current?.(null);
     isOpenRef.current = false;
-  }, []);
+  }, [clearPresentAfterLoadWatchdog]);
 
   const readListenerDiagContext = useCallback(() => {
     const context = getListenerDiagContextRef.current?.();
@@ -625,6 +673,8 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
 
       await attachListener('browserPageLoaded', () => {
         console.log('[NativeWebView] Page loaded');
+        void ensureBrowserPresented('browserPageLoaded', currentUrlRef.current || pageLoadErrorRecoveryRef.current.url);
+        clearPresentAfterLoadWatchdog();
         pageLoadErrorRecoveryRef.current = {
           url: currentUrlRef.current || pageLoadErrorRecoveryRef.current.url,
           count: 0,
@@ -644,6 +694,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
       }, 'useNativeWebView.listeners.browserPageLoaded');
 
       await attachListener('pageLoadError', () => {
+        clearPresentAfterLoadWatchdog();
         const failedUrl = currentUrlRef.current || '';
         const now = Date.now();
         const previous = pageLoadErrorRecoveryRef.current;
@@ -678,6 +729,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
 
       await attachListener('closeEvent', () => {
         console.log('[NativeWebView] Browser closed');
+        clearPresentAfterLoadWatchdog();
         markClosed('closeEvent');
         flashGuardInstalledRef.current = false;
         setState(prev => ({ ...prev, isOpen: false }));
@@ -747,11 +799,13 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
   }, [
     isNative,
     markClosed,
+    clearPresentAfterLoadWatchdog,
     setFlashGuardState,
     probeFlashGuard,
     installFlashGuard,
     runFlashGuardDiagProof,
     flashDiagLog,
+    ensureBrowserPresented,
     setListenersAttachedState,
     readListenerDiagContext,
     logChurnDiag,
@@ -767,7 +821,27 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
 
     // Check if navigation should be blocked
     if (onNavigationRequestRef.current) {
-      const allowed = await Promise.resolve(onNavigationRequestRef.current(url));
+      let timeoutId: ReturnType<typeof setTimeout> | null = null;
+      const timeoutGuard = new Promise<boolean>((resolve) => {
+        timeoutId = setTimeout(() => {
+          console.warn(
+            '[NativeWebView][Lifecycle] navigation guard timed out; continuing fail-open',
+            'url=' + url,
+            'timeoutMs=' + NAVIGATION_GUARD_TIMEOUT_MS,
+          );
+          resolve(true);
+        }, NAVIGATION_GUARD_TIMEOUT_MS);
+      });
+      const navigationGuard = Promise.resolve(onNavigationRequestRef.current(url))
+        .then((result) => result !== false)
+        .catch((error) => {
+          console.warn('[NativeWebView][Lifecycle] navigation guard error; continuing fail-open', error);
+          return true;
+        });
+      const allowed = await Promise.race([navigationGuard, timeoutGuard]);
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
       if (!allowed) {
         console.log('[NativeWebView] Navigation blocked by handler:', url);
         return false;
@@ -776,6 +850,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
 
     if (isOpenRef.current) {
       console.log('[NativeWebView][Lifecycle] open requested while active; closing existing instance first');
+      clearPresentAfterLoadWatchdog();
       try {
         await InAppBrowser.close();
       } catch {
@@ -794,7 +869,8 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     try {
       const options: OpenWebViewOptions = {
         url,
-        isPresentAfterPageLoad: true,
+        // Present immediately for reliability; waiting for page load can leave the browser hidden.
+        isPresentAfterPageLoad: false,
         preventDeeplink: false,
         closeModal: true,
         closeModalTitle: 'Close',
@@ -803,13 +879,14 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
         closeModalCancel: 'Cancel',
         toolbarType: inApp ? ToolBarType.NAVIGATION : ToolBarType.BLANK,
         toolbarColor: '#0f1419',
-        backgroundColor: BackgroundColor.BLACK,
+        backgroundColor: BackgroundColor.WHITE,
         visibleTitle: true,
         showArrow: true,
         showReloadButton: true,
       };
 
       await InAppBrowser.openWebView(options);
+      await ensureBrowserPresented('open_success', url);
       await installFlashGuard();
 
       historyStackRef.current = [url];
@@ -843,22 +920,25 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
         'url=' + url,
       );
       logChurnDiag('open', 'open_success', 'useNativeWebView.open');
+      armPresentAfterLoadWatchdog(url);
 
       return true;
     } catch (error) {
+      clearPresentAfterLoadWatchdog();
       const errorMsg = error instanceof Error ? error.message : 'Failed to open WebView';
       console.error('[NativeWebView] Open error:', error);
       setState(prev => ({ ...prev, isLoading: false, error: errorMsg }));
       onLoadErrorRef.current?.(url, errorMsg);
       return false;
     }
-  }, [isNative, installFlashGuard, markClosed, setFlashGuardState, readListenerDiagContext, logChurnDiag]);
+  }, [isNative, installFlashGuard, markClosed, setFlashGuardState, readListenerDiagContext, logChurnDiag, armPresentAfterLoadWatchdog, clearPresentAfterLoadWatchdog, ensureBrowserPresented]);
 
   // Close the WebView
   const close = useCallback(async () => {
     if (!isNative) return;
 
     try {
+      clearPresentAfterLoadWatchdog();
       await InAppBrowser.close();
       markClosed('close()');
       flashGuardInstalledRef.current = false;
@@ -868,16 +948,17 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     } catch (error) {
       console.error('[NativeWebView] Close error:', error);
     }
-  }, [isNative, markClosed]);
+  }, [isNative, markClosed, clearPresentAfterLoadWatchdog]);
 
   useEffect(() => {
     return () => {
+      clearPresentAfterLoadWatchdog();
       if (!isNative || !isOpenRef.current) return;
       InAppBrowser.close()
         .catch(() => undefined)
         .finally(() => markClosed('hook_unmount'));
     };
-  }, [isNative, markClosed]);
+  }, [isNative, markClosed, clearPresentAfterLoadWatchdog]);
 
   // Navigate back in WebView history
   const goBack = useCallback(async () => {
