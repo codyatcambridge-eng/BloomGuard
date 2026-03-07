@@ -97,6 +97,24 @@ const isDiagYtBlurEnabledForUrl = (value?: string) => {
   return false;
 };
 
+const getUrlFamily = (value?: string) => {
+  if (!value) return 'unknown';
+  if (isYouTubeShortsUrl(value)) return 'youtube_shorts';
+  if (isYouTubeDomainUrl(value)) {
+    try {
+      const parsed = new URL(value);
+      return parsed.hostname.toLowerCase() === 'm.youtube.com' ? 'youtube_mobile' : 'youtube';
+    } catch {
+      return 'youtube';
+    }
+  }
+  try {
+    return new URL(value).hostname.toLowerCase();
+  } catch {
+    return 'unknown';
+  }
+};
+
 interface SearchResult {
   title: string;
   url: string;
@@ -330,6 +348,7 @@ export const NativeWebViewBrowser = () => {
   const activeNavIdRef = useRef(0);
   const currentUrlRef = useRef('');
   const webViewActiveInstanceIdRef = useRef<number | null>(null);
+  const webViewListenersAttachedRef = useRef(false);
   const diagYtBlurEpochRef = useRef({
     staleHostRejectCount: 0,
     epochHeldCount: 0,
@@ -528,6 +547,32 @@ export const NativeWebViewBrowser = () => {
     }
   }, []);
 
+  const logLifecycleSnapshot = useCallback((event: string, urlHint?: string, reason?: string) => {
+    const currentUrl = urlHint || currentUrlRef.current || 'unknown';
+    const activeTimerNames: string[] = [];
+    if (loadEndInjectTimerRef.current) activeTimerNames.push('loadEndInjectTimer');
+    if (blurRetryTimerRef.current) activeTimerNames.push('blurRetryTimer');
+    if (blurPendingRef.current) activeTimerNames.push('blurPendingState');
+    const overlayState = blurStateRef.current;
+    console.log(
+      '[DIAG][LIFECYCLE_SNAPSHOT]',
+      'event=' + event,
+      'reason=' + (reason || 'none'),
+      'activeTimers=' + activeTimerNames.length,
+      'activeTimerNames=' + (activeTimerNames.length ? activeTimerNames.join(',') : 'none'),
+      'listenerStatus=' + webViewListenersAttachedRef.current,
+      'activeInstanceId=' + (webViewActiveInstanceIdRef.current ?? 'none'),
+      'navId=' + activeNavIdRef.current,
+      'pageEpoch=' + webViewPageEpochRef.current,
+      'currentUrl=' + toDiagUrl(currentUrl),
+      'urlFamily=' + getUrlFamily(currentUrl),
+      'overlayHostState=' + (overlayState.enabled ? 'enabled' : 'disabled'),
+      'overlayReason=' + overlayState.reason,
+      'overlayReady=' + blurReadyRef.current,
+      'moderationEnabled=' + isRuntimeModerationEnabled,
+    );
+  }, [isRuntimeModerationEnabled, toDiagUrl]);
+
   const markNavigation = useCallback((reason: string, url: string) => {
     const previousUrl = currentUrlRef.current || '';
     const previousEpoch = webViewPageEpochRef.current || 0;
@@ -576,7 +621,14 @@ export const NativeWebViewBrowser = () => {
     if (url) {
       currentUrlRef.current = url;
     }
-  }, []);
+    const previousIsYouTube = isYouTubeDomainUrl(previousUrl);
+    const nextIsYouTube = isYouTubeDomainUrl(url);
+    if (previousIsYouTube && !nextIsYouTube) {
+      logLifecycleSnapshot('leave_youtube', url, reason);
+    } else if (!previousIsYouTube && nextIsYouTube) {
+      logLifecycleSnapshot('return_to_youtube', url, reason);
+    }
+  }, [logLifecycleSnapshot]);
 
   const injectModerationScript = useCallback(async (
     scriptExecutor: (script: string) => Promise<string | null>,
@@ -722,6 +774,7 @@ export const NativeWebViewBrowser = () => {
       console.log('[DIAG][LOAD] stage=success url=' + toDiagUrl(url));
       console.log('[Browser] ======= LOAD END =======');
       console.log('[Browser] URL:', url);
+      logLifecycleSnapshot('page_load_end', url, 'onLoadEnd');
       logHostLayerDiagnostics('load_end');
       setIsLoading(false);
       setFlashGuardState?.(false, 'load_end');
@@ -774,6 +827,7 @@ export const NativeWebViewBrowser = () => {
       console.log('[Browser] New URL:', url);
       console.log('[DIAG][LOAD] stage=url_change url=' + toDiagUrl(url));
       markNavigation('onUrlChange', url);
+      logLifecycleSnapshot('url_change', url, 'onUrlChange');
       logHostLayerDiagnostics('url_change');
       setUrlInput(url);
       navigate('browse', url, url);
@@ -815,6 +869,10 @@ export const NativeWebViewBrowser = () => {
   useEffect(() => {
     currentUrlRef.current = webViewState.currentUrl || '';
   }, [webViewState.currentUrl]);
+
+  useEffect(() => {
+    webViewListenersAttachedRef.current = webViewListenersAttached;
+  }, [webViewListenersAttached]);
 
   useEffect(() => {
     console.log(
@@ -1262,6 +1320,16 @@ export const NativeWebViewBrowser = () => {
     pendingRequestsRef.current.add(requestId);
 
     if (requestEpoch !== null && requestEpoch !== activeEpoch && !relaxedYouTubeEpochMode) {
+      console.warn(
+        '[DIAG][EPOCH_BYPASS]',
+        'epoch_bypass_blocked',
+        'reason=request_epoch_mismatch_non_youtube',
+        'navId=' + activeNavIdRef.current,
+        'requestPageEpoch=' + requestEpoch,
+        'currentPageEpoch=' + activeEpoch,
+        'urlFamily=' + getUrlFamily(activeUrl),
+        'url=' + (activeUrl || 'unknown'),
+      );
       if (stickyShortsMode) {
         console.log(
           '[DIAG][SHORTS_SCAN] skip',
@@ -1322,16 +1390,28 @@ export const NativeWebViewBrowser = () => {
       flashLog('disarm stale epoch');
       return;
     }
-    if (requestEpoch !== null && requestEpoch !== activeEpoch && relaxedYouTubeEpochMode && isDiagYtBlurEnabledForUrl(activeUrl)) {
+    if (requestEpoch !== null && requestEpoch !== activeEpoch && relaxedYouTubeEpochMode) {
       console.log(
-        '[MW-YT][DIAG][EPOCH][HOST]',
-        'action=stale_host_bypass_youtube',
-        'requestId=' + requestId,
-        'requestEpoch=' + requestEpoch,
-        'activeEpoch=' + activeEpoch,
-        'scope=' + (stickyShortsMode ? 'shorts' : 'youtube'),
+        '[DIAG][EPOCH_BYPASS]',
+        'epoch_bypass_allowed',
+        'reason=request_epoch_mismatch_youtube_relaxed',
+        'navId=' + activeNavIdRef.current,
+        'requestPageEpoch=' + requestEpoch,
+        'currentPageEpoch=' + activeEpoch,
+        'urlFamily=' + getUrlFamily(activeUrl),
         'url=' + (activeUrl || 'unknown'),
       );
+      if (isDiagYtBlurEnabledForUrl(activeUrl)) {
+        console.log(
+          '[MW-YT][DIAG][EPOCH][HOST]',
+          'action=stale_host_bypass_youtube',
+          'requestId=' + requestId,
+          'requestEpoch=' + requestEpoch,
+          'activeEpoch=' + activeEpoch,
+          'scope=' + (stickyShortsMode ? 'shorts' : 'youtube'),
+          'url=' + (activeUrl || 'unknown'),
+        );
+      }
     }
     
     const startTime = performance.now();

@@ -35,7 +35,25 @@ export interface UseModerationBridgeOptions {
   onError?: (error: string) => void;
 }
 
-export interface BridgeScanContext extends ModerationScanContext {}
+export type BridgeScanContext = ModerationScanContext;
+
+const getCacheDomainContext = (src: string): string => {
+  try {
+    return new URL(src).hostname.toLowerCase();
+  } catch {
+    return 'unknown';
+  }
+};
+
+const getCacheFamilyContext = (src: string): string => {
+  const domain = getCacheDomainContext(src);
+  if (domain === 'm.youtube.com') return 'youtube_mobile';
+  if (domain === 'youtube.com' || domain === 'www.youtube.com') return 'youtube_www';
+  if (domain.endsWith('youtube.com') || domain.endsWith('youtu.be') || domain.endsWith('ytimg.com')) {
+    return 'youtube_other';
+  }
+  return domain || 'unknown';
+};
 
 export const isWebViewBlurReadyEvent = (message: unknown): boolean => {
   return isBlurOverlayReadyMessage(message);
@@ -61,6 +79,10 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
   const scanQueue = useRef<string[]>([]);
   const resultsCache = useRef<Map<string, ModerationScanResult>>(new Map());
   const processingRef = useRef(0);
+  const cacheDiagRef = useRef<{ lastHitDomain: string; lastHitFamily: string }>({
+    lastHitDomain: '',
+    lastHitFamily: '',
+  });
   const maxConcurrent = 4;
 
   const { isReady: modelReady, classifyImage, modelState } = useOnDeviceModeration();
@@ -164,11 +186,42 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
       return null;
     }
 
+    const cacheDomain = getCacheDomainContext(src);
+    const cacheFamily = getCacheFamilyContext(src);
+    const previousHitDomain = cacheDiagRef.current.lastHitDomain;
+    const siteSwitchedSincePriorHit = !!previousHitDomain && previousHitDomain !== cacheDomain;
+
     // Check cache
     if (resultsCache.current.has(src)) {
       console.log('[MW-Bridge] Cache hit:', src.substring(0, 50));
+      console.log(
+        '[DIAG][CACHE]',
+        'cache_hit_bridge',
+        'domain=' + cacheDomain,
+        'keyFamily=' + cacheFamily,
+        'siteSwitchedSincePriorHit=' + siteSwitchedSincePriorHit,
+        'previousHitDomain=' + (previousHitDomain || 'none'),
+        'requestId=' + (context?.requestId || 'n/a'),
+        'itemId=' + (context?.itemId || 'n/a'),
+        'sourceType=' + (context?.sourceType || 'n/a'),
+        'pageEpoch=' + (Number.isFinite(context?.pageEpoch) ? String(context?.pageEpoch) : 'n/a'),
+      );
+      cacheDiagRef.current.lastHitDomain = cacheDomain;
+      cacheDiagRef.current.lastHitFamily = cacheFamily;
       return resultsCache.current.get(src)!;
     }
+    console.log(
+      '[DIAG][CACHE]',
+      'cache_miss_bridge',
+      'domain=' + cacheDomain,
+      'keyFamily=' + cacheFamily,
+      'siteSwitchedSincePriorHit=' + siteSwitchedSincePriorHit,
+      'previousHitDomain=' + (previousHitDomain || 'none'),
+      'requestId=' + (context?.requestId || 'n/a'),
+      'itemId=' + (context?.itemId || 'n/a'),
+      'sourceType=' + (context?.sourceType || 'n/a'),
+      'pageEpoch=' + (Number.isFinite(context?.pageEpoch) ? String(context?.pageEpoch) : 'n/a'),
+    );
 
     const effectiveThresholds = thresholds || getDialThresholds();
     const startTime = performance.now();

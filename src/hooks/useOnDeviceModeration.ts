@@ -142,6 +142,24 @@ const IMAGE_LOAD_TIMEOUT_MS = 8000;
 const STAGE_B_FORCE_NEXT_KEY = 'MW_STAGEB_FORCE_NEXT_N';
 const STAGE_B_FORCE_NEXT_FN_KEY = '__MW_STAGEB_FORCE_NEXT__';
 
+const getCacheDomainContext = (src: string): string => {
+  try {
+    return new URL(src).hostname.toLowerCase();
+  } catch {
+    return 'unknown';
+  }
+};
+
+const getCacheFamilyContext = (src: string): string => {
+  const domain = getCacheDomainContext(src);
+  if (domain === 'm.youtube.com') return 'youtube_mobile';
+  if (domain === 'youtube.com' || domain === 'www.youtube.com') return 'youtube_www';
+  if (domain.endsWith('youtube.com') || domain.endsWith('youtu.be') || domain.endsWith('ytimg.com')) {
+    return 'youtube_other';
+  }
+  return domain || 'unknown';
+};
+
 export interface StageBEligibilityInput {
   segmentationEnabled: boolean;
   strictMode: boolean;
@@ -597,6 +615,10 @@ export const useOnDeviceModeration = () => {
   const segmentationLastRunAt = useRef(0);
   const segmentationCounters = useRef({ cacheHits: 0, throttleSkips: 0, attempts: 0 });
   const stageBFlagLoggedEpochs = useRef<Set<string>>(new Set());
+  const cacheDiagRef = useRef<{ lastHitDomain: string; lastHitFamily: string }>({
+    lastHitDomain: '',
+    lastHitFamily: '',
+  });
   const initAttempted = useRef(false);
   const { settings, segmentationSignalResolution } = useLocalSettings();
 
@@ -698,11 +720,30 @@ export const useOnDeviceModeration = () => {
       // Handle string URL input
       if (typeof imageSource === 'string') {
         cacheKey = imageSource;
+        const cacheDomain = getCacheDomainContext(cacheKey);
+        const cacheFamily = getCacheFamilyContext(cacheKey);
+        const previousHitDomain = cacheDiagRef.current.lastHitDomain;
+        const siteSwitchedSincePriorHit = !!previousHitDomain && previousHitDomain !== cacheDomain;
         
         // Check cache first
         if (imageCache.current.has(cacheKey)) {
           const cachedResult = imageCache.current.get(cacheKey)!;
           const cachedSeg = cachedResult.segmentation;
+          console.log(
+            '[DIAG][CACHE]',
+            'cache_hit_ondevice',
+            'cacheType=image_result',
+            'domain=' + cacheDomain,
+            'keyFamily=' + cacheFamily,
+            'siteSwitchedSincePriorHit=' + siteSwitchedSincePriorHit,
+            'previousHitDomain=' + (previousHitDomain || 'none'),
+            'requestId=' + requestId,
+            'itemId=' + itemId,
+            'sourceType=' + (scanContext?.sourceType || 'n/a'),
+            'pageEpoch=' + pageEpoch,
+          );
+          cacheDiagRef.current.lastHitDomain = cacheDomain;
+          cacheDiagRef.current.lastHitFamily = cacheFamily;
           if (diagEnabled) {
             stageBDiag(
               'cache_hit=image_result',
@@ -715,6 +756,19 @@ export const useOnDeviceModeration = () => {
           }
           return cachedResult;
         }
+        console.log(
+          '[DIAG][CACHE]',
+          'cache_miss_ondevice',
+          'cacheType=image_result',
+          'domain=' + cacheDomain,
+          'keyFamily=' + cacheFamily,
+          'siteSwitchedSincePriorHit=' + siteSwitchedSincePriorHit,
+          'previousHitDomain=' + (previousHitDomain || 'none'),
+          'requestId=' + requestId,
+          'itemId=' + itemId,
+          'sourceType=' + (scanContext?.sourceType || 'n/a'),
+          'pageEpoch=' + pageEpoch,
+        );
 
         // Load image from URL with timeout
         image = await loadImageElement(imageSource, IMAGE_LOAD_TIMEOUT_MS, 'anonymous');
@@ -877,6 +931,19 @@ export const useOnDeviceModeration = () => {
         const cacheTtlMs = Math.max(1_000, Number(settings.segmentationCacheTtlMs) || 20_000);
         const cached = cacheKey ? segmentationCache.current.get(cacheKey) : undefined;
         if (cached && cached.expiresAt > now) {
+          console.log(
+            '[DIAG][CACHE]',
+            'cache_hit_ondevice',
+            'cacheType=segmentation',
+            'domain=' + (sourceHost || 'unknown'),
+            'keyFamily=' + (cacheKey ? getCacheFamilyContext(cacheKey) : 'unknown'),
+            'siteSwitchedSincePriorHit=' + (!!cacheDiagRef.current.lastHitDomain && cacheDiagRef.current.lastHitDomain !== (sourceHost || 'unknown')),
+            'previousHitDomain=' + (cacheDiagRef.current.lastHitDomain || 'none'),
+            'requestId=' + requestId,
+            'itemId=' + itemId,
+            'sourceType=' + (scanContext?.sourceType || 'n/a'),
+            'pageEpoch=' + pageEpoch,
+          );
           segmentationCached = true;
           segmentationSkipReason = 'cache_hit';
           segmentationCounters.current.cacheHits += 1;
@@ -899,6 +966,19 @@ export const useOnDeviceModeration = () => {
             'thirstScore=' + segmentationThirstScore.toFixed(3),
           );
         } else {
+          console.log(
+            '[DIAG][CACHE]',
+            'cache_miss_ondevice',
+            'cacheType=segmentation',
+            'domain=' + (sourceHost || 'unknown'),
+            'keyFamily=' + (cacheKey ? getCacheFamilyContext(cacheKey) : 'unknown'),
+            'siteSwitchedSincePriorHit=' + (!!cacheDiagRef.current.lastHitDomain && cacheDiagRef.current.lastHitDomain !== (sourceHost || 'unknown')),
+            'previousHitDomain=' + (cacheDiagRef.current.lastHitDomain || 'none'),
+            'requestId=' + requestId,
+            'itemId=' + itemId,
+            'sourceType=' + (scanContext?.sourceType || 'n/a'),
+            'pageEpoch=' + pageEpoch,
+          );
           const throttleMs = Math.max(0, Number(settings.segmentationThrottleMs) || 800);
           const elapsedSinceLastRun = now - segmentationLastRunAt.current;
           if (elapsedSinceLastRun < throttleMs) {

@@ -894,6 +894,32 @@ export function generateModerationScript(config: InjectionConfig): string {
   let diagPrevResponses = 0;
   let diagLastShortsScanBatchStartAt = 0;
   const diagScanBatchStartAtByRequestId = new Map();
+  const diagApplySeenNodes = new WeakSet();
+  const diagScanSourceCounters = {
+    poster_scan_used: 0,
+    video_frame_scan_used: 0,
+    scan_source_fallback_reason: 0,
+  };
+  const diagObserverModeCounters = {
+    shorts_attr_mode_on: 0,
+    shorts_attr_mode_off: 0,
+    transitions: 0,
+  };
+  const diagEpochBypassCounters = {
+    epoch_bypass_allowed: 0,
+    epoch_bypass_blocked: 0,
+  };
+  const diagApplyCounters = {
+    apply_by_item_id: 0,
+    apply_by_src_fanout: 0,
+  };
+  const diagLifecycleCounters = {
+    snapshots: 0,
+  };
+  const diagObserverModeState = {
+    current: null,
+    initialized: false,
+  };
   const mutationScanQueue = [];
   const mutationScanSet = new Set();
   let mutationScanTimer = null;
@@ -1274,6 +1300,143 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function isShortsModeActive() {
     return isYouTubeShortsUrl(window.location.href);
+  }
+
+  function getDiagUrlFamily(value) {
+    if (!value) return 'unknown';
+    if (isYouTubeShortsUrl(value)) return 'youtube_shorts';
+    if (isYouTubeDomainUrl(value)) {
+      try {
+        const parsed = new URL(value, window.location.href);
+        return String(parsed.hostname || '').toLowerCase() === 'm.youtube.com' ? 'youtube_mobile' : 'youtube';
+      } catch (e) {
+        return 'youtube';
+      }
+    }
+    try {
+      const parsed = new URL(value, window.location.href);
+      return String(parsed.hostname || '').toLowerCase() || 'unknown';
+    } catch (e) {
+      return 'unknown';
+    }
+  }
+
+  function diagLogScanSource(tag, details) {
+    console.log(
+      '[DIAG][SCAN_SOURCE]',
+      tag,
+      'navId=' + NAV_ID,
+      'pageEpoch=' + state.pageEpoch,
+      'urlFamily=' + getDiagUrlFamily(window.location.href),
+      details || ''
+    );
+  }
+
+  function diagLogEpochBypass(tag, reason, requestEpoch, currentEpoch, urlValue) {
+    console.log(
+      '[DIAG][EPOCH_BYPASS]',
+      tag,
+      'reason=' + (reason || 'none'),
+      'navId=' + NAV_ID,
+      'requestPageEpoch=' + (Number.isFinite(requestEpoch) ? String(requestEpoch) : 'none'),
+      'currentPageEpoch=' + (Number.isFinite(currentEpoch) ? String(currentEpoch) : 'none'),
+      'urlFamily=' + getDiagUrlFamily(urlValue || window.location.href),
+      'url=' + (urlValue || window.location.href)
+    );
+  }
+
+  function diagLogObserverMode(modeOn, reason, urlValue, extra) {
+    const eventName = modeOn ? 'shorts_attr_mode_on' : 'shorts_attr_mode_off';
+    if (modeOn) {
+      diagObserverModeCounters.shorts_attr_mode_on += 1;
+    } else {
+      diagObserverModeCounters.shorts_attr_mode_off += 1;
+    }
+    const transitioned = diagObserverModeState.initialized && diagObserverModeState.current !== modeOn;
+    if (transitioned) {
+      diagObserverModeCounters.transitions += 1;
+    }
+    diagObserverModeState.current = modeOn;
+    diagObserverModeState.initialized = true;
+    console.log(
+      '[DIAG][OBSERVER_MODE]',
+      eventName,
+      'transitioned=' + transitioned,
+      'transitionCount=' + diagObserverModeCounters.transitions,
+      'reason=' + (reason || 'none'),
+      'navId=' + NAV_ID,
+      'pageEpoch=' + state.pageEpoch,
+      'urlFamily=' + getDiagUrlFamily(urlValue || window.location.href),
+      'url=' + (urlValue || window.location.href),
+      extra || ''
+    );
+  }
+
+  function diagLogApplyByItemId(itemId, src, element, extra) {
+    if (!element || element.nodeType !== 1) return;
+    const normalizedSrc = normalizeUrl(src || '') || String(src || '');
+    const previousSrc = normalizeUrl(element.dataset && element.dataset.mwLastScanSrc ? element.dataset.mwLastScanSrc : '') || '';
+    const recycled = !!previousSrc && !!normalizedSrc && previousSrc !== normalizedSrc;
+    const newlyDiscovered = !diagApplySeenNodes.has(element);
+    if (newlyDiscovered) {
+      diagApplySeenNodes.add(element);
+    }
+    diagApplyCounters.apply_by_item_id += 1;
+    console.log(
+      '[DIAG][APPLY_PROVENANCE]',
+      'apply_by_item_id',
+      'count=' + diagApplyCounters.apply_by_item_id,
+      'itemId=' + (itemId || 'none'),
+      'src=' + String(src || '').substring(0, 180),
+      'nodeId=' + getDiagNodeId(element),
+      'tag=' + (element.tagName || 'unknown'),
+      'nodeRecycled=' + recycled,
+      'nodeNewlyDiscovered=' + newlyDiscovered,
+      'navId=' + NAV_ID,
+      'pageEpoch=' + state.pageEpoch,
+      'urlFamily=' + getDiagUrlFamily(window.location.href),
+      extra || ''
+    );
+  }
+
+  function diagLogLifecycleSnapshot(eventName, reason, previousUrl, nextUrl) {
+    diagLifecycleCounters.snapshots += 1;
+    let activeTimerCount = 0;
+    try {
+      activeTimerCount = countActiveTimerHandles();
+    } catch (e) {
+      activeTimerCount = 0;
+    }
+    const activeTimerNames = [];
+    if (timerState.legacyResultsInterval) activeTimerNames.push('legacyResultsInterval');
+    if (timerState.urlChangeInterval) activeTimerNames.push('urlChangeInterval');
+    if (timerState.youtubePeriodicInterval) activeTimerNames.push('youtubePeriodicInterval');
+    if (timerState.shortsHealthHealInterval) activeTimerNames.push('shortsHealthHealInterval');
+    if (timerState.mainScrollTimeout) activeTimerNames.push('mainScrollTimeout');
+    if (timerState.youtubeScrollTimeout) activeTimerNames.push('youtubeScrollTimeout');
+    if (timerState.youtubeMutationScanTimeout) activeTimerNames.push('youtubeMutationScanTimeout');
+    if (batchTimer) activeTimerNames.push('batchTimer');
+    if (mutationScanTimer) activeTimerNames.push('mutationScanTimer');
+    const activeInstanceId = window.__MW_ACTIVE_INSTANCE_ID__ || 'none';
+    console.log(
+      '[DIAG][LIFECYCLE_SNAPSHOT]',
+      'event=' + (eventName || 'unknown'),
+      'reason=' + (reason || 'none'),
+      'snapshotCount=' + diagLifecycleCounters.snapshots,
+      'activeTimers=' + activeTimerCount,
+      'activeTimerNames=' + (activeTimerNames.length ? activeTimerNames.join(',') : 'none'),
+      'listenerStatus=' + 'message=true,messageFromNative=true,visibility=true',
+      'activeInstanceId=' + activeInstanceId,
+      'navId=' + NAV_ID,
+      'pageEpoch=' + state.pageEpoch,
+      'currentUrl=' + window.location.href,
+      'urlFamily=' + getDiagUrlFamily(window.location.href),
+      'previousUrl=' + (previousUrl || 'none'),
+      'nextUrl=' + (nextUrl || 'none'),
+      'overlayHostState=' + (overlayState.enabled ? 'enabled' : 'disabled'),
+      'overlayReason=' + overlayState.reason,
+      'moderationEnabled=' + (CONFIG.enabled && CONFIG.sensitivity > 0)
+    );
   }
 
   function getCurrentShortsUrlId() {
@@ -4096,6 +4259,14 @@ export function generateModerationScript(config: InjectionConfig): string {
       const stickyShortsMode = isYouTubeShortsUrl(window.location.href);
       const relaxedYouTubeEpochMode = isYouTubeDomainUrl(window.location.href);
       if (resultEpoch !== null && resultEpoch !== state.pageEpoch && !relaxedYouTubeEpochMode) {
+        diagEpochBypassCounters.epoch_bypass_blocked += 1;
+        diagLogEpochBypass(
+          'epoch_bypass_blocked',
+          'result_epoch_mismatch_non_youtube',
+          resultEpoch,
+          state.pageEpoch,
+          window.location.href
+        );
         state.stats.staleEpochDiscarded++;
         logShortsScanSkip('epoch_mismatch', null, 'request:' + String(requestId || 'none'), 'result');
         if (DIAG_YT_BLUR) {
@@ -4122,16 +4293,26 @@ export function generateModerationScript(config: InjectionConfig): string {
         cleanupRejectedOrTimedOutRequest(requestId, 'reject_epoch');
         return;
       }
-      if (resultEpoch !== null && resultEpoch !== state.pageEpoch && relaxedYouTubeEpochMode && DIAG_YT_BLUR) {
-        console.log(
-          '[MW-YT][DIAG][EPOCH][INJECT]',
-          'action=stale_injected_bypass_youtube',
-          'requestId=' + requestId,
-          'resultEpoch=' + resultEpoch,
-          'activeEpoch=' + state.pageEpoch,
-          'scope=' + (stickyShortsMode ? 'shorts' : 'youtube'),
-          'url=' + window.location.href
+      if (resultEpoch !== null && resultEpoch !== state.pageEpoch && relaxedYouTubeEpochMode) {
+        diagEpochBypassCounters.epoch_bypass_allowed += 1;
+        diagLogEpochBypass(
+          'epoch_bypass_allowed',
+          'result_epoch_mismatch_youtube_relaxed',
+          resultEpoch,
+          state.pageEpoch,
+          window.location.href
         );
+        if (DIAG_YT_BLUR) {
+          console.log(
+            '[MW-YT][DIAG][EPOCH][INJECT]',
+            'action=stale_injected_bypass_youtube',
+            'requestId=' + requestId,
+            'resultEpoch=' + resultEpoch,
+            'activeEpoch=' + state.pageEpoch,
+            'scope=' + (stickyShortsMode ? 'shorts' : 'youtube'),
+            'url=' + window.location.href
+          );
+        }
       }
       
       if (!requestId || !Array.isArray(results)) {
@@ -4397,6 +4578,12 @@ export function generateModerationScript(config: InjectionConfig): string {
         const preDecisionFilter = element.style.getPropertyValue('filter') || element.style.filter || '';
         const preDecisionHasBlur = preDecisionFilter.toLowerCase().includes('blur(');
         if (finalBlur) {
+          diagLogApplyByItemId(
+            itemId,
+            src,
+            element,
+            'applyPath=item_identity sourceType=' + ((pendingItem && pendingItem.sourceType) || (element.dataset && element.dataset.mwSourceType) || 'unknown')
+          );
           console.log(
             '[MW][JSBlur] applied reason=' + (decisionReason || 'unknown'),
             'src=' + String(src || '').substring(0, 120),
@@ -4437,7 +4624,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       // Also find any other elements with the same src
       if (finalBlur) {
         clearSafeResolved(src);
-        findAndBlur(src, predictedLabel || category, CONFIG.blurStrength, true);
+        findAndBlur(src, predictedLabel || category, CONFIG.blurStrength, true, itemId);
       } else {
         markSafeResolved(src);
         // Remove soft blur from all matching elements
@@ -4456,14 +4643,33 @@ export function generateModerationScript(config: InjectionConfig): string {
   /**
    * Find and blur all elements matching a src
    */
-  function findAndBlur(src, category, blurStrengthPx, shouldBlur) {
+  function findAndBlur(src, category, blurStrengthPx, shouldBlur, originItemId) {
     if (!shouldBlur) return;
     if (state.revealed.has(src)) return;
     
     try {
+      let fanoutCandidates = 0;
+      let fanoutApplied = 0;
+      let fanoutRecycled = 0;
+      let fanoutNewlyDiscovered = 0;
+      const trackFanoutNode = function(node) {
+        if (!node || node.nodeType !== 1) return;
+        fanoutCandidates += 1;
+        const normalizedSrc = normalizeUrl(src || '') || String(src || '');
+        const previousSrc = normalizeUrl(node.dataset && node.dataset.mwLastScanSrc ? node.dataset.mwLastScanSrc : '') || '';
+        if (previousSrc && normalizedSrc && previousSrc !== normalizedSrc) {
+          fanoutRecycled += 1;
+        }
+        if (!diagApplySeenNodes.has(node)) {
+          fanoutNewlyDiscovered += 1;
+          diagApplySeenNodes.add(node);
+        }
+      };
+
       // Images
       document.querySelectorAll('img').forEach(img => {
         if ((img.src === src || img.dataset.mwOrigSrc === src) && !state.revealed.has(src)) {
+          trackFanoutNode(img);
           if (img.dataset.mwModerated === 'blurred' && img.dataset.mwRevealed !== 'true' && isShortsModeActive()) {
             if (!findRevealOverlayForElement(img, src) && img.isConnected) {
               createRevealOverlay(img, src, category);
@@ -4472,6 +4678,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           }
           if (img.dataset.mwModerated !== 'blurred' && img.dataset.mwRevealed !== 'true') {
             applyBlur(img, src, category, blurStrengthPx);
+            fanoutApplied += 1;
           }
         }
       });
@@ -4479,6 +4686,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       // Video posters
       document.querySelectorAll('video').forEach(video => {
         if ((video.poster === src || video.dataset.mwOrigPoster === src) && !state.revealed.has(src)) {
+          trackFanoutNode(video);
           if (video.dataset.mwModerated === 'blurred' && video.dataset.mwRevealed !== 'true' && isShortsModeActive()) {
             if (!findRevealOverlayForElement(video, src) && video.isConnected) {
               createRevealOverlay(video, src, category);
@@ -4487,6 +4695,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           }
           if (video.dataset.mwModerated !== 'blurred' && video.dataset.mwRevealed !== 'true') {
             applyBlur(video, src, category, blurStrengthPx);
+            fanoutApplied += 1;
           }
         }
       });
@@ -4494,6 +4703,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       // Background images
       document.querySelectorAll('[data-mw-bg-src]').forEach(el => {
         if (el.dataset.mwBgSrc === src && !state.revealed.has(src)) {
+          trackFanoutNode(el);
           if (el.dataset.mwModerated === 'blurred' && el.dataset.mwRevealed !== 'true' && isShortsModeActive()) {
             if (!findRevealOverlayForElement(el, src) && el.isConnected) {
               createRevealOverlay(el, src, category);
@@ -4502,9 +4712,25 @@ export function generateModerationScript(config: InjectionConfig): string {
           }
           if (el.dataset.mwModerated !== 'blurred' && el.dataset.mwRevealed !== 'true') {
             applyBlur(el, src, category, blurStrengthPx);
+            fanoutApplied += 1;
           }
         }
       });
+      diagApplyCounters.apply_by_src_fanout += 1;
+      console.log(
+        '[DIAG][APPLY_PROVENANCE]',
+        'apply_by_src_fanout',
+        'count=' + diagApplyCounters.apply_by_src_fanout,
+        'originItemId=' + (originItemId || 'none'),
+        'src=' + String(src || '').substring(0, 180),
+        'fanoutCandidates=' + fanoutCandidates,
+        'fanoutApplied=' + fanoutApplied,
+        'fanoutRecycled=' + fanoutRecycled,
+        'fanoutNewlyDiscovered=' + fanoutNewlyDiscovered,
+        'navId=' + NAV_ID,
+        'pageEpoch=' + state.pageEpoch,
+        'urlFamily=' + getDiagUrlFamily(window.location.href)
+      );
     } catch (e) {}
   }
 
@@ -4849,10 +5075,12 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function scanVideoPoster(video) {
+    const videoNodeId = getDiagNodeId(video);
+    const videoCurrentSrc = String((video && video.currentSrc) || (video && video.src) || '').substring(0, 180);
     if (isShortsModeActive()) {
       console.log(
         '[DIAG][VIDEO] found video element',
-        'id=' + getDiagNodeId(video),
+        'id=' + videoNodeId,
         'readyState=' + (Number.isFinite(video.readyState) ? video.readyState : 'n/a'),
         'currentTime=' + (Number.isFinite(video.currentTime) ? video.currentTime.toFixed(3) : 'n/a')
       );
@@ -4867,6 +5095,23 @@ export function generateModerationScript(config: InjectionConfig): string {
                    video.getAttribute('data-poster');
     
     if (!poster) {
+      diagScanSourceCounters.scan_source_fallback_reason += 1;
+      diagLogScanSource(
+        'scan_source_fallback_reason',
+        'count=' + diagScanSourceCounters.scan_source_fallback_reason +
+        ' reason=poster_missing_no_frame_scan' +
+        ' itemIdentity=' + videoNodeId +
+        ' sourceType=video-poster' +
+        ' currentSrc=' + videoCurrentSrc
+      );
+      diagLogScanSource(
+        'video_frame_scan_used',
+        'count=' + diagScanSourceCounters.video_frame_scan_used +
+        ' itemIdentity=' + videoNodeId +
+        ' sourceType=video-frame' +
+        ' used=false' +
+        ' reason=poster_missing_frame_scan_unavailable'
+      );
       diagScanRunLog('scanVideoPoster', video, '', false, 'reason=no_poster');
       if (isShortsModeActive()) {
         const source = getDiagSourceFields(video);
@@ -4889,6 +5134,23 @@ export function generateModerationScript(config: InjectionConfig): string {
     video.dataset.mwPosterScanned = 'true';
     video.dataset.mwLastPoster = poster;
     video.dataset.mwOrigPoster = poster;
+    diagScanSourceCounters.poster_scan_used += 1;
+    diagLogScanSource(
+      'poster_scan_used',
+      'count=' + diagScanSourceCounters.poster_scan_used +
+      ' itemIdentity=' + videoNodeId +
+      ' sourceType=video-poster' +
+      ' src=' + String(poster || '').substring(0, 180) +
+      ' currentSrc=' + videoCurrentSrc
+    );
+    diagLogScanSource(
+      'video_frame_scan_used',
+      'count=' + diagScanSourceCounters.video_frame_scan_used +
+      ' itemIdentity=' + videoNodeId +
+      ' sourceType=video-frame' +
+      ' used=false' +
+      ' reason=poster_available_prefers_poster'
+    );
     if (isShortsModeActive()) {
       console.log(
         '[DIAG][VIDEO] using_thumbnail_only',
@@ -5141,6 +5403,12 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function setupMutationObserver(root) {
     const shortsAttrMode = isShortsModeActive();
+    diagLogObserverMode(
+      shortsAttrMode,
+      'setupMutationObserver',
+      window.location.href,
+      'rootNode=' + getDiagNodeId(root) + ' existingObservers=' + state.mutationObservers.length
+    );
     const attributeFilter = ['src', 'srcset', 'poster', 'data-src', 'data-lazy-src', 'style'];
     const observer = new MutationObserver(mutations => {
       if (timerState.paused) return;
@@ -5244,6 +5512,12 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
     });
     if (shortsAttrMode) {
+      diagLogObserverMode(
+        true,
+        'observer_observe_attributes_on',
+        window.location.href,
+        'rootNode=' + getDiagNodeId(root) + ' attributeFilter=' + attributeFilter.join(',')
+      );
       observer.observe(root, {
         childList: true,
         subtree: true,
@@ -5251,6 +5525,12 @@ export function generateModerationScript(config: InjectionConfig): string {
         attributeFilter: attributeFilter,
       });
     } else {
+      diagLogObserverMode(
+        false,
+        'observer_observe_attributes_off',
+        window.location.href,
+        'rootNode=' + getDiagNodeId(root)
+      );
       observer.observe(root, { childList: true, subtree: true, attributes: false });
     }
     state.mutationObservers.push(observer);
@@ -5358,6 +5638,12 @@ export function generateModerationScript(config: InjectionConfig): string {
           markSafeResolved(src);
         }
         if (shouldApplyBlur && el && el.isConnected) {
+          diagLogApplyByItemId(
+            itemId,
+            src,
+            el,
+            'applyPath=item_identity_legacy sourceType=' + (pending.sourceType || 'unknown')
+          );
           applyBlur(el, src, category, blurStrengthPx, itemId);
           clearSafeResolved(src);
         }
@@ -5527,12 +5813,15 @@ export function generateModerationScript(config: InjectionConfig): string {
   if (document.readyState !== 'complete') {
     const onLoadScan = () => {
       if (timerState.teardownDone) return;
+      diagLogLifecycleSnapshot('page_load_end', 'window_load_event', lastUrl, window.location.href);
       scanFullPage();
       if (isYouTube()) {
         scheduleInitTimeout('loadYouTubeScan', scanYouTubeThumbnails, 200);
       }
     };
     window.addEventListener('load', onLoadScan);
+  } else {
+    diagLogLifecycleSnapshot('page_load_end', 'document_ready_complete', lastUrl, window.location.href);
   }
 
   // Periodic rescans (more aggressive for YouTube)
@@ -5577,6 +5866,27 @@ export function generateModerationScript(config: InjectionConfig): string {
       const previousUrl = lastUrl;
       const nextUrl = window.location.href;
       console.log('[MW] SPA navigation detected:', previousUrl, '->', nextUrl);
+      diagLogLifecycleSnapshot('url_change', 'spa_detected', previousUrl, nextUrl);
+      const previousIsYouTube = isYouTubeDomainUrl(previousUrl);
+      const nextIsYouTube = isYouTubeDomainUrl(nextUrl);
+      if (previousIsYouTube && !nextIsYouTube) {
+        diagLogLifecycleSnapshot('leave_youtube', 'spa_detected', previousUrl, nextUrl);
+      } else if (!previousIsYouTube && nextIsYouTube) {
+        diagLogLifecycleSnapshot('return_to_youtube', 'spa_detected', previousUrl, nextUrl);
+      }
+      const expectedShortsAttrMode = isYouTubeShortsUrl(nextUrl);
+      const observerModeFrozen = diagObserverModeState.initialized && diagObserverModeState.current !== expectedShortsAttrMode;
+      console.log(
+        '[DIAG][OBSERVER_MODE]',
+        expectedShortsAttrMode ? 'shorts_attr_mode_on' : 'shorts_attr_mode_off',
+        'reason=url_change_expected_mode',
+        'observerModeFrozen=' + observerModeFrozen,
+        'observerModeCurrent=' + (diagObserverModeState.initialized ? String(diagObserverModeState.current) : 'unknown'),
+        'navId=' + NAV_ID,
+        'pageEpoch=' + state.pageEpoch,
+        'urlFamily=' + getDiagUrlFamily(nextUrl),
+        'url=' + nextUrl
+      );
       lastUrl = nextUrl;
       const holdEpoch = isYouTubeShortsUrl(previousUrl) && isYouTubeShortsUrl(nextUrl);
       if (!holdEpoch) {
