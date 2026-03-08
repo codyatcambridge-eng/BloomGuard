@@ -97,6 +97,12 @@ const isDiagYtBlurEnabledForUrl = (value?: string) => {
   return false;
 };
 
+const SHORTS_LEGACY_FALLBACK_ENTRY_PROBE_MS = 2500;
+const SHORTS_LEGACY_FALLBACK_TIMEOUT_PROBE_MS = 8000;
+const SHORTS_LEGACY_FALLBACK_REQ_GRACE_MS = 2500;
+const SHORTS_LEGACY_FALLBACK_MAX_PROBE_MS = 9000;
+const SHORTS_LEGACY_FALLBACK_MAX_POLLS = 6;
+
 const getUrlFamily = (value?: string) => {
   if (!value) return 'unknown';
   if (isYouTubeShortsUrl(value)) return 'youtube_shorts';
@@ -250,6 +256,19 @@ export const NativeWebViewBrowser = () => {
   const webViewPageEpochRef = useRef(0);
   const stageBFlagDiagEpochRef = useRef<string | null>(null);
   const shortsScanDiagRef = useRef<{ lastScanBatchStartAt: number }>({ lastScanBatchStartAt: 0 });
+  const shortsLegacyFallbackRef = useRef<{
+    untilMs: number;
+    reason: string;
+    lastReqSentAt: number;
+    lastReqTimeoutAt: number;
+  }>({
+    untilMs: 0,
+    reason: 'idle',
+    lastReqSentAt: 0,
+    lastReqTimeoutAt: 0,
+  });
+  const shortsModeActiveRef = useRef(false);
+  const [shortsLegacyFallbackVersion, setShortsLegacyFallbackVersion] = useState(0);
 
   const UNSAFE_STREAK_REQUIRED = 2;
   const SAFE_STREAK_REQUIRED = 2;
@@ -259,6 +278,39 @@ export const NativeWebViewBrowser = () => {
     if (!isDebugMode) return;
     console.log(...args);
   }, [isDebugMode]);
+
+  const armShortsLegacyFallbackProbe = useCallback((reason: string, durationMs: number) => {
+    const boundedDuration = Math.max(200, Math.floor(durationMs));
+    const now = Date.now();
+    const state = shortsLegacyFallbackRef.current;
+    const nextUntil = now + boundedDuration;
+    if (nextUntil <= state.untilMs && state.reason === reason) {
+      return;
+    }
+    state.untilMs = Math.max(state.untilMs, nextUntil);
+    state.reason = reason;
+    console.log(
+      '[MW-Host][ShortsFallback] probe_arm',
+      'reason=' + reason,
+      'durationMs=' + boundedDuration,
+      'untilMs=' + state.untilMs,
+      'navId=' + activeNavIdRef.current,
+    );
+    setShortsLegacyFallbackVersion(v => v + 1);
+  }, []);
+
+  const disarmShortsLegacyFallbackProbe = useCallback((reason: string) => {
+    const state = shortsLegacyFallbackRef.current;
+    if (state.untilMs <= 0) return;
+    state.untilMs = 0;
+    state.reason = reason;
+    console.log(
+      '[MW-Host][ShortsFallback] probe_disarm',
+      'reason=' + reason,
+      'navId=' + activeNavIdRef.current,
+    );
+    setShortsLegacyFallbackVersion(v => v + 1);
+  }, []);
 
   const queueCurrentBlurState = useCallback((reason: string) => {
     blurPendingRef.current = {
@@ -1047,6 +1099,23 @@ export const NativeWebViewBrowser = () => {
   useEffect(() => {
     currentUrlRef.current = webViewState.currentUrl || '';
   }, [webViewState.currentUrl]);
+
+  useEffect(() => {
+    const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
+    const inShorts = isYouTubeShortsUrl(activeUrl);
+    const wasInShorts = shortsModeActiveRef.current;
+    shortsModeActiveRef.current = inShorts;
+    if (inShorts && !wasInShorts) {
+      const sinceLastReq = Date.now() - shortsLegacyFallbackRef.current.lastReqSentAt;
+      if (sinceLastReq > SHORTS_LEGACY_FALLBACK_REQ_GRACE_MS) {
+        armShortsLegacyFallbackProbe('shorts_entry_uncertain', SHORTS_LEGACY_FALLBACK_ENTRY_PROBE_MS);
+      }
+      return;
+    }
+    if (!inShorts && wasInShorts) {
+      disarmShortsLegacyFallbackProbe('shorts_exit');
+    }
+  }, [webViewState.currentUrl, armShortsLegacyFallbackProbe, disarmShortsLegacyFallbackProbe]);
 
   useEffect(() => {
     webViewListenersAttachedRef.current = webViewListenersAttached;
@@ -1951,6 +2020,11 @@ export const NativeWebViewBrowser = () => {
         return;
       }
       if (typedMessage.type === 'MW_REQ_SENT') {
+        const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
+        if (isYouTubeShortsUrl(activeUrl)) {
+          shortsLegacyFallbackRef.current.lastReqSentAt = Date.now();
+          disarmShortsLegacyFallbackProbe('req_sent');
+        }
         console.log(
           '[MW-Host][REQ] MW_REQ_SENT',
           'source=' + source,
@@ -1963,6 +2037,11 @@ export const NativeWebViewBrowser = () => {
         return;
       }
       if (typedMessage.type === 'MW_REQ_TIMEOUT') {
+        const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
+        if (isYouTubeShortsUrl(activeUrl)) {
+          shortsLegacyFallbackRef.current.lastReqTimeoutAt = Date.now();
+          armShortsLegacyFallbackProbe('req_timeout', SHORTS_LEGACY_FALLBACK_TIMEOUT_PROBE_MS);
+        }
         console.warn(
           '[MW-Host][REQ] MW_REQ_TIMEOUT',
           'source=' + source,
@@ -1999,6 +2078,11 @@ export const NativeWebViewBrowser = () => {
           console.warn('[MW-Host] NONCE MISMATCH - rejecting request:', message.requestId, 'source=' + source);
           console.warn('[MW-Host] Expected:', sessionNonce.substring(0, 10), 'Got:', (message.nonce || 'none').substring(0, 10));
           return;
+        }
+        const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
+        if (isYouTubeShortsUrl(activeUrl)) {
+          shortsLegacyFallbackRef.current.lastReqSentAt = Date.now();
+          disarmShortsLegacyFallbackProbe('request_received');
         }
         console.log(
           '[MW-Host] Received moderation request:',
@@ -2056,7 +2140,19 @@ export const NativeWebViewBrowser = () => {
       messageFromWebViewHandlerRef.current = null;
       window.removeEventListener('message', handleWindowMessage);
     };
-  }, [ENABLE_SIGNAL_PIPELINE, ENABLE_DOM_BLUR, processModerationRequest, moderationBridge, postMessageToWebView, getNonce, queueCurrentBlurState, flushBlurStateToWebView]);
+  }, [
+    ENABLE_SIGNAL_PIPELINE,
+    ENABLE_DOM_BLUR,
+    processModerationRequest,
+    moderationBridge,
+    postMessageToWebView,
+    getNonce,
+    queueCurrentBlurState,
+    flushBlurStateToWebView,
+    armShortsLegacyFallbackProbe,
+    disarmShortsLegacyFallbackProbe,
+    webViewState.currentUrl,
+  ]);
 
   /**
    * Fallback: Poll for moderation requests from legacy global queue
@@ -2078,8 +2174,23 @@ export const NativeWebViewBrowser = () => {
       );
       return;
     }
+    const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
+    const stickyShortsMode = isYouTubeShortsUrl(activeUrl);
+    const hasActiveShortsProbe = shortsLegacyFallbackRef.current.untilMs > Date.now();
+    if (stickyShortsMode && !hasActiveShortsProbe) {
+      console.log(
+        '[MW-Host][ShortsFallback] skip_legacy_poll',
+        'reason=probe_inactive',
+        'navId=' + activeNavIdRef.current,
+        'url=' + (activeUrl || 'unknown'),
+      );
+      return;
+    }
 
-    console.log('[MW-Host] Starting adaptive legacy queue polling (fallback)...');
+    console.log(
+      '[MW-Host] Starting adaptive legacy queue polling (fallback)...',
+      'scope=' + (stickyShortsMode ? 'shorts_probe' : 'default'),
+    );
     const MIN_POLL_MS = 300;
     const MAX_POLL_MS = 3000;
     const EMPTY_BACKOFF_MS = 250;
@@ -2089,7 +2200,12 @@ export const NativeWebViewBrowser = () => {
     const IDLE_MIN_POLL_MS = 2000;
     const IDLE_MAX_POLL_MS = 5000;
     const IDLE_BACKOFF_MS = 500;
-    const SHORTS_EMPTY_POLL_MS = 6000;
+    const LEGACY_EMPTY_REASONS = new Set([
+      'queue_empty',
+      'legacy_empty_literal',
+      'queue_empty_after_parse',
+      'queue_missing',
+    ]);
     let pollDelayMs = MIN_POLL_MS;
     let cancelled = false;
     let pollTimer: NodeJS.Timeout | null = null;
@@ -2097,8 +2213,27 @@ export const NativeWebViewBrowser = () => {
     let consecutiveEmptyPolls = 0;
     let lastActivityAt = Date.now();
     let lastEmptyPollReason = 'none';
+    let lastProducerMode = 'unknown';
     let idleMode = false;
     let idlePollMs = IDLE_MIN_POLL_MS;
+    const shortsProbeDeadlineMs = stickyShortsMode
+      ? Math.min(shortsLegacyFallbackRef.current.untilMs, Date.now() + SHORTS_LEGACY_FALLBACK_MAX_PROBE_MS)
+      : 0;
+    let shortsProbePollCount = 0;
+
+    const deactivateShortsProbe = (reason: string) => {
+      if (!stickyShortsMode) return;
+      shortsLegacyFallbackRef.current.untilMs = 0;
+      shortsLegacyFallbackRef.current.reason = reason;
+      console.log(
+        '[MW-Host][ShortsFallback] probe_stop',
+        'reason=' + reason,
+        'polls=' + shortsProbePollCount,
+        'lastEmpty=' + lastEmptyPollReason,
+        'producer=' + lastProducerMode,
+        'navId=' + activeNavIdRef.current,
+      );
+    };
 
     const exitIdleMode = (reason: string) => {
       if (!idleMode) return;
@@ -2185,6 +2320,7 @@ export const NativeWebViewBrowser = () => {
         if (document.visibilityState !== 'visible') {
           return false;
         }
+        lastProducerMode = 'unknown';
         // Get and clear pending requests from WebView's global queue
         const getQueueScript = `
           (function() {
@@ -2267,6 +2403,7 @@ export const NativeWebViewBrowser = () => {
           const status = String(payloadRecord.status || '').toUpperCase();
           const reason = String(payloadRecord.reason || '');
           const producerMode = String(payloadRecord.producerMode || 'unknown');
+          lastProducerMode = producerMode;
           if (status === 'EMPTY') {
             lastEmptyPollReason = reason || 'queue_empty';
             logYouTubeDiag(
@@ -2356,7 +2493,45 @@ export const NativeWebViewBrowser = () => {
 
     const runPollLoop = async () => {
       if (cancelled) return;
+      if (stickyShortsMode) {
+        if (Date.now() >= shortsProbeDeadlineMs) {
+          deactivateShortsProbe('probe_deadline_elapsed');
+          return;
+        }
+        if (shortsProbePollCount >= SHORTS_LEGACY_FALLBACK_MAX_POLLS) {
+          deactivateShortsProbe('probe_max_polls_reached');
+          return;
+        }
+      }
       const hadWork = await pollForRequests();
+      if (stickyShortsMode) {
+        shortsProbePollCount += 1;
+        if (document.visibilityState !== 'visible') {
+          pollDelayMs = HIDDEN_POLL_MS;
+        } else if (hadWork) {
+          lastActivityAt = Date.now();
+          consecutiveEmptyPolls = 0;
+          lastEmptyPollReason = 'none';
+          pollDelayMs = MIN_POLL_MS;
+        } else {
+          const isLegacyEmpty = LEGACY_EMPTY_REASONS.has(lastEmptyPollReason);
+          if (isLegacyEmpty && lastProducerMode === 'disabled') {
+            deactivateShortsProbe('producer_disabled_empty');
+            return;
+          }
+          pollDelayMs = Math.min(pollDelayMs + EMPTY_BACKOFF_MS, MAX_POLL_MS);
+        }
+        if (Date.now() >= shortsProbeDeadlineMs) {
+          deactivateShortsProbe('probe_deadline_elapsed');
+          return;
+        }
+        if (shortsProbePollCount >= SHORTS_LEGACY_FALLBACK_MAX_POLLS) {
+          deactivateShortsProbe('probe_max_polls_reached');
+          return;
+        }
+        scheduleNextPoll(pollDelayMs);
+        return;
+      }
       if (document.visibilityState !== 'visible') {
         pollDelayMs = HIDDEN_POLL_MS;
       } else if (hadWork) {
@@ -2366,21 +2541,11 @@ export const NativeWebViewBrowser = () => {
         exitIdleMode('request');
         pollDelayMs = MIN_POLL_MS;
       } else {
-        const diagUrl = webViewState.currentUrl || currentUrlRef.current || '';
-        const inShorts = isYouTubeShortsUrl(diagUrl);
         consecutiveEmptyPolls += 1;
         maybeEnterIdleMode();
         if (idleMode) {
           idlePollMs = Math.min(idlePollMs + IDLE_BACKOFF_MS, IDLE_MAX_POLL_MS);
           pollDelayMs = idlePollMs;
-        } else if (
-          inShorts &&
-          (lastEmptyPollReason === 'queue_empty' ||
-            lastEmptyPollReason === 'legacy_empty_literal' ||
-            lastEmptyPollReason === 'queue_empty_after_parse' ||
-            lastEmptyPollReason === 'queue_missing')
-        ) {
-          pollDelayMs = Math.max(SHORTS_EMPTY_POLL_MS, Math.min(pollDelayMs + EMPTY_BACKOFF_MS, MAX_POLL_MS));
         } else {
           pollDelayMs = Math.min(pollDelayMs + EMPTY_BACKOFF_MS, MAX_POLL_MS);
         }
@@ -2414,7 +2579,18 @@ export const NativeWebViewBrowser = () => {
       window.removeEventListener('hashchange', onHashChange);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [ENABLE_SIGNAL_PIPELINE, isNative, webViewState.isOpen, webViewListenersAttached, isRuntimeModerationEnabled, executeScript, moderationBridge, localSettings.blur_strength_px, webViewState.currentUrl]);
+  }, [
+    ENABLE_SIGNAL_PIPELINE,
+    isNative,
+    webViewState.isOpen,
+    webViewListenersAttached,
+    isRuntimeModerationEnabled,
+    executeScript,
+    moderationBridge,
+    localSettings.blur_strength_px,
+    webViewState.currentUrl,
+    shortsLegacyFallbackVersion,
+  ]);
 
   /**
    * Determine if input is a URL vs search query
