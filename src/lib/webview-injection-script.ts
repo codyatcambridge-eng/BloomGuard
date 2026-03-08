@@ -1227,6 +1227,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   const SHORTS_HEALTH_HEAL_INTERVAL_MS = 2000;
   const SHORTS_HEALTH_HEAL_ENABLED = CONFIG.enableShortsHealthHeal === true;
   const SHORTS_HEALTH_LOG_PREFIX = '[MW-YT][DIAG][SHORTS_HEALTH]';
+  const SHORTS_REENTRY_REFRESH_COOLDOWN_MS = 1200;
   const ADAPTIVE_SHORTS_RESCAN_DEBOUNCE_MS = 140;
   const ADAPTIVE_SHORTS_RESCAN_COOLDOWN_MS = 700;
   const ADAPTIVE_SHORTS_WATCH_ATTRIBUTE_FILTER = [
@@ -1257,6 +1258,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     lastRescanIdentity: '',
     lastRescanAt: 0,
     active: false,
+  };
+  const shortsReentryState = {
+    lastRefreshAt: 0,
+    lastReason: 'none',
   };
   const diagEpochCounters = {
     staleInjectedDiscardCount: 0,
@@ -1945,6 +1950,87 @@ export function generateModerationScript(config: InjectionConfig): string {
       immediate: true,
     });
     return true;
+  }
+
+  function clearAdaptiveShortsActiveAssumptions(reason) {
+    const previousIdentity = adaptiveShortsWatchState.lastIdentity || 'none';
+    const previousRescanIdentity = adaptiveShortsWatchState.lastRescanIdentity || 'none';
+    clearAdaptiveShortsRescanTimer('clear_assumptions:' + (reason || 'unknown'));
+    adaptiveShortsWatchState.lastIdentity = '';
+    adaptiveShortsWatchState.lastIdentityLoggedAt = 0;
+    adaptiveShortsWatchState.lastRescanIdentity = '';
+    adaptiveShortsWatchState.lastRescanAt = 0;
+    logAdaptiveShortsEvent(
+      'active_assumptions_cleared',
+      'reason=' + (reason || 'unknown') +
+      ' prevIdentity=' + String(previousIdentity || 'none').substring(0, 220) +
+      ' prevRescanIdentity=' + String(previousRescanIdentity || 'none').substring(0, 220)
+    );
+  }
+
+  function refreshShortsFreshnessOnReentry(reason, options) {
+    if (!isShortsModeActive()) return false;
+    if (timerState.paused || timerState.teardownDone) {
+      logAdaptiveShortsEvent(
+        'shorts_reentry_refresh_skipped',
+        'reason=inactive_state' +
+        ' trigger=' + (reason || 'unknown') +
+        ' paused=' + timerState.paused +
+        ' teardown=' + timerState.teardownDone
+      );
+      return false;
+    }
+
+    const opts = options || {};
+    const shouldResetContext = opts.resetContext !== false;
+    const now = Date.now();
+    if (!opts.force && (now - shortsReentryState.lastRefreshAt) < SHORTS_REENTRY_REFRESH_COOLDOWN_MS) {
+      logAdaptiveShortsEvent(
+        'shorts_reentry_refresh_skipped',
+        'reason=cooldown' +
+        ' trigger=' + (reason || 'unknown') +
+        ' sinceMs=' + (now - shortsReentryState.lastRefreshAt)
+      );
+      return false;
+    }
+
+    const previousCandidate = getAdaptiveActiveShortsCandidateIdentity();
+    const previousIdentity = previousCandidate && previousCandidate.contentIdentity
+      ? previousCandidate.contentIdentity
+      : 'none';
+    shortsReentryState.lastRefreshAt = now;
+    shortsReentryState.lastReason = reason || 'unknown';
+    logAdaptiveShortsEvent(
+      'shorts_reentry_refresh_start',
+      'reason=' + (reason || 'unknown') +
+      ' prevIdentity=' + String(previousIdentity || 'none').substring(0, 220) +
+      ' prevContainerNodeId=' + getDiagNodeId(previousCandidate && previousCandidate.container ? previousCandidate.container : null)
+    );
+
+    clearAdaptiveShortsActiveAssumptions('reentry:' + (reason || 'unknown'));
+    if (shouldResetContext) {
+      resetShortsBlurContext('reentry:' + (reason || 'unknown'));
+    }
+    stopAdaptiveShortsOverlayWatch('reentry:' + (reason || 'unknown'));
+    const watchBound = refreshAdaptiveShortsOverlayWatch('reentry:' + (reason || 'unknown'));
+    const nextCandidate = getAdaptiveActiveShortsCandidateIdentity();
+    logActiveShortsCandidateIdentity('reentry:' + (reason || 'unknown'), nextCandidate, true);
+    if (!watchBound) {
+      triggerAdaptiveShortsTargetedRescan('reentry_fallback:' + (reason || 'unknown'), nextCandidate, {
+        force: true,
+        immediate: true,
+      });
+    }
+    const nextIdentity = nextCandidate && nextCandidate.contentIdentity ? nextCandidate.contentIdentity : 'none';
+    logAdaptiveShortsEvent(
+      'shorts_reentry_refresh_done',
+      'reason=' + (reason || 'unknown') +
+      ' watchBound=' + watchBound +
+      ' prevIdentity=' + String(previousIdentity || 'none').substring(0, 220) +
+      ' nextIdentity=' + String(nextIdentity || 'none').substring(0, 220) +
+      ' nextContainerNodeId=' + getDiagNodeId(nextCandidate && nextCandidate.container ? nextCandidate.container : null)
+    );
+    return watchBound;
   }
 
   function doesShortsContainerMatchSrc(container, normalizedSrc) {
@@ -6475,6 +6561,13 @@ export function generateModerationScript(config: InjectionConfig): string {
   // Expose targeted rescan hooks for the host (NativeWebViewBrowser)
   window.__MW_SCAN_FULL__ = scanFullPage;
   window.__MW_SCAN_YT__ = scanYouTubeThumbnails;
+  window.__MW_SHORTS_REENTRY_REFRESH__ = function(reason) {
+    try {
+      return refreshShortsFreshnessOnReentry(reason || 'host_shorts_reentry', { force: true }) ? 'OK' : 'SKIP';
+    } catch (e) {
+      return 'ERR';
+    }
+  };
 
   // Set up observers
   setupMutationObserver(document.body);
@@ -6597,11 +6690,17 @@ export function generateModerationScript(config: InjectionConfig): string {
           'nextUrl=' + nextUrl
         );
       }
-      if (isYouTubeShortsUrl(previousUrl) || isYouTubeShortsUrl(nextUrl)) {
+      const previousIsShorts = isYouTubeShortsUrl(previousUrl);
+      const nextIsShorts = isYouTubeShortsUrl(nextUrl);
+      if (previousIsShorts || nextIsShorts) {
         resetShortsBlurContext('url_change');
       }
-      if (isYouTubeShortsUrl(nextUrl)) {
-        refreshAdaptiveShortsOverlayWatch('url_change');
+      if (nextIsShorts) {
+        if (!previousIsShorts) {
+          refreshShortsFreshnessOnReentry('url_change_return_to_shorts', { force: true, resetContext: false });
+        } else {
+          refreshAdaptiveShortsOverlayWatch('url_change');
+        }
       } else {
         stopAdaptiveShortsOverlayWatch('url_change_non_shorts');
       }
@@ -6728,9 +6827,13 @@ export function generateModerationScript(config: InjectionConfig): string {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
       resumeManagedTimers('visibility_visible');
+      refreshShortsFreshnessOnReentry('visibility_visible');
       return;
     }
     pauseManagedTimers('visibility_hidden');
+  });
+  window.addEventListener('pageshow', () => {
+    refreshShortsFreshnessOnReentry('pageshow');
   });
   window.addEventListener('beforeunload', () => teardownManagedScheduling('beforeunload'));
   window.addEventListener('pagehide', () => teardownManagedScheduling('pagehide'));

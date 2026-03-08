@@ -268,6 +268,11 @@ export const NativeWebViewBrowser = () => {
     lastReqTimeoutAt: 0,
   });
   const shortsModeActiveRef = useRef(false);
+  const shortsReentryRefreshRef = useRef<{ navId: number; url: string; at: number }>({
+    navId: 0,
+    url: '',
+    at: 0,
+  });
   const [shortsLegacyFallbackVersion, setShortsLegacyFallbackVersion] = useState(0);
 
   const UNSAFE_STREAK_REQUIRED = 2;
@@ -1096,6 +1101,60 @@ export const NativeWebViewBrowser = () => {
     getListenerDiagContext: getWebViewListenerDiagContext,
   });
 
+  const requestShortsReentryRefresh = useCallback(async (
+    reason: string,
+    urlHint?: string,
+    force?: boolean,
+  ) => {
+    if (!isNative || !webViewState.isOpen || !executeScript) return;
+    const activeUrl = urlHint || webViewState.currentUrl || currentUrlRef.current || '';
+    if (!isYouTubeShortsUrl(activeUrl)) return;
+    const navId = activeNavIdRef.current || 0;
+    const now = Date.now();
+    const previous = shortsReentryRefreshRef.current;
+    if (
+      !force &&
+      previous.navId === navId &&
+      previous.url === activeUrl &&
+      (now - previous.at) < 1800
+    ) {
+      console.log(
+        '[DIAG][SHORTS_REENTRY][HOST]',
+        'action=skip_duplicate',
+        'reason=' + reason,
+        'navId=' + navId,
+        'url=' + toDiagUrl(activeUrl),
+      );
+      return;
+    }
+
+    shortsReentryRefreshRef.current = {
+      navId,
+      url: activeUrl,
+      at: now,
+    };
+
+    const safeReason = escapeForJs(reason || 'host_shorts_reentry');
+    const result = await executeScript(`
+      (function() {
+        try {
+          if (typeof window.__MW_SHORTS_REENTRY_REFRESH__ !== 'function') return 'NO_HOOK';
+          return window.__MW_SHORTS_REENTRY_REFRESH__('${safeReason}');
+        } catch (e) {
+          return 'ERR:' + String(e);
+        }
+      })();
+    `);
+    console.log(
+      '[DIAG][SHORTS_REENTRY][HOST]',
+      'action=requested',
+      'reason=' + reason,
+      'navId=' + navId,
+      'url=' + toDiagUrl(activeUrl),
+      'result=' + String(result || 'null'),
+    );
+  }, [isNative, webViewState.isOpen, webViewState.currentUrl, executeScript, toDiagUrl]);
+
   useEffect(() => {
     currentUrlRef.current = webViewState.currentUrl || '';
   }, [webViewState.currentUrl]);
@@ -1110,12 +1169,20 @@ export const NativeWebViewBrowser = () => {
       if (sinceLastReq > SHORTS_LEGACY_FALLBACK_REQ_GRACE_MS) {
         armShortsLegacyFallbackProbe('shorts_entry_uncertain', SHORTS_LEGACY_FALLBACK_ENTRY_PROBE_MS);
       }
+      void requestShortsReentryRefresh('shorts_entry_transition', activeUrl, true);
       return;
     }
     if (!inShorts && wasInShorts) {
       disarmShortsLegacyFallbackProbe('shorts_exit');
     }
-  }, [webViewState.currentUrl, armShortsLegacyFallbackProbe, disarmShortsLegacyFallbackProbe]);
+  }, [webViewState.currentUrl, armShortsLegacyFallbackProbe, disarmShortsLegacyFallbackProbe, requestShortsReentryRefresh]);
+
+  useEffect(() => {
+    if (!webViewState.isOpen) return;
+    const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
+    if (!isYouTubeShortsUrl(activeUrl)) return;
+    void requestShortsReentryRefresh('webview_open_shorts', activeUrl, false);
+  }, [webViewState.isOpen, webViewState.currentUrl, requestShortsReentryRefresh]);
 
   useEffect(() => {
     webViewListenersAttachedRef.current = webViewListenersAttached;
