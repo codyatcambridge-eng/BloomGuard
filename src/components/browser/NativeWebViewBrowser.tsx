@@ -115,6 +115,29 @@ const getUrlFamily = (value?: string) => {
   }
 };
 
+const getCacheDomainContext = (value?: string): string => {
+  if (!value) return 'unknown';
+  try {
+    return new URL(value).hostname.toLowerCase();
+  } catch {
+    return 'unknown';
+  }
+};
+
+const getCacheFamilyContext = (value?: string): string => {
+  const domain = getCacheDomainContext(value);
+  if (domain === 'm.youtube.com') return 'youtube_mobile';
+  if (domain === 'youtube.com' || domain === 'www.youtube.com') return 'youtube_www';
+  if (domain.endsWith('youtube.com') || domain.endsWith('youtu.be') || domain.endsWith('ytimg.com')) {
+    return 'youtube_other';
+  }
+  return domain || 'unknown';
+};
+
+const isYouTubeFamilyContext = (family: string): boolean => {
+  return family === 'youtube_www' || family === 'youtube_mobile' || family === 'youtube_other';
+};
+
 interface SearchResult {
   title: string;
   url: string;
@@ -618,17 +641,45 @@ export const NativeWebViewBrowser = () => {
       'reason=' + reason,
       'targetUrl=' + (url || 'unknown'),
     );
+
+    const previousFamily = getCacheFamilyContext(previousUrl);
+    const nextFamily = getCacheFamilyContext(url);
+    const previousIsYouTubeFamily = isYouTubeFamilyContext(previousFamily);
+    const nextIsYouTubeFamily = isYouTubeFamilyContext(nextFamily);
+    let cacheFlushReason: string | null = null;
+
+    if (previousUrl && previousIsYouTubeFamily && !nextIsYouTubeFamily) {
+      cacheFlushReason = 'leave_youtube_family';
+      logLifecycleSnapshot('leave_youtube', url, reason);
+    } else if (previousUrl && !previousIsYouTubeFamily && nextIsYouTubeFamily) {
+      cacheFlushReason = 'return_to_youtube_family';
+      logLifecycleSnapshot('return_to_youtube', url, reason);
+    } else if (
+      previousUrl &&
+      previousFamily !== nextFamily &&
+      (
+        (previousFamily === 'youtube_www' && nextFamily === 'youtube_mobile') ||
+        (previousFamily === 'youtube_mobile' && nextFamily === 'youtube_www')
+      )
+    ) {
+      cacheFlushReason = 'youtube_www_mobile_context_change';
+      logLifecycleSnapshot('youtube_context_change', url, reason);
+    }
+
+    if (cacheFlushReason) {
+      moderationBridge.clearCache({
+        reason: cacheFlushReason,
+        previousFamily,
+        nextFamily,
+        navId: activeNavIdRef.current,
+        pageEpoch: webViewPageEpochRef.current,
+      });
+    }
+
     if (url) {
       currentUrlRef.current = url;
     }
-    const previousIsYouTube = isYouTubeDomainUrl(previousUrl);
-    const nextIsYouTube = isYouTubeDomainUrl(url);
-    if (previousIsYouTube && !nextIsYouTube) {
-      logLifecycleSnapshot('leave_youtube', url, reason);
-    } else if (!previousIsYouTube && nextIsYouTube) {
-      logLifecycleSnapshot('return_to_youtube', url, reason);
-    }
-  }, [logLifecycleSnapshot]);
+  }, [logLifecycleSnapshot, moderationBridge]);
 
   const injectModerationScript = useCallback(async (
     scriptExecutor: (script: string) => Promise<string | null>,
@@ -844,7 +895,13 @@ export const NativeWebViewBrowser = () => {
       console.log('[Browser] ======= WEBVIEW CLOSED =======');
       teardownWebViewScheduling('webview_closed', webViewState.currentUrl).catch(() => undefined);
       clearLoadEndInjectTimer();
-      moderationBridge.clearCache();
+      moderationBridge.clearCache({
+        reason: 'webview_closed',
+        previousFamily: getCacheFamilyContext(webViewState.currentUrl || currentUrlRef.current || ''),
+        nextFamily: 'none',
+        navId: activeNavIdRef.current,
+        pageEpoch: webViewPageEpochRef.current,
+      });
       injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
       blurReadyRef.current = false;
@@ -1479,6 +1536,7 @@ export const NativeWebViewBrowser = () => {
         const scanResult = await moderationBridge.scanImage(item.src, thresholds, {
           requestId,
           itemId: item.itemId,
+          navId: activeNavIdRef.current,
           pageEpoch: requestEpoch ?? activeEpoch,
           sourceType: item.sourceType,
         });
@@ -2058,6 +2116,7 @@ export const NativeWebViewBrowser = () => {
           const scanResult = await moderationBridge.scanImage(src, thresholds, {
             requestId: 'legacy_poll',
             itemId: typeof item.itemId === 'string' ? item.itemId : 'legacy_item',
+            navId: activeNavIdRef.current,
             pageEpoch: webViewPageEpochRef.current,
             sourceType: typeof item.sourceType === 'string' ? item.sourceType : 'unknown',
           });
@@ -2545,10 +2604,17 @@ export const NativeWebViewBrowser = () => {
 
   const handleHome = useCallback(async () => {
     teardownWebViewScheduling('home_reset', webViewState.currentUrl).catch(() => undefined);
+    const currentFamily = getCacheFamilyContext(webViewState.currentUrl || currentUrlRef.current || '');
     if (isNative && webViewState.isOpen) {
       await closeWebView();
     }
-    moderationBridge.clearCache();
+    moderationBridge.clearCache({
+      reason: 'home_reset',
+      previousFamily: currentFamily,
+      nextFamily: 'home',
+      navId: activeNavIdRef.current,
+      pageEpoch: webViewPageEpochRef.current,
+    });
     injectionDoneRef.current = false;
     blurReadyRef.current = false;
     blurPendingRef.current = null;

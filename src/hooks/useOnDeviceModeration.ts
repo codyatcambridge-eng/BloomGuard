@@ -88,8 +88,17 @@ export interface AIThresholds {
 export interface ModerationScanContext {
   requestId?: string;
   itemId?: string;
+  navId?: number;
   pageEpoch?: number;
   sourceType?: string;
+}
+
+export interface ModerationCacheFlushContext {
+  reason?: string;
+  navId?: number;
+  pageEpoch?: number;
+  previousFamily?: string;
+  nextFamily?: string;
 }
 
 /**
@@ -699,6 +708,9 @@ export const useOnDeviceModeration = () => {
     const diagEnabled = !!import.meta.env.DEV;
     const requestId = scanContext?.requestId || 'n/a';
     const itemId = scanContext?.itemId || 'n/a';
+    const navId = Number.isFinite(scanContext?.navId)
+      ? String(scanContext?.navId)
+      : 'n/a';
     const pageEpoch = Number.isFinite(scanContext?.pageEpoch)
       ? String(scanContext?.pageEpoch)
       : 'n/a';
@@ -735,11 +747,13 @@ export const useOnDeviceModeration = () => {
             'cacheType=image_result',
             'domain=' + cacheDomain,
             'keyFamily=' + cacheFamily,
+            'domainFamily=' + cacheFamily,
             'siteSwitchedSincePriorHit=' + siteSwitchedSincePriorHit,
             'previousHitDomain=' + (previousHitDomain || 'none'),
             'requestId=' + requestId,
             'itemId=' + itemId,
             'sourceType=' + (scanContext?.sourceType || 'n/a'),
+            'navId=' + navId,
             'pageEpoch=' + pageEpoch,
           );
           cacheDiagRef.current.lastHitDomain = cacheDomain;
@@ -762,11 +776,13 @@ export const useOnDeviceModeration = () => {
           'cacheType=image_result',
           'domain=' + cacheDomain,
           'keyFamily=' + cacheFamily,
+          'domainFamily=' + cacheFamily,
           'siteSwitchedSincePriorHit=' + siteSwitchedSincePriorHit,
           'previousHitDomain=' + (previousHitDomain || 'none'),
           'requestId=' + requestId,
           'itemId=' + itemId,
           'sourceType=' + (scanContext?.sourceType || 'n/a'),
+          'navId=' + navId,
           'pageEpoch=' + pageEpoch,
         );
 
@@ -937,11 +953,13 @@ export const useOnDeviceModeration = () => {
             'cacheType=segmentation',
             'domain=' + (sourceHost || 'unknown'),
             'keyFamily=' + (cacheKey ? getCacheFamilyContext(cacheKey) : 'unknown'),
+            'domainFamily=' + (cacheKey ? getCacheFamilyContext(cacheKey) : 'unknown'),
             'siteSwitchedSincePriorHit=' + (!!cacheDiagRef.current.lastHitDomain && cacheDiagRef.current.lastHitDomain !== (sourceHost || 'unknown')),
             'previousHitDomain=' + (cacheDiagRef.current.lastHitDomain || 'none'),
             'requestId=' + requestId,
             'itemId=' + itemId,
             'sourceType=' + (scanContext?.sourceType || 'n/a'),
+            'navId=' + navId,
             'pageEpoch=' + pageEpoch,
           );
           segmentationCached = true;
@@ -972,11 +990,13 @@ export const useOnDeviceModeration = () => {
             'cacheType=segmentation',
             'domain=' + (sourceHost || 'unknown'),
             'keyFamily=' + (cacheKey ? getCacheFamilyContext(cacheKey) : 'unknown'),
+            'domainFamily=' + (cacheKey ? getCacheFamilyContext(cacheKey) : 'unknown'),
             'siteSwitchedSincePriorHit=' + (!!cacheDiagRef.current.lastHitDomain && cacheDiagRef.current.lastHitDomain !== (sourceHost || 'unknown')),
             'previousHitDomain=' + (cacheDiagRef.current.lastHitDomain || 'none'),
             'requestId=' + requestId,
             'itemId=' + itemId,
             'sourceType=' + (scanContext?.sourceType || 'n/a'),
+            'navId=' + navId,
             'pageEpoch=' + pageEpoch,
           );
           const throttleMs = Math.max(0, Number(settings.segmentationThrottleMs) || 800);
@@ -1582,8 +1602,29 @@ export const useOnDeviceModeration = () => {
   }, [classifyImage]);
 
   // Clear cache
-  const clearCache = useCallback(() => {
+  const clearCache = useCallback((context?: ModerationCacheFlushContext) => {
+    const imageEntries = imageCache.current.size;
+    const segmentationEntries = segmentationCache.current.size;
     imageCache.current.clear();
+    segmentationCache.current.clear();
+    segmentationLastRunAt.current = 0;
+    segmentationCounters.current = { cacheHits: 0, throttleSkips: 0, attempts: 0 };
+    stageBFlagLoggedEpochs.current.clear();
+    cacheDiagRef.current.lastHitDomain = '';
+    cacheDiagRef.current.lastHitFamily = '';
+    console.log(
+      '[DIAG][CACHE]',
+      'cache_flushed_reason',
+      'scope=ondevice',
+      'reason=' + (context?.reason || 'manual_clear'),
+      'imageEntries=' + imageEntries,
+      'segmentationEntries=' + segmentationEntries,
+      'previousFamily=' + (context?.previousFamily || 'unknown'),
+      'nextFamily=' + (context?.nextFamily || 'unknown'),
+      'navId=' + (Number.isFinite(context?.navId) ? String(context?.navId) : 'n/a'),
+      'pageEpoch=' + (Number.isFinite(context?.pageEpoch) ? String(context?.pageEpoch) : 'n/a'),
+    );
+    return { imageEntries, segmentationEntries };
   }, []);
 
   return {

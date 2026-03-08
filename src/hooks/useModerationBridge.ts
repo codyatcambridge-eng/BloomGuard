@@ -3,6 +3,7 @@ import {
   useOnDeviceModeration,
   ModerationResult,
   type ModerationScanContext,
+  type ModerationCacheFlushContext,
 } from '@/hooks/useOnDeviceModeration';
 import { useLocalSettings } from '@/hooks/useLocalSettings';
 import { 
@@ -36,6 +37,7 @@ export interface UseModerationBridgeOptions {
 }
 
 export type BridgeScanContext = ModerationScanContext;
+export type BridgeCacheFlushContext = ModerationCacheFlushContext;
 
 const getCacheDomainContext = (src: string): string => {
   try {
@@ -85,7 +87,7 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
   });
   const maxConcurrent = 4;
 
-  const { isReady: modelReady, classifyImage, modelState } = useOnDeviceModeration();
+  const { isReady: modelReady, classifyImage, modelState, clearCache: clearOnDeviceCache } = useOnDeviceModeration();
   const { settings, getDialThresholds, isModerationEnabled, getModerationConfig } = useLocalSettings();
 
   // Update ready state when model loads
@@ -190,6 +192,8 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
     const cacheFamily = getCacheFamilyContext(src);
     const previousHitDomain = cacheDiagRef.current.lastHitDomain;
     const siteSwitchedSincePriorHit = !!previousHitDomain && previousHitDomain !== cacheDomain;
+    const navId = Number.isFinite(context?.navId) ? String(context?.navId) : 'n/a';
+    const pageEpoch = Number.isFinite(context?.pageEpoch) ? String(context?.pageEpoch) : 'n/a';
 
     // Check cache
     if (resultsCache.current.has(src)) {
@@ -199,12 +203,14 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
         'cache_hit_bridge',
         'domain=' + cacheDomain,
         'keyFamily=' + cacheFamily,
+        'domainFamily=' + cacheFamily,
         'siteSwitchedSincePriorHit=' + siteSwitchedSincePriorHit,
         'previousHitDomain=' + (previousHitDomain || 'none'),
         'requestId=' + (context?.requestId || 'n/a'),
         'itemId=' + (context?.itemId || 'n/a'),
         'sourceType=' + (context?.sourceType || 'n/a'),
-        'pageEpoch=' + (Number.isFinite(context?.pageEpoch) ? String(context?.pageEpoch) : 'n/a'),
+        'navId=' + navId,
+        'pageEpoch=' + pageEpoch,
       );
       cacheDiagRef.current.lastHitDomain = cacheDomain;
       cacheDiagRef.current.lastHitFamily = cacheFamily;
@@ -215,12 +221,14 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
       'cache_miss_bridge',
       'domain=' + cacheDomain,
       'keyFamily=' + cacheFamily,
+      'domainFamily=' + cacheFamily,
       'siteSwitchedSincePriorHit=' + siteSwitchedSincePriorHit,
       'previousHitDomain=' + (previousHitDomain || 'none'),
       'requestId=' + (context?.requestId || 'n/a'),
       'itemId=' + (context?.itemId || 'n/a'),
       'sourceType=' + (context?.sourceType || 'n/a'),
-      'pageEpoch=' + (Number.isFinite(context?.pageEpoch) ? String(context?.pageEpoch) : 'n/a'),
+      'navId=' + navId,
+      'pageEpoch=' + pageEpoch,
     );
 
     const effectiveThresholds = thresholds || getDialThresholds();
@@ -368,6 +376,10 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
       thresholds?: { porn: number; sexy: number; hentai: number };
       messageId?: number;
       sourceType?: string;
+      requestId?: string;
+      itemId?: string;
+      navId?: number;
+      pageEpoch?: number;
     };
     console.log('[MW-Bridge] Received WebView message:', msg.type, msg.action);
     
@@ -377,7 +389,15 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
       console.log('[MW-Bridge] Processing scan request #' + messageId + ' [' + sourceType + ']:', src?.substring(0, 60));
       
       if (!src) return null;
-      const result = await scanImage(src, thresholds);
+      const result = await scanImage(src, thresholds, {
+        requestId: typeof msg.requestId === 'string' ? msg.requestId : 'legacy_message',
+        itemId: typeof msg.itemId === 'string'
+          ? msg.itemId
+          : (Number.isFinite(messageId) ? `legacy_${messageId}` : 'legacy_item'),
+        sourceType,
+        navId: Number.isFinite(msg.navId) ? Number(msg.navId) : undefined,
+        pageEpoch: Number.isFinite(msg.pageEpoch) ? Number(msg.pageEpoch) : undefined,
+      });
       
       if (result) {
         return { ...result, messageId };
@@ -396,10 +416,15 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
   /**
    * Clear cache
    */
-  const clearCache = useCallback(() => {
+  const clearCache = useCallback((context?: BridgeCacheFlushContext) => {
+    const bridgeEntries = resultsCache.current.size;
+    const queuedItems = scanQueue.current.length;
     resultsCache.current.clear();
     scanQueue.current = [];
     processingRef.current = 0;
+    cacheDiagRef.current.lastHitDomain = '';
+    cacheDiagRef.current.lastHitFamily = '';
+    const onDeviceCleared = clearOnDeviceCache(context);
     setState({
       isReady: modelReady,
       isScanning: false,
@@ -409,8 +434,28 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
       lastScanTime: 0,
       error: null,
     });
+    console.log(
+      '[DIAG][CACHE]',
+      'cache_flushed_reason',
+      'scope=bridge',
+      'reason=' + (context?.reason || 'manual_clear'),
+      'bridgeEntries=' + bridgeEntries,
+      'bridgeQueued=' + queuedItems,
+      'onDeviceImageEntries=' + (onDeviceCleared?.imageEntries ?? 'n/a'),
+      'onDeviceSegmentationEntries=' + (onDeviceCleared?.segmentationEntries ?? 'n/a'),
+      'previousFamily=' + (context?.previousFamily || 'unknown'),
+      'nextFamily=' + (context?.nextFamily || 'unknown'),
+      'navId=' + (Number.isFinite(context?.navId) ? String(context?.navId) : 'n/a'),
+      'pageEpoch=' + (Number.isFinite(context?.pageEpoch) ? String(context?.pageEpoch) : 'n/a'),
+    );
     console.log('[MW-Bridge] Cache cleared');
-  }, [modelReady]);
+    return {
+      bridgeEntries,
+      queuedItems,
+      onDeviceImageEntries: onDeviceCleared?.imageEntries ?? 0,
+      onDeviceSegmentationEntries: onDeviceCleared?.segmentationEntries ?? 0,
+    };
+  }, [modelReady, clearOnDeviceCache]);
 
   /**
    * Get current moderation config for WebView injection
