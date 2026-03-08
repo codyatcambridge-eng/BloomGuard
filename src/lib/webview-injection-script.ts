@@ -1372,6 +1372,57 @@ export function generateModerationScript(config: InjectionConfig): string {
     );
   }
 
+  function isRelevantShortsContainerNode(node) {
+    if (!node || node.nodeType !== 1) return false;
+    const element = node;
+    if (element.id === 'shorts-player') return true;
+    const tag = String(element.tagName || '').toUpperCase();
+    return (
+      tag === 'YTM-REEL-VIDEO-RENDERER' ||
+      tag === 'YTM-SHORTS-LOCKUP-VIEW-MODEL' ||
+      tag === 'YTD-REEL-VIDEO-RENDERER'
+    );
+  }
+
+  function shouldReevaluateShortsModeOnContainerAttribute(target, attrName) {
+    if (!isRelevantShortsContainerNode(target)) return false;
+    return (
+      attrName === 'aria-hidden' ||
+      attrName === 'hidden' ||
+      attrName === 'selected' ||
+      attrName === 'is-active' ||
+      attrName === 'style'
+    );
+  }
+
+  function resolveShortsObserverMode(urlValue) {
+    return isYouTubeShortsUrl(urlValue || window.location.href);
+  }
+
+  function reevaluateShortsObserverMode(reason, urlValue, options) {
+    const opts = options || {};
+    const resolvedUrl = urlValue || window.location.href;
+    const previousMode = diagObserverModeState.initialized ? !!diagObserverModeState.current : null;
+    const nextMode = resolveShortsObserverMode(resolvedUrl);
+    const transitioned = previousMode !== null && previousMode !== nextMode;
+    if (!diagObserverModeState.initialized || transitioned || opts.forceLog === true) {
+      diagLogObserverMode(nextMode, reason, resolvedUrl, opts.extra || '');
+    }
+    if (transitioned) {
+      console.log(
+        '[DIAG][OBSERVER_MODE]',
+        'observer_mode_transition_reason',
+        'reason=' + (reason || 'none'),
+        'from=' + (previousMode ? 'on' : 'off'),
+        'to=' + (nextMode ? 'on' : 'off'),
+        'navId=' + NAV_ID,
+        'pageEpoch=' + state.pageEpoch,
+        'url=' + resolvedUrl
+      );
+    }
+    return { mode: nextMode, transitioned: transitioned };
+  }
+
   function diagLogApplyByItemId(itemId, src, element, extra) {
     if (!element || element.nodeType !== 1) return;
     const normalizedSrc = normalizeUrl(src || '') || String(src || '');
@@ -5558,27 +5609,52 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function setupMutationObserver(root) {
-    const shortsAttrMode = isShortsModeActive();
-    diagLogObserverMode(
-      shortsAttrMode,
+    const observerRootNodeId = getDiagNodeId(root);
+    let shortsAttrMode = reevaluateShortsObserverMode(
       'setupMutationObserver',
       window.location.href,
-      'rootNode=' + getDiagNodeId(root) + ' existingObservers=' + state.mutationObservers.length
-    );
-    const attributeFilter = ['src', 'srcset', 'poster', 'data-src', 'data-lazy-src', 'style'];
+      {
+        forceLog: true,
+        extra: 'rootNode=' + observerRootNodeId + ' existingObservers=' + state.mutationObservers.length,
+      }
+    ).mode;
+    const observeAttributes = isYouTube();
+    const attributeFilter = observeAttributes
+      ? ['src', 'srcset', 'poster', 'data-src', 'data-lazy-src', 'style', 'aria-hidden', 'hidden', 'selected', 'is-active']
+      : ['src', 'srcset', 'poster', 'data-src', 'data-lazy-src', 'style'];
     const observer = new MutationObserver(mutations => {
       if (timerState.paused) return;
       if (!CONFIG.enabled || CONFIG.sensitivity === 0) return;
       
       let hasYouTubeChanges = false;
+      shortsAttrMode = reevaluateShortsObserverMode('mutation_batch', window.location.href).mode;
       
       for (const mutation of mutations) {
         mutation.removedNodes.forEach(node => {
           if (node.nodeType !== 1) return;
           pruneDisconnectedPending('mutation_removed');
+          if (isYouTube() && isRelevantShortsContainerNode(node)) {
+            shortsAttrMode = reevaluateShortsObserverMode(
+              'youtube_container_removed',
+              window.location.href,
+              {
+                extra: 'rootNode=' + observerRootNodeId + ' containerNode=' + getDiagNodeId(node),
+              }
+            ).mode;
+          }
         });
         mutation.addedNodes.forEach(node => {
           if (node.nodeType !== 1) return;
+          if (isYouTube() && isRelevantShortsContainerNode(node)) {
+            shortsAttrMode = reevaluateShortsObserverMode(
+              'youtube_container_added',
+              window.location.href,
+              {
+                extra: 'rootNode=' + observerRootNodeId + ' containerNode=' + getDiagNodeId(node),
+              }
+            ).mode;
+            hasYouTubeChanges = true;
+          }
           if (shortsAttrMode) {
             reattachShortsBlurForInsertedNode(node, 'global_mutation_added', null);
             if (DIAG_YT_BLUR) {
@@ -5608,6 +5684,20 @@ export function generateModerationScript(config: InjectionConfig): string {
         if (mutation.type === 'attributes') {
           const target = mutation.target;
           const attr = mutation.attributeName || '';
+          if (
+            isYouTube() &&
+            target &&
+            target.nodeType === 1 &&
+            shouldReevaluateShortsModeOnContainerAttribute(target, attr)
+          ) {
+            shortsAttrMode = reevaluateShortsObserverMode(
+              'youtube_container_attr:' + attr,
+              window.location.href,
+              {
+                extra: 'rootNode=' + observerRootNodeId + ' containerNode=' + getDiagNodeId(target),
+              }
+            ).mode;
+          }
           if (!shortsAttrMode || target.nodeType !== 1) {
             continue;
           }
@@ -5667,12 +5757,12 @@ export function generateModerationScript(config: InjectionConfig): string {
         scheduleYouTubeScan('mutation');
       }
     });
-    if (shortsAttrMode) {
+    if (observeAttributes) {
       diagLogObserverMode(
-        true,
+        shortsAttrMode,
         'observer_observe_attributes_on',
         window.location.href,
-        'rootNode=' + getDiagNodeId(root) + ' attributeFilter=' + attributeFilter.join(',')
+        'rootNode=' + observerRootNodeId + ' attributeFilter=' + attributeFilter.join(',')
       );
       observer.observe(root, {
         childList: true,
@@ -5682,10 +5772,10 @@ export function generateModerationScript(config: InjectionConfig): string {
       });
     } else {
       diagLogObserverMode(
-        false,
+        shortsAttrMode,
         'observer_observe_attributes_off',
         window.location.href,
-        'rootNode=' + getDiagNodeId(root)
+        'rootNode=' + observerRootNodeId
       );
       observer.observe(root, { childList: true, subtree: true, attributes: false });
     }
@@ -6030,19 +6120,10 @@ export function generateModerationScript(config: InjectionConfig): string {
       } else if (!previousIsYouTube && nextIsYouTube) {
         diagLogLifecycleSnapshot('return_to_youtube', 'spa_detected', previousUrl, nextUrl);
       }
-      const expectedShortsAttrMode = isYouTubeShortsUrl(nextUrl);
-      const observerModeFrozen = diagObserverModeState.initialized && diagObserverModeState.current !== expectedShortsAttrMode;
-      console.log(
-        '[DIAG][OBSERVER_MODE]',
-        expectedShortsAttrMode ? 'shorts_attr_mode_on' : 'shorts_attr_mode_off',
-        'reason=url_change_expected_mode',
-        'observerModeFrozen=' + observerModeFrozen,
-        'observerModeCurrent=' + (diagObserverModeState.initialized ? String(diagObserverModeState.current) : 'unknown'),
-        'navId=' + NAV_ID,
-        'pageEpoch=' + state.pageEpoch,
-        'urlFamily=' + getDiagUrlFamily(nextUrl),
-        'url=' + nextUrl
-      );
+      const observerModeResult = reevaluateShortsObserverMode('url_change', nextUrl, {
+        forceLog: true,
+        extra: 'previousUrl=' + previousUrl,
+      });
       lastUrl = nextUrl;
       const holdEpoch = isYouTubeShortsUrl(previousUrl) && isYouTubeShortsUrl(nextUrl);
       if (!holdEpoch) {
@@ -6074,6 +6155,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       if (isYouTubeShortsUrl(previousUrl) || isYouTubeShortsUrl(nextUrl)) {
         resetShortsBlurContext('url_change');
+      }
+      if (observerModeResult.transitioned && observerModeResult.mode) {
+        scheduleYouTubeScan('url_change_mode_on');
       }
 
       if (batchTimer) {
