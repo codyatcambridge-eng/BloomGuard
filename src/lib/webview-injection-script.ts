@@ -867,6 +867,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     youtubeScrollTimeout: null,
     youtubeScrollHandler: null,
     youtubeMutationScanTimeout: null,
+    revealOverlayRepositionRaf: null,
+    revealOverlayLastReason: '',
+    revealOverlayScrollHandler: null,
+    revealOverlayResizeHandler: null,
     debugSummaryInterval: null,
     diagHeartbeatInterval: null,
     shortsHealthHealInterval: null,
@@ -1502,6 +1506,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (timerState.mainScrollTimeout) activeTimerNames.push('mainScrollTimeout');
     if (timerState.youtubeScrollTimeout) activeTimerNames.push('youtubeScrollTimeout');
     if (timerState.youtubeMutationScanTimeout) activeTimerNames.push('youtubeMutationScanTimeout');
+    if (timerState.revealOverlayRepositionRaf) activeTimerNames.push('revealOverlayRepositionRaf');
     if (batchTimer) activeTimerNames.push('batchTimer');
     if (mutationScanTimer) activeTimerNames.push('mutationScanTimer');
     if (adaptiveShortsWatchState.pendingRescanTimer) activeTimerNames.push('adaptiveShortsRescanTimeout');
@@ -3302,25 +3307,123 @@ export function generateModerationScript(config: InjectionConfig): string {
     return portal;
   }
 
-  function positionShortsRevealOverlay(overlay, element) {
-    if (!overlay || !element || typeof element.getBoundingClientRect !== 'function') return;
+  function setRevealOverlayAnchorTarget(overlay, element, reason) {
+    if (!overlay || overlay.nodeType !== 1) return;
+    const nextTarget = (element && element.nodeType === 1) ? element : null;
+    const previousTarget = (overlay.__mwAnchorTarget && overlay.__mwAnchorTarget.nodeType === 1)
+      ? overlay.__mwAnchorTarget
+      : null;
+    overlay.__mwAnchorTarget = nextTarget;
+    if (nextTarget) {
+      overlay.dataset.mwNodeId = getDiagNodeId(nextTarget);
+    }
+    if (DIAG_YT_BLUR && previousTarget !== nextTarget) {
+      console.log(
+        '[DIAG][REVEAL_POS] anchor_bound',
+        'overlayId=' + String((overlay.dataset && overlay.dataset.mwOverlayId) || 'unknown'),
+        'reason=' + (reason || 'unknown'),
+        'prevNode=' + getDiagNodeId(previousTarget),
+        'nextNode=' + getDiagNodeId(nextTarget),
+        'src=' + String((overlay.dataset && overlay.dataset.mwFor) || '').substring(0, 180)
+      );
+    }
+  }
+
+  function resolveShortsRevealOverlayAnchor(overlay) {
+    if (!overlay || overlay.nodeType !== 1) return null;
+    const src = String((overlay.dataset && overlay.dataset.mwFor) || '');
+    const normalizedSrc = normalizeUrl(src || '');
+    const boundAnchor = (
+      overlay.__mwAnchorTarget &&
+      overlay.__mwAnchorTarget.nodeType === 1 &&
+      overlay.__mwAnchorTarget.isConnected
+    ) ? overlay.__mwAnchorTarget : null;
+    if (boundAnchor) return boundAnchor;
+
+    const activeContainer = getActiveShortsPlayerContainer();
+    if (activeContainer && activeContainer.isConnected && doesShortsContainerMatchSrc(activeContainer, normalizedSrc)) {
+      return activeContainer;
+    }
+
+    const blurredNodes = document.querySelectorAll('[data-mw-moderated="blurred"][data-mw-src]');
+    for (let i = 0; i < blurredNodes.length; i += 1) {
+      const candidate = blurredNodes[i];
+      if (!candidate || candidate.nodeType !== 1 || !candidate.isConnected) continue;
+      if (candidate.dataset && candidate.dataset.mwSrc === src) return candidate;
+    }
+
+    if (activeContainer && activeContainer.isConnected) {
+      return activeContainer;
+    }
+    return null;
+  }
+
+  function getVisibleViewportRect(rect, viewportWidth, viewportHeight) {
+    const clippedLeft = Math.max(0, Math.min(viewportWidth, Number(rect.left) || 0));
+    const clippedTop = Math.max(0, Math.min(viewportHeight, Number(rect.top) || 0));
+    const clippedRight = Math.max(0, Math.min(viewportWidth, Number(rect.right) || 0));
+    const clippedBottom = Math.max(0, Math.min(viewportHeight, Number(rect.bottom) || 0));
+    const visibleWidth = Math.max(0, clippedRight - clippedLeft);
+    const visibleHeight = Math.max(0, clippedBottom - clippedTop);
+    return {
+      left: clippedLeft,
+      top: clippedTop,
+      right: clippedRight,
+      bottom: clippedBottom,
+      width: visibleWidth,
+      height: visibleHeight,
+    };
+  }
+
+  function positionShortsRevealOverlay(overlay, element, reason) {
+    if (!overlay) return false;
+    if (!element || !element.isConnected || typeof element.getBoundingClientRect !== 'function') {
+      overlay.style.display = 'none';
+      if (DIAG_YT_BLUR) {
+        console.log(
+          '[DIAG][REVEAL_POS] hidden',
+          'overlayId=' + String((overlay.dataset && overlay.dataset.mwOverlayId) || 'unknown'),
+          'reason=' + (reason || 'unknown'),
+          'hideReason=missing_or_disconnected_anchor'
+        );
+      }
+      return false;
+    }
     let rect = null;
     try {
       rect = element.getBoundingClientRect();
     } catch (e) {
       rect = null;
     }
-    if (!rect) return;
+    if (!rect) {
+      overlay.style.display = 'none';
+      return false;
+    }
     const badge = overlay.querySelector('span');
     const btn = overlay.querySelector('.mw-reveal-btn');
     const viewportWidth = Math.max(window.innerWidth || 0, 1);
     const viewportHeight = Math.max(window.innerHeight || 0, 1);
-    const centerX = Math.max(24, Math.min(viewportWidth - 24, Math.round(rect.left + (rect.width / 2))));
-    const centerY = Math.max(28, Math.min(viewportHeight - 28, Math.round(rect.top + (rect.height / 2))));
+    const visibleRect = getVisibleViewportRect(rect, viewportWidth, viewportHeight);
+    if (visibleRect.width < 16 || visibleRect.height < 16) {
+      overlay.style.display = 'none';
+      if (DIAG_YT_BLUR) {
+        console.log(
+          '[DIAG][REVEAL_POS] hidden',
+          'overlayId=' + String((overlay.dataset && overlay.dataset.mwOverlayId) || 'unknown'),
+          'reason=' + (reason || 'unknown'),
+          'hideReason=anchor_not_visible',
+          'anchorRect=' + Math.round(rect.left) + ',' + Math.round(rect.top) + ',' + Math.round(rect.width) + 'x' + Math.round(rect.height)
+        );
+      }
+      return false;
+    }
+    overlay.style.display = 'flex';
+    const centerX = Math.max(24, Math.min(viewportWidth - 24, Math.round(visibleRect.left + (visibleRect.width / 2))));
+    const centerY = Math.max(28, Math.min(viewportHeight - 28, Math.round(visibleRect.top + (visibleRect.height / 2))));
     if (badge && badge.nodeType === 1) {
       badge.style.position = 'absolute';
-      badge.style.left = Math.max(8, Math.min(viewportWidth - 100, Math.round(rect.left + 8))) + 'px';
-      badge.style.top = Math.max(8, Math.min(viewportHeight - 28, Math.round(rect.top + 8))) + 'px';
+      badge.style.left = Math.max(8, Math.min(viewportWidth - 100, Math.round(visibleRect.left + 8))) + 'px';
+      badge.style.top = Math.max(8, Math.min(viewportHeight - 28, Math.round(visibleRect.top + 8))) + 'px';
     }
     if (btn && btn.nodeType === 1) {
       btn.style.position = 'absolute';
@@ -3328,6 +3431,81 @@ export function generateModerationScript(config: InjectionConfig): string {
       btn.style.top = centerY + 'px';
       btn.style.transform = 'translate(-50%, -50%)';
     }
+    if (DIAG_YT_BLUR) {
+      console.log(
+        '[DIAG][REVEAL_POS] placed',
+        'overlayId=' + String((overlay.dataset && overlay.dataset.mwOverlayId) || 'unknown'),
+        'reason=' + (reason || 'unknown'),
+        'anchorNode=' + getDiagNodeId(element),
+        'anchorRect=' + Math.round(rect.left) + ',' + Math.round(rect.top) + ',' + Math.round(rect.width) + 'x' + Math.round(rect.height),
+        'visibleRect=' + Math.round(visibleRect.left) + ',' + Math.round(visibleRect.top) + ',' + Math.round(visibleRect.width) + 'x' + Math.round(visibleRect.height),
+        'button=' + centerX + ',' + centerY
+      );
+    }
+    return true;
+  }
+
+  function repositionAllShortsRevealOverlays(reason) {
+    if (!isShortsModeActive()) return;
+    const portal = document.getElementById(REVEAL_PORTAL_ID);
+    if (!portal || typeof portal.querySelectorAll !== 'function') return;
+    const overlays = portal.querySelectorAll('.mw-reveal-overlay');
+    for (let i = 0; i < overlays.length; i += 1) {
+      const overlay = overlays[i];
+      if (!overlay || !overlay.isConnected) continue;
+      const anchor = resolveShortsRevealOverlayAnchor(overlay);
+      if (!anchor) {
+        overlay.style.display = 'none';
+        continue;
+      }
+      setRevealOverlayAnchorTarget(overlay, anchor, 'reposition:' + (reason || 'unknown'));
+      positionShortsRevealOverlay(overlay, anchor, reason || 'reposition');
+    }
+  }
+
+  function scheduleShortsRevealOverlayReposition(reason) {
+    if (timerState.paused || timerState.teardownDone) return;
+    if (!isShortsModeActive()) return;
+    timerState.revealOverlayLastReason = reason || 'unknown';
+    if (timerState.revealOverlayRepositionRaf) return;
+    if (typeof window.requestAnimationFrame !== 'function') {
+      repositionAllShortsRevealOverlays(timerState.revealOverlayLastReason || 'sync');
+      return;
+    }
+    timerState.revealOverlayRepositionRaf = window.requestAnimationFrame(function() {
+      timerState.revealOverlayRepositionRaf = null;
+      const runReason = timerState.revealOverlayLastReason || 'raf';
+      timerState.revealOverlayLastReason = '';
+      repositionAllShortsRevealOverlays(runReason);
+    });
+  }
+
+  function cancelShortsRevealOverlayReposition(reason) {
+    if (!timerState.revealOverlayRepositionRaf) return;
+    if (typeof window.cancelAnimationFrame === 'function') {
+      window.cancelAnimationFrame(timerState.revealOverlayRepositionRaf);
+    }
+    timerState.revealOverlayRepositionRaf = null;
+    timerState.revealOverlayLastReason = '';
+    if (DIAG_YT_BLUR) {
+      console.log(
+        '[DIAG][REVEAL_POS] cancel',
+        'reason=' + (reason || 'unknown')
+      );
+    }
+  }
+
+  function ensureRevealOverlayPositionListeners() {
+    if (timerState.revealOverlayScrollHandler && timerState.revealOverlayResizeHandler) return;
+    timerState.revealOverlayScrollHandler = function() {
+      scheduleShortsRevealOverlayReposition('window_scroll');
+    };
+    timerState.revealOverlayResizeHandler = function() {
+      scheduleShortsRevealOverlayReposition('window_resize');
+    };
+    window.addEventListener('scroll', timerState.revealOverlayScrollHandler, { passive: true });
+    window.addEventListener('resize', timerState.revealOverlayResizeHandler, { passive: true });
+    window.addEventListener('orientationchange', timerState.revealOverlayResizeHandler);
   }
 
   function diagShortsRecycleLog(node, field, prevSrc, nextSrc) {
@@ -4261,6 +4439,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       existingOverlay.style.pointerEvents = 'none';
       existingOverlay.style.display = 'flex';
       if (shortsMode) {
+        setRevealOverlayAnchorTarget(existingOverlay, element, 'existing_overlay');
         const portal = ensureRevealPortal();
         if (portal && existingOverlay.parentElement !== portal) {
           portal.appendChild(existingOverlay);
@@ -4275,7 +4454,8 @@ export function generateModerationScript(config: InjectionConfig): string {
             }
           }
         }
-        positionShortsRevealOverlay(existingOverlay, element);
+        positionShortsRevealOverlay(existingOverlay, element, 'existing_overlay');
+        scheduleShortsRevealOverlayReposition('existing_overlay');
         console.log('[DIAG][REVEAL_UI] portal_update', 'itemKey=' + getDiagItemKey(src));
       }
       return;
@@ -4344,6 +4524,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     overlay.dataset.mwFor = src;
     overlay.dataset.mwNodeId = getDiagNodeId(element);
     overlay.dataset.mwOverlayId = overlayId;
+    setRevealOverlayAnchorTarget(overlay, element, 'overlay_created');
     overlay.style.cssText = [
       shortsMode ? 'position: fixed' : 'position: absolute',
       'inset: 0',
@@ -4521,7 +4702,8 @@ export function generateModerationScript(config: InjectionConfig): string {
           active.parentElement.removeChild(active);
         }
       }
-      positionShortsRevealOverlay(overlay, element);
+      positionShortsRevealOverlay(overlay, element, 'overlay_created');
+      scheduleShortsRevealOverlayReposition('overlay_created');
       console.log('[DIAG][REVEAL_UI] portal_update', 'itemKey=' + itemKey);
     }
     overlayParent.appendChild(overlay);
@@ -6280,6 +6462,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       
       if (shortsAttrMode && hasYouTubeChanges) {
+        scheduleShortsRevealOverlayReposition('mutation');
         scheduleYouTubeScan('mutation');
       }
     });
@@ -6320,6 +6503,7 @@ export function generateModerationScript(config: InjectionConfig): string {
 
     timerState.youtubeScrollHandler = () => {
       if (timerState.paused) return;
+      scheduleShortsRevealOverlayReposition('youtube_scroll');
       const currentScrollY = window.scrollY;
       const scrollDelta = Math.abs(currentScrollY - lastScrollY);
       
@@ -6462,6 +6646,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (timerState.mainScrollTimeout) count++;
     if (timerState.youtubeScrollTimeout) count++;
     if (timerState.youtubeMutationScanTimeout) count++;
+    if (timerState.revealOverlayRepositionRaf) count++;
     if (adaptiveShortsWatchState.pendingRescanTimer) count++;
     if (adaptiveShortsWatchState.observer) count++;
     count += timerState.initialTimeouts.length;
@@ -6629,6 +6814,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   // Scroll-triggered rescans
   timerState.mainScrollHandler = () => {
     if (timerState.paused) return;
+    scheduleShortsRevealOverlayReposition('main_scroll');
     clearNamedTimeout('mainScrollTimeout', 'reschedule');
     timerState.mainScrollTimeout = setTimeout(() => {
       scanFullPage();
@@ -6641,6 +6827,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   window.addEventListener('scroll', timerState.mainScrollHandler, { passive: true });
 
   ensureSensitivityToggle();
+  ensureRevealOverlayPositionListeners();
 
   // SPA navigation detection
   let lastUrl = window.location.href;
@@ -6701,6 +6888,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         } else {
           refreshAdaptiveShortsOverlayWatch('url_change');
         }
+        scheduleShortsRevealOverlayReposition('url_change_shorts');
       } else {
         stopAdaptiveShortsOverlayWatch('url_change_non_shorts');
       }
@@ -6751,6 +6939,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     clearNamedTimeout('mainScrollTimeout', reason);
     clearNamedTimeout('youtubeScrollTimeout', reason);
     clearNamedTimeout('youtubeMutationScanTimeout', reason);
+    cancelShortsRevealOverlayReposition(reason || 'stopManagedTimers');
     if (batchTimer) {
       clearTimeout(batchTimer);
       batchTimer = null;
@@ -6813,6 +7002,15 @@ export function generateModerationScript(config: InjectionConfig): string {
       window.removeEventListener('scroll', timerState.youtubeScrollHandler);
       timerState.youtubeScrollHandler = null;
     }
+    if (timerState.revealOverlayScrollHandler) {
+      window.removeEventListener('scroll', timerState.revealOverlayScrollHandler);
+      timerState.revealOverlayScrollHandler = null;
+    }
+    if (timerState.revealOverlayResizeHandler) {
+      window.removeEventListener('resize', timerState.revealOverlayResizeHandler);
+      window.removeEventListener('orientationchange', timerState.revealOverlayResizeHandler);
+      timerState.revealOverlayResizeHandler = null;
+    }
     if (state.viewportObserver && typeof state.viewportObserver.disconnect === 'function') {
       state.viewportObserver.disconnect();
       state.viewportObserver = null;
@@ -6828,12 +7026,14 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (document.visibilityState === 'visible') {
       resumeManagedTimers('visibility_visible');
       refreshShortsFreshnessOnReentry('visibility_visible');
+      scheduleShortsRevealOverlayReposition('visibility_visible');
       return;
     }
     pauseManagedTimers('visibility_hidden');
   });
   window.addEventListener('pageshow', () => {
     refreshShortsFreshnessOnReentry('pageshow');
+    scheduleShortsRevealOverlayReposition('pageshow');
   });
   window.addEventListener('beforeunload', () => teardownManagedScheduling('beforeunload'));
   window.addEventListener('pagehide', () => teardownManagedScheduling('pagehide'));

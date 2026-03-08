@@ -273,6 +273,7 @@ export const NativeWebViewBrowser = () => {
     url: '',
     at: 0,
   });
+  const legacyPollSelfDisabledContextRef = useRef<string | null>(null);
   const [shortsLegacyFallbackVersion, setShortsLegacyFallbackVersion] = useState(0);
 
   const UNSAFE_STREAK_REQUIRED = 2;
@@ -2243,6 +2244,11 @@ export const NativeWebViewBrowser = () => {
     }
     const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
     const stickyShortsMode = isYouTubeShortsUrl(activeUrl);
+    const isNonShortsYouTubeContext = isYouTubeDomainUrl(activeUrl) && !stickyShortsMode;
+    const pollContextKey = String(activeNavIdRef.current) + ':' + getUrlFamily(activeUrl);
+    if (isNonShortsYouTubeContext && legacyPollSelfDisabledContextRef.current === pollContextKey) {
+      return;
+    }
     const hasActiveShortsProbe = shortsLegacyFallbackRef.current.untilMs > Date.now();
     if (stickyShortsMode && !hasActiveShortsProbe) {
       console.log(
@@ -2281,6 +2287,7 @@ export const NativeWebViewBrowser = () => {
     let lastActivityAt = Date.now();
     let lastEmptyPollReason = 'none';
     let lastProducerMode = 'unknown';
+    let lastPollStatus = 'unknown';
     let idleMode = false;
     let idlePollMs = IDLE_MIN_POLL_MS;
     const shortsProbeDeadlineMs = stickyShortsMode
@@ -2388,6 +2395,7 @@ export const NativeWebViewBrowser = () => {
           return false;
         }
         lastProducerMode = 'unknown';
+        lastPollStatus = 'unknown';
         // Get and clear pending requests from WebView's global queue
         const getQueueScript = `
           (function() {
@@ -2458,6 +2466,7 @@ export const NativeWebViewBrowser = () => {
 
         let items: Array<Record<string, unknown>> = [];
         if (Array.isArray(parsedPayload)) {
+          lastPollStatus = parsedPayload.length > 0 ? 'ITEMS' : 'EMPTY';
           items = parsedPayload as Array<Record<string, unknown>>;
         } else if (parsedPayload && typeof parsedPayload === 'object') {
           const payloadRecord = parsedPayload as {
@@ -2468,6 +2477,7 @@ export const NativeWebViewBrowser = () => {
             producerMode?: unknown;
           };
           const status = String(payloadRecord.status || '').toUpperCase();
+          lastPollStatus = status || 'unknown';
           const reason = String(payloadRecord.reason || '');
           const producerMode = String(payloadRecord.producerMode || 'unknown');
           lastProducerMode = producerMode;
@@ -2608,6 +2618,26 @@ export const NativeWebViewBrowser = () => {
         exitIdleMode('request');
         pollDelayMs = MIN_POLL_MS;
       } else {
+        const shouldSelfDisableNonShortsLegacyPoll =
+          isNonShortsYouTubeContext &&
+          lastPollStatus === 'EMPTY' &&
+          lastEmptyPollReason === 'queue_empty' &&
+          lastProducerMode === 'disabled';
+        if (shouldSelfDisableNonShortsLegacyPoll) {
+          legacyPollSelfDisabledContextRef.current = pollContextKey;
+          cancelled = true;
+          console.log(
+            '[DIAG][LEGACY_POLL_SELF_DISABLE]',
+            'scope=non_shorts_youtube',
+            'reason=empty_queue_disabled_producer',
+            'status=' + lastPollStatus,
+            'emptyReason=' + lastEmptyPollReason,
+            'producer=' + lastProducerMode,
+            'navId=' + activeNavIdRef.current,
+            'url=' + (activeUrl || 'unknown'),
+          );
+          return;
+        }
         consecutiveEmptyPolls += 1;
         maybeEnterIdleMode();
         if (idleMode) {
