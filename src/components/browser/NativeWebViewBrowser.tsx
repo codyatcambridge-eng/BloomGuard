@@ -253,6 +253,7 @@ export const NativeWebViewBrowser = () => {
 
   const UNSAFE_STREAK_REQUIRED = 2;
   const SAFE_STREAK_REQUIRED = 2;
+  const PENDING_REINJECT_WINDOW_MS = 1500;
   const isDebugMode = localSettings.debug_mode === true;
   const debugLog = useCallback((...args: unknown[]) => {
     if (!isDebugMode) return;
@@ -367,11 +368,20 @@ export const NativeWebViewBrowser = () => {
   const duplicateInjectionSkipsRef = useRef(0);
   const didInjectAfterSettingsLoadedRef = useRef(false);
   const loadEndInjectTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const pendingReinjectTimerRef = useRef<NodeJS.Timeout | null>(null);
   const navigationSeqRef = useRef(0);
   const activeNavIdRef = useRef(0);
   const currentUrlRef = useRef('');
   const webViewActiveInstanceIdRef = useRef<number | null>(null);
   const webViewListenersAttachedRef = useRef(false);
+  const pendingReinjectRef = useRef<{
+    active: boolean;
+    navId: number;
+    pageEpoch: number;
+    urlFamily: string;
+    reason: string;
+    enteredAt: number;
+  } | null>(null);
   const diagYtBlurEpochRef = useRef({
     staleHostRejectCount: 0,
     epochHeldCount: 0,
@@ -570,6 +580,64 @@ export const NativeWebViewBrowser = () => {
     }
   }, []);
 
+  const clearPendingReinjectTimer = useCallback(() => {
+    if (!pendingReinjectTimerRef.current) return;
+    clearTimeout(pendingReinjectTimerRef.current);
+    pendingReinjectTimerRef.current = null;
+  }, []);
+
+  const logSafeResetDiag = useCallback((
+    event: 'safe_reset_deferred' | 'pending_reinject_enter' | 'pending_reinject_exit',
+    reason: string,
+    urlHint?: string,
+  ) => {
+    const diagUrl = urlHint || currentUrlRef.current || 'unknown';
+    const pending = pendingReinjectRef.current;
+    const urlFamily = getCacheFamilyContext(diagUrl);
+    console.log(
+      '[DIAG][SAFE_RESET]',
+      'event=' + event,
+      'reason=' + reason,
+      'navId=' + activeNavIdRef.current,
+      'pageEpoch=' + webViewPageEpochRef.current,
+      'urlFamily=' + urlFamily,
+      'activeInstanceId=' + (webViewActiveInstanceIdRef.current ?? 'none'),
+      'pending=' + (pending?.active ? 'true' : 'false'),
+    );
+  }, []);
+
+  const exitPendingReinject = useCallback((reason: string, urlHint?: string) => {
+    const pending = pendingReinjectRef.current;
+    if (!pending?.active) return;
+    clearPendingReinjectTimer();
+    pendingReinjectRef.current = null;
+    logSafeResetDiag('pending_reinject_exit', reason, urlHint);
+  }, [clearPendingReinjectTimer, logSafeResetDiag]);
+
+  const enterPendingReinject = useCallback((reason: string, urlHint?: string) => {
+    const targetUrl = urlHint || currentUrlRef.current || '';
+    const targetFamily = getCacheFamilyContext(targetUrl);
+    const pendingNavId = activeNavIdRef.current;
+    clearPendingReinjectTimer();
+    pendingReinjectRef.current = {
+      active: true,
+      navId: pendingNavId,
+      pageEpoch: webViewPageEpochRef.current,
+      urlFamily: targetFamily,
+      reason,
+      enteredAt: Date.now(),
+    };
+    logSafeResetDiag('pending_reinject_enter', reason, targetUrl);
+    pendingReinjectTimerRef.current = setTimeout(() => {
+      const pending = pendingReinjectRef.current;
+      if (!pending?.active || pending.navId !== pendingNavId) return;
+      pendingReinjectRef.current = null;
+      pendingReinjectTimerRef.current = null;
+      logSafeResetDiag('pending_reinject_exit', reason + '_timeout', targetUrl);
+      setCentralBlurState(false, 'url_change_safe_reset_pending_timeout');
+    }, PENDING_REINJECT_WINDOW_MS);
+  }, [clearPendingReinjectTimer, logSafeResetDiag, setCentralBlurState, PENDING_REINJECT_WINDOW_MS]);
+
   const logLifecycleSnapshot = useCallback((event: string, urlHint?: string, reason?: string) => {
     const currentUrl = urlHint || currentUrlRef.current || 'unknown';
     const activeTimerNames: string[] = [];
@@ -767,6 +835,7 @@ export const NativeWebViewBrowser = () => {
         'navId=' + navId,
         'url=' + (targetUrl || 'unknown'),
       );
+      exitPendingReinject('inject_success', targetUrl);
     } catch (error) {
       console.error('[MW-Bridge] Moderation script injection failed:', error);
       console.log(
@@ -779,7 +848,7 @@ export const NativeWebViewBrowser = () => {
     } finally {
       injectionInFlightRef.current = false;
     }
-  }, [ENABLE_SIGNAL_PIPELINE, settingsLoaded, isRuntimeModerationEnabled, getModerationConfig, localSettings.diag_youtube_shorts]);
+  }, [ENABLE_SIGNAL_PIPELINE, settingsLoaded, isRuntimeModerationEnabled, getModerationConfig, localSettings.diag_youtube_shorts, exitPendingReinject]);
 
   const getWebViewListenerDiagContext = useCallback(() => {
     return {
@@ -814,7 +883,16 @@ export const NativeWebViewBrowser = () => {
       injectionInFlightRef.current = false;
       blurReadyRef.current = false;
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
-      setCentralBlurState(false, 'navigation_load_start');
+      const canDeferLoadStartReset =
+        pendingReinjectRef.current?.active === true &&
+        isYouTubeFamilyContext(getCacheFamilyContext(url));
+      if (canDeferLoadStartReset) {
+        logSafeResetDiag('safe_reset_deferred', 'navigation_load_start_pending_reinject', url);
+        queueCurrentBlurState('navigation_load_start_deferred');
+      } else {
+        exitPendingReinject('navigation_load_start', url);
+        setCentralBlurState(false, 'navigation_load_start');
+      }
       setFlashGuardState?.(true, 'navigation_start');
       // Early inject to attach per-element pre-blur before first paint.
       if (executeScript) {
@@ -870,10 +948,20 @@ export const NativeWebViewBrowser = () => {
       clearLoadEndInjectTimer();
       injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
+      exitPendingReinject('load_error', url);
       setFallbackUrl(url);
       navigate('fallback', '', url);
     },
     onUrlChange: (url) => {
+      const previousUrl = currentUrlRef.current || webViewState.currentUrl || '';
+      const previousFamily = getCacheFamilyContext(previousUrl);
+      const nextFamily = getCacheFamilyContext(url);
+      const deferReason = `youtube_internal_nav_${previousFamily}_to_${nextFamily}`;
+      const shouldDeferSafeReset =
+        !!previousUrl &&
+        isRuntimeModerationEnabled &&
+        isYouTubeFamilyContext(previousFamily) &&
+        isYouTubeFamilyContext(nextFamily);
       console.log('[Browser] ======= URL CHANGE =======');
       console.log('[Browser] New URL:', url);
       console.log('[DIAG][LOAD] stage=url_change url=' + toDiagUrl(url));
@@ -888,13 +976,21 @@ export const NativeWebViewBrowser = () => {
       injectionInFlightRef.current = false;
       blurReadyRef.current = false;
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
-      setCentralBlurState(false, 'url_change_safe_reset');
+      if (shouldDeferSafeReset) {
+        logSafeResetDiag('safe_reset_deferred', deferReason, url);
+        enterPendingReinject(deferReason, url);
+        queueCurrentBlurState('url_change_safe_reset_deferred');
+      } else {
+        exitPendingReinject(`context_exit_${previousFamily}_to_${nextFamily}`, url);
+        setCentralBlurState(false, 'url_change_safe_reset');
+      }
     },
     onNavigationRequest: handleNavigationRequest,
     onClose: () => {
       console.log('[Browser] ======= WEBVIEW CLOSED =======');
       teardownWebViewScheduling('webview_closed', webViewState.currentUrl).catch(() => undefined);
       clearLoadEndInjectTimer();
+      exitPendingReinject('webview_closed', webViewState.currentUrl || currentUrlRef.current || '');
       moderationBridge.clearCache({
         reason: 'webview_closed',
         previousFamily: getCacheFamilyContext(webViewState.currentUrl || currentUrlRef.current || ''),
@@ -1334,11 +1430,13 @@ export const NativeWebViewBrowser = () => {
   useEffect(() => {
     return () => {
       clearLoadEndInjectTimer();
+      clearPendingReinjectTimer();
+      pendingReinjectRef.current = null;
       if (blurRetryTimerRef.current) {
         clearTimeout(blurRetryTimerRef.current);
       }
     };
-  }, [clearLoadEndInjectTimer]);
+  }, [clearLoadEndInjectTimer, clearPendingReinjectTimer]);
 
   // ==================== MODERATION MESSAGE HANDLING ====================
   // 
@@ -2608,6 +2706,7 @@ export const NativeWebViewBrowser = () => {
     if (isNative && webViewState.isOpen) {
       await closeWebView();
     }
+    exitPendingReinject('home_reset', webViewState.currentUrl || currentUrlRef.current || '');
     moderationBridge.clearCache({
       reason: 'home_reset',
       previousFamily: currentFamily,
@@ -2630,7 +2729,7 @@ export const NativeWebViewBrowser = () => {
     setUrlInput('');
     setFallbackUrl('');
     goHome();
-  }, [isNative, webViewState.isOpen, webViewState.currentUrl, closeWebView, goHome, moderationBridge, setCentralBlurState, teardownWebViewScheduling]);
+  }, [isNative, webViewState.isOpen, webViewState.currentUrl, closeWebView, goHome, moderationBridge, setCentralBlurState, teardownWebViewScheduling, exitPendingReinject]);
 
   // Manual scan trigger for current page
   const handleScanPage = useCallback(async () => {
