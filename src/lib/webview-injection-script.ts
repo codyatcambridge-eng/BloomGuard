@@ -5074,43 +5074,199 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
   }
 
+  const SHORTS_FRAME_CAPTURE_MAX_EDGE = 512;
+  const SHORTS_FRAME_CAPTURE_JPEG_QUALITY = 0.72;
+
+  function logScanSourceFallback(reason, videoNodeId, videoCurrentSrc, extraDetails) {
+    diagScanSourceCounters.scan_source_fallback_reason += 1;
+    const details =
+      'count=' + diagScanSourceCounters.scan_source_fallback_reason +
+      ' reason=' + (reason || 'unknown') +
+      ' itemIdentity=' + (videoNodeId || 'unknown') +
+      ' sourceType=video-poster' +
+      ' currentSrc=' + String(videoCurrentSrc || '').substring(0, 180) +
+      (extraDetails ? (' ' + extraDetails) : '');
+    diagLogScanSource('fallback_reason', details);
+    diagLogScanSource('scan_source_fallback_reason', details);
+  }
+
+  function isActiveVisibleShortsVideo(video) {
+    if (!isShortsModeActive()) return false;
+    if (!video || video.nodeType !== 1 || !video.isConnected) return false;
+    if (!isElementVisible(video)) return false;
+    const activeContainer = getActiveShortsPlayerContainer();
+    if (!activeContainer || !activeContainer.isConnected) return false;
+    const localContainer = getShortsCardOrPlayerContainerFromNode(video);
+    if (activeContainer === video) return true;
+    if (typeof activeContainer.contains === 'function' && activeContainer.contains(video)) return true;
+    if (localContainer && localContainer.isConnected) {
+      if (localContainer === activeContainer) return true;
+      if (typeof localContainer.contains === 'function' && localContainer.contains(activeContainer)) return true;
+      if (typeof activeContainer.contains === 'function' && activeContainer.contains(localContainer)) return true;
+    }
+    return false;
+  }
+
+  function getShortsFrameScanKey(video) {
+    const source = getDiagSourceFields(video);
+    const shortsUrlId = getCurrentShortsUrlId() || 'none';
+    const normalizedCurrent = normalizeUrl(source.currentSrc || '') || String(source.currentSrc || '');
+    const normalizedPoster = normalizeUrl(source.poster || '') || String(source.poster || '');
+    return (
+      shortsUrlId + '|' +
+      String(normalizedCurrent || '').substring(0, 180) + '|' +
+      String(normalizedPoster || '').substring(0, 180)
+    );
+  }
+
+  function tryCaptureActiveShortsVideoFrame(video) {
+    if (!video || video.nodeType !== 1 || !video.isConnected) {
+      return { ok: false, reason: 'invalid_video_node' };
+    }
+    const readyState = Number.isFinite(video.readyState) ? video.readyState : 0;
+    if (readyState < 2) {
+      return { ok: false, reason: 'video_not_ready', readyState: readyState };
+    }
+    const sourceWidth = Math.max(0, Number(video.videoWidth) || 0);
+    const sourceHeight = Math.max(0, Number(video.videoHeight) || 0);
+    if (sourceWidth < 2 || sourceHeight < 2) {
+      return { ok: false, reason: 'video_dimensions_unavailable', width: sourceWidth, height: sourceHeight };
+    }
+
+    const maxEdge = SHORTS_FRAME_CAPTURE_MAX_EDGE;
+    const scale = Math.min(1, maxEdge / Math.max(sourceWidth, sourceHeight));
+    const captureWidth = Math.max(1, Math.round(sourceWidth * scale));
+    const captureHeight = Math.max(1, Math.round(sourceHeight * scale));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = captureWidth;
+    canvas.height = captureHeight;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) {
+      return { ok: false, reason: 'canvas_context_unavailable' };
+    }
+
+    try {
+      ctx.drawImage(video, 0, 0, captureWidth, captureHeight);
+    } catch (err) {
+      return {
+        ok: false,
+        reason: 'draw_image_failed',
+        error: (err && err.message) ? String(err.message) : String(err || ''),
+      };
+    }
+
+    let dataUrl = '';
+    try {
+      dataUrl = canvas.toDataURL('image/jpeg', SHORTS_FRAME_CAPTURE_JPEG_QUALITY);
+    } catch (err) {
+      return {
+        ok: false,
+        reason: 'to_data_url_failed',
+        error: (err && err.message) ? String(err.message) : String(err || ''),
+      };
+    }
+    if (!dataUrl || dataUrl.length < 1000) {
+      return {
+        ok: false,
+        reason: 'frame_data_too_small',
+        dataLength: dataUrl ? dataUrl.length : 0,
+      };
+    }
+
+    return {
+      ok: true,
+      src: dataUrl,
+      width: captureWidth,
+      height: captureHeight,
+      readyState: readyState,
+    };
+  }
+
   function scanVideoPoster(video) {
     const videoNodeId = getDiagNodeId(video);
     const videoCurrentSrc = String((video && video.currentSrc) || (video && video.src) || '').substring(0, 180);
-    if (isShortsModeActive()) {
-      console.log(
-        '[DIAG][VIDEO] found video element',
-        'id=' + videoNodeId,
-        'readyState=' + (Number.isFinite(video.readyState) ? video.readyState : 'n/a'),
-        'currentTime=' + (Number.isFinite(video.currentTime) ? video.currentTime.toFixed(3) : 'n/a')
+    const activeShortsVideo = isActiveVisibleShortsVideo(video);
+    const shortsFrameKey = activeShortsVideo ? getShortsFrameScanKey(video) : '';
+    if (activeShortsVideo) {
+      diagLogScanSource(
+        'active_shorts_detected',
+        'itemIdentity=' + videoNodeId +
+        ' sourceType=video-frame' +
+        ' active=true' +
+        ' frameKey=' + String(shortsFrameKey || '').substring(0, 180) +
+        ' currentSrc=' + videoCurrentSrc
       );
-      console.log(
-        '[DIAG][VIDEO] frame_capture_attempt',
-        'success=false',
-        'currentTime=' + (Number.isFinite(video.currentTime) ? video.currentTime.toFixed(3) : 'n/a')
-      );
+      if (video.dataset.mwLastShortsFrameAttemptKey !== shortsFrameKey) {
+        video.dataset.mwLastShortsFrameAttemptKey = shortsFrameKey;
+        const frameCapture = tryCaptureActiveShortsVideoFrame(video);
+        if (frameCapture.ok && frameCapture.src) {
+          const queuedFrame = queueForScan(frameCapture.src, video, 'video-frame');
+          if (queuedFrame) {
+            diagScanSourceCounters.video_frame_scan_used += 1;
+            diagLogScanSource(
+              'video_frame_scan_used',
+              'count=' + diagScanSourceCounters.video_frame_scan_used +
+              ' itemIdentity=' + videoNodeId +
+              ' sourceType=video-frame' +
+              ' used=true' +
+              ' reason=active_shorts_frame_capture' +
+              ' capture=' + frameCapture.width + 'x' + frameCapture.height +
+              ' readyState=' + frameCapture.readyState +
+              ' currentSrc=' + videoCurrentSrc
+            );
+            diagScanRunLog(
+              'scanVideoPoster',
+              video,
+              frameCapture.src,
+              true,
+              'sourceType=video-frame capture=' + frameCapture.width + 'x' + frameCapture.height
+            );
+            state.stats.videoPosters++;
+            return;
+          }
+          logScanSourceFallback(
+            'frame_queue_rejected',
+            videoNodeId,
+            videoCurrentSrc,
+            'sourceType=video-frame capture=' + frameCapture.width + 'x' + frameCapture.height
+          );
+        } else {
+          logScanSourceFallback(
+            frameCapture.reason || 'frame_capture_failed',
+            videoNodeId,
+            videoCurrentSrc,
+            'sourceType=video-frame'
+          );
+        }
+      } else {
+        diagScanRunLog('scanVideoPoster', video, '', false, 'reason=frame_attempt_already_done_for_active_key');
+      }
     }
     const poster = video.poster ||
                    video.dataset.poster ||
                    video.getAttribute('data-poster');
     
     if (!poster) {
-      diagScanSourceCounters.scan_source_fallback_reason += 1;
-      diagLogScanSource(
-        'scan_source_fallback_reason',
-        'count=' + diagScanSourceCounters.scan_source_fallback_reason +
-        ' reason=poster_missing_no_frame_scan' +
-        ' itemIdentity=' + videoNodeId +
-        ' sourceType=video-poster' +
-        ' currentSrc=' + videoCurrentSrc
+      const posterMissingFallbackReason = activeShortsVideo
+        ? 'poster_missing_after_frame_path'
+        : 'poster_missing_no_frame_scan';
+      logScanSourceFallback(
+        posterMissingFallbackReason,
+        videoNodeId,
+        videoCurrentSrc,
+        'sourceType=video-poster'
       );
+      const frameUnusedReason = activeShortsVideo
+        ? 'poster_missing_after_frame_path'
+        : 'poster_missing_frame_scan_unavailable';
       diagLogScanSource(
         'video_frame_scan_used',
         'count=' + diagScanSourceCounters.video_frame_scan_used +
         ' itemIdentity=' + videoNodeId +
         ' sourceType=video-frame' +
         ' used=false' +
-        ' reason=poster_missing_frame_scan_unavailable'
+        ' reason=' + frameUnusedReason
       );
       diagScanRunLog('scanVideoPoster', video, '', false, 'reason=no_poster');
       if (isShortsModeActive()) {
@@ -5149,7 +5305,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       ' itemIdentity=' + videoNodeId +
       ' sourceType=video-frame' +
       ' used=false' +
-      ' reason=poster_available_prefers_poster'
+      ' reason=' + (activeShortsVideo ? 'poster_fallback' : 'poster_available_prefers_poster')
     );
     if (isShortsModeActive()) {
       console.log(
