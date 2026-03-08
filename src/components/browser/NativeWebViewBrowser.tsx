@@ -794,6 +794,31 @@ export const NativeWebViewBrowser = () => {
       'navId=' + navId,
       'url=' + (targetUrl || 'unknown'),
     );
+    const activeInstanceId = (
+      typeof webViewActiveInstanceIdRef.current === 'number' &&
+      Number.isFinite(webViewActiveInstanceIdRef.current)
+    ) ? webViewActiveInstanceIdRef.current : null;
+    const hostContextSyncScript = `
+      (function() {
+        try {
+          window.__MW_ACTIVE_INSTANCE_ID__ = ${activeInstanceId === null ? 'null' : String(activeInstanceId)};
+          window.__MW_HOST_NAV_ID__ = ${navId};
+          window.__MW_HOST_PAGE_EPOCH__ = ${webViewPageEpochRef.current};
+          return 'OK';
+        } catch (e) {
+          return 'ERR';
+        }
+      })();
+    `;
+    await scriptExecutor(hostContextSyncScript);
+    console.log(
+      '[DIAG][INJECT] host_context_sync',
+      'reason=' + reason,
+      'navId=' + navId,
+      'pageEpoch=' + webViewPageEpochRef.current,
+      'activeInstanceId=' + (activeInstanceId ?? 'none'),
+      'url=' + (targetUrl || 'unknown'),
+    );
     const config = {
       ...getModerationConfig(),
       enabled: isRuntimeModerationEnabled,
@@ -2064,12 +2089,14 @@ export const NativeWebViewBrowser = () => {
     const IDLE_MIN_POLL_MS = 2000;
     const IDLE_MAX_POLL_MS = 5000;
     const IDLE_BACKOFF_MS = 500;
+    const SHORTS_EMPTY_POLL_MS = 6000;
     let pollDelayMs = MIN_POLL_MS;
     let cancelled = false;
     let pollTimer: NodeJS.Timeout | null = null;
     let pollInFlight = false;
     let consecutiveEmptyPolls = 0;
     let lastActivityAt = Date.now();
+    let lastEmptyPollReason = 'none';
     let idleMode = false;
     let idlePollMs = IDLE_MIN_POLL_MS;
 
@@ -2161,11 +2188,25 @@ export const NativeWebViewBrowser = () => {
         // Get and clear pending requests from WebView's global queue
         const getQueueScript = `
           (function() {
-            if (!window.__GC_SCAN_QUEUE__ || window.__GC_SCAN_QUEUE__.length === 0) {
-              return 'EMPTY';
+            var queue = window.__GC_SCAN_QUEUE__;
+            var producerMode = typeof window.__MW_LEGACY_QUEUE_PRODUCER__ === 'string'
+              ? window.__MW_LEGACY_QUEUE_PRODUCER__
+              : 'unknown';
+            if (!Array.isArray(queue) || queue.length === 0) {
+              return JSON.stringify({
+                status: 'EMPTY',
+                reason: Array.isArray(queue) ? 'queue_empty' : 'queue_missing',
+                queueLength: Array.isArray(queue) ? queue.length : 0,
+                producerMode: producerMode,
+              });
             }
-            var items = window.__GC_SCAN_QUEUE__.splice(0, 5);
-            return JSON.stringify(items);
+            var items = queue.splice(0, 5);
+            return JSON.stringify({
+              status: 'ITEMS',
+              items: items,
+              queueLength: queue.length,
+              producerMode: producerMode,
+            });
           })();
         `;
         
@@ -2173,39 +2214,96 @@ export const NativeWebViewBrowser = () => {
         const diagUrl = webViewState.currentUrl || currentUrlRef.current || '';
         const resultTypeLabel = result === undefined ? 'undefined' : typeof result;
         const previewValue = result === undefined ? 'undefined' : result === null ? 'null' : String(result);
-        const trimmedResult = typeof result === 'string' ? result.trim() : '';
-        const startsWithObjArr = typeof result === 'string' && trimmedResult.startsWith('[');
         logYouTubeDiag(
           'legacyPoll',
           'legacy-poll type=' + resultTypeLabel +
           ' isUndefined=' + (result === undefined) +
           ' isEMPTY=' + (result === 'EMPTY') +
-          ' startsWithObjArr=' + startsWithObjArr +
           ' preview=' + previewValue.substring(0, 24) +
           ' url=' + (diagUrl || 'unknown'),
           diagUrl
         );
-        
-        if (!result || result === 'EMPTY' || result === 'null') {
+
+        if (!result || result === 'null') {
+          lastEmptyPollReason = 'null_or_empty_result';
+          logYouTubeDiag(
+            'emptyPollReason',
+            'empty_poll_reason=' + lastEmptyPollReason +
+            ' navId=' + activeNavIdRef.current +
+            ' url=' + (diagUrl || 'unknown'),
+            diagUrl
+          );
           return false;
         }
-        
-        let items;
+
+        let parsedPayload: unknown = null;
         try {
-          items = JSON.parse(result);
+          parsedPayload = JSON.parse(result);
         } catch (e) {
+          if (result === 'EMPTY') {
+            lastEmptyPollReason = 'legacy_empty_literal';
+            logYouTubeDiag(
+              'emptyPollReason',
+              'empty_poll_reason=' + lastEmptyPollReason +
+              ' navId=' + activeNavIdRef.current +
+              ' url=' + (diagUrl || 'unknown'),
+              diagUrl
+            );
+          }
           return false;
         }
-        
+
+        let items: Array<Record<string, unknown>> = [];
+        if (Array.isArray(parsedPayload)) {
+          items = parsedPayload as Array<Record<string, unknown>>;
+        } else if (parsedPayload && typeof parsedPayload === 'object') {
+          const payloadRecord = parsedPayload as {
+            status?: unknown;
+            reason?: unknown;
+            items?: unknown;
+            queueLength?: unknown;
+            producerMode?: unknown;
+          };
+          const status = String(payloadRecord.status || '').toUpperCase();
+          const reason = String(payloadRecord.reason || '');
+          const producerMode = String(payloadRecord.producerMode || 'unknown');
+          if (status === 'EMPTY') {
+            lastEmptyPollReason = reason || 'queue_empty';
+            logYouTubeDiag(
+              'emptyPollReason',
+              'empty_poll_reason=' + lastEmptyPollReason +
+              ' producer=' + producerMode +
+              ' queueLength=' + String(payloadRecord.queueLength ?? 'unknown') +
+              ' navId=' + activeNavIdRef.current +
+              ' url=' + (diagUrl || 'unknown'),
+              diagUrl
+            );
+            return false;
+          }
+          if (status === 'ITEMS' && Array.isArray(payloadRecord.items)) {
+            items = payloadRecord.items as Array<Record<string, unknown>>;
+          }
+        }
+
         if (!Array.isArray(items) || items.length === 0) {
+          lastEmptyPollReason = 'queue_empty_after_parse';
+          logYouTubeDiag(
+            'emptyPollReason',
+            'empty_poll_reason=' + lastEmptyPollReason +
+            ' navId=' + activeNavIdRef.current +
+            ' url=' + (diagUrl || 'unknown'),
+            diagUrl
+          );
           return false;
         }
+        lastEmptyPollReason = 'none';
         
         console.log('[MW-Host] Legacy poll: found', items.length, 'items in queue');
         
         // Process each scan request
         for (const item of items) {
-          const { src, thresholds } = item;
+          const src = typeof item.src === 'string' ? item.src : '';
+          const thresholds = item.thresholds;
           
           if (!src) continue;
           
@@ -2264,14 +2362,25 @@ export const NativeWebViewBrowser = () => {
       } else if (hadWork) {
         lastActivityAt = Date.now();
         consecutiveEmptyPolls = 0;
+        lastEmptyPollReason = 'none';
         exitIdleMode('request');
         pollDelayMs = MIN_POLL_MS;
       } else {
+        const diagUrl = webViewState.currentUrl || currentUrlRef.current || '';
+        const inShorts = isYouTubeShortsUrl(diagUrl);
         consecutiveEmptyPolls += 1;
         maybeEnterIdleMode();
         if (idleMode) {
           idlePollMs = Math.min(idlePollMs + IDLE_BACKOFF_MS, IDLE_MAX_POLL_MS);
           pollDelayMs = idlePollMs;
+        } else if (
+          inShorts &&
+          (lastEmptyPollReason === 'queue_empty' ||
+            lastEmptyPollReason === 'legacy_empty_literal' ||
+            lastEmptyPollReason === 'queue_empty_after_parse' ||
+            lastEmptyPollReason === 'queue_missing')
+        ) {
+          pollDelayMs = Math.max(SHORTS_EMPTY_POLL_MS, Math.min(pollDelayMs + EMPTY_BACKOFF_MS, MAX_POLL_MS));
         } else {
           pollDelayMs = Math.min(pollDelayMs + EMPTY_BACKOFF_MS, MAX_POLL_MS);
         }
