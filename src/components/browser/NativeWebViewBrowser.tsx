@@ -140,6 +140,16 @@ const getCacheFamilyContext = (value?: string): string => {
   return domain || 'unknown';
 };
 
+const resolveNavigationUrl = (value?: string, fallbackBase?: string): string => {
+  const candidate = typeof value === 'string' ? value.trim() : '';
+  if (!candidate) return '';
+  try {
+    return fallbackBase ? new URL(candidate, fallbackBase).toString() : new URL(candidate).toString();
+  } catch {
+    return '';
+  }
+};
+
 const isYouTubeFamilyContext = (family: string): boolean => {
   return family === 'youtube_www' || family === 'youtube_mobile' || family === 'youtube_other';
 };
@@ -238,7 +248,18 @@ export const NativeWebViewBrowser = () => {
   const { effectiveShieldState } = useGateRuntime();
   const deviceId = useDeviceId();
   const effectiveShieldEnabled = effectiveShieldState.shieldEnabled;
-  const isRuntimeModerationEnabled = effectiveShieldEnabled && localSettings.blur_dial > 0;
+  const isRuntimeModerationEnabled =
+    effectiveShieldEnabled &&
+    localSettings.shield_active &&
+    localSettings.blur_dial > 0;
+  const runtimeModerationDisabledReason =
+    !effectiveShieldEnabled
+      ? (effectiveShieldState.passActive ? 'shield_pass_active' : 'shield_disabled')
+      : !localSettings.shield_active
+        ? 'shield_toggle_off'
+        : localSettings.blur_dial <= 0
+          ? 'blur_dial_off'
+          : 'enabled';
 
   // Central blur source-of-truth with hysteresis to avoid flicker.
   const blurStateRef = useRef<{ enabled: boolean; reason: string; timestamp: number }>({
@@ -691,9 +712,13 @@ export const NativeWebViewBrowser = () => {
       pendingReinjectRef.current = null;
       pendingReinjectTimerRef.current = null;
       logSafeResetDiag('pending_reinject_exit', reason + '_timeout', targetUrl);
+      if (blurStateRef.current.enabled) {
+        queueCurrentBlurState('url_change_safe_reset_pending_timeout_hold');
+        return;
+      }
       setCentralBlurState(false, 'url_change_safe_reset_pending_timeout');
     }, PENDING_REINJECT_WINDOW_MS);
-  }, [clearPendingReinjectTimer, logSafeResetDiag, setCentralBlurState, PENDING_REINJECT_WINDOW_MS]);
+  }, [clearPendingReinjectTimer, logSafeResetDiag, setCentralBlurState, queueCurrentBlurState, PENDING_REINJECT_WINDOW_MS]);
 
   const logLifecycleSnapshot = useCallback((event: string, urlHint?: string, reason?: string) => {
     const currentUrl = urlHint || currentUrlRef.current || 'unknown';
@@ -819,7 +844,15 @@ export const NativeWebViewBrowser = () => {
       return;
     }
     if (!isRuntimeModerationEnabled) {
-      console.log('[MW-Bridge] Moderation disabled, skipping injection');
+      console.log(
+        '[MW-Bridge] Moderation disabled, skipping injection',
+        'reason=' + runtimeModerationDisabledReason,
+        'shieldEnabled=' + effectiveShieldEnabled,
+        'shieldToggle=' + localSettings.shield_active,
+        'passActive=' + effectiveShieldState.passActive,
+        'passRemainingSeconds=' + effectiveShieldState.passRemainingSeconds,
+        'blurDial=' + localSettings.blur_dial,
+      );
       return;
     }
 
@@ -930,7 +963,20 @@ export const NativeWebViewBrowser = () => {
     } finally {
       injectionInFlightRef.current = false;
     }
-  }, [ENABLE_SIGNAL_PIPELINE, settingsLoaded, isRuntimeModerationEnabled, getModerationConfig, localSettings.diag_youtube_shorts, exitPendingReinject]);
+  }, [
+    ENABLE_SIGNAL_PIPELINE,
+    settingsLoaded,
+    isRuntimeModerationEnabled,
+    runtimeModerationDisabledReason,
+    effectiveShieldEnabled,
+    effectiveShieldState.passActive,
+    effectiveShieldState.passRemainingSeconds,
+    getModerationConfig,
+    localSettings.diag_youtube_shorts,
+    localSettings.shield_active,
+    localSettings.blur_dial,
+    exitPendingReinject,
+  ]);
 
   const getWebViewListenerDiagContext = useCallback(() => {
     return {
@@ -1036,8 +1082,23 @@ export const NativeWebViewBrowser = () => {
     },
     onUrlChange: (url) => {
       const previousUrl = currentUrlRef.current || webViewState.currentUrl || '';
+      const normalizedUrl = resolveNavigationUrl(url, previousUrl || undefined);
+      if (!normalizedUrl) {
+        console.warn('[Browser] URL CHANGE ignored: empty/invalid payload', String(url || ''));
+        return;
+      }
+      if (previousUrl && normalizedUrl === previousUrl) {
+        console.log('[Browser] URL CHANGE duplicate ignored:', normalizedUrl);
+        return;
+      }
       const previousFamily = getCacheFamilyContext(previousUrl);
-      const nextFamily = getCacheFamilyContext(url);
+      const detectedNextFamily = getCacheFamilyContext(normalizedUrl);
+      const nextFamily = (
+        detectedNextFamily === 'unknown' &&
+        isYouTubeFamilyContext(previousFamily)
+      )
+        ? previousFamily
+        : detectedNextFamily;
       const deferReason = `youtube_internal_nav_${previousFamily}_to_${nextFamily}`;
       const shouldDeferSafeReset =
         !!previousUrl &&
@@ -1045,13 +1106,13 @@ export const NativeWebViewBrowser = () => {
         isYouTubeFamilyContext(previousFamily) &&
         isYouTubeFamilyContext(nextFamily);
       console.log('[Browser] ======= URL CHANGE =======');
-      console.log('[Browser] New URL:', url);
-      console.log('[DIAG][LOAD] stage=url_change url=' + toDiagUrl(url));
-      markNavigation('onUrlChange', url);
-      logLifecycleSnapshot('url_change', url, 'onUrlChange');
+      console.log('[Browser] New URL:', normalizedUrl);
+      console.log('[DIAG][LOAD] stage=url_change url=' + toDiagUrl(normalizedUrl));
+      markNavigation('onUrlChange', normalizedUrl);
+      logLifecycleSnapshot('url_change', normalizedUrl, 'onUrlChange');
       logHostLayerDiagnostics('url_change');
-      setUrlInput(url);
-      navigate('browse', url, url);
+      setUrlInput(normalizedUrl);
+      navigate('browse', normalizedUrl, normalizedUrl);
       // Reset injection for new page navigation
       clearLoadEndInjectTimer();
       injectionDoneRef.current = false;
@@ -1059,11 +1120,11 @@ export const NativeWebViewBrowser = () => {
       blurReadyRef.current = false;
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       if (shouldDeferSafeReset) {
-        logSafeResetDiag('safe_reset_deferred', deferReason, url);
-        enterPendingReinject(deferReason, url);
+        logSafeResetDiag('safe_reset_deferred', deferReason, normalizedUrl);
+        enterPendingReinject(deferReason, normalizedUrl);
         queueCurrentBlurState('url_change_safe_reset_deferred');
       } else {
-        exitPendingReinject(`context_exit_${previousFamily}_to_${nextFamily}`, url);
+        exitPendingReinject(`context_exit_${previousFamily}_to_${nextFamily}`, normalizedUrl);
         setCentralBlurState(false, 'url_change_safe_reset');
       }
     },
@@ -1193,6 +1254,9 @@ export const NativeWebViewBrowser = () => {
       '[DIAG][SHIELD_STATE]',
       'shieldEnabled=' + effectiveShieldEnabled,
       'runtimeModeration=' + isRuntimeModerationEnabled,
+      'shieldToggle=' + localSettings.shield_active,
+      'passActive=' + effectiveShieldState.passActive,
+      'passRemainingSeconds=' + effectiveShieldState.passRemainingSeconds,
       'blurDial=' + localSettings.blur_dial,
       'currentView=' + currentView,
       'webViewOpen=' + webViewState.isOpen,
@@ -1200,6 +1264,9 @@ export const NativeWebViewBrowser = () => {
   }, [
     effectiveShieldEnabled,
     isRuntimeModerationEnabled,
+    localSettings.shield_active,
+    effectiveShieldState.passActive,
+    effectiveShieldState.passRemainingSeconds,
     localSettings.blur_dial,
     currentView,
     webViewState.isOpen,
@@ -2218,6 +2285,8 @@ export const NativeWebViewBrowser = () => {
     flushBlurStateToWebView,
     armShortsLegacyFallbackProbe,
     disarmShortsLegacyFallbackProbe,
+    localSettings.blur_dial,
+    updateSetting,
     webViewState.currentUrl,
   ]);
 

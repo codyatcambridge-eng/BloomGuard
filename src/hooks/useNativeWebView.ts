@@ -629,7 +629,11 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
 
       await attachListener('urlChangeEvent', (event) => {
         const payload = event as { url?: string };
-        const url = payload.url || '';
+        const url = (payload.url || '').trim();
+        if (!url) {
+          console.log('[NativeWebView] URL changed: <empty> (ignored)');
+          return;
+        }
         console.log('[NativeWebView] URL changed:', url);
         currentUrlRef.current = url;
 

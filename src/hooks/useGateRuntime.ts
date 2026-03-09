@@ -244,7 +244,10 @@ function decideAccess(context: GateRequestContext, effective: EffectiveShieldSta
 
 export function useGateRuntime() {
   const [gateState, setGateState] = useState<GateStateV1>(() => readGateState());
+  const [clockNowTs, setClockNowTs] = useState<number>(() => Date.now());
   const expiryTimerRef = useRef<number | null>(null);
+  const activePassEndsAt = gateState.activePass?.endsAt ?? null;
+  const cooldownEndsAt = gateState.cooldown?.endsAt ?? null;
 
   const syncFromStorage = useCallback(() => {
     const next = readGateState();
@@ -278,11 +281,16 @@ export function useGateRuntime() {
 
     const onStorage = (event: StorageEvent) => {
       if (event.key !== GATE_STATE_STORAGE_KEY) return;
+      setClockNowTs(Date.now());
       syncFromStorage();
     };
-    const onGateEvent = () => syncFromStorage();
+    const onGateEvent = () => {
+      setClockNowTs(Date.now());
+      syncFromStorage();
+    };
     const onVisibility = () => {
       if (document.visibilityState === 'visible') {
+        setClockNowTs(Date.now());
         syncFromStorage();
       }
     };
@@ -302,13 +310,28 @@ export function useGateRuntime() {
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
+
+    const hasTimedState = activePassEndsAt !== null || cooldownEndsAt !== null;
+    if (!hasTimedState) return;
+
+    const intervalId = window.setInterval(() => {
+      setClockNowTs(Date.now());
+    }, 1000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [activePassEndsAt, cooldownEndsAt]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
     if (expiryTimerRef.current !== null) {
       window.clearTimeout(expiryTimerRef.current);
       expiryTimerRef.current = null;
     }
 
     const nowTs = Date.now();
-    const expiryCandidates = [gateState.activePass?.endsAt, gateState.cooldown?.endsAt].filter(
+    const expiryCandidates = [activePassEndsAt, cooldownEndsAt].filter(
       (value): value is number => typeof value === 'number' && value > nowTs,
     );
 
@@ -326,13 +349,23 @@ export function useGateRuntime() {
         expiryTimerRef.current = null;
       }
     };
-  }, [gateState.activePass?.endsAt, gateState.cooldown?.endsAt, syncFromStorage]);
+  }, [activePassEndsAt, cooldownEndsAt, syncFromStorage]);
 
-  const effectiveShieldState = useMemo(() => buildEffectiveShieldState(gateState), [gateState]);
+  useEffect(() => {
+    const passExpired = activePassEndsAt !== null && activePassEndsAt <= clockNowTs;
+    const cooldownExpired = cooldownEndsAt !== null && cooldownEndsAt <= clockNowTs;
+
+    if (!passExpired && !cooldownExpired) return;
+    syncFromStorage();
+  }, [activePassEndsAt, cooldownEndsAt, clockNowTs, syncFromStorage]);
+
+  const effectiveShieldState = useMemo(() => buildEffectiveShieldState(gateState, clockNowTs), [gateState, clockNowTs]);
 
   const getEffectiveShieldState = useCallback(() => {
-    const state = readGateState();
-    const effective = buildEffectiveShieldState(state);
+    const nowTs = Date.now();
+    const state = readGateState(nowTs);
+    const effective = buildEffectiveShieldState(state, nowTs);
+    setClockNowTs(nowTs);
     setGateState((prev) => (areGateStatesEqual(prev, state) ? prev : state));
     return effective;
   }, []);

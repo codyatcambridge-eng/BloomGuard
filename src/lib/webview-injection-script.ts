@@ -328,22 +328,37 @@ export function generateModerationScript(config: InjectionConfig): string {
   window.__MW_BLUR_STATE__ = overlayState;
 
   function postToHost(payload) {
-    let delivered = false;
+    let deliveredViaMobile = false;
     try {
       if (window.mobileApp && typeof window.mobileApp.postMessage === 'function') {
         window.mobileApp.postMessage({ detail: payload });
-        delivered = true;
+        deliveredViaMobile = true;
       }
     } catch (e) {}
-    if (delivered) return;
-    try {
-      window.postMessage(payload, '*');
-    } catch (e) {}
-    try {
-      if (window.parent && window.parent !== window) {
-        window.parent.postMessage(payload, '*');
-      }
-    } catch (e) {}
+
+    // Bridge hardening:
+    // For critical moderation/blur signaling, mirror to window/parent postMessage
+    // even when mobileApp bridge exists. Host-side requestId dedupe prevents duplicate work.
+    const payloadType = payload && typeof payload === 'object' ? String(payload.type || '') : '';
+    const shouldMirrorToWindow = (
+      !deliveredViaMobile ||
+      payloadType === 'gc-moderation-request' ||
+      payloadType === 'MW_REQ_SENT' ||
+      payloadType === 'MW_REQ_TIMEOUT' ||
+      payloadType === 'MW_BLUR_READY' ||
+      payloadType === 'MW_INJECTED_ACK'
+    );
+
+    if (shouldMirrorToWindow) {
+      try {
+        window.postMessage(payload, '*');
+      } catch (e) {}
+      try {
+        if (window.parent && window.parent !== window) {
+          window.parent.postMessage(payload, '*');
+        }
+      } catch (e) {}
+    }
   }
 
   function readHostEventPayload(eventLike) {
