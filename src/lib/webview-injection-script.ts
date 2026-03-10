@@ -808,6 +808,16 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function handleShieldAction(action) {
     if (!action) return;
+    if (action === 'false_positive') {
+      const target = lastShieldTarget;
+      if (target && target.src) {
+        const scores = getShieldScores(target.predictions || {});
+        logShieldAction(action, target, scores);
+        markSafeResolved(target.src);
+      }
+      forceGlobalUnblur('shield_false_positive');
+      return;
+    }
     const target = lastShieldTarget;
     if (!target || !target.src) {
       console.warn('[MW][ShieldAction] no active target for', action);
@@ -827,11 +837,6 @@ export function generateModerationScript(config: InjectionConfig): string {
       applyBlur(element, target.src, target.normalizedCategory || target.predictedLabel || 'flagged', CLAMPED_BLUR_STRENGTH, target.itemId);
       return;
     }
-    if (action === 'false_positive') {
-      markSafeResolved(target.src);
-      removeBlur(element, target.src);
-      return;
-    }
     if (action === 'deep_scan') {
       queueDeepScanTarget(target);
     }
@@ -840,12 +845,27 @@ export function generateModerationScript(config: InjectionConfig): string {
   // Batch queue for collecting items before sending request
   let batchQueue = [];
   let batchTimer = null;
-  const NAV_ID = window.__MW_NAV_ID__ || ('mw_' + Date.now().toString(36));
+  function normalizeNavId(value) {
+    if (value === null || value === undefined) return null;
+    const normalized = String(value).trim();
+    return normalized ? normalized : null;
+  }
+
+  function navIdsMatch(left, right) {
+    const leftNorm = normalizeNavId(left);
+    const rightNorm = normalizeNavId(right);
+    return leftNorm !== null && rightNorm !== null && leftNorm === rightNorm;
+  }
+
+  const NAV_ID = normalizeNavId(window.__MW_NAV_ID__) || normalizeNavId(window.__MW_HOST_NAV_ID__) || ('mw_' + Date.now().toString(36));
   window.__MW_NAV_ID__ = NAV_ID;
+  function getCurrentNavId() {
+    return normalizeNavId(window.__MW_HOST_NAV_ID__) || NAV_ID;
+  }
   const NONCE_PREFIX = String(CONFIG.nonce || '').substring(0, 6);
   postToHost({
     type: 'MW_INJECTED_ACK',
-    navId: NAV_ID,
+    navId: getCurrentNavId(),
     pageEpoch: CONFIG.pageEpoch,
     noncePrefix: NONCE_PREFIX,
     url: window.location.href,
@@ -853,7 +873,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   });
   console.log(
     '[MW][ACK] MW_INJECTED_ACK',
-    'navId=' + NAV_ID,
+    'navId=' + getCurrentNavId(),
     'pageEpoch=' + CONFIG.pageEpoch,
     'noncePrefix=' + NONCE_PREFIX,
     'url=' + window.location.href,
@@ -874,6 +894,8 @@ export function generateModerationScript(config: InjectionConfig): string {
     debugSummaryInterval: null,
     diagHeartbeatInterval: null,
     shortsHealthHealInterval: null,
+    shortsReelTransitionObserver: null,
+    shortsReelTransitionRoot: null,
     initialTimeouts: [],
     paused: document.visibilityState !== 'visible',
     teardownDone: false,
@@ -1233,6 +1255,23 @@ export function generateModerationScript(config: InjectionConfig): string {
   const SHORTS_REVEAL_ANCHOR_RECOVERY_GRACE_MS = 900;
   const SHORTS_REVEAL_ANCHOR_RETRY_DELAY_MS = 120;
   const SHORTS_HEALTH_LOG_PREFIX = '[MW-YT][DIAG][SHORTS_HEALTH]';
+  const FORCE_SHIELD_ON_SHORTS = true;
+  const SHORTS_REEL_TRANSITION_REARM_COOLDOWN_MS = 140;
+  const SHORTS_REEL_TRANSITION_ATTRIBUTE_FILTER = [
+    'aria-hidden',
+    'aria-current',
+    'hidden',
+    'selected',
+    'is-active',
+    'class',
+    'style',
+    'src',
+    'poster',
+    'data-video-id',
+    'data-item-id',
+    'data-id',
+    'data-index',
+  ];
   const SHORTS_REENTRY_REFRESH_COOLDOWN_MS = 1200;
   const ADAPTIVE_SHORTS_RESCAN_DEBOUNCE_MS = 140;
   const ADAPTIVE_SHORTS_RESCAN_COOLDOWN_MS = 700;
@@ -1269,6 +1308,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     lastRefreshAt: 0,
     lastReason: 'none',
   };
+  let shortsReelTransitionLastRearmAt = 0;
   const diagEpochCounters = {
     staleInjectedDiscardCount: 0,
     epochHeldCount: 0,
@@ -1513,6 +1553,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (mutationScanTimer) activeTimerNames.push('mutationScanTimer');
     if (adaptiveShortsWatchState.pendingRescanTimer) activeTimerNames.push('adaptiveShortsRescanTimeout');
     if (adaptiveShortsWatchState.observer) activeTimerNames.push('adaptiveShortsOverlayObserver');
+    if (timerState.shortsReelTransitionObserver) activeTimerNames.push('shortsReelTransitionObserver');
     const activeInstanceId = window.__MW_ACTIVE_INSTANCE_ID__ || 'none';
     console.log(
       '[DIAG][LIFECYCLE_SNAPSHOT]',
@@ -2037,7 +2078,231 @@ export function generateModerationScript(config: InjectionConfig): string {
       ' nextIdentity=' + String(nextIdentity || 'none').substring(0, 220) +
       ' nextContainerNodeId=' + getDiagNodeId(nextCandidate && nextCandidate.container ? nextCandidate.container : null)
     );
+    startShortsReelTransitionObserver('reentry:' + (reason || 'unknown'));
+    forceRearmShortsShield(
+      'reentry:' + (reason || 'unknown'),
+      nextCandidate && nextCandidate.container ? nextCandidate.container : null
+    );
     return watchBound;
+  }
+
+  function resolveShortsRearmSource(node) {
+    if (!node || node.nodeType !== 1) return '';
+    const source = getDiagSourceFields(node);
+    const attrSrc = node.getAttribute ? String(node.getAttribute('src') || '') : '';
+    const attrPoster = node.getAttribute ? String(node.getAttribute('poster') || '') : '';
+    const datasetSrc = node.dataset ? String(
+      node.dataset.mwSrc ||
+      node.dataset.mwOrigSrc ||
+      node.dataset.mwOrigPoster ||
+      node.dataset.mwBgSrc ||
+      node.dataset.mwLastScanSrc ||
+      ''
+    ) : '';
+    return normalizeUrl(source.currentSrc || source.poster || attrPoster || attrSrc || datasetSrc || '');
+  }
+
+  function collectShortsRearmTargets(container) {
+    const targets = [];
+    if (!container || container.nodeType !== 1) return targets;
+    const tag = String(container.tagName || '').toUpperCase();
+    if (tag === 'VIDEO' || tag === 'IMG') {
+      targets.push(container);
+    }
+    if (typeof container.querySelectorAll === 'function') {
+      const nodes = container.querySelectorAll('video.html5-main-video, video, img');
+      for (let i = 0; i < nodes.length; i += 1) {
+        targets.push(nodes[i]);
+      }
+    }
+    if (targets.length === 0) {
+      const fallback = document.querySelector('#shorts-player video.html5-main-video, #shorts-player video, #shorts-player img');
+      if (fallback && fallback.nodeType === 1) {
+        targets.push(fallback);
+      }
+    }
+    return targets;
+  }
+
+  function forceRearmShortsShield(reason, candidateNode) {
+    if (!FORCE_SHIELD_ON_SHORTS || !isShortsModeActive()) return false;
+    if (timerState.paused || timerState.teardownDone) return false;
+    const now = Date.now();
+    if ((now - shortsReelTransitionLastRearmAt) < SHORTS_REEL_TRANSITION_REARM_COOLDOWN_MS) {
+      return false;
+    }
+
+    const candidateContainer = getShortsCardOrPlayerContainerFromNode(candidateNode);
+    const activeContainer = (
+      candidateContainer && candidateContainer.isConnected
+        ? candidateContainer
+        : getActiveShortsPlayerContainer()
+    );
+    if (!activeContainer || !activeContainer.isConnected) return false;
+
+    const targets = collectShortsRearmTargets(activeContainer);
+    const seenSources = new Set();
+    let armedCount = 0;
+    for (let i = 0; i < targets.length; i += 1) {
+      const target = targets[i];
+      if (!target || target.nodeType !== 1 || !target.isConnected) continue;
+      const src = resolveShortsRearmSource(target);
+      if (!src || seenSources.has(src)) continue;
+      seenSources.add(src);
+      if (state.revealed.has(src) || target.dataset.mwRevealed === 'true') continue;
+      clearSafeResolved(src);
+      state.scanned.delete(src);
+      applyBlur(
+        target,
+        src,
+        'shorts_transition_guard',
+        CONFIG.blurStrength,
+        target.dataset.mwItemId || ''
+      );
+      armedCount += 1;
+    }
+
+    if (armedCount > 0) {
+      shortsReelTransitionLastRearmAt = now;
+      queueMutationScan(activeContainer, 'shorts_reel_transition_rearm:' + (reason || 'unknown'));
+      triggerAdaptiveShortsTargetedRescan(
+        'shorts_reel_transition_rearm:' + (reason || 'unknown'),
+        null,
+        { force: true, immediate: true }
+      );
+      scheduleShortsRevealOverlayReposition('shorts_reel_transition_rearm');
+      if (DIAG_YT_BLUR) {
+        console.log(
+          '[MW-YT][DIAG][SHORTS_REEL]',
+          'event=rearm_applied',
+          'reason=' + (reason || 'unknown'),
+          'armedCount=' + armedCount,
+          'containerNodeId=' + getDiagNodeId(activeContainer)
+        );
+      }
+      return true;
+    }
+    return false;
+  }
+
+  function stopShortsReelTransitionObserver(reason) {
+    if (!timerState.shortsReelTransitionObserver) return;
+    try {
+      timerState.shortsReelTransitionObserver.disconnect();
+    } catch (e) {}
+    timerState.shortsReelTransitionObserver = null;
+    timerState.shortsReelTransitionRoot = null;
+    if (DIAG_YT_BLUR) {
+      console.log(
+        '[MW-YT][DIAG][SHORTS_REEL]',
+        'event=observer_stop',
+        'reason=' + (reason || 'unknown')
+      );
+    }
+  }
+
+  function startShortsReelTransitionObserver(reason) {
+    if (timerState.paused || timerState.teardownDone) return false;
+    if (!FORCE_SHIELD_ON_SHORTS || !isShortsModeActive()) {
+      stopShortsReelTransitionObserver('inactive:' + (reason || 'unknown'));
+      return false;
+    }
+    const root = document.getElementById('shorts-player') || getActiveShortsPlayerContainer();
+    if (!root || !root.isConnected) return false;
+    if (
+      timerState.shortsReelTransitionObserver &&
+      timerState.shortsReelTransitionRoot === root
+    ) {
+      return true;
+    }
+
+    stopShortsReelTransitionObserver('refresh:' + (reason || 'unknown'));
+
+    const observer = new MutationObserver(function(mutations) {
+      if (!FORCE_SHIELD_ON_SHORTS || !isShortsModeActive()) return;
+      if (timerState.paused || timerState.teardownDone) return;
+
+      let shouldRearm = false;
+      let candidateNode = null;
+      const reasonParts = [];
+      for (let i = 0; i < mutations.length; i += 1) {
+        const mutation = mutations[i];
+        if (mutation.type === 'childList') {
+          for (let j = 0; j < mutation.addedNodes.length; j += 1) {
+            const node = mutation.addedNodes[j];
+            if (!node || node.nodeType !== 1) continue;
+            const matchesContainer = isRelevantShortsContainerNode(node);
+            const hasReelDescendant = typeof node.querySelector === 'function'
+              ? !!node.querySelector('ytm-reel-video-renderer, ytm-shorts-lockup-view-model, video.html5-main-video, #shorts-player')
+              : false;
+            if (matchesContainer || hasReelDescendant) {
+              shouldRearm = true;
+              candidateNode = node;
+              if (reasonParts.length < 3) reasonParts.push('child_added');
+            }
+          }
+          for (let j = 0; j < mutation.removedNodes.length; j += 1) {
+            const node = mutation.removedNodes[j];
+            if (!node || node.nodeType !== 1) continue;
+            if (isRelevantShortsContainerNode(node)) {
+              shouldRearm = true;
+              candidateNode = mutation.target && mutation.target.nodeType === 1
+                ? mutation.target
+                : candidateNode;
+              if (reasonParts.length < 3) reasonParts.push('child_removed');
+            }
+          }
+        } else if (mutation.type === 'attributes') {
+          const target = mutation.target;
+          const attr = mutation.attributeName || '';
+          if (!target || target.nodeType !== 1) continue;
+          const inShortsScope = (
+            isRelevantShortsContainerNode(target) ||
+            !!getShortsCardOrPlayerContainerFromNode(target)
+          );
+          if (!inShortsScope) continue;
+          const attrSignalsTransition = (
+            attr === 'aria-hidden' ||
+            attr === 'aria-current' ||
+            attr === 'hidden' ||
+            attr === 'selected' ||
+            attr === 'is-active' ||
+            attr === 'class' ||
+            attr === 'style' ||
+            attr === 'src' ||
+            attr === 'poster' ||
+            attr.indexOf('data-') === 0
+          );
+          if (!attrSignalsTransition) continue;
+          shouldRearm = true;
+          candidateNode = target;
+          if (reasonParts.length < 3) reasonParts.push('attr:' + attr);
+        }
+      }
+
+      if (!shouldRearm) return;
+      const reasonSummary = reasonParts.length ? reasonParts.join(',') : 'mutation';
+      forceRearmShortsShield('reel_transition:' + reasonSummary, candidateNode);
+    });
+
+    observer.observe(root, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: SHORTS_REEL_TRANSITION_ATTRIBUTE_FILTER,
+    });
+    timerState.shortsReelTransitionObserver = observer;
+    timerState.shortsReelTransitionRoot = root;
+    forceRearmShortsShield('reel_observer_start:' + (reason || 'unknown'), root);
+    if (DIAG_YT_BLUR) {
+      console.log(
+        '[MW-YT][DIAG][SHORTS_REEL]',
+        'event=observer_start',
+        'reason=' + (reason || 'unknown'),
+        'rootNodeId=' + getDiagNodeId(root)
+      );
+    }
+    return true;
   }
 
   function doesShortsContainerMatchSrc(container, normalizedSrc) {
@@ -2992,7 +3257,11 @@ export function generateModerationScript(config: InjectionConfig): string {
       );
       const liveMissing = !liveContext || !liveSrc;
       const liveInvalidTarget = !liveTarget || !liveTarget.isConnected;
-      const liveSafeResolved = !!(liveSrc && isSafeResolvedActive(liveSrc));
+      const liveSafeResolved = !!(
+        liveSrc &&
+        !FORCE_SHIELD_ON_SHORTS &&
+        isSafeResolvedActive(liveSrc)
+      );
       const liveTrustworthy = !liveMissing && !liveIsStale && !liveUrlMismatch && !liveInvalidTarget && !liveSafeResolved;
       if (!liveTrustworthy) {
         if (liveContext && (liveIsStale || liveUrlMismatch || liveSafeResolved || liveInvalidTarget)) {
@@ -4055,6 +4324,80 @@ export function generateModerationScript(config: InjectionConfig): string {
     return changed;
   }
 
+  function forceGlobalUnblur(reason) {
+    const actionReason = reason || 'manual_global_unblur';
+    const navId = getCurrentNavId();
+    const revealedSrcs = new Set();
+    let clearedNodes = 0;
+    let removedOverlayNodes = 0;
+
+    state.pending.forEach(function(pendingItem, itemId) {
+      if (!pendingItem) return;
+      const pendingSrc = pendingItem.src || '';
+      if (pendingSrc) revealedSrcs.add(pendingSrc);
+      const pendingElement = pendingItem.element && pendingItem.element.isConnected
+        ? pendingItem.element
+        : state.elements.get(itemId);
+      if (pendingElement && pendingElement.nodeType === 1) {
+        if (clearAllBlurAndOverlay(pendingElement, pendingSrc, actionReason, 'revealed')) {
+          clearedNodes += 1;
+        }
+        pendingElement.dataset.mwRevealed = 'true';
+      }
+      clearPendingItem(itemId, 'force_global_unblur');
+    });
+
+    const candidateNodes = document.querySelectorAll('[data-mw-moderated], .mw-softblur, .mw-blurred');
+    candidateNodes.forEach(function(node) {
+      if (!node || node.nodeType !== 1) return;
+      const element = node;
+      const srcForClear = element.dataset.mwSrc || '';
+      if (srcForClear) revealedSrcs.add(srcForClear);
+      if (clearAllBlurAndOverlay(element, srcForClear, actionReason, 'revealed')) {
+        clearedNodes += 1;
+      }
+      element.dataset.mwRevealed = 'true';
+      element.dataset.mwHasOverlay = 'false';
+    });
+
+    document.querySelectorAll('.mw-reveal-overlay').forEach(function(overlayNode) {
+      try {
+        overlayNode.remove();
+        removedOverlayNodes += 1;
+      } catch (e) {}
+    });
+
+    state.pendingRequests.forEach(function(pending) {
+      if (pending && pending.timeoutId) {
+        clearTimeout(pending.timeoutId);
+      }
+    });
+    state.pendingRequests.clear();
+    state.pendingBySrc.clear();
+    state.blurred.clear();
+    if (batchTimer) {
+      clearTimeout(batchTimer);
+      batchTimer = null;
+    }
+    batchQueue = [];
+
+    revealedSrcs.forEach(function(src) {
+      if (!src) return;
+      state.revealed.add(src);
+      markSafeResolved(src);
+    });
+
+    setOverlayEnabled(false, actionReason + '_overlay_drop');
+    console.log(
+      '[MW][Unblur][Global]',
+      'reason=' + actionReason,
+      'navId=' + navId,
+      'clearedNodes=' + clearedNodes,
+      'removedOverlays=' + removedOverlayNodes,
+      'revealedSrcs=' + revealedSrcs.size
+    );
+  }
+
   function applySoftBlur(element, src, itemId) {
     diagBlurStateLog('applySoftBlur.enter', element, src, 'itemId=' + (itemId || 'none'));
     // Check persistence: if user revealed this, don't blur
@@ -4785,6 +5128,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     btn.addEventListener('click', function(e) {
       e.preventDefault();
       e.stopPropagation();
+      if (typeof e.stopImmediatePropagation === 'function') {
+        e.stopImmediatePropagation();
+      }
       console.log(
         '[DIAG][REVEAL_EVT] button_click',
         'overlayId=' + overlayId,
@@ -5005,6 +5351,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     
     const requestId = generateRequestId();
     const timestamp = Date.now();
+    const requestNavId = getCurrentNavId();
     if (isShortsModeActive()) {
       console.log(
         '[DIAG][SHORTS_SCAN] scanBatch_start',
@@ -5032,6 +5379,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         height: item.height,
       })),
       thresholds: effectiveThresholds,
+      navId: requestNavId,
       pageEpoch: state.pageEpoch,
       nonce: CONFIG.nonce,
       timestamp: timestamp,
@@ -5044,6 +5392,7 @@ export function generateModerationScript(config: InjectionConfig): string {
 
     state.pendingRequests.set(requestId, {
       items: items,
+      navId: requestNavId,
       pageEpoch: state.pageEpoch,
       timestamp: timestamp,
       timeoutId: timeoutId,
@@ -5056,7 +5405,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     console.log(
       '[MW][REQ] MW_REQ_SENT',
       'requestId=' + requestId,
-      'navId=' + NAV_ID,
+      'navId=' + requestNavId,
       'pageEpoch=' + state.pageEpoch,
       'noncePrefix=' + NONCE_PREFIX,
       'items=' + items.length,
@@ -5064,7 +5413,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     postToHost({
       type: 'MW_REQ_SENT',
       requestId: requestId,
-      navId: NAV_ID,
+      navId: requestNavId,
       pageEpoch: state.pageEpoch,
       noncePrefix: NONCE_PREFIX,
       itemCount: items.length,
@@ -5112,10 +5461,21 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!pendingRequest) return;
     if (pendingRequest.state === 'handled') return;
     diagScanBatchStartAtByRequestId.delete(requestId);
-    if (Number.isFinite(pendingRequest.pageEpoch) && pendingRequest.pageEpoch !== state.pageEpoch) {
+    const timeoutEpochMismatch = Number.isFinite(pendingRequest.pageEpoch) && pendingRequest.pageEpoch !== state.pageEpoch;
+    if (timeoutEpochMismatch && !navIdsMatch(pendingRequest.navId, getCurrentNavId())) {
       logShortsScanSkip('epoch_mismatch', null, 'request:' + String(requestId || 'none'), 'timeout');
       cleanupRejectedOrTimedOutRequest(requestId, 'timeout_epoch_mismatch');
       return;
+    }
+    if (timeoutEpochMismatch && navIdsMatch(pendingRequest.navId, getCurrentNavId())) {
+      diagEpochBypassCounters.epoch_bypass_allowed += 1;
+      diagLogEpochBypass(
+        'epoch_bypass_allowed',
+        'timeout_epoch_mismatch_nav_sync',
+        pendingRequest.pageEpoch,
+        state.pageEpoch,
+        window.location.href
+      );
     }
     
     pendingRequest.state = 'timeout';
@@ -5124,7 +5484,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     console.warn(
       '[MW][REQ] MW_REQ_TIMEOUT',
       'requestId=' + requestId,
-      'navId=' + NAV_ID,
+      'navId=' + getCurrentNavId(),
       'pageEpoch=' + state.pageEpoch,
       'noncePrefix=' + NONCE_PREFIX,
       'items=' + pendingRequest.items.length,
@@ -5132,7 +5492,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     postToHost({
       type: 'MW_REQ_TIMEOUT',
       requestId: requestId,
-      navId: NAV_ID,
+      navId: getCurrentNavId(),
       pageEpoch: state.pageEpoch,
       noncePrefix: NONCE_PREFIX,
       itemCount: pendingRequest.items.length,
@@ -5141,22 +5501,33 @@ export function generateModerationScript(config: InjectionConfig): string {
     state.stats.timeouts += pendingRequest.items.length;
     
     const timeoutPolicy = applyFailOpenAndModePolicy(false, 'timeout', 'timeout', true);
+    const forceShieldOnShortsTimeout = FORCE_SHIELD_ON_SHORTS && isShortsModeActive();
     if (CONFIG.debug) {
       console.log(
         '[MW-DIAG][INJECT] source=timeout',
         'requestId=' + requestId,
         'policy=' + (timeoutPolicy.shouldBlur ? 'failClosed_blur' : 'failOpen_safe'),
-        'reason=' + (timeoutPolicy.reason || 'none')
+        'reason=' + (timeoutPolicy.reason || 'none'),
+        'shortsForce=' + forceShieldOnShortsTimeout
       );
     }
-    if (timeoutPolicy.shouldBlur) {
-      console.log('[MW] FAIL-CLOSED: Applying blur to timed-out items');
+    if (timeoutPolicy.shouldBlur || forceShieldOnShortsTimeout) {
+      console.log(
+        '[MW] ' + (forceShieldOnShortsTimeout ? 'SHORTS-GUARD' : 'FAIL-CLOSED') + ': Applying blur to timed-out items'
+      );
       pendingRequest.items.forEach(item => {
         clearPendingItem(item.itemId, 'timeout_failClosed');
         const element = state.elements.get(item.itemId);
         if (element && element.isConnected) {
-          applyBlur(element, item.src, 'timeout', CONFIG.blurStrength, item.itemId);
+          applyBlur(
+            element,
+            item.src,
+            forceShieldOnShortsTimeout ? 'shorts_timeout_guard' : 'timeout',
+            CONFIG.blurStrength,
+            item.itemId
+          );
         }
+        clearSafeResolved(item.src);
         state.scanned.add(item.src);
       });
     } else {
@@ -5186,11 +5557,19 @@ export function generateModerationScript(config: InjectionConfig): string {
     try {
       const { requestId, results, nonce } = message;
       const resultEpoch = Number.isFinite(message.pageEpoch) ? Number(message.pageEpoch) : null;
+      const pendingRequest = requestId ? state.pendingRequests.get(requestId) : null;
+      const requestNavId = normalizeNavId((pendingRequest && pendingRequest.navId) || message.navId);
+      const currentNavId = getCurrentNavId();
+      const epochSyncAllowed = (
+        resultEpoch !== null &&
+        resultEpoch < state.pageEpoch &&
+        navIdsMatch(requestNavId, currentNavId)
+      );
       const expectedNoncePrefix = String(CONFIG.nonce || '').substring(0, 6);
       const receivedNoncePrefix = String(nonce || 'none').substring(0, 6);
       const stickyShortsMode = isYouTubeShortsUrl(window.location.href);
       const relaxedYouTubeEpochMode = isYouTubeDomainUrl(window.location.href);
-      if (resultEpoch !== null && resultEpoch !== state.pageEpoch && !relaxedYouTubeEpochMode) {
+      if (resultEpoch !== null && resultEpoch !== state.pageEpoch && !relaxedYouTubeEpochMode && !epochSyncAllowed) {
         diagEpochBypassCounters.epoch_bypass_blocked += 1;
         diagLogEpochBypass(
           'epoch_bypass_blocked',
@@ -5220,16 +5599,18 @@ export function generateModerationScript(config: InjectionConfig): string {
           'expectedNonce=' + expectedNoncePrefix,
           'gotNonce=' + receivedNoncePrefix,
           'resultEpoch=' + resultEpoch,
-          'activeEpoch=' + state.pageEpoch
+          'activeEpoch=' + state.pageEpoch,
+          'resultNavId=' + (requestNavId || 'none'),
+          'activeNavId=' + currentNavId
         );
         cleanupRejectedOrTimedOutRequest(requestId, 'reject_epoch');
         return;
       }
-      if (resultEpoch !== null && resultEpoch !== state.pageEpoch && relaxedYouTubeEpochMode) {
+      if (resultEpoch !== null && resultEpoch !== state.pageEpoch && (relaxedYouTubeEpochMode || epochSyncAllowed)) {
         diagEpochBypassCounters.epoch_bypass_allowed += 1;
         diagLogEpochBypass(
           'epoch_bypass_allowed',
-          'result_epoch_mismatch_youtube_relaxed',
+          epochSyncAllowed ? 'result_epoch_mismatch_nav_sync' : 'result_epoch_mismatch_youtube_relaxed',
           resultEpoch,
           state.pageEpoch,
           window.location.href
@@ -5241,12 +5622,14 @@ export function generateModerationScript(config: InjectionConfig): string {
             'requestId=' + requestId,
             'resultEpoch=' + resultEpoch,
             'activeEpoch=' + state.pageEpoch,
+            'resultNavId=' + (requestNavId || 'none'),
+            'activeNavId=' + currentNavId,
             'scope=' + (stickyShortsMode ? 'shorts' : 'youtube'),
             'url=' + window.location.href
           );
         }
       }
-      if (stickyShortsMode && resultEpoch !== null && resultEpoch < state.pageEpoch) {
+      if (stickyShortsMode && resultEpoch !== null && resultEpoch < state.pageEpoch && !epochSyncAllowed) {
         console.warn(
           '[DIAG][SHORTS_EPOCH_DROP]',
           'stale result dropped',
@@ -5281,7 +5664,6 @@ export function generateModerationScript(config: InjectionConfig): string {
         return;
       }
       
-      const pendingRequest = state.pendingRequests.get(requestId);
       if (pendingRequest) {
         clearTimeout(pendingRequest.timeoutId);
         pendingRequest.state = 'handled';
@@ -5327,6 +5709,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         diagnostics,
       } = result;
       const aiShouldBlur = !!shouldBlur;
+      const forceShieldOnShorts = FORCE_SHIELD_ON_SHORTS && isShortsModeActive();
       const rawPredictions = result && typeof result === 'object'
         ? (result.predictions || result.scores || result.probabilities || null)
         : null;
@@ -5485,10 +5868,17 @@ export function generateModerationScript(config: InjectionConfig): string {
       } else if (dynamicBlurCandidate) {
         decisionReason = (decisionReason ? decisionReason + '/' : '') + 'dynamic_blur';
       }
+      if (forceShieldOnShorts && !state.revealed.has(src)) {
+        finalBlur = true;
+        decisionReason = (decisionReason ? decisionReason + '/' : '') + 'shorts_distraction_first';
+      }
       if (DEBUG_SKIP_DOMAIN_BLUR && !CONFIG.forcedBlur) {
         if (finalBlur) state.stats.blurSkippedByKillSwitch++;
         finalBlur = false;
         decisionReason = 'kill-switch/youtube-domain';
+      }
+      if (forceShieldOnShorts) {
+        clearSafeResolved(src);
       }
       if (CONFIG.debug) {
         console.log('[MW][Decision] itemId=' + itemId, 'src=' + (src || '').substring(0, 60), 'finalBlur=' + finalBlur, 'reason=' + decisionReason);
@@ -5505,7 +5895,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       const dims = element ? getElementDimensions(element) : { width: 0, height: 0 };
       
-      if (!finalBlur && !aiShouldBlur && isShortsModeActive()) {
+      if (!finalBlur && !aiShouldBlur && isShortsModeActive() && !forceShieldOnShorts) {
         try {
           const safeSrc = normalizeUrl(src || '');
           const portal = document.getElementById(REVEAL_PORTAL_ID);
@@ -5601,7 +5991,9 @@ export function generateModerationScript(config: InjectionConfig): string {
               'hasBlurFilter=' + preDecisionHasBlur
             );
           }
-          markSafeResolved(src);
+          if (!forceShieldOnShorts) {
+            markSafeResolved(src);
+          }
           // Remove soft blur if result is safe
           removeSoftBlur(element, src);
           if (wasInSoftBlur && !finalBlur) {
@@ -5615,7 +6007,9 @@ export function generateModerationScript(config: InjectionConfig): string {
         clearSafeResolved(src);
         findAndBlur(src, predictedLabel || category, CONFIG.blurStrength, true, itemId);
       } else {
-        markSafeResolved(src);
+        if (!forceShieldOnShorts) {
+          markSafeResolved(src);
+        }
         // Remove soft blur from all matching elements
         findAndRemoveSoftBlur(src);
       }
@@ -5949,9 +6343,16 @@ export function generateModerationScript(config: InjectionConfig): string {
     state.elements.set(itemId, element);
     element.dataset.mwSourceType = sourceType || 'unknown';
     
-    // Apply soft blur immediately to prevent any flash of unblurred content.
-    // Safe results will remove the blur as soon as moderation completes.
-    applySoftBlur(element, url, itemId);
+    // Distraction-first Shorts policy: start with hard blur + reveal control immediately.
+    // AI still scans in the background for telemetry/labels.
+    if (FORCE_SHIELD_ON_SHORTS && isShortsModeActive()) {
+      clearSafeResolved(url);
+      applyBlur(element, url, 'shorts_guard', CONFIG.blurStrength, itemId);
+    } else {
+      // Apply soft blur immediately to prevent any flash of unblurred content.
+      // Safe results will remove the blur as soon as moderation completes.
+      applySoftBlur(element, url, itemId);
+    }
     const blurTimer = null;
     
     state.pending.set(itemId, {
@@ -6596,6 +6997,8 @@ export function generateModerationScript(config: InjectionConfig): string {
             ).mode;
             hasYouTubeChanges = true;
             refreshAdaptiveShortsOverlayWatch('container_added');
+            startShortsReelTransitionObserver('container_added');
+            forceRearmShortsShield('container_added', node);
           }
           if (shortsAttrMode) {
             reattachShortsBlurForInsertedNode(node, 'global_mutation_added', null);
@@ -6640,6 +7043,8 @@ export function generateModerationScript(config: InjectionConfig): string {
               }
             ).mode;
             refreshAdaptiveShortsOverlayWatch('container_attr:' + attr);
+            startShortsReelTransitionObserver('container_attr:' + attr);
+            forceRearmShortsShield('container_attr:' + attr, target);
           }
           if (!shortsAttrMode || target.nodeType !== 1) {
             continue;
@@ -6758,6 +7163,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       // Only trigger if scrolled significantly
       if (scrollDelta > 200) {
         lastScrollY = currentScrollY;
+        if (FORCE_SHIELD_ON_SHORTS && isShortsModeActive()) {
+          forceRearmShortsShield('youtube_scroll', getActiveShortsPlayerContainer());
+        }
 
         clearNamedTimeout('youtubeScrollTimeout', 'reschedule');
         timerState.youtubeScrollTimeout = setTimeout(() => {
@@ -6890,6 +7298,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (timerState.urlChangeInterval) count++;
     if (timerState.youtubePeriodicInterval) count++;
     if (timerState.shortsHealthHealInterval) count++;
+    if (timerState.shortsReelTransitionObserver) count++;
     if (timerState.debugSummaryInterval) count++;
     if (timerState.mainScrollTimeout) count++;
     if (timerState.youtubeScrollTimeout) count++;
@@ -7137,8 +7546,11 @@ export function generateModerationScript(config: InjectionConfig): string {
           refreshAdaptiveShortsOverlayWatch('url_change');
         }
         scheduleShortsRevealOverlayReposition('url_change_shorts');
+        startShortsReelTransitionObserver('url_change_shorts');
+        forceRearmShortsShield('url_change_shorts', getActiveShortsPlayerContainer());
       } else {
         stopAdaptiveShortsOverlayWatch('url_change_non_shorts');
+        stopShortsReelTransitionObserver('url_change_non_shorts');
       }
       if (observerModeResult.transitioned && observerModeResult.mode) {
         scheduleYouTubeScan('url_change_mode_on');
@@ -7179,6 +7591,7 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function stopManagedTimers(reason) {
     stopAdaptiveShortsOverlayWatch('stopManagedTimers:' + (reason || 'unknown'));
+    stopShortsReelTransitionObserver('stopManagedTimers:' + (reason || 'unknown'));
     clearNamedInterval('legacyResultsInterval', reason);
     clearNamedInterval('urlChangeInterval', reason);
     clearNamedInterval('youtubePeriodicInterval', reason);
@@ -7217,6 +7630,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   function startManagedTimers(reason) {
     if (timerState.paused || timerState.teardownDone) return;
     refreshAdaptiveShortsOverlayWatch('startManagedTimers:' + (reason || 'unknown'));
+    startShortsReelTransitionObserver('startManagedTimers:' + (reason || 'unknown'));
     startLegacyResultsPoll(reason);
     startUrlChangePoll(reason);
     startYouTubePeriodicScan(reason);
@@ -7242,6 +7656,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     timerState.teardownDone = true;
     pauseManagedTimers(reason || 'teardown');
     stopAdaptiveShortsOverlayWatch('teardown:' + (reason || 'unknown'));
+    stopShortsReelTransitionObserver('teardown:' + (reason || 'unknown'));
     if (timerState.mainScrollHandler) {
       window.removeEventListener('scroll', timerState.mainScrollHandler);
       timerState.mainScrollHandler = null;

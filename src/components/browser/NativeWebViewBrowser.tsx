@@ -1778,6 +1778,19 @@ export const NativeWebViewBrowser = () => {
     const { requestId, items, thresholds } = request;
     const requestEpoch = Number.isFinite(request.pageEpoch) ? Number(request.pageEpoch) : null;
     const activeEpoch = webViewPageEpochRef.current;
+    const normalizeNavId = (value: unknown): string | null => {
+      if (value === null || value === undefined) return null;
+      const normalized = String(value).trim();
+      return normalized ? normalized : null;
+    };
+    const requestNavId = normalizeNavId(request.navId);
+    const activeNavId = normalizeNavId(activeNavIdRef.current);
+    const epochSyncAllowed =
+      requestEpoch !== null &&
+      requestEpoch < activeEpoch &&
+      requestNavId !== null &&
+      activeNavId !== null &&
+      requestNavId === activeNavId;
     const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
     const stickyShortsMode = isYouTubeShortsUrl(activeUrl);
     const relaxedYouTubeEpochMode = isYouTubeDomainUrl(activeUrl);
@@ -1788,7 +1801,7 @@ export const NativeWebViewBrowser = () => {
     }
     pendingRequestsRef.current.add(requestId);
 
-    if (requestEpoch !== null && requestEpoch !== activeEpoch && !relaxedYouTubeEpochMode) {
+    if (requestEpoch !== null && requestEpoch !== activeEpoch && !relaxedYouTubeEpochMode && !epochSyncAllowed) {
       console.warn(
         '[DIAG][EPOCH_BYPASS]',
         'epoch_bypass_blocked',
@@ -1847,7 +1860,13 @@ export const NativeWebViewBrowser = () => {
       }));
 
       try {
-        const staleMessage = createResultMessage(requestId, staleResults, nonce, requestEpoch ?? undefined);
+        const staleMessage = createResultMessage(
+          requestId,
+          staleResults,
+          nonce,
+          requestEpoch ?? undefined,
+          requestNavId ?? activeNavIdRef.current,
+        );
         await postMessageToWebView(staleMessage as unknown as Record<string, unknown>);
       } catch {
         // Fail-open by design for stale requests.
@@ -1859,12 +1878,13 @@ export const NativeWebViewBrowser = () => {
       flashLog('disarm stale epoch');
       return;
     }
-    if (requestEpoch !== null && requestEpoch !== activeEpoch && relaxedYouTubeEpochMode) {
+    if (requestEpoch !== null && requestEpoch !== activeEpoch && (relaxedYouTubeEpochMode || epochSyncAllowed)) {
       console.log(
         '[DIAG][EPOCH_BYPASS]',
         'epoch_bypass_allowed',
-        'reason=request_epoch_mismatch_youtube_relaxed',
+        'reason=' + (epochSyncAllowed ? 'request_epoch_mismatch_nav_sync' : 'request_epoch_mismatch_youtube_relaxed'),
         'navId=' + activeNavIdRef.current,
+        'requestNavId=' + (requestNavId || 'none'),
         'requestPageEpoch=' + requestEpoch,
         'currentPageEpoch=' + activeEpoch,
         'urlFamily=' + getUrlFamily(activeUrl),
@@ -1875,6 +1895,8 @@ export const NativeWebViewBrowser = () => {
           '[MW-YT][DIAG][EPOCH][HOST]',
           'action=stale_host_bypass_youtube',
           'requestId=' + requestId,
+          'requestNavId=' + (requestNavId || 'none'),
+          'activeNavId=' + (activeNavId || 'none'),
           'requestEpoch=' + requestEpoch,
           'activeEpoch=' + activeEpoch,
           'scope=' + (stickyShortsMode ? 'shorts' : 'youtube'),
@@ -1951,6 +1973,7 @@ export const NativeWebViewBrowser = () => {
           navId: activeNavIdRef.current,
           pageEpoch: requestEpoch ?? activeEpoch,
           sourceType: item.sourceType,
+          pageUrl: activeUrl,
         });
         
         if (scanResult) {
@@ -2157,7 +2180,13 @@ export const NativeWebViewBrowser = () => {
     console.log('[MW-Host] posting results back', requestId, 'count=' + results.length, 'nonce=' + nonce.substring(0, 10));
     
     try {
-      const resultMessage = createResultMessage(requestId, results, nonce, requestEpoch ?? undefined);
+      const resultMessage = createResultMessage(
+        requestId,
+        results,
+        nonce,
+        requestEpoch ?? undefined,
+        requestNavId ?? activeNavIdRef.current,
+      );
       const posted = await postMessageToWebView(resultMessage as unknown as Record<string, unknown>);
       if (posted) {
         console.log('[MW-Host] Results posted via postMessage for', requestId);
@@ -2698,6 +2727,7 @@ export const NativeWebViewBrowser = () => {
             navId: activeNavIdRef.current,
             pageEpoch: webViewPageEpochRef.current,
             sourceType: typeof item.sourceType === 'string' ? item.sourceType : 'unknown',
+            pageUrl: diagUrl,
           });
           
           if (scanResult) {

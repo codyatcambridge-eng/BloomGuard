@@ -91,6 +91,7 @@ export interface ModerationScanContext {
   navId?: number;
   pageEpoch?: number;
   sourceType?: string;
+  pageUrl?: string;
 }
 
 export interface ModerationCacheFlushContext {
@@ -127,6 +128,34 @@ const MIN_SKIN_DENSITY_FOR_SWIMWEAR = 0.35;
  * Neutral confidence floor used to avoid over-blurring benign content.
  */
 const NEUTRAL_FAST_PASS_THRESHOLD = 0.80;
+const FORCE_SHIELD_ON_SHORTS = true;
+
+const isShortsPageUrl = (value?: string): boolean => {
+  if (!value) return false;
+  try {
+    const parsed = new URL(value);
+    return parsed.pathname.includes('/shorts/');
+  } catch {
+    return value.includes('/shorts/');
+  }
+};
+
+const applyShortsShieldOverride = (
+  result: ModerationResult,
+  forceShieldOnShorts: boolean,
+): ModerationResult => {
+  if (!forceShieldOnShorts || result.shouldBlur) return result;
+  const decisionReason = typeof result.decisionReason === 'string'
+    ? result.decisionReason
+    : '';
+  return {
+    ...result,
+    shouldBlur: true,
+    decisionReason: decisionReason
+      ? `${decisionReason}/shorts_blanket_force`
+      : 'shorts_blanket_force',
+  };
+};
 
 /**
  * Fast timeout for fail-open behavior (ms)
@@ -714,6 +743,8 @@ export const useOnDeviceModeration = () => {
     const pageEpoch = Number.isFinite(scanContext?.pageEpoch)
       ? String(scanContext?.pageEpoch)
       : 'n/a';
+    const pageUrl = typeof scanContext?.pageUrl === 'string' ? scanContext.pageUrl : '';
+    const forceShieldOnShorts = FORCE_SHIELD_ON_SHORTS && isShortsPageUrl(pageUrl);
     const stageBDiag = (...parts: string[]) => {
       if (!diagEnabled) return;
       console.debug(
@@ -768,7 +799,7 @@ export const useOnDeviceModeration = () => {
               'thirstScore=' + String(cachedSeg?.thirstScore ?? 'n/a'),
             );
           }
-          return cachedResult;
+          return applyShortsShieldOverride(cachedResult, forceShieldOnShorts);
         }
         console.log(
           '[DIAG][CACHE]',
@@ -798,7 +829,7 @@ export const useOnDeviceModeration = () => {
         if (image instanceof HTMLImageElement) {
           if (image.naturalWidth < MIN_IMAGE_DIMENSION || image.naturalHeight < MIN_IMAGE_DIMENSION) {
             console.debug('[OnDeviceAI] fail_open_tiny: dimensions', image.naturalWidth, 'x', image.naturalHeight);
-            return {
+            const tinyResult: ModerationResult = {
               isExplicit: false,
               shouldBlur: false,
               predictions: [],
@@ -807,6 +838,7 @@ export const useOnDeviceModeration = () => {
               inferenceTime: performance.now() - startTime,
               reason: 'fail_open_tiny',
             };
+            return applyShortsShieldOverride(tinyResult, forceShieldOnShorts);
           }
         }
       }
@@ -1235,7 +1267,7 @@ export const useOnDeviceModeration = () => {
         }
 
         console.debug('[OnDeviceAI] neutral_fast_pass:', neutralScore.toFixed(2));
-        return result;
+        return applyShortsShieldOverride(result, forceShieldOnShorts);
       }
 
       // ==== Estimate signals for human-centric logic ====
@@ -1311,7 +1343,7 @@ export const useOnDeviceModeration = () => {
         }
 
         console.debug('[OnDeviceAI] swimwear_detected: sexy=', sexyScore.toFixed(2), 'skinDensity=', signals.skinDensity.toFixed(2));
-        return result;
+        return applyShortsShieldOverride(result, forceShieldOnShorts);
       }
 
       // ==== STANDARD THRESHOLD CHECK ====
@@ -1408,7 +1440,7 @@ export const useOnDeviceModeration = () => {
           limitCache();
         }
 
-        return result;
+        return applyShortsShieldOverride(result, forceShieldOnShorts);
       }
 
       let reason: ModerationReason = shouldBlur ? 'threshold_hit' : 'threshold_safe';
@@ -1521,7 +1553,7 @@ export const useOnDeviceModeration = () => {
       }
 
       console.debug(`[OnDeviceAI] ${reason}: blur=${shouldBlur}, dom=${dominantClass}, conf=${confidence.toFixed(2)}`);
-      return result;
+      return applyShortsShieldOverride(result, forceShieldOnShorts);
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Unknown error';
       const inferenceTime = performance.now() - startTime;
@@ -1537,7 +1569,7 @@ export const useOnDeviceModeration = () => {
       
       console.debug(`[OnDeviceAI] ${reason}:`, errorMsg);
       
-      return {
+      const failOpenResult: ModerationResult = {
         isExplicit: false,
         shouldBlur: false,
         predictions: [],
@@ -1546,6 +1578,7 @@ export const useOnDeviceModeration = () => {
         inferenceTime,
         reason,
       };
+      return applyShortsShieldOverride(failOpenResult, forceShieldOnShorts);
     }
   }, [modelState, settings, segmentationSignalResolution]);
 

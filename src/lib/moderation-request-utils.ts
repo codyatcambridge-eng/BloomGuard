@@ -85,6 +85,7 @@ export interface TriggerConfig {
 export interface ModerationRequestMessage {
   type: 'gc-moderation-request';
   requestId: string;
+  navId?: string | number;
   pageEpoch?: number;
   items: ModerationRequestItem[];
   thresholds?: {
@@ -130,6 +131,7 @@ export interface ModerationResultItem {
 export interface ModerationResultMessage {
   type: 'gc-moderation-result';
   requestId: string;
+  navId?: string | number;
   pageEpoch?: number;
   results: ModerationResultItem[];
   nonce: string;
@@ -253,11 +255,13 @@ export function createResultMessage(
   requestId: string,
   results: ModerationResultItem[],
   nonce: string,
-  pageEpoch?: number
+  pageEpoch?: number,
+  navId?: string | number
 ): ModerationResultMessage {
   return {
     type: 'gc-moderation-result',
     requestId,
+    navId,
     pageEpoch,
     results,
     nonce,

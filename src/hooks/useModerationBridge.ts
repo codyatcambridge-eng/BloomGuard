@@ -57,6 +57,20 @@ const getCacheFamilyContext = (src: string): string => {
   return domain || 'unknown';
 };
 
+const isShortsPageUrl = (value?: string): boolean => {
+  if (!value) return false;
+  try {
+    const parsed = new URL(value);
+    return parsed.pathname.includes('/shorts/');
+  } catch {
+    return value.includes('/shorts/');
+  }
+};
+
+const hasShortsBlanketDecision = (decisionReason?: string): boolean => (
+  typeof decisionReason === 'string' && decisionReason.includes('shorts_blanket_force')
+);
+
 export const isWebViewBlurReadyEvent = (message: unknown): boolean => {
   return isBlurOverlayReadyMessage(message);
 };
@@ -112,6 +126,7 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
     const hentaiScore = predictions.Hentai ?? predictions.hentai ?? 0;
 
     let category = calculateCategory(predictions);
+    const shortsBlanketForced = hasShortsBlanketDecision(result.decisionReason);
 
     // Keep category aligned with blur decisions so downstream JS doesn't discard unsafe hits.
     if (result.reason === 'thirst_detected') {
@@ -120,6 +135,7 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
       category = 'swimwear';
     } else if (
       result.shouldBlur &&
+      !shortsBlanketForced &&
       (category === 'safe' || category === 'neutral' || category === 'drawing')
     ) {
       if (pornScore >= hentaiScore && pornScore >= sexyScore) {
@@ -192,29 +208,37 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
     const cacheFamily = getCacheFamilyContext(src);
     const previousHitDomain = cacheDiagRef.current.lastHitDomain;
     const siteSwitchedSincePriorHit = !!previousHitDomain && previousHitDomain !== cacheDomain;
+    const shortsPageContext = isShortsPageUrl(context?.pageUrl);
     const navId = Number.isFinite(context?.navId) ? String(context?.navId) : 'n/a';
     const pageEpoch = Number.isFinite(context?.pageEpoch) ? String(context?.pageEpoch) : 'n/a';
 
     // Check cache
     if (resultsCache.current.has(src)) {
-      console.log('[MW-Bridge] Cache hit:', src.substring(0, 50));
-      console.log(
-        '[DIAG][CACHE]',
-        'cache_hit_bridge',
-        'domain=' + cacheDomain,
-        'keyFamily=' + cacheFamily,
-        'domainFamily=' + cacheFamily,
-        'siteSwitchedSincePriorHit=' + siteSwitchedSincePriorHit,
-        'previousHitDomain=' + (previousHitDomain || 'none'),
-        'requestId=' + (context?.requestId || 'n/a'),
-        'itemId=' + (context?.itemId || 'n/a'),
-        'sourceType=' + (context?.sourceType || 'n/a'),
-        'navId=' + navId,
-        'pageEpoch=' + pageEpoch,
-      );
-      cacheDiagRef.current.lastHitDomain = cacheDomain;
-      cacheDiagRef.current.lastHitFamily = cacheFamily;
-      return resultsCache.current.get(src)!;
+      const cachedResult = resultsCache.current.get(src)!;
+      const cachedShortsForced = hasShortsBlanketDecision(cachedResult.decisionReason);
+      const cacheContextMatch = cachedShortsForced === shortsPageContext;
+      if (!cacheContextMatch) {
+        resultsCache.current.delete(src);
+      } else {
+        console.log('[MW-Bridge] Cache hit:', src.substring(0, 50));
+        console.log(
+          '[DIAG][CACHE]',
+          'cache_hit_bridge',
+          'domain=' + cacheDomain,
+          'keyFamily=' + cacheFamily,
+          'domainFamily=' + cacheFamily,
+          'siteSwitchedSincePriorHit=' + siteSwitchedSincePriorHit,
+          'previousHitDomain=' + (previousHitDomain || 'none'),
+          'requestId=' + (context?.requestId || 'n/a'),
+          'itemId=' + (context?.itemId || 'n/a'),
+          'sourceType=' + (context?.sourceType || 'n/a'),
+          'navId=' + navId,
+          'pageEpoch=' + pageEpoch,
+        );
+        cacheDiagRef.current.lastHitDomain = cacheDomain;
+        cacheDiagRef.current.lastHitFamily = cacheFamily;
+        return cachedResult;
+      }
     }
     console.log(
       '[DIAG][CACHE]',
@@ -245,7 +269,9 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
       }
 
       const scanResult = convertResult(src, result, inferenceTime);
-      resultsCache.current.set(src, scanResult);
+      if (!hasShortsBlanketDecision(scanResult.decisionReason)) {
+        resultsCache.current.set(src, scanResult);
+      }
 
       onSignal?.({
         Porn: scanResult.predictions?.Porn ?? scanResult.predictions?.porn ?? 0,
@@ -380,6 +406,8 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
       itemId?: string;
       navId?: number;
       pageEpoch?: number;
+      pageUrl?: string;
+      url?: string;
     };
     console.log('[MW-Bridge] Received WebView message:', msg.type, msg.action);
     
@@ -397,6 +425,9 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
         sourceType,
         navId: Number.isFinite(msg.navId) ? Number(msg.navId) : undefined,
         pageEpoch: Number.isFinite(msg.pageEpoch) ? Number(msg.pageEpoch) : undefined,
+        pageUrl: typeof msg.pageUrl === 'string'
+          ? msg.pageUrl
+          : (typeof msg.url === 'string' ? msg.url : undefined),
       });
       
       if (result) {

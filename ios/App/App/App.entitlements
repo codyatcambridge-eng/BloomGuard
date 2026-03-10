@@ -6,5 +6,7 @@
 	<array>
 		<string>audio</string>
 	</array>
+	<key>com.apple.multitasking.systemappassertions</key>
+	<true/>
 </dict>
 </plist>
