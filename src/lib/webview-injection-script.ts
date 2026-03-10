@@ -1230,6 +1230,8 @@ export function generateModerationScript(config: InjectionConfig): string {
   const SHORTS_HEALTH_HEAL_GIVEUP_MS = 30000;
   const SHORTS_HEALTH_HEAL_INTERVAL_MS = 2000;
   const SHORTS_HEALTH_HEAL_ENABLED = CONFIG.enableShortsHealthHeal === true;
+  const SHORTS_REVEAL_ANCHOR_RECOVERY_GRACE_MS = 900;
+  const SHORTS_REVEAL_ANCHOR_RETRY_DELAY_MS = 120;
   const SHORTS_HEALTH_LOG_PREFIX = '[MW-YT][DIAG][SHORTS_HEALTH]';
   const SHORTS_REENTRY_REFRESH_COOLDOWN_MS = 1200;
   const ADAPTIVE_SHORTS_RESCAN_DEBOUNCE_MS = 140;
@@ -2966,24 +2968,70 @@ export function generateModerationScript(config: InjectionConfig): string {
       healTriggered = maybeReattachShortsBlurForVideoNode(targetNode, healReason, relatedNodeId);
     }
     if (!healTriggered) {
-      const healTarget = (
-        (replacementVideo && replacementVideo.nodeType === 1 && replacementVideo.isConnected ? replacementVideo : null) ||
-        (targetNode && targetNode.nodeType === 1 ? targetNode : null) ||
-        container
+      const liveContext = shortsBlurContextByContainer.get(container);
+      const liveSrc = String(liveContext && liveContext.src ? liveContext.src : '');
+      const liveTarget = (
+        liveContext &&
+        liveContext.targetNode &&
+        liveContext.targetNode.nodeType === 1
+      ) ? liveContext.targetNode : null;
+      const currentShortsUrlId = getCurrentShortsUrlId();
+      const liveAgeMs = Number.isFinite(liveContext && liveContext.updatedAt)
+        ? Math.max(0, Date.now() - Number(liveContext.updatedAt))
+        : 0;
+      const liveIsStale = !!(
+        liveContext &&
+        Number.isFinite(liveContext.updatedAt) &&
+        liveAgeMs > SHORTS_SWAP_REATTACH_WINDOW_MS
       );
-      if (healTarget && healTarget.nodeType === 1 && context.src) {
-        applyBlur(
-          healTarget,
-          context.src,
-          context.category || 'flagged',
-          context.blurPx || CONFIG.blurStrength,
-          context.itemId || ''
+      const liveUrlMismatch = !!(
+        liveContext &&
+        liveContext.shortsUrlId &&
+        currentShortsUrlId &&
+        liveContext.shortsUrlId !== currentShortsUrlId
+      );
+      const liveMissing = !liveContext || !liveSrc;
+      const liveInvalidTarget = !liveTarget || !liveTarget.isConnected;
+      const liveSafeResolved = !!(liveSrc && isSafeResolvedActive(liveSrc));
+      const liveTrustworthy = !liveMissing && !liveIsStale && !liveUrlMismatch && !liveInvalidTarget && !liveSafeResolved;
+      if (!liveTrustworthy) {
+        if (liveContext && (liveIsStale || liveUrlMismatch || liveSafeResolved || liveInvalidTarget)) {
+          deleteShortsBlurContextEntry(container);
+        }
+        logShortsHealthEvent(
+          'shorts_health_heal_skip_fallback',
+          'reason=live_context_untrusted' +
+          ' containerNodeId=' + getDiagNodeId(container) +
+          ' liveMissing=' + liveMissing +
+          ' liveInvalidTarget=' + liveInvalidTarget +
+          ' liveIsStale=' + liveIsStale +
+          ' liveUrlMismatch=' + liveUrlMismatch +
+          ' liveSafeResolved=' + liveSafeResolved +
+          ' liveAgeMs=' + liveAgeMs +
+          ' currentShortsUrlId=' + (currentShortsUrlId || 'none') +
+          ' liveContextShortsUrlId=' + (liveContext && liveContext.shortsUrlId ? liveContext.shortsUrlId : 'none') +
+          ' liveContextSrc=' + String(liveSrc || '').substring(0, 180)
         );
-        healTriggered = true;
+      } else {
+        const healTarget = (
+          (replacementVideo && replacementVideo.nodeType === 1 && replacementVideo.isConnected ? replacementVideo : null) ||
+          (liveTarget && liveTarget.nodeType === 1 ? liveTarget : null) ||
+          container
+        );
+        if (healTarget && healTarget.nodeType === 1) {
+          applyBlur(
+            healTarget,
+            liveSrc,
+            liveContext.category || 'flagged',
+            liveContext.blurPx || CONFIG.blurStrength,
+            liveContext.itemId || ''
+          );
+          healTriggered = true;
+        }
       }
     }
 
-    const refreshedContext = shortsBlurContextByContainer.get(container) || context;
+    const refreshedContext = shortsBlurContextByContainer.get(container) || null;
     const refreshedTarget = (
       refreshedContext &&
       refreshedContext.targetNode &&
@@ -3329,19 +3377,66 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
   }
 
+  function hasShortsLiveBlurEffect(node) {
+    if (!node || node.nodeType !== 1) return false;
+    const inlineFilter = String(node.style.getPropertyValue('filter') || node.style.filter || '').toLowerCase();
+    const inlineBackdrop = String(node.style.getPropertyValue('backdrop-filter') || '').toLowerCase();
+    if (inlineFilter.indexOf('blur(') !== -1 || inlineBackdrop.indexOf('blur(') !== -1) {
+      return true;
+    }
+    try {
+      const computed = window.getComputedStyle(node);
+      const computedFilter = String(computed && computed.filter ? computed.filter : '').toLowerCase();
+      const computedBackdrop = String(
+        computed && computed.getPropertyValue ? computed.getPropertyValue('backdrop-filter') : ''
+      ).toLowerCase();
+      return (
+        computedFilter.indexOf('blur(') !== -1 ||
+        computedBackdrop.indexOf('blur(') !== -1
+      );
+    } catch (e) {}
+    return false;
+  }
+
+  function isTrustedShortsRevealOverlayOwner(node, normalizedSrc, activeContainer) {
+    if (!node || node.nodeType !== 1 || !node.isConnected) return false;
+    if (!node.dataset || node.dataset.mwModerated !== 'blurred' || node.dataset.mwRevealed === 'true') {
+      return false;
+    }
+    const ownerSrc = normalizeUrl((node.dataset && node.dataset.mwSrc) || '');
+    if (normalizedSrc && ownerSrc !== normalizedSrc) return false;
+    if (!activeContainer || !activeContainer.isConnected) return false;
+    const ownerContainer = getShortsCardOrPlayerContainerFromNode(node) || node;
+    const inActiveCard = (
+      ownerContainer === activeContainer ||
+      (typeof activeContainer.contains === 'function' && activeContainer.contains(ownerContainer)) ||
+      (typeof ownerContainer.contains === 'function' && ownerContainer.contains(activeContainer)) ||
+      (typeof activeContainer.contains === 'function' && activeContainer.contains(node))
+    );
+    if (!inActiveCard) return false;
+    return hasShortsLiveBlurEffect(node);
+  }
+
   function resolveShortsRevealOverlayAnchor(overlay) {
     if (!overlay || overlay.nodeType !== 1) return null;
     const src = String((overlay.dataset && overlay.dataset.mwFor) || '');
     const normalizedSrc = normalizeUrl(src || '');
+    const activeContainer = getActiveShortsPlayerContainer();
     const boundAnchor = (
       overlay.__mwAnchorTarget &&
       overlay.__mwAnchorTarget.nodeType === 1 &&
       overlay.__mwAnchorTarget.isConnected
     ) ? overlay.__mwAnchorTarget : null;
-    if (boundAnchor) return boundAnchor;
+    if (boundAnchor && isTrustedShortsRevealOverlayOwner(boundAnchor, normalizedSrc, activeContainer)) {
+      return boundAnchor;
+    }
 
-    const activeContainer = getActiveShortsPlayerContainer();
-    if (activeContainer && activeContainer.isConnected && doesShortsContainerMatchSrc(activeContainer, normalizedSrc)) {
+    if (
+      activeContainer &&
+      activeContainer.isConnected &&
+      doesShortsContainerMatchSrc(activeContainer, normalizedSrc) &&
+      isTrustedShortsRevealOverlayOwner(activeContainer, normalizedSrc, activeContainer)
+    ) {
       return activeContainer;
     }
 
@@ -3349,11 +3444,11 @@ export function generateModerationScript(config: InjectionConfig): string {
     for (let i = 0; i < blurredNodes.length; i += 1) {
       const candidate = blurredNodes[i];
       if (!candidate || candidate.nodeType !== 1 || !candidate.isConnected) continue;
-      if (candidate.dataset && candidate.dataset.mwSrc === src) return candidate;
-    }
-
-    if (activeContainer && activeContainer.isConnected) {
-      return activeContainer;
+      if (!isTrustedShortsRevealOverlayOwner(candidate, normalizedSrc, activeContainer)) continue;
+      const candidateSrc = normalizeUrl((candidate.dataset && candidate.dataset.mwSrc) || '');
+      if (!normalizedSrc || candidateSrc === normalizedSrc) {
+        return candidate;
+      }
     }
     return null;
   }
@@ -3377,6 +3472,12 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function positionShortsRevealOverlay(overlay, element, reason) {
     if (!overlay) return false;
+    const normalizedSrc = normalizeUrl(String((overlay.dataset && overlay.dataset.mwFor) || ''));
+    const activeContainer = getActiveShortsPlayerContainer();
+    if (!isTrustedShortsRevealOverlayOwner(element, normalizedSrc, activeContainer)) {
+      overlay.style.display = 'none';
+      return false;
+    }
     if (!element || !element.isConnected || typeof element.getBoundingClientRect !== 'function') {
       overlay.style.display = 'none';
       if (DIAG_YT_BLUR) {
@@ -3450,13 +3551,74 @@ export function generateModerationScript(config: InjectionConfig): string {
     const portal = document.getElementById(REVEAL_PORTAL_ID);
     if (!portal || typeof portal.querySelectorAll !== 'function') return;
     const overlays = portal.querySelectorAll('.mw-reveal-overlay');
+    const now = Date.now();
     for (let i = 0; i < overlays.length; i += 1) {
       const overlay = overlays[i];
       if (!overlay || !overlay.isConnected) continue;
       const anchor = resolveShortsRevealOverlayAnchor(overlay);
       if (!anchor) {
-        overlay.style.display = 'none';
+        let missingSince = 0;
+        const rawMissingSince = Number((overlay.dataset && overlay.dataset.mwAnchorMissingSince) || 0);
+        if (Number.isFinite(rawMissingSince) && rawMissingSince > 0) {
+          missingSince = rawMissingSince;
+        } else {
+          missingSince = now;
+          if (overlay.dataset) {
+            overlay.dataset.mwAnchorMissingSince = String(missingSince);
+          }
+        }
+        const missingElapsedMs = Math.max(0, now - missingSince);
+        if (missingElapsedMs < SHORTS_REVEAL_ANCHOR_RECOVERY_GRACE_MS) {
+          overlay.style.display = 'none';
+          if (!overlay.__mwShortsAnchorRetryTimer) {
+            overlay.__mwShortsAnchorRetryTimer = setTimeout(function() {
+              overlay.__mwShortsAnchorRetryTimer = null;
+              if (!overlay || !overlay.isConnected) return;
+              scheduleShortsRevealOverlayReposition('missing_anchor_retry');
+            }, SHORTS_REVEAL_ANCHOR_RETRY_DELAY_MS);
+          }
+          if (DIAG_YT_BLUR) {
+            console.log(
+              '[DIAG][REVEAL_UI] overlay_hidden',
+              'overlayId=' + String((overlay.dataset && overlay.dataset.mwOverlayId) || 'unknown'),
+              'reason=shorts_anchor_missing_grace',
+              'node=' + String((overlay.dataset && overlay.dataset.mwNodeId) || 'n/a'),
+              'missingElapsedMs=' + missingElapsedMs,
+              'graceMs=' + SHORTS_REVEAL_ANCHOR_RECOVERY_GRACE_MS
+            );
+          }
+          continue;
+        }
+        if (overlay.__mwShortsAnchorRetryTimer) {
+          clearTimeout(overlay.__mwShortsAnchorRetryTimer);
+          overlay.__mwShortsAnchorRetryTimer = null;
+        }
+        if (overlay.dataset) {
+          delete overlay.dataset.mwAnchorMissingSince;
+        }
+        if (overlay.parentElement) {
+          if (DIAG_YT_BLUR) {
+            console.log(
+              '[DIAG][REVEAL_UI] overlay_removed',
+              'overlayId=' + String((overlay.dataset && overlay.dataset.mwOverlayId) || 'unknown'),
+              'reason=stale_or_untrusted_shorts_owner_after_grace',
+              'node=' + String((overlay.dataset && overlay.dataset.mwNodeId) || 'n/a'),
+              'missingElapsedMs=' + missingElapsedMs,
+              'graceMs=' + SHORTS_REVEAL_ANCHOR_RECOVERY_GRACE_MS
+            );
+          }
+          overlay.parentElement.removeChild(overlay);
+        } else {
+          overlay.style.display = 'none';
+        }
         continue;
+      }
+      if (overlay.__mwShortsAnchorRetryTimer) {
+        clearTimeout(overlay.__mwShortsAnchorRetryTimer);
+        overlay.__mwShortsAnchorRetryTimer = null;
+      }
+      if (overlay.dataset && overlay.dataset.mwAnchorMissingSince) {
+        delete overlay.dataset.mwAnchorMissingSince;
       }
       setRevealOverlayAnchorTarget(overlay, anchor, 'reposition:' + (reason || 'unknown'));
       positionShortsRevealOverlay(overlay, anchor, reason || 'reposition');
@@ -3587,14 +3749,21 @@ export function generateModerationScript(config: InjectionConfig): string {
     const nodeId = getDiagNodeId(node);
     const shortsMode = isShortsModeActive();
     if (shortsMode) {
+      const normalizedSrc = normalizeUrl(src || '');
       const portal = document.getElementById(REVEAL_PORTAL_ID);
       if (portal && typeof portal.querySelectorAll === 'function') {
         const overlays = portal.querySelectorAll('.mw-reveal-overlay');
         for (let i = 0; i < overlays.length; i += 1) {
           const overlay = overlays[i];
           if (!overlay || !overlay.isConnected) continue;
-          if (overlay.dataset.mwNodeId === nodeId) return overlay;
-          if (src && overlay.dataset.mwFor === src) return overlay;
+          const nodeMatch = (
+            overlay.__mwAnchorTarget === node ||
+            overlay.dataset.mwNodeId === nodeId
+          );
+          if (!nodeMatch) continue;
+          if (!normalizedSrc) return overlay;
+          const overlaySrc = normalizeUrl((overlay.dataset && overlay.dataset.mwFor) || '');
+          if (overlaySrc === normalizedSrc) return overlay;
         }
       }
     }
@@ -3634,7 +3803,11 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function removeRevealOverlay(node, src, reason) {
     if (!node || node.nodeType !== 1) return false;
-    const overlay = findRevealOverlayForElement(node, src || node.dataset.mwSrc || '');
+    let overlay = findRevealOverlayForElement(node, src || node.dataset.mwSrc || '');
+    if (!overlay && isShortsModeActive()) {
+      // Shorts fallback: clear stale node-owned overlays even if src drifted.
+      overlay = findRevealOverlayForElement(node, '');
+    }
     if (overlay && overlay.parentElement) {
       const overlayId = overlay.dataset && overlay.dataset.mwOverlayId ? overlay.dataset.mwOverlayId : 'unknown';
       overlay.parentElement.removeChild(overlay);
@@ -4427,7 +4600,25 @@ export function generateModerationScript(config: InjectionConfig): string {
         'mwModerated=' + (element.dataset.mwModerated || 'none')
       );
     }
-    const existingOverlay = findRevealOverlayForElement(element, src);
+    let existingOverlay = findRevealOverlayForElement(element, src);
+    if (shortsMode && existingOverlay) {
+      const expectedNodeId = getDiagNodeId(element);
+      const overlayNodeId = String((existingOverlay.dataset && existingOverlay.dataset.mwNodeId) || '');
+      const overlayAnchor = (
+        existingOverlay.__mwAnchorTarget &&
+        existingOverlay.__mwAnchorTarget.nodeType === 1
+      ) ? existingOverlay.__mwAnchorTarget : null;
+      const ownerMatches = (
+        overlayAnchor === element ||
+        overlayNodeId === expectedNodeId
+      );
+      if (!ownerMatches) {
+        if (existingOverlay.parentElement) {
+          existingOverlay.parentElement.removeChild(existingOverlay);
+        }
+        existingOverlay = null;
+      }
+    }
     if (existingOverlay) {
       element.dataset.mwHasOverlay = 'true';
       if (shortsMode && element.dataset.mwModerated !== 'blurred') {
@@ -5055,6 +5246,18 @@ export function generateModerationScript(config: InjectionConfig): string {
           );
         }
       }
+      if (stickyShortsMode && resultEpoch !== null && resultEpoch < state.pageEpoch) {
+        console.warn(
+          '[DIAG][SHORTS_EPOCH_DROP]',
+          'stale result dropped',
+          'resultEpoch=' + resultEpoch,
+          'currentEpoch=' + state.pageEpoch
+        );
+        state.stats.staleEpochDiscarded++;
+        logShortsScanSkip('epoch_stale_drop', null, 'request:' + String(requestId || 'none'), 'result');
+        cleanupRejectedOrTimedOutRequest(requestId, 'reject_stale_shorts_epoch');
+        return;
+      }
       
       if (!requestId || !Array.isArray(results)) {
         console.log('[MW] Invalid result message:', message);
@@ -5297,6 +5500,46 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       const dims = element ? getElementDimensions(element) : { width: 0, height: 0 };
       
+      if (!finalBlur && isShortsModeActive()) {
+        try {
+          const safeSrc = normalizeUrl(src || '');
+          const portal = document.getElementById(REVEAL_PORTAL_ID);
+          if (portal && typeof portal.querySelectorAll === 'function') {
+            const overlays = portal.querySelectorAll('.mw-reveal-overlay');
+            for (let i = 0; i < overlays.length; i += 1) {
+              const overlay = overlays[i];
+              if (!overlay || !overlay.isConnected) continue;
+              const overlaySrc = normalizeUrl(String((overlay.dataset && overlay.dataset.mwFor) || ''));
+              const matchesSafeSrc = !!safeSrc && overlaySrc === safeSrc;
+              const anchor = (
+                overlay.__mwAnchorTarget &&
+                overlay.__mwAnchorTarget.nodeType === 1
+              ) ? overlay.__mwAnchorTarget : null;
+              const anchorConnected = !!(anchor && anchor.isConnected);
+              let staleOrDisconnectedOwner = !anchorConnected;
+              if (!staleOrDisconnectedOwner && anchor) {
+                const ownerSrc = normalizeUrl((anchor.dataset && anchor.dataset.mwSrc) || '');
+                const ownerBlurred = (
+                  !!anchor.dataset &&
+                  anchor.dataset.mwModerated === 'blurred' &&
+                  anchor.dataset.mwRevealed !== 'true' &&
+                  hasShortsLiveBlurEffect(anchor)
+                );
+                const ownerSrcMismatch = !!overlaySrc && !!ownerSrc && overlaySrc !== ownerSrc;
+                staleOrDisconnectedOwner = !ownerBlurred || ownerSrcMismatch;
+              }
+              const shouldRemove = matchesSafeSrc || staleOrDisconnectedOwner;
+              if (!shouldRemove) continue;
+              if (overlay.parentElement) {
+                overlay.parentElement.removeChild(overlay);
+              } else {
+                overlay.style.display = 'none';
+              }
+            }
+          }
+        } catch (e) {}
+      }
+
       if (element && element.isConnected) {
         try {
           element.dataset.mwConfidence = String(toFiniteNumber(confidence) ?? 0);

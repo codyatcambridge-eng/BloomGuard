@@ -102,6 +102,8 @@ const SHORTS_LEGACY_FALLBACK_TIMEOUT_PROBE_MS = 8000;
 const SHORTS_LEGACY_FALLBACK_REQ_GRACE_MS = 2500;
 const SHORTS_LEGACY_FALLBACK_MAX_PROBE_MS = 9000;
 const SHORTS_LEGACY_FALLBACK_MAX_POLLS = 6;
+const SHORTS_REENTRY_HOOK_RETRY_DELAY_MS = 120;
+const SHORTS_REENTRY_HOOK_MAX_ATTEMPTS = 8;
 
 const getUrlFamily = (value?: string) => {
   if (!value) return 'unknown';
@@ -268,10 +270,11 @@ export const NativeWebViewBrowser = () => {
     lastReqTimeoutAt: 0,
   });
   const shortsModeActiveRef = useRef(false);
-  const shortsReentryRefreshRef = useRef<{ navId: number; url: string; at: number }>({
+  const shortsReentryRefreshRef = useRef<{ navId: number; url: string; at: number; result: string }>({
     navId: 0,
     url: '',
     at: 0,
+    result: 'none',
   });
   const legacyPollSelfDisabledContextRef = useRef<string | null>(null);
   const [shortsLegacyFallbackVersion, setShortsLegacyFallbackVersion] = useState(0);
@@ -284,6 +287,66 @@ export const NativeWebViewBrowser = () => {
     if (!isDebugMode) return;
     console.log(...args);
   }, [isDebugMode]);
+
+  const resetShortsReentryTracking = useCallback((reason: string) => {
+    shortsReentryRefreshRef.current = {
+      navId: 0,
+      url: '',
+      at: 0,
+      result: 'none',
+    };
+    shortsModeActiveRef.current = false;
+    console.log(
+      '[DIAG][SHORTS_REENTRY][HOST]',
+      'action=reset_tracking',
+      'reason=' + reason,
+      'navId=' + activeNavIdRef.current,
+    );
+  }, []);
+
+  const invokeShortsReentryRefresh = useCallback(async (
+    scriptExecutor: (script: string) => Promise<string | null>,
+    reason: string,
+    urlHint?: string,
+    options?: { ensureHookReady?: boolean; maxAttempts?: number },
+  ): Promise<{ result: string; attempts: number }> => {
+    const activeUrl = urlHint || currentUrlRef.current || '';
+    if (!isYouTubeShortsUrl(activeUrl)) {
+      return { result: 'NOT_SHORTS', attempts: 0 };
+    }
+
+    const safeReason = escapeForJs(reason || 'host_shorts_reentry');
+    const ensureHookReady = options?.ensureHookReady === true;
+    const requestedAttempts = Number.isFinite(options?.maxAttempts)
+      ? Number(options?.maxAttempts)
+      : 1;
+    const maxAttempts = Math.max(1, Math.min(12, ensureHookReady ? requestedAttempts : 1));
+    let attempts = 0;
+    let lastResult = 'NO_HOOK';
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      attempts = attempt;
+      const raw = await scriptExecutor(`
+        (function() {
+          try {
+            if (typeof window.__MW_SHORTS_REENTRY_REFRESH__ !== 'function') return 'NO_HOOK';
+            return window.__MW_SHORTS_REENTRY_REFRESH__('${safeReason}');
+          } catch (e) {
+            return 'ERR:' + String(e);
+          }
+        })();
+      `);
+      lastResult = String(raw || 'null');
+      if (lastResult !== 'NO_HOOK') {
+        break;
+      }
+      if (attempt < maxAttempts) {
+        await new Promise<void>(resolve => setTimeout(resolve, SHORTS_REENTRY_HOOK_RETRY_DELAY_MS));
+      }
+    }
+
+    return { result: lastResult, attempts };
+  }, []);
 
   const armShortsLegacyFallbackProbe = useCallback((reason: string, durationMs: number) => {
     const boundedDuration = Math.max(200, Math.floor(durationMs));
@@ -882,6 +945,7 @@ export const NativeWebViewBrowser = () => {
       enabled: isRuntimeModerationEnabled,
       pageEpoch: webViewPageEpochRef.current,
       diagYouTubeShorts: localSettings.diag_youtube_shorts === true && isYouTubeUrl(targetUrl),
+      enableShortsHealthHeal: true,
     };
     console.log(
       '[MW-Inject][Config]',
@@ -895,7 +959,8 @@ export const NativeWebViewBrowser = () => {
     // Full moderation script: request scanning + host bridge + DOM blur/reveal behavior.
     const mainScript = generateModerationScript(config);
     try {
-      await scriptExecutor(mainScript);
+      const injectResultRaw = await scriptExecutor(mainScript);
+      const injectResult = String(injectResultRaw || 'null');
       injectionDoneRef.current = true;
       lastInjectedUrlRef.current = targetUrl;
       lastInjectionAtRef.current = Date.now();
@@ -904,6 +969,7 @@ export const NativeWebViewBrowser = () => {
         'navId=' + navId,
         'reason=' + reason,
         'targetUrl=' + (targetUrl || 'unknown'),
+        'result=' + injectResult,
       );
       console.log(
         '[DIAG][INJECT] dispatch',
@@ -918,6 +984,29 @@ export const NativeWebViewBrowser = () => {
         'navId=' + navId,
         'url=' + (targetUrl || 'unknown'),
       );
+      if (isYouTubeShortsUrl(targetUrl)) {
+        const forcedReason = injectResult === 'MW_ALREADY_ACTIVE'
+          ? 'post_inject_force_already_active:' + reason
+          : 'post_inject_force:' + reason;
+        const postInjectRefresh = await invokeShortsReentryRefresh(
+          scriptExecutor,
+          forcedReason,
+          targetUrl,
+          {
+            ensureHookReady: true,
+            maxAttempts: SHORTS_REENTRY_HOOK_MAX_ATTEMPTS,
+          },
+        );
+        console.log(
+          '[DIAG][SHORTS_REENTRY][HOST]',
+          'action=post_inject_forced',
+          'reason=' + forcedReason,
+          'navId=' + navId,
+          'url=' + toDiagUrl(targetUrl),
+          'result=' + postInjectRefresh.result,
+          'attempts=' + postInjectRefresh.attempts,
+        );
+      }
       exitPendingReinject('inject_success', targetUrl);
     } catch (error) {
       console.error('[MW-Bridge] Moderation script injection failed:', error);
@@ -931,7 +1020,16 @@ export const NativeWebViewBrowser = () => {
     } finally {
       injectionInFlightRef.current = false;
     }
-  }, [ENABLE_SIGNAL_PIPELINE, settingsLoaded, isRuntimeModerationEnabled, getModerationConfig, localSettings.diag_youtube_shorts, exitPendingReinject]);
+  }, [
+    ENABLE_SIGNAL_PIPELINE,
+    settingsLoaded,
+    isRuntimeModerationEnabled,
+    getModerationConfig,
+    localSettings.diag_youtube_shorts,
+    exitPendingReinject,
+    invokeShortsReentryRefresh,
+    toDiagUrl,
+  ]);
 
   const getWebViewListenerDiagContext = useCallback(() => {
     return {
@@ -1086,6 +1184,7 @@ export const NativeWebViewBrowser = () => {
       blurReadyRef.current = false;
       blurPendingRef.current = null;
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
+      resetShortsReentryTracking('webview_closed');
       setCentralBlurState(false, 'webview_closed');
       setFlashGuardState?.(false, 'close');
       navigate('home', '', '');
@@ -1117,6 +1216,7 @@ export const NativeWebViewBrowser = () => {
       !force &&
       previous.navId === navId &&
       previous.url === activeUrl &&
+      previous.result !== 'NO_HOOK' &&
       (now - previous.at) < 1800
     ) {
       console.log(
@@ -1129,32 +1229,40 @@ export const NativeWebViewBrowser = () => {
       return;
     }
 
-    shortsReentryRefreshRef.current = {
-      navId,
-      url: activeUrl,
-      at: now,
-    };
-
-    const safeReason = escapeForJs(reason || 'host_shorts_reentry');
-    const result = await executeScript(`
-      (function() {
-        try {
-          if (typeof window.__MW_SHORTS_REENTRY_REFRESH__ !== 'function') return 'NO_HOOK';
-          return window.__MW_SHORTS_REENTRY_REFRESH__('${safeReason}');
-        } catch (e) {
-          return 'ERR:' + String(e);
-        }
-      })();
-    `);
+    const refresh = await invokeShortsReentryRefresh(
+      executeScript,
+      reason || 'host_shorts_reentry',
+      activeUrl,
+      {
+        ensureHookReady: true,
+        maxAttempts: SHORTS_REENTRY_HOOK_MAX_ATTEMPTS,
+      },
+    );
+    if (refresh.result === 'NO_HOOK') {
+      shortsReentryRefreshRef.current = {
+        navId,
+        url: activeUrl,
+        at: 0,
+        result: 'NO_HOOK',
+      };
+    } else {
+      shortsReentryRefreshRef.current = {
+        navId,
+        url: activeUrl,
+        at: Date.now(),
+        result: refresh.result,
+      };
+    }
     console.log(
       '[DIAG][SHORTS_REENTRY][HOST]',
       'action=requested',
       'reason=' + reason,
       'navId=' + navId,
       'url=' + toDiagUrl(activeUrl),
-      'result=' + String(result || 'null'),
+      'result=' + refresh.result,
+      'attempts=' + refresh.attempts,
     );
-  }, [isNative, webViewState.isOpen, webViewState.currentUrl, executeScript, toDiagUrl]);
+  }, [isNative, webViewState.isOpen, webViewState.currentUrl, executeScript, invokeShortsReentryRefresh, toDiagUrl]);
 
   useEffect(() => {
     currentUrlRef.current = webViewState.currentUrl || '';
@@ -1182,7 +1290,7 @@ export const NativeWebViewBrowser = () => {
     if (!webViewState.isOpen) return;
     const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
     if (!isYouTubeShortsUrl(activeUrl)) return;
-    void requestShortsReentryRefresh('webview_open_shorts', activeUrl, false);
+    void requestShortsReentryRefresh('webview_open_shorts', activeUrl, true);
   }, [webViewState.isOpen, webViewState.currentUrl, requestShortsReentryRefresh]);
 
   useEffect(() => {
@@ -3101,6 +3209,7 @@ export const NativeWebViewBrowser = () => {
     blurPendingRef.current = null;
     blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
     setCentralBlurState(false, 'home_reset');
+    resetShortsReentryTracking('home_reset');
     setReaderContent(null);
     setPdfContent(null);
     setYoutubeContent(null);
@@ -3111,7 +3220,7 @@ export const NativeWebViewBrowser = () => {
     setUrlInput('');
     setFallbackUrl('');
     goHome();
-  }, [isNative, webViewState.isOpen, webViewState.currentUrl, closeWebView, goHome, moderationBridge, setCentralBlurState, teardownWebViewScheduling, exitPendingReinject]);
+  }, [isNative, webViewState.isOpen, webViewState.currentUrl, closeWebView, goHome, moderationBridge, setCentralBlurState, teardownWebViewScheduling, exitPendingReinject, resetShortsReentryTracking]);
 
   // Manual scan trigger for current page
   const handleScanPage = useCallback(async () => {
