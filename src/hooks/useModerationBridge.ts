@@ -67,8 +67,11 @@ const isShortsPageUrl = (value?: string): boolean => {
   }
 };
 
-const hasShortsBlanketDecision = (decisionReason?: string): boolean => (
-  typeof decisionReason === 'string' && decisionReason.includes('shorts_blanket_force')
+const hasShortsForceDecision = (decisionReason?: string): boolean => (
+  typeof decisionReason === 'string' && (
+    decisionReason.includes('shorts_blanket_force') ||
+    decisionReason.includes('shorts_high_risk_force')
+  )
 );
 
 export const isWebViewBlurReadyEvent = (message: unknown): boolean => {
@@ -126,7 +129,7 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
     const hentaiScore = predictions.Hentai ?? predictions.hentai ?? 0;
 
     let category = calculateCategory(predictions);
-    const shortsBlanketForced = hasShortsBlanketDecision(result.decisionReason);
+    const shortsBlanketForced = hasShortsForceDecision(result.decisionReason);
 
     // Keep category aligned with blur decisions so downstream JS doesn't discard unsafe hits.
     if (result.reason === 'thirst_detected') {
@@ -215,7 +218,7 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
     // Check cache
     if (resultsCache.current.has(src)) {
       const cachedResult = resultsCache.current.get(src)!;
-      const cachedShortsForced = hasShortsBlanketDecision(cachedResult.decisionReason);
+      const cachedShortsForced = hasShortsForceDecision(cachedResult.decisionReason);
       const cacheContextMatch = cachedShortsForced === shortsPageContext;
       if (!cacheContextMatch) {
         resultsCache.current.delete(src);
@@ -269,7 +272,7 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
       }
 
       const scanResult = convertResult(src, result, inferenceTime);
-      if (!hasShortsBlanketDecision(scanResult.decisionReason)) {
+      if (!hasShortsForceDecision(scanResult.decisionReason)) {
         resultsCache.current.set(src, scanResult);
       }
 

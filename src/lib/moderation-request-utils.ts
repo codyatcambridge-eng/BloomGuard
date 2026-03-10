@@ -166,6 +166,8 @@ export interface BlurOverlayStateMessage {
 export interface SensitivityUpdateMessage {
   type: 'MW_SENSITIVITY_UPDATE';
   level: number;
+  navId?: string | number;
+  pageEpoch?: number;
   reason?: string;
   timestamp: number;
 }
@@ -227,11 +229,19 @@ export function isBlurOverlayReadyMessage(message: unknown): message is BlurOver
 
 export function isSensitivityUpdateMessage(message: unknown): message is SensitivityUpdateMessage {
   const m = message as Record<string, unknown>;
+  const navIdValid = (
+    m.navId === undefined ||
+    typeof m.navId === 'string' ||
+    typeof m.navId === 'number'
+  );
+  const pageEpochValid = m.pageEpoch === undefined || typeof m.pageEpoch === 'number';
   return (
     !!m &&
     typeof m === 'object' &&
     m.type === 'MW_SENSITIVITY_UPDATE' &&
-    typeof m.level === 'number'
+    typeof m.level === 'number' &&
+    navIdValid &&
+    pageEpochValid
   );
 }
 

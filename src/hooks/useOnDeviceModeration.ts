@@ -127,8 +127,11 @@ const MIN_SKIN_DENSITY_FOR_SWIMWEAR = 0.35;
 /**
  * Neutral confidence floor used to avoid over-blurring benign content.
  */
-const NEUTRAL_FAST_PASS_THRESHOLD = 0.80;
+const NEUTRAL_FAST_PASS_THRESHOLD = 0.90;
+const NEUTRAL_NO_BLUR_THRESHOLD = 0.90;
+const NSFW_MIN_BLUR_SCORE = 0.35;
 const FORCE_SHIELD_ON_SHORTS = true;
+const SHORTS_FORCE_SHIELD_NSFW_SCORE = NSFW_MIN_BLUR_SCORE;
 
 const isShortsPageUrl = (value?: string): boolean => {
   if (!value) return false;
@@ -144,17 +147,89 @@ const applyShortsShieldOverride = (
   result: ModerationResult,
   forceShieldOnShorts: boolean,
 ): ModerationResult => {
-  if (!forceShieldOnShorts || result.shouldBlur) return result;
+  let neutralScore = 0;
+  const highestUnsafeScore = result.predictions.reduce((max, prediction) => {
+    const name = prediction.className.toLowerCase();
+    if (name === 'neutral') {
+      neutralScore = prediction.probability;
+      return max;
+    }
+    if (name !== 'porn' && name !== 'sexy' && name !== 'hentai') return max;
+    return Math.max(max, prediction.probability);
+  }, 0);
+  if (
+    !forceShieldOnShorts ||
+    result.shouldBlur ||
+    neutralScore > NEUTRAL_NO_BLUR_THRESHOLD ||
+    highestUnsafeScore <= SHORTS_FORCE_SHIELD_NSFW_SCORE
+  ) {
+    return result;
+  }
   const decisionReason = typeof result.decisionReason === 'string'
     ? result.decisionReason
     : '';
   return {
     ...result,
     shouldBlur: true,
+    reason: 'threshold_hit',
+    isExplicit: true,
     decisionReason: decisionReason
-      ? `${decisionReason}/shorts_blanket_force`
-      : 'shorts_blanket_force',
+      ? `${decisionReason}/shorts_high_risk_force`
+      : 'shorts_high_risk_force',
   };
+};
+
+const applyOnDeviceSensitivityGuards = (result: ModerationResult): ModerationResult => {
+  if (!result.shouldBlur) return result;
+
+  let neutralScore = 0;
+  let highestUnsafeScore = 0;
+  for (let i = 0; i < result.predictions.length; i += 1) {
+    const prediction = result.predictions[i];
+    const className = prediction.className.toLowerCase();
+    if (className === 'neutral') {
+      neutralScore = prediction.probability;
+      continue;
+    }
+    if (className === 'porn' || className === 'sexy' || className === 'hentai') {
+      highestUnsafeScore = Math.max(highestUnsafeScore, prediction.probability);
+    }
+  }
+
+  const appendReason = (suffix: string): string => {
+    const decisionReason = typeof result.decisionReason === 'string' ? result.decisionReason : '';
+    return decisionReason ? `${decisionReason}/${suffix}` : suffix;
+  };
+
+  if (neutralScore > NEUTRAL_NO_BLUR_THRESHOLD) {
+    return {
+      ...result,
+      shouldBlur: false,
+      isExplicit: false,
+      reason: 'threshold_safe',
+      decisionReason: appendReason('neutral_above_090_guard'),
+    };
+  }
+
+  if (highestUnsafeScore <= NSFW_MIN_BLUR_SCORE) {
+    return {
+      ...result,
+      shouldBlur: false,
+      isExplicit: false,
+      reason: 'threshold_safe',
+      decisionReason: appendReason('nsfw_below_035_guard'),
+    };
+  }
+
+  return result;
+};
+
+const finalizeModerationResult = (
+  result: ModerationResult,
+  forceShieldOnShorts: boolean,
+): ModerationResult => {
+  const tunedResult = applyOnDeviceSensitivityGuards(result);
+  return applyShortsShieldOverride(tunedResult, forceShieldOnShorts);
 };
 
 /**
@@ -799,7 +874,7 @@ export const useOnDeviceModeration = () => {
               'thirstScore=' + String(cachedSeg?.thirstScore ?? 'n/a'),
             );
           }
-          return applyShortsShieldOverride(cachedResult, forceShieldOnShorts);
+          return finalizeModerationResult(cachedResult, forceShieldOnShorts);
         }
         console.log(
           '[DIAG][CACHE]',
@@ -838,7 +913,7 @@ export const useOnDeviceModeration = () => {
               inferenceTime: performance.now() - startTime,
               reason: 'fail_open_tiny',
             };
-            return applyShortsShieldOverride(tinyResult, forceShieldOnShorts);
+            return finalizeModerationResult(tinyResult, forceShieldOnShorts);
           }
         }
       }
@@ -1267,7 +1342,7 @@ export const useOnDeviceModeration = () => {
         }
 
         console.debug('[OnDeviceAI] neutral_fast_pass:', neutralScore.toFixed(2));
-        return applyShortsShieldOverride(result, forceShieldOnShorts);
+        return finalizeModerationResult(result, forceShieldOnShorts);
       }
 
       // ==== Estimate signals for human-centric logic ====
@@ -1343,7 +1418,7 @@ export const useOnDeviceModeration = () => {
         }
 
         console.debug('[OnDeviceAI] swimwear_detected: sexy=', sexyScore.toFixed(2), 'skinDensity=', signals.skinDensity.toFixed(2));
-        return applyShortsShieldOverride(result, forceShieldOnShorts);
+        return finalizeModerationResult(result, forceShieldOnShorts);
       }
 
       // ==== STANDARD THRESHOLD CHECK ====
@@ -1440,7 +1515,7 @@ export const useOnDeviceModeration = () => {
           limitCache();
         }
 
-        return applyShortsShieldOverride(result, forceShieldOnShorts);
+        return finalizeModerationResult(result, forceShieldOnShorts);
       }
 
       let reason: ModerationReason = shouldBlur ? 'threshold_hit' : 'threshold_safe';
@@ -1553,7 +1628,7 @@ export const useOnDeviceModeration = () => {
       }
 
       console.debug(`[OnDeviceAI] ${reason}: blur=${shouldBlur}, dom=${dominantClass}, conf=${confidence.toFixed(2)}`);
-      return applyShortsShieldOverride(result, forceShieldOnShorts);
+      return finalizeModerationResult(result, forceShieldOnShorts);
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Unknown error';
       const inferenceTime = performance.now() - startTime;
@@ -1578,7 +1653,7 @@ export const useOnDeviceModeration = () => {
         inferenceTime,
         reason,
       };
-      return applyShortsShieldOverride(failOpenResult, forceShieldOnShorts);
+      return finalizeModerationResult(failOpenResult, forceShieldOnShorts);
     }
   }, [modelState, settings, segmentationSignalResolution]);
 

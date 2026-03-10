@@ -2361,6 +2361,17 @@ export const NativeWebViewBrowser = () => {
       }
 
       if (isSensitivityUpdateMessage(message)) {
+        const updateEpoch = Number.isFinite(message.pageEpoch) ? Number(message.pageEpoch) : null;
+        const activeEpoch = webViewPageEpochRef.current;
+        if (updateEpoch !== null && updateEpoch < activeEpoch) {
+          console.log(
+            '[MW-Host] Ignored stale sensitivity update',
+            'incomingEpoch=' + updateEpoch,
+            'activeEpoch=' + activeEpoch,
+            'reason=' + String(message.reason || 'overlay_toggle'),
+          );
+          return;
+        }
         const level = Math.max(0, Math.min(4, Math.round(message.level)));
         if (level !== localSettings.blur_dial) {
           console.log('[MW-Host] Received sensitivity update from page:', level, message.reason || 'overlay_toggle');

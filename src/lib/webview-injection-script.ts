@@ -535,6 +535,8 @@ export function generateModerationScript(config: InjectionConfig): string {
     postToHost({
       type: 'MW_SENSITIVITY_UPDATE',
       level: normalized,
+      navId: getCurrentNavId(),
+      pageEpoch: state.pageEpoch,
       reason: reason || 'overlay_toggle',
       timestamp: Date.now(),
     });
@@ -674,6 +676,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     pendingRequests: new Map(), // requestId -> { items, timestamp, timeoutId, state }
     safeResolved: new Set(), // src values resolved as safe to suppress legacy re-blur
     safeResolvedAt: new Map(), // src -> timestamp (bounded/ttl for legacy suppression)
+    shortsHighRisk: new Set(), // src values currently considered high-risk in Shorts mode
     blurred: new Set(),
     revealed: new Set(), // Tracks URLs that user has manually revealed
     elements: new Map(), // itemId -> element
@@ -706,6 +709,88 @@ export function generateModerationScript(config: InjectionConfig): string {
   function safeScore(value) {
     const n = toFiniteNumber(value);
     return n === null ? 0 : n;
+  }
+
+  function getShortsHighRiskKey(src) {
+    const raw = String(src || '').trim();
+    if (!raw) return '';
+    const normalized = normalizeUrl(raw);
+    return normalized || raw;
+  }
+
+  function getUnsafeMaxScore(scores) {
+    if (!scores || typeof scores !== 'object') return 0;
+    const porn = safeScore(scores.porn ?? scores.Porn);
+    const sexy = safeScore(scores.sexy ?? scores.Sexy);
+    const hentai = safeScore(scores.hentai ?? scores.Hentai);
+    return Math.max(porn, sexy, hentai);
+  }
+
+  function isShortsHighRiskScore(score) {
+    return Number.isFinite(score) && score > SHORTS_FORCE_SHIELD_RISK_THRESHOLD;
+  }
+
+  function isKnownShortsHighRisk(src) {
+    const key = getShortsHighRiskKey(src);
+    if (!key) return false;
+    return state.shortsHighRisk.has(key);
+  }
+
+  function hasKnownShortsHighRisk() {
+    return state.shortsHighRisk.size > 0;
+  }
+
+  function markShortsHighRisk(src, reason) {
+    const key = getShortsHighRiskKey(src);
+    if (!key) return;
+    if (state.shortsHighRisk.has(key)) return;
+    state.shortsHighRisk.add(key);
+    if (isShortsModeActive()) {
+      startShortsReelTransitionObserver('high_risk_marked');
+    }
+    if (DIAG_YT_BLUR) {
+      console.log(
+        '[MW-YT][DIAG][SHORTS_FORCE]',
+        'action=mark_high_risk',
+        'src=' + key.substring(0, 180),
+        'count=' + state.shortsHighRisk.size,
+        'reason=' + (reason || 'unknown')
+      );
+    }
+  }
+
+  function clearShortsHighRisk(src, reason) {
+    const key = getShortsHighRiskKey(src);
+    if (!key) return;
+    if (!state.shortsHighRisk.has(key)) return;
+    state.shortsHighRisk.delete(key);
+    if (state.shortsHighRisk.size <= 0) {
+      stopShortsReelTransitionObserver('high_risk_cleared');
+    }
+    if (DIAG_YT_BLUR) {
+      console.log(
+        '[MW-YT][DIAG][SHORTS_FORCE]',
+        'action=clear_high_risk',
+        'src=' + key.substring(0, 180),
+        'count=' + state.shortsHighRisk.size,
+        'reason=' + (reason || 'unknown')
+      );
+    }
+  }
+
+  function clearAllShortsHighRisk(reason) {
+    if (state.shortsHighRisk.size <= 0) return;
+    const clearedCount = state.shortsHighRisk.size;
+    state.shortsHighRisk.clear();
+    stopShortsReelTransitionObserver('high_risk_cleared_all');
+    if (DIAG_YT_BLUR) {
+      console.log(
+        '[MW-YT][DIAG][SHORTS_FORCE]',
+        'action=clear_all_high_risk',
+        'count=' + clearedCount,
+        'reason=' + (reason || 'unknown')
+      );
+    }
   }
 
   function readHeuristicCache() {
@@ -1256,6 +1341,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   const SHORTS_REVEAL_ANCHOR_RETRY_DELAY_MS = 120;
   const SHORTS_HEALTH_LOG_PREFIX = '[MW-YT][DIAG][SHORTS_HEALTH]';
   const FORCE_SHIELD_ON_SHORTS = true;
+  const SHORTS_FORCE_SHIELD_RISK_THRESHOLD = 0.35;
   const SHORTS_REEL_TRANSITION_REARM_COOLDOWN_MS = 140;
   const SHORTS_REEL_TRANSITION_ATTRIBUTE_FILTER = [
     'aria-hidden',
@@ -1960,6 +2046,9 @@ export function generateModerationScript(config: InjectionConfig): string {
           ' from=' + String(previousIdentity || 'none').substring(0, 220) +
           ' to=' + String(nextIdentity || 'none').substring(0, 220)
         );
+        clearAllRevealOverlays('active_shorts_item_changed', true);
+        clearAllShortsHighRisk('active_shorts_item_changed');
+        resetShortsBlurContext('active_shorts_item_changed');
         adaptiveShortsWatchState.lastIdentity = nextIdentity;
         triggerAdaptiveShortsTargetedRescan('active_item_changed:' + reasonSummary, candidate, { force: true });
       } else if (!adaptiveShortsWatchState.lastIdentity && nextIdentity) {
@@ -2125,7 +2214,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function forceRearmShortsShield(reason, candidateNode) {
-    if (!FORCE_SHIELD_ON_SHORTS || !isShortsModeActive()) return false;
+    if (!FORCE_SHIELD_ON_SHORTS || !isShortsModeActive() || !hasKnownShortsHighRisk()) return false;
     if (timerState.paused || timerState.teardownDone) return false;
     const now = Date.now();
     if ((now - shortsReelTransitionLastRearmAt) < SHORTS_REEL_TRANSITION_REARM_COOLDOWN_MS) {
@@ -2148,6 +2237,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (!target || target.nodeType !== 1 || !target.isConnected) continue;
       const src = resolveShortsRearmSource(target);
       if (!src || seenSources.has(src)) continue;
+      if (!isKnownShortsHighRisk(src)) continue;
       seenSources.add(src);
       if (state.revealed.has(src) || target.dataset.mwRevealed === 'true') continue;
       clearSafeResolved(src);
@@ -2203,7 +2293,7 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function startShortsReelTransitionObserver(reason) {
     if (timerState.paused || timerState.teardownDone) return false;
-    if (!FORCE_SHIELD_ON_SHORTS || !isShortsModeActive()) {
+    if (!FORCE_SHIELD_ON_SHORTS || !isShortsModeActive() || !hasKnownShortsHighRisk()) {
       stopShortsReelTransitionObserver('inactive:' + (reason || 'unknown'));
       return false;
     }
@@ -2219,7 +2309,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     stopShortsReelTransitionObserver('refresh:' + (reason || 'unknown'));
 
     const observer = new MutationObserver(function(mutations) {
-      if (!FORCE_SHIELD_ON_SHORTS || !isShortsModeActive()) return;
+      if (!FORCE_SHIELD_ON_SHORTS || !isShortsModeActive() || !hasKnownShortsHighRisk()) return;
       if (timerState.paused || timerState.teardownDone) return;
 
       let shouldRearm = false;
@@ -3259,7 +3349,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       const liveInvalidTarget = !liveTarget || !liveTarget.isConnected;
       const liveSafeResolved = !!(
         liveSrc &&
-        !FORCE_SHIELD_ON_SHORTS &&
+        !isKnownShortsHighRisk(liveSrc) &&
         isSafeResolvedActive(liveSrc)
       );
       const liveTrustworthy = !liveMissing && !liveIsStale && !liveUrlMismatch && !liveInvalidTarget && !liveSafeResolved;
@@ -4100,6 +4190,51 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     node.dataset.mwHasOverlay = 'false';
     return false;
+  }
+
+  function clearAllRevealOverlays(reason, clearRevealState) {
+    const cleanupReason = reason || 'unknown';
+    cancelShortsRevealOverlayReposition('clear_all_reveal_overlays:' + cleanupReason);
+    let removedCount = 0;
+    const overlays = document.querySelectorAll('.mw-reveal-overlay');
+    for (let i = 0; i < overlays.length; i += 1) {
+      const overlay = overlays[i];
+      if (!overlay) continue;
+      try {
+        if (overlay.parentElement) {
+          overlay.parentElement.removeChild(overlay);
+        } else if (typeof overlay.remove === 'function') {
+          overlay.remove();
+        }
+        removedCount += 1;
+      } catch (e) {}
+    }
+
+    const overlayOwners = document.querySelectorAll('[data-mw-has-overlay="true"]');
+    for (let i = 0; i < overlayOwners.length; i += 1) {
+      const owner = overlayOwners[i];
+      if (!owner || !owner.dataset) continue;
+      owner.dataset.mwHasOverlay = 'false';
+    }
+
+    if (clearRevealState) {
+      state.revealed.clear();
+      const revealedNodes = document.querySelectorAll('[data-mw-revealed="true"]');
+      for (let i = 0; i < revealedNodes.length; i += 1) {
+        const node = revealedNodes[i];
+        if (!node || !node.dataset) continue;
+        node.dataset.mwRevealed = 'false';
+      }
+    }
+
+    if (DIAG_YT_BLUR || removedCount > 0 || clearRevealState) {
+      console.log(
+        '[DIAG][REVEAL_UI] clear_all',
+        'removed=' + removedCount,
+        'clearRevealState=' + (!!clearRevealState),
+        'reason=' + cleanupReason
+      );
+    }
   }
 
   function diagBlurStateLog(action, element, src, extra) {
@@ -5501,7 +5636,11 @@ export function generateModerationScript(config: InjectionConfig): string {
     state.stats.timeouts += pendingRequest.items.length;
     
     const timeoutPolicy = applyFailOpenAndModePolicy(false, 'timeout', 'timeout', true);
-    const forceShieldOnShortsTimeout = FORCE_SHIELD_ON_SHORTS && isShortsModeActive();
+    const forceShieldOnShortsTimeout = (
+      FORCE_SHIELD_ON_SHORTS &&
+      isShortsModeActive() &&
+      pendingRequest.items.some(item => isKnownShortsHighRisk(item.src))
+    );
     if (CONFIG.debug) {
       console.log(
         '[MW-DIAG][INJECT] source=timeout',
@@ -5709,7 +5848,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         diagnostics,
       } = result;
       const aiShouldBlur = !!shouldBlur;
-      const forceShieldOnShorts = FORCE_SHIELD_ON_SHORTS && isShortsModeActive();
+      const shortsForceShieldEnabled = FORCE_SHIELD_ON_SHORTS && isShortsModeActive();
       const rawPredictions = result && typeof result === 'object'
         ? (result.predictions || result.scores || result.probabilities || null)
         : null;
@@ -5727,6 +5866,16 @@ export function generateModerationScript(config: InjectionConfig): string {
         sexy: toFiniteNumber(normalizedPredictions.sexy),
         hentai: toFiniteNumber(normalizedPredictions.hentai),
       };
+      const unsafeMaxScore = getUnsafeMaxScore(unsafeScores);
+      const shortsHighRisk = shortsForceShieldEnabled && isShortsHighRiskScore(unsafeMaxScore);
+      if (shortsForceShieldEnabled) {
+        if (shortsHighRisk) {
+          markShortsHighRisk(src, 'result_high_risk score=' + unsafeMaxScore.toFixed(3));
+        } else {
+          clearShortsHighRisk(src, 'result_low_risk score=' + unsafeMaxScore.toFixed(3));
+        }
+      }
+      const forceShieldOnShorts = shortsHighRisk;
       const diagnosticsObj = diagnostics && typeof diagnostics === 'object' ? diagnostics : null;
       const thresholdObj = thresholds && typeof thresholds === 'object' ? thresholds : null;
       const diagnosticNsfwRisk = toFiniteNumber(diagnosticsObj?.nsfwRisk);
@@ -6343,9 +6492,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     state.elements.set(itemId, element);
     element.dataset.mwSourceType = sourceType || 'unknown';
     
-    // Distraction-first Shorts policy: start with hard blur + reveal control immediately.
-    // AI still scans in the background for telemetry/labels.
-    if (FORCE_SHIELD_ON_SHORTS && isShortsModeActive()) {
+    // Keep Shorts FORCE_SHIELD scoped to already-known high-risk items.
+    // Unknown/new items start with soft blur until moderation returns.
+    if (FORCE_SHIELD_ON_SHORTS && isShortsModeActive() && isKnownShortsHighRisk(url)) {
       clearSafeResolved(url);
       applyBlur(element, url, 'shorts_guard', CONFIG.blurStrength, itemId);
     } else {
@@ -7163,7 +7312,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       // Only trigger if scrolled significantly
       if (scrollDelta > 200) {
         lastScrollY = currentScrollY;
-        if (FORCE_SHIELD_ON_SHORTS && isShortsModeActive()) {
+        if (FORCE_SHIELD_ON_SHORTS && isShortsModeActive() && hasKnownShortsHighRisk()) {
           forceRearmShortsShield('youtube_scroll', getActiveShortsPlayerContainer());
         }
 
@@ -7536,6 +7685,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       const previousIsShorts = isYouTubeShortsUrl(previousUrl);
       const nextIsShorts = isYouTubeShortsUrl(nextUrl);
+      clearAllRevealOverlays('url_change', true);
+      clearAllShortsHighRisk('url_change');
       if (previousIsShorts || nextIsShorts) {
         resetShortsBlurContext('url_change');
       }
