@@ -32,6 +32,8 @@ import {
   startScanning as startNativeContentFilter,
   stopScanning as stopNativeContentFilter,
   setNSFWSignal as pushNativeNsfwSignal,
+  normalizeNsfwProbabilities,
+  calculateNsfwRiskScore,
   onRiskDecision as onNativeRiskDecision,
   type NsfwProbabilities,
 } from '@/plugins/ContentFilter';
@@ -262,8 +264,10 @@ export const NativeWebViewBrowser = () => {
   const blurPendingRef = useRef<{ enabled: boolean; reason: string; timestamp: number } | null>(null);
   const blurRetryTimerRef = useRef<NodeJS.Timeout | null>(null);
   const blurSignalRef = useRef({ unsafeStreak: 0, safeStreak: 0 });
+  const messageFromWebViewHandlerRef = useRef<((payload: unknown) => void) | null>(null);
   const [blurSyncVersion, setBlurSyncVersion] = useState(0);
   const riskDecisionListenerRef = useRef<PluginListenerHandle | null>(null);
+  const nativeSignalUnimplementedRef = useRef(false);
   const lastNsfwSignalAtRef = useRef(0);
   const webViewPageEpochRef = useRef(0);
   const stageBFlagDiagEpochRef = useRef<string | null>(null);
@@ -455,17 +459,45 @@ export const NativeWebViewBrowser = () => {
     setCentralBlurState(false, effectiveShieldEnabled ? 'moderation_disabled' : 'shield_pass_active');
   }, [isRuntimeModerationEnabled, effectiveShieldEnabled, setCentralBlurState]);
 
+  const relayNativeSignalToBridge = useCallback((probs: NsfwProbabilities) => {
+    const payload = {
+      type: 'MW_NATIVE_SIGNAL',
+      probs,
+      timestamp: Date.now(),
+    };
+    const handler = messageFromWebViewHandlerRef.current;
+    if (handler) {
+      handler(payload);
+      return;
+    }
+    window.dispatchEvent(new MessageEvent('message', { data: payload }));
+  }, []);
+
   const pushNativeSignalCapped = useCallback(async (probs: Partial<NsfwProbabilities>) => {
     const now = Date.now();
     if (now - lastNsfwSignalAtRef.current < 500) return; // max 2 FPS
     lastNsfwSignalAtRef.current = now;
+    const normalizedProbs = normalizeNsfwProbabilities(probs);
+    relayNativeSignalToBridge(normalizedProbs);
+    if (nativeSignalUnimplementedRef.current) return;
     try {
-      console.debug('[NSFW-Signal] pushNativeSignalCapped', probs);
-      await pushNativeNsfwSignal(probs);
+      console.debug('[NSFW-Signal] pushNativeSignalCapped', normalizedProbs);
+      await pushNativeNsfwSignal(normalizedProbs);
     } catch (error) {
+      const code = (
+        error &&
+        typeof error === 'object' &&
+        'code' in error &&
+        typeof (error as { code?: unknown }).code === 'string'
+      )
+        ? String((error as { code?: unknown }).code)
+        : '';
+      if (code === 'UNIMPLEMENTED') {
+        nativeSignalUnimplementedRef.current = true;
+      }
       console.debug('[NSFW-Signal] push failed', error);
     }
-  }, []);
+  }, [relayNativeSignalToBridge]);
   
   // Moderation bridge for AI image scanning
   const moderationBridge = useModerationBridge({
@@ -518,7 +550,6 @@ export const NativeWebViewBrowser = () => {
     epochHeldCount: 0,
     epochIncrementedCount: 0,
   });
-  const messageFromWebViewHandlerRef = useRef<((payload: unknown) => void) | null>(null);
   
   const {
     currentView,
@@ -2261,6 +2292,22 @@ export const NativeWebViewBrowser = () => {
         console.log('[MW-Host] correction feedback received');
         return;
       }
+
+      if (typedMessage.type === 'MW_NATIVE_SIGNAL') {
+        const probs = normalizeNsfwProbabilities(
+          typedMessage.probs && typeof typedMessage.probs === 'object'
+            ? typedMessage.probs as Partial<NsfwProbabilities>
+            : {},
+        );
+        const riskScore = calculateNsfwRiskScore(probs);
+        const explicitScore = Math.max(probs.Porn, probs.Hentai);
+        const isUnsafe = explicitScore >= 0.70 || riskScore >= 0.05;
+        processModerationSafetySignal(
+          isUnsafe,
+          `native_signal:${isUnsafe ? 'unsafe' : 'safe'}:risk=${riskScore.toFixed(3)}`,
+        );
+        return;
+      }
       
       if (isValidModerationRequest(message)) {
         if (message.nonce !== sessionNonce) {
@@ -2338,6 +2385,7 @@ export const NativeWebViewBrowser = () => {
     getNonce,
     queueCurrentBlurState,
     flushBlurStateToWebView,
+    processModerationSafetySignal,
     armShortsLegacyFallbackProbe,
     disarmShortsLegacyFallbackProbe,
     webViewState.currentUrl,

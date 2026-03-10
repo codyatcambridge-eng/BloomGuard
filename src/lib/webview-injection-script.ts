@@ -4753,7 +4753,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     
     const btn = document.createElement('button');
     btn.className = 'mw-reveal-btn';
-    btn.textContent = '👁 Reveal';
+    btn.textContent = 'Tap to Reveal';
     btn.style.cssText = [
       'background: rgba(0, 0, 0, 0.9)',
       'color: white',
@@ -4805,7 +4805,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         state.revealed.delete(src);
         element.dataset.mwRevealed = 'false';
         applyBlur(element, src, category, CONFIG.blurStrength, itemId);
-        btn.textContent = '👁 Reveal';
+        btn.textContent = 'Tap to Reveal';
         overlay.style.display = 'flex';
       } else {
         // Reveal and trigger feedback
@@ -5326,6 +5326,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         ts,
         diagnostics,
       } = result;
+      const aiShouldBlur = !!shouldBlur;
       const rawPredictions = result && typeof result === 'object'
         ? (result.predictions || result.scores || result.probabilities || null)
         : null;
@@ -5474,6 +5475,10 @@ export function generateModerationScript(config: InjectionConfig): string {
         (predictedLabel === 'sexy' && sexyScoreForAction > 0.8);
       const dynamicBlurCandidate = rawCategory === 'swimwear' || (predictedLabel === 'sexy' && sexyScoreForAction < 0.8);
       let finalBlur = CONFIG.forcedBlur || (shouldApplyBlur && dialActive);
+      if (aiShouldBlur && !state.revealed.has(src)) {
+        finalBlur = true;
+        decisionReason = (decisionReason ? decisionReason + '/' : '') + 'ai_shouldBlur_lock';
+      }
       if (hardBlurOverride) {
         finalBlur = true;
         decisionReason = (decisionReason ? decisionReason + '/' : '') + 'hard_blur';
@@ -5500,7 +5505,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       const dims = element ? getElementDimensions(element) : { width: 0, height: 0 };
       
-      if (!finalBlur && isShortsModeActive()) {
+      if (!finalBlur && !aiShouldBlur && isShortsModeActive()) {
         try {
           const safeSrc = normalizeUrl(src || '');
           const portal = document.getElementById(REVEAL_PORTAL_ID);
