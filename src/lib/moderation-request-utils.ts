@@ -279,6 +279,81 @@ export function createResultMessage(
   };
 }
 
+export interface PageEpochTransitionInput {
+  previousUrl?: string | null;
+  nextUrl?: string | null;
+  currentPageEpoch: number;
+  nextPageEpoch: number;
+  forceReset?: boolean;
+  onCleanup?: () => void;
+}
+
+export interface PageEpochTransitionResult {
+  urlChanged: boolean;
+  didReset: boolean;
+  pageEpoch: number;
+}
+
+function normalizeEpochUrl(url?: string | null): string {
+  const raw = String(url || '').trim();
+  if (!raw) return '';
+  try {
+    return new URL(raw).href;
+  } catch {
+    return raw;
+  }
+}
+
+function normalizePageEpoch(value: number, fallback: number): number {
+  const normalized = Number.isFinite(value) ? Math.trunc(value) : Math.trunc(fallback);
+  return normalized > 0 ? normalized : 1;
+}
+
+/**
+ * Reset page epoch when navigation changes URL and run cleanup immediately.
+ * This keeps old async moderation results from mutating the new page.
+ */
+export function resolvePageEpochTransition(input: PageEpochTransitionInput): PageEpochTransitionResult {
+  const previous = normalizeEpochUrl(input.previousUrl);
+  const next = normalizeEpochUrl(input.nextUrl);
+  const urlChanged = previous !== next;
+
+  const shouldReset =
+    input.forceReset === true ||
+    urlChanged ||
+    !Number.isFinite(input.currentPageEpoch) ||
+    input.currentPageEpoch <= 0;
+
+  if (shouldReset) {
+    try {
+      input.onCleanup?.();
+    } catch (error) {
+      console.warn('[MW][Epoch] transition cleanup failed', error);
+    }
+    return {
+      urlChanged,
+      didReset: true,
+      pageEpoch: normalizePageEpoch(input.nextPageEpoch, input.currentPageEpoch + 1),
+    };
+  }
+
+  return {
+    urlChanged,
+    didReset: false,
+    pageEpoch: normalizePageEpoch(input.currentPageEpoch, 1),
+  };
+}
+
+export function isOlderPageEpoch(
+  incomingPageEpoch: number | null | undefined,
+  activePageEpoch: number
+): boolean {
+  const incoming = Number(incomingPageEpoch);
+  const active = Number(activePageEpoch);
+  if (!Number.isFinite(incoming) || !Number.isFinite(active)) return false;
+  return incoming < active;
+}
+
 /**
  * Create a safe JSON string for injection via executeScript
  * Properly escapes all special characters

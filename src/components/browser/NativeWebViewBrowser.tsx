@@ -23,6 +23,8 @@ import {
   createBlurOverlayStateMessage,
   isBlurOverlayReadyMessage,
   isSensitivityUpdateMessage,
+  isOlderPageEpoch,
+  resolvePageEpochTransition,
   escapeForJs,
   mapModerationCategoryToSeverity,
   type ModerationSeverity,
@@ -107,11 +109,37 @@ const SHORTS_LEGACY_FALLBACK_MAX_POLLS = 6;
 const SHORTS_REENTRY_HOOK_RETRY_DELAY_MS = 120;
 const SHORTS_REENTRY_HOOK_MAX_ATTEMPTS = 8;
 const SMOKE_TEST_RED_SCREEN_ENABLED = false;
+const FORCE_SHIELD_NSFW_SCORE_THRESHOLD = 0.50;
 const SMOKE_TEST_RED_SCREEN_SCRIPT = `(() => {
   const apply = () => { if (!document.body) return; document.body.style.filter = 'blur(10px) !important'; };
   apply();
   document.addEventListener('DOMContentLoaded', apply, { once: true });
 })();`;
+
+const NEUTRAL_OR_UNKNOWN_CATEGORIES = new Set(['', 'safe', 'neutral', 'unknown', 'drawing']);
+const isNeutralOrUnknownCategory = (category?: string): boolean => {
+  const normalized = String(category || '').trim().toLowerCase();
+  return NEUTRAL_OR_UNKNOWN_CATEGORIES.has(normalized);
+};
+const FORCE_SHIELD_UNSAFE_KEYWORDS = [
+  'porn',
+  'hentai',
+  'sexy',
+  'thirst',
+  'nud',
+  'explicit',
+  'nsfw',
+  'swimwear',
+  'shirtless',
+  'bikini',
+  'lingerie',
+  'cleavage',
+];
+const isForceShieldUnsafeCategory = (category?: string): boolean => {
+  const normalized = String(category || '').trim().toLowerCase();
+  if (isNeutralOrUnknownCategory(normalized)) return false;
+  return FORCE_SHIELD_UNSAFE_KEYWORDS.some(keyword => normalized.includes(keyword));
+};
 
 const getUrlFamily = (value?: string) => {
   if (!value) return 'unknown';
@@ -826,34 +854,40 @@ export const NativeWebViewBrowser = () => {
     );
   }, [isRuntimeModerationEnabled, toDiagUrl]);
 
-  const markNavigation = useCallback((reason: string, url: string) => {
+  const markNavigation = useCallback((
+    reason: string,
+    url: string,
+    options?: {
+      forceEpochReset?: boolean;
+      onEpochResetCleanup?: () => void;
+    },
+  ) => {
     const previousUrl = currentUrlRef.current || '';
     const previousEpoch = webViewPageEpochRef.current || 0;
-    const sameUrl = !!previousUrl && previousUrl === url;
-    const holdEpoch =
-      reason === 'onUrlChange' &&
-      (
-        sameUrl ||
-        (isYouTubeShortsUrl(previousUrl) && isYouTubeShortsUrl(url))
-      );
     navigationSeqRef.current += 1;
     activeNavIdRef.current = navigationSeqRef.current;
-    if (!holdEpoch || previousEpoch <= 0) {
-      webViewPageEpochRef.current = activeNavIdRef.current;
-      if (isDiagYtBlurEnabledForUrl(url || previousUrl)) {
-        diagYtBlurEpochRef.current.epochIncrementedCount += 1;
-        console.log(
-          '[MW-YT][DIAG][EPOCH][HOST]',
-          'action=epoch_incremented',
-          'count=' + diagYtBlurEpochRef.current.epochIncrementedCount,
-          'reason=' + reason,
-          'prevEpoch=' + previousEpoch,
-          'nextEpoch=' + webViewPageEpochRef.current,
-          'prevUrl=' + (previousUrl || 'unknown'),
-          'nextUrl=' + (url || 'unknown'),
-        );
-      }
-    } else if (isDiagYtBlurEnabledForUrl(url || previousUrl)) {
+    const epochTransition = resolvePageEpochTransition({
+      previousUrl,
+      nextUrl: url,
+      currentPageEpoch: previousEpoch,
+      nextPageEpoch: activeNavIdRef.current,
+      forceReset: options?.forceEpochReset === true,
+      onCleanup: options?.onEpochResetCleanup,
+    });
+    webViewPageEpochRef.current = epochTransition.pageEpoch;
+    if (epochTransition.didReset && isDiagYtBlurEnabledForUrl(url || previousUrl)) {
+      diagYtBlurEpochRef.current.epochIncrementedCount += 1;
+      console.log(
+        '[MW-YT][DIAG][EPOCH][HOST]',
+        'action=epoch_incremented',
+        'count=' + diagYtBlurEpochRef.current.epochIncrementedCount,
+        'reason=' + reason,
+        'prevEpoch=' + previousEpoch,
+        'nextEpoch=' + webViewPageEpochRef.current,
+        'prevUrl=' + (previousUrl || 'unknown'),
+        'nextUrl=' + (url || 'unknown'),
+      );
+    } else if (!epochTransition.didReset && isDiagYtBlurEnabledForUrl(url || previousUrl)) {
       diagYtBlurEpochRef.current.epochHeldCount += 1;
       console.log(
         '[MW-YT][DIAG][EPOCH][HOST]',
@@ -1187,7 +1221,14 @@ export const NativeWebViewBrowser = () => {
       console.log('[Browser] ======= URL CHANGE =======');
       console.log('[Browser] New URL:', url);
       console.log('[DIAG][LOAD] stage=url_change url=' + toDiagUrl(url));
-      markNavigation('onUrlChange', url);
+      markNavigation('onUrlChange', url, {
+        forceEpochReset: true,
+        onEpochResetCleanup: () => {
+          pendingRequestsRef.current.clear();
+          void teardownWebViewScheduling('url_change_epoch_reset', url).catch(() => undefined);
+          setFlashGuardState?.(false, 'url_change_epoch_reset');
+        },
+      });
       logLifecycleSnapshot('url_change', url, 'onUrlChange');
       logHostLayerDiagnostics('url_change');
       setUrlInput(url);
@@ -1850,28 +1891,6 @@ export const NativeWebViewBrowser = () => {
         diagUrl
       );
 
-      const staleResults = items.map(item => ({
-        itemId: item.itemId,
-        src: item.src,
-        shouldBlur: false,
-        category: 'safe_epoch_stale',
-        confidence: 0,
-        severity: 'safe' as ModerationSeverity,
-      }));
-
-      try {
-        const staleMessage = createResultMessage(
-          requestId,
-          staleResults,
-          nonce,
-          requestEpoch ?? undefined,
-          requestNavId ?? activeNavIdRef.current,
-        );
-        await postMessageToWebView(staleMessage as unknown as Record<string, unknown>);
-      } catch {
-        // Fail-open by design for stale requests.
-      }
-
       pendingRequestsRef.current.delete(requestId);
       clearTimeout(timeoutId);
       setFlashGuardState?.(false, 'moderation_epoch_stale');
@@ -2038,6 +2057,24 @@ export const NativeWebViewBrowser = () => {
       );
     }
 
+    const requestEpochForResult = requestEpoch ?? activeEpoch;
+    const latestEpoch = webViewPageEpochRef.current;
+    if (isOlderPageEpoch(requestEpochForResult, latestEpoch)) {
+      console.warn(
+        '[MW-Host][Epoch] stale result ignored',
+        'requestId=' + requestId,
+        'requestEpoch=' + requestEpochForResult,
+        'activeEpoch=' + latestEpoch,
+        'requestNavId=' + (requestNavId || 'none'),
+        'activeNavId=' + activeNavIdRef.current,
+      );
+      pendingRequestsRef.current.delete(requestId);
+      clearTimeout(timeoutId);
+      setFlashGuardState?.(false, 'moderation_result_epoch_stale');
+      flashLog('disarm stale result');
+      return;
+    }
+
     const blurMode = localSettings.blur_mode || 'balanced';
     const modePolicy = blurMode === 'strict'
       ? {
@@ -2114,6 +2151,33 @@ export const NativeWebViewBrowser = () => {
     const softResults = eligibleResults.filter(item => item.shouldBlur && item.severity === 'soft');
     const softQualifiedHits = softResults.filter(item => item.confidence >= softConfidenceFloor);
     const softRatio = denominator > 0 ? softQualifiedHits.length / denominator : 0;
+    const forceShieldEligibleResults = eligibleResults.filter(item => (
+      item.shouldBlur &&
+      isForceShieldUnsafeCategory(item.category)
+    ));
+    const maxForceShieldScore = forceShieldEligibleResults.reduce((max, item) => {
+      const predictions = item.predictions || {};
+      const porn = typeof predictions.porn === 'number'
+        ? predictions.porn
+        : (typeof predictions.Porn === 'number' ? predictions.Porn : 0);
+      const sexy = typeof predictions.sexy === 'number'
+        ? predictions.sexy
+        : (typeof predictions.Sexy === 'number' ? predictions.Sexy : 0);
+      const hentai = typeof predictions.hentai === 'number'
+        ? predictions.hentai
+        : (typeof predictions.Hentai === 'number' ? predictions.Hentai : 0);
+      const predictionUnsafeMax = Math.max(porn, sexy, hentai);
+      const confidenceScore = (
+        isForceShieldUnsafeCategory(item.category) &&
+        Number.isFinite(item.confidence)
+      )
+        ? item.confidence
+        : 0;
+      return Math.max(max, predictionUnsafeMax, confidenceScore);
+    }, 0);
+    const forceShieldAllowed =
+      forceShieldEligibleResults.length > 0 &&
+      maxForceShieldScore > FORCE_SHIELD_NSFW_SCORE_THRESHOLD;
 
     const hardOverlayDecision =
       hardStrongHits.length >= 1 ||
@@ -2133,6 +2197,12 @@ export const NativeWebViewBrowser = () => {
       overlayDecision = true;
       decisionReason = 'soft_ratio_hit';
     }
+    if (!forceShieldAllowed && overlayDecision) {
+      overlayDecision = false;
+      decisionReason = forceShieldEligibleResults.length > 0
+        ? 'force_shield_below_threshold'
+        : 'force_shield_neutral_or_unknown';
+    }
 
     const shouldDebugScanSummary = isDebugMode || localSettings.prototype_mode || localSettings.show_scan_notifications;
     if (shouldDebugScanSummary) {
@@ -2144,21 +2214,29 @@ export const NativeWebViewBrowser = () => {
         }
       })();
       console.log(
-        `[MW-Host][ScanSummary] url=${shortUrl} req=${requestId} total=${results.length} eligible=${denominator} tinyExcluded=${tinyExcludedCount} hardHits=${hardStrongHits.length} softHits=${softQualifiedHits.length} safeHits=${Math.max(denominator - hardStrongHits.length - softQualifiedHits.length, 0)} hardMax=${hardUnsafeMaxConf.toFixed(3)} softMax=${softQualifiedHits.reduce((max, item) => Math.max(max, item.confidence), 0).toFixed(3)} softRatio=${softRatio.toFixed(3)} mode=${blurMode} decision=${overlayDecision ? 'ON' : 'OFF'} reason=${decisionReason}`
+        `[MW-Host][ScanSummary] url=${shortUrl} req=${requestId} total=${results.length} eligible=${denominator} tinyExcluded=${tinyExcludedCount} hardHits=${hardStrongHits.length} softHits=${softQualifiedHits.length} safeHits=${Math.max(denominator - hardStrongHits.length - softQualifiedHits.length, 0)} hardMax=${hardUnsafeMaxConf.toFixed(3)} softMax=${softQualifiedHits.reduce((max, item) => Math.max(max, item.confidence), 0).toFixed(3)} softRatio=${softRatio.toFixed(3)} forceMax=${maxForceShieldScore.toFixed(3)} forceAllowed=${forceShieldAllowed} mode=${blurMode} decision=${overlayDecision ? 'ON' : 'OFF'} reason=${decisionReason}`
       );
     }
 
     // Hysteresis is based on hard conditions only.
-    if (hardOverlayDecision) {
+    if (hardOverlayDecision && forceShieldAllowed) {
       processModerationSafetySignal(true, `moderation_request_hard:${decisionReason}`);
     } else {
-      processModerationSafetySignal(false, 'moderation_request_no_hard');
+      processModerationSafetySignal(
+        false,
+        hardOverlayDecision ? 'moderation_request_hard_filtered' : 'moderation_request_no_hard',
+      );
+      if (hardOverlayDecision) {
+        setCentralBlurState(false, 'moderation_request_force_shield_filtered');
+      }
     }
 
     // Optional strict mode: temporary page-level soft confirmation (no hysteresis stickiness).
     if (!hardOverlayDecision) {
-      if (softOverlayDecision) {
+      if (softOverlayDecision && forceShieldAllowed) {
         setCentralBlurState(true, 'moderation_request_soft_policy');
+      } else if (softOverlayDecision && !forceShieldAllowed) {
+        setCentralBlurState(false, 'moderation_request_soft_filtered');
       } else if (blurStateRef.current.reason.startsWith('moderation_request_soft_')) {
         setCentralBlurState(false, 'moderation_request_soft_cleared');
       }
@@ -2172,6 +2250,8 @@ export const NativeWebViewBrowser = () => {
       'hardStrong=' + hardStrongHits.length,
       'hardLow=' + hardLowHits.length,
       'softQualified=' + softQualifiedHits.length,
+      'forceShieldAllowed=' + forceShieldAllowed,
+      'forceShieldMax=' + maxForceShieldScore.toFixed(3),
       'domOverlay=' + (ENABLE_DOM_BLUR ? 'on' : 'off'),
       'epoch=' + (requestEpoch ?? activeEpoch),
     );
@@ -2329,11 +2409,11 @@ export const NativeWebViewBrowser = () => {
             : {},
         );
         const riskScore = calculateNsfwRiskScore(probs);
-        const explicitScore = Math.max(probs.Porn, probs.Hentai);
-        const isUnsafe = explicitScore >= 0.70 || riskScore >= 0.05;
+        const explicitScore = Math.max(probs.Porn, probs.Hentai, probs.Sexy);
+        const isUnsafe = explicitScore > FORCE_SHIELD_NSFW_SCORE_THRESHOLD || riskScore > FORCE_SHIELD_NSFW_SCORE_THRESHOLD;
         processModerationSafetySignal(
           isUnsafe,
-          `native_signal:${isUnsafe ? 'unsafe' : 'safe'}:risk=${riskScore.toFixed(3)}`,
+          `native_signal:${isUnsafe ? 'unsafe' : 'safe'}:risk=${riskScore.toFixed(3)} explicit=${explicitScore.toFixed(3)}`,
         );
         return;
       }

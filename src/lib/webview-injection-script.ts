@@ -598,21 +598,47 @@ export function generateModerationScript(config: InjectionConfig): string {
     window.__MW_BLUR_NAV_HOOKED__ = true;
     const rawPushState = history.pushState;
     const rawReplaceState = history.replaceState;
+    const handleHistoryNavigation = function(reason) {
+      try {
+        if (typeof window.__MW_REMOVE_REVEAL_OVERLAYS_NOW__ === 'function') {
+          window.__MW_REMOVE_REVEAL_OVERLAYS_NOW__('history_' + reason);
+        } else {
+          const overlays = document.querySelectorAll('.mw-reveal-overlay');
+          for (let i = 0; i < overlays.length; i += 1) {
+            const overlay = overlays[i];
+            if (!overlay) continue;
+            if (overlay.parentElement) {
+              overlay.parentElement.removeChild(overlay);
+            } else if (typeof overlay.remove === 'function') {
+              overlay.remove();
+            }
+          }
+        }
+      } catch (e) {}
+      setTimeout(function() {
+        try {
+          if (typeof window.__MW_FORCE_URL_CHECK__ === 'function') {
+            window.__MW_FORCE_URL_CHECK__('history_' + reason);
+          }
+        } catch (e) {}
+        sendBlurReady(reason);
+      }, 0);
+    };
 
     history.pushState = function() {
       const result = rawPushState.apply(this, arguments);
-      setTimeout(function() { sendBlurReady('pushState'); }, 0);
+      handleHistoryNavigation('pushState');
       return result;
     };
 
     history.replaceState = function() {
       const result = rawReplaceState.apply(this, arguments);
-      setTimeout(function() { sendBlurReady('replaceState'); }, 0);
+      handleHistoryNavigation('replaceState');
       return result;
     };
 
-    window.addEventListener('popstate', function() { sendBlurReady('popstate'); });
-    window.addEventListener('hashchange', function() { sendBlurReady('hashchange'); });
+    window.addEventListener('popstate', function() { handleHistoryNavigation('popstate'); });
+    window.addEventListener('hashchange', function() { handleHistoryNavigation('hashchange'); });
     window.addEventListener('pageshow', function() { sendBlurReady('pageshow'); });
     window.addEventListener('load', function() { sendBlurReady('load'); });
     document.addEventListener('visibilitychange', function() {
@@ -728,6 +754,17 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function isShortsHighRiskScore(score) {
     return Number.isFinite(score) && score > SHORTS_FORCE_SHIELD_RISK_THRESHOLD;
+  }
+
+  function isForceShieldCategoryEligible(category) {
+    const normalized = normalizeLabel(category);
+    return (
+      normalized !== '' &&
+      normalized !== 'safe' &&
+      normalized !== 'neutral' &&
+      normalized !== 'unknown' &&
+      normalized !== 'drawing'
+    );
   }
 
   function isKnownShortsHighRisk(src) {
@@ -1341,7 +1378,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   const SHORTS_REVEAL_ANCHOR_RETRY_DELAY_MS = 120;
   const SHORTS_HEALTH_LOG_PREFIX = '[MW-YT][DIAG][SHORTS_HEALTH]';
   const FORCE_SHIELD_ON_SHORTS = true;
-  const SHORTS_FORCE_SHIELD_RISK_THRESHOLD = 0.35;
+  const SHORTS_FORCE_SHIELD_RISK_THRESHOLD = 0.50;
   const SHORTS_REEL_TRANSITION_REARM_COOLDOWN_MS = 140;
   const SHORTS_REEL_TRANSITION_ATTRIBUTE_FILTER = [
     'aria-hidden',
@@ -4236,6 +4273,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       );
     }
   }
+  window.__MW_REMOVE_REVEAL_OVERLAYS_NOW__ = function(reason) {
+    clearAllRevealOverlays(reason || 'history_navigation', true);
+  };
 
   function diagBlurStateLog(action, element, src, extra) {
     if (!DIAG_YT_BLUR) return;
@@ -5587,6 +5627,24 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
   }
 
+  function dropPendingRequestStateOnly(requestId, reason) {
+    if (!requestId) return;
+    diagScanBatchStartAtByRequestId.delete(requestId);
+    const pendingRequest = state.pendingRequests.get(requestId);
+    if (!pendingRequest || !Array.isArray(pendingRequest.items)) return;
+    pendingRequest.items.forEach(item => {
+      clearPendingItem(item.itemId, reason || 'drop_pending_state_only');
+    });
+    state.pendingRequests.delete(requestId);
+    console.warn(
+      '[MW][Epoch] stale result dropped (no UI mutation)',
+      'requestId=' + requestId,
+      'reason=' + (reason || 'stale_epoch'),
+      'items=' + pendingRequest.items.length,
+      'pageEpoch=' + state.pageEpoch
+    );
+  }
+
   /**
    * Handle timeout for pending request
    * FAIL-OPEN by default: Do NOT apply blur on timeout
@@ -5742,7 +5800,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           'resultNavId=' + (requestNavId || 'none'),
           'activeNavId=' + currentNavId
         );
-        cleanupRejectedOrTimedOutRequest(requestId, 'reject_epoch');
+        dropPendingRequestStateOnly(requestId, 'reject_epoch');
         return;
       }
       if (resultEpoch !== null && resultEpoch !== state.pageEpoch && (relaxedYouTubeEpochMode || epochSyncAllowed)) {
@@ -5777,7 +5835,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         );
         state.stats.staleEpochDiscarded++;
         logShortsScanSkip('epoch_stale_drop', null, 'request:' + String(requestId || 'none'), 'result');
-        cleanupRejectedOrTimedOutRequest(requestId, 'reject_stale_shorts_epoch');
+        dropPendingRequestStateOnly(requestId, 'reject_stale_shorts_epoch');
         return;
       }
       
@@ -5867,12 +5925,21 @@ export function generateModerationScript(config: InjectionConfig): string {
         hentai: toFiniteNumber(normalizedPredictions.hentai),
       };
       const unsafeMaxScore = getUnsafeMaxScore(unsafeScores);
-      const shortsHighRisk = shortsForceShieldEnabled && isShortsHighRiskScore(unsafeMaxScore);
+      const forceShieldCategory = rawCategory || normalizedCategory || topPrediction.label || '';
+      const forceShieldCategoryEligible = isForceShieldCategoryEligible(forceShieldCategory);
+      const shortsHighRisk = (
+        shortsForceShieldEnabled &&
+        forceShieldCategoryEligible &&
+        isShortsHighRiskScore(unsafeMaxScore)
+      );
       if (shortsForceShieldEnabled) {
         if (shortsHighRisk) {
           markShortsHighRisk(src, 'result_high_risk score=' + unsafeMaxScore.toFixed(3));
         } else {
-          clearShortsHighRisk(src, 'result_low_risk score=' + unsafeMaxScore.toFixed(3));
+          const clearReason = forceShieldCategoryEligible
+            ? 'result_low_risk score=' + unsafeMaxScore.toFixed(3)
+            : 'result_neutral_or_unknown category=' + (forceShieldCategory || 'unknown');
+          clearShortsHighRisk(src, clearReason);
         }
       }
       const forceShieldOnShorts = shortsHighRisk;
@@ -7637,48 +7704,37 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   // SPA navigation detection
   let lastUrl = window.location.href;
-  const checkUrlChange = () => {
+  const checkUrlChange = (triggerReason) => {
     if (window.location.href !== lastUrl) {
+      const reason = triggerReason || 'spa_detected';
       const previousUrl = lastUrl;
       const nextUrl = window.location.href;
       console.log('[MW] SPA navigation detected:', previousUrl, '->', nextUrl);
-      diagLogLifecycleSnapshot('url_change', 'spa_detected', previousUrl, nextUrl);
+      diagLogLifecycleSnapshot('url_change', reason, previousUrl, nextUrl);
       const previousIsYouTube = isYouTubeDomainUrl(previousUrl);
       const nextIsYouTube = isYouTubeDomainUrl(nextUrl);
       if (previousIsYouTube && !nextIsYouTube) {
-        diagLogLifecycleSnapshot('leave_youtube', 'spa_detected', previousUrl, nextUrl);
+        diagLogLifecycleSnapshot('leave_youtube', reason, previousUrl, nextUrl);
       } else if (!previousIsYouTube && nextIsYouTube) {
-        diagLogLifecycleSnapshot('return_to_youtube', 'spa_detected', previousUrl, nextUrl);
+        diagLogLifecycleSnapshot('return_to_youtube', reason, previousUrl, nextUrl);
       }
       const observerModeResult = reevaluateShortsObserverMode('url_change', nextUrl, {
         forceLog: true,
         extra: 'previousUrl=' + previousUrl,
       });
       lastUrl = nextUrl;
-      const holdEpoch = isYouTubeShortsUrl(previousUrl) && isYouTubeShortsUrl(nextUrl);
-      if (!holdEpoch) {
-        state.pageEpoch += 1;
-        if (CONFIG.debug) {
-          console.log('[MW][Epoch] incremented pageEpoch=' + state.pageEpoch);
-        }
-        if (DIAG_YT_BLUR) {
-          diagEpochCounters.epochIncrementedCount += 1;
-          console.log(
-            '[MW-YT][DIAG][EPOCH][INJECT]',
-            'action=epoch_incremented',
-            'count=' + diagEpochCounters.epochIncrementedCount,
-            'pageEpoch=' + state.pageEpoch,
-            'prevUrl=' + previousUrl,
-            'nextUrl=' + nextUrl
-          );
-        }
-      } else if (DIAG_YT_BLUR) {
-        diagEpochCounters.epochHeldCount += 1;
+      state.pageEpoch += 1;
+      if (CONFIG.debug) {
+        console.log('[MW][Epoch] incremented pageEpoch=' + state.pageEpoch, 'reason=' + reason);
+      }
+      if (DIAG_YT_BLUR) {
+        diagEpochCounters.epochIncrementedCount += 1;
         console.log(
           '[MW-YT][DIAG][EPOCH][INJECT]',
-          'action=epoch_held',
-          'count=' + diagEpochCounters.epochHeldCount,
+          'action=epoch_incremented',
+          'count=' + diagEpochCounters.epochIncrementedCount,
           'pageEpoch=' + state.pageEpoch,
+          'reason=' + reason,
           'prevUrl=' + previousUrl,
           'nextUrl=' + nextUrl
         );
@@ -7732,6 +7788,9 @@ export function generateModerationScript(config: InjectionConfig): string {
         scheduleInitTimeout('spaYouTubeScan', scanYouTubeThumbnails, 500);
       }
     }
+  };
+  window.__MW_FORCE_URL_CHECK__ = function(reason) {
+    checkUrlChange(reason || 'manual_force');
   };
 
   function startUrlChangePoll(reason) {
