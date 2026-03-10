@@ -236,6 +236,9 @@ export interface UseNativeWebViewOptions {
     url?: string;
     activeInstanceId?: number | null;
   };
+  preShowScript?: string;
+  preShowScriptInjectionTime?: 'documentStart' | 'pageLoad';
+  isPresentAfterPageLoad?: boolean;
 }
 
 export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
@@ -249,6 +252,9 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     onMessageFromWebview,
     onActiveInstanceIdChange,
     getListenerDiagContext,
+    preShowScript,
+    preShowScriptInjectionTime = 'pageLoad',
+    isPresentAfterPageLoad = false,
   } = options;
 
   const [state, setState] = useState<WebViewState>({
@@ -293,6 +299,9 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
   const onMessageFromWebviewRef = useRef(onMessageFromWebview);
   const onActiveInstanceIdChangeRef = useRef(onActiveInstanceIdChange);
   const getListenerDiagContextRef = useRef(getListenerDiagContext);
+  const preShowScriptRef = useRef(preShowScript);
+  const preShowScriptInjectionTimeRef = useRef(preShowScriptInjectionTime);
+  const isPresentAfterPageLoadRef = useRef(isPresentAfterPageLoad);
   const pageLoadErrorRecoveryRef = useRef<{ url: string; count: number; at: number }>({
     url: '',
     count: 0,
@@ -313,6 +322,9 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     onMessageFromWebviewRef.current = onMessageFromWebview;
     onActiveInstanceIdChangeRef.current = onActiveInstanceIdChange;
     getListenerDiagContextRef.current = getListenerDiagContext;
+    preShowScriptRef.current = preShowScript;
+    preShowScriptInjectionTimeRef.current = preShowScriptInjectionTime;
+    isPresentAfterPageLoadRef.current = isPresentAfterPageLoad;
   }, [
     onLoadStart,
     onLoadEnd,
@@ -323,6 +335,9 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     onMessageFromWebview,
     onActiveInstanceIdChange,
     getListenerDiagContext,
+    preShowScript,
+    preShowScriptInjectionTime,
+    isPresentAfterPageLoad,
   ]);
 
   const clearPresentAfterLoadWatchdog = useCallback(() => {
@@ -869,8 +884,8 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     try {
       const options: OpenWebViewOptions = {
         url,
-        // Present immediately for reliability; waiting for page load can leave the browser hidden.
-        isPresentAfterPageLoad: false,
+        // For smoke diagnostics, this can be enabled so a document-start WKUserScript is installed.
+        isPresentAfterPageLoad: isPresentAfterPageLoadRef.current,
         preventDeeplink: false,
         closeModal: true,
         closeModalTitle: 'Close',
@@ -883,6 +898,8 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
         visibleTitle: true,
         showArrow: true,
         showReloadButton: true,
+        preShowScript: preShowScriptRef.current,
+        preShowScriptInjectionTime: preShowScriptInjectionTimeRef.current,
       };
 
       await InAppBrowser.openWebView(options);

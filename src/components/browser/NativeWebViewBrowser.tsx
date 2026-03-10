@@ -104,6 +104,12 @@ const SHORTS_LEGACY_FALLBACK_MAX_PROBE_MS = 9000;
 const SHORTS_LEGACY_FALLBACK_MAX_POLLS = 6;
 const SHORTS_REENTRY_HOOK_RETRY_DELAY_MS = 120;
 const SHORTS_REENTRY_HOOK_MAX_ATTEMPTS = 8;
+const SMOKE_TEST_RED_SCREEN_ENABLED = false;
+const SMOKE_TEST_RED_SCREEN_SCRIPT = `(() => {
+  const apply = () => { if (!document.body) return; document.body.style.filter = 'blur(10px) !important'; };
+  apply();
+  document.addEventListener('DOMContentLoaded', apply, { once: true });
+})();`;
 
 const getUrlFamily = (value?: string) => {
   if (!value) return 'unknown';
@@ -194,9 +200,10 @@ interface SocialContent {
  */
 export const NativeWebViewBrowser = () => {
   const { isNative } = useCapacitor();
-  // Enable page-wide DOM blur/overlay bridge in addition to per-element blur.
-  const ENABLE_DOM_BLUR = true;
-  const ENABLE_SIGNAL_PIPELINE = true;
+  const ENABLE_SMOKE_TEST_RED_SCREEN = SMOKE_TEST_RED_SCREEN_ENABLED;
+  // Smoke branch: disable full moderation path and validate WKWebView document-start injection only.
+  const ENABLE_DOM_BLUR = !ENABLE_SMOKE_TEST_RED_SCREEN;
+  const ENABLE_SIGNAL_PIPELINE = !ENABLE_SMOKE_TEST_RED_SCREEN;
   const browserMainRef = useRef<HTMLElement | null>(null);
   const hostLayerDiagLogAtRef = useRef(0);
   const topLayerLabelRef = useRef('none');
@@ -240,7 +247,10 @@ export const NativeWebViewBrowser = () => {
   const { effectiveShieldState } = useGateRuntime();
   const deviceId = useDeviceId();
   const effectiveShieldEnabled = effectiveShieldState.shieldEnabled;
-  const isRuntimeModerationEnabled = effectiveShieldEnabled && localSettings.blur_dial > 0;
+  const isRuntimeModerationEnabled =
+    !ENABLE_SMOKE_TEST_RED_SCREEN &&
+    effectiveShieldEnabled &&
+    localSettings.blur_dial > 0;
 
   // Central blur source-of-truth with hysteresis to avoid flicker.
   const blurStateRef = useRef<{ enabled: boolean; reason: string; timestamp: number }>({
@@ -1199,6 +1209,9 @@ export const NativeWebViewBrowser = () => {
       webViewActiveInstanceIdRef.current = activeInstanceId;
     },
     getListenerDiagContext: getWebViewListenerDiagContext,
+    preShowScript: null,
+    preShowScriptInjectionTime: 'documentStart',
+    isPresentAfterPageLoad: ENABLE_SMOKE_TEST_RED_SCREEN,
   });
 
   const requestShortsReentryRefresh = useCallback(async (
@@ -1693,7 +1706,7 @@ export const NativeWebViewBrowser = () => {
       if (!blurReadyRef.current) {
         requestBlurHandshake('ready_poll');
       }
-    }, 800);
+    }, 500);
     return () => clearInterval(timer);
   }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, requestBlurHandshake]);
 
@@ -2372,7 +2385,7 @@ export const NativeWebViewBrowser = () => {
       '[MW-Host] Starting adaptive legacy queue polling (fallback)...',
       'scope=' + (stickyShortsMode ? 'shorts_probe' : 'default'),
     );
-    const MIN_POLL_MS = 300;
+    const MIN_POLL_MS = 500;
     const MAX_POLL_MS = 3000;
     const EMPTY_BACKOFF_MS = 250;
     const HIDDEN_POLL_MS = 2000;
