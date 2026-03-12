@@ -34,6 +34,7 @@ export interface InjectionConfig {
   pageEpoch?: number;
   diagYouTubeShorts?: boolean;
   enableShortsHealthHeal?: boolean;
+  nativeRevealOverlay?: boolean;
 }
 
 export interface FailOpenModePolicyInput {
@@ -197,6 +198,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     pageEpoch: ${pageEpoch},
     diagYouTubeShorts: ${config.diagYouTubeShorts ? 'true' : 'false'},
     enableShortsHealthHeal: ${config.enableShortsHealthHeal ? 'true' : 'false'},
+    nativeRevealOverlay: ${config.nativeRevealOverlay ? 'true' : 'false'},
     minImageSize: 80, // Minimum image dimension (fail-open below this - 80x80)
     semanticDelayMs: 0, // Apply blur immediately; no delay to avoid flash of unblurred content
     // Neutral fast-pass removed for strict/YouTube mode
@@ -627,6 +629,10 @@ export function generateModerationScript(config: InjectionConfig): string {
 
     history.pushState = function() {
       const result = rawPushState.apply(this, arguments);
+      const currentUrl = String(window.location && window.location.href ? window.location.href : '');
+      if (currentUrl.indexOf('youtube.com/shorts/') !== -1) {
+        return result;
+      }
       handleHistoryNavigation('pushState');
       return result;
     };
@@ -1360,13 +1366,16 @@ export function generateModerationScript(config: InjectionConfig): string {
   const diagShortsBlurredHtml5MainVideoNodeIds = new Set();
   const diagShortsLastBlurNodeIdBySrc = {};
   const SHORTS_STABLE_CONTAINER_SELECTORS = [
+    '#shorts-player .short-video-container[aria-hidden="false"]',
+    '#shorts-player .short-video-container[selected]',
+    '#shorts-player .short-video-container',
     '#shorts-player ytm-reel-video-renderer[aria-hidden="false"]',
     '#shorts-player ytm-reel-video-renderer[selected]',
     '#shorts-player ytm-reel-video-renderer[is-active]',
     '#shorts-player ytm-reel-video-renderer',
     '#shorts-player',
   ];
-  const SHORTS_STABLE_CONTAINER_TAG_SELECTOR = 'ytm-reel-video-renderer, ytm-shorts-lockup-view-model, #shorts-player';
+  const SHORTS_STABLE_CONTAINER_TAG_SELECTOR = '.short-video-container, ytm-reel-video-renderer, ytm-shorts-lockup-view-model, #shorts-player';
   const SHORTS_SWAP_REATTACH_WINDOW_MS = 2600;
   const SHORTS_HEALTH_HEAL_COOLDOWN_MS = 1500;
   const SHORTS_HEALTH_HEAL_MAX_ATTEMPTS = 5;
@@ -1578,6 +1587,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!node || node.nodeType !== 1) return false;
     const element = node;
     if (element.id === 'shorts-player') return true;
+    if (element.classList && element.classList.contains('short-video-container')) return true;
     const tag = String(element.tagName || '').toUpperCase();
     return (
       tag === 'YTM-REEL-VIDEO-RENDERER' ||
@@ -1759,7 +1769,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     const element = node;
     if (root && typeof root.contains === 'function' && root.contains(element)) return true;
     if (typeof element.closest === 'function') {
-      return !!element.closest('#shorts-player, ytm-reel-video-renderer, ytm-shorts-lockup-view-model');
+      return !!element.closest('#shorts-player, .short-video-container, ytm-reel-video-renderer, ytm-shorts-lockup-view-model');
     }
     return false;
   }
@@ -2475,6 +2485,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     let current = node;
     let shortsPlayerFallback = null;
     while (current && current.nodeType === 1) {
+      if (current.classList && current.classList.contains('short-video-container')) {
+        if (current.isConnected) return { target: current, selectorUsed: 'parent_walk:.short-video-container' };
+      }
       const tag = String(current.tagName || '').toUpperCase();
       if (tag === 'YTM-REEL-VIDEO-RENDERER') {
         if (current.isConnected) return { target: current, selectorUsed: 'parent_walk:ytm-reel-video-renderer' };
@@ -4185,6 +4198,50 @@ export function generateModerationScript(config: InjectionConfig): string {
     return null;
   }
 
+  function ensureRevealOverlayForBlurSignal(element, src, category, itemId, reason) {
+    if (!element || element.nodeType !== 1 || !element.isConnected) return false;
+    const targetSrc = src || (element.dataset ? element.dataset.mwSrc || '' : '');
+    if (!targetSrc) return false;
+    if (state.revealed.has(targetSrc) || element.dataset.mwRevealed === 'true') return false;
+
+    let overlay = findRevealOverlayForElement(element, targetSrc);
+    const hasRevealButton = !!(
+      overlay &&
+      overlay.isConnected &&
+      typeof overlay.querySelector === 'function' &&
+      overlay.querySelector('.mw-reveal-btn')
+    );
+    if (hasRevealButton) return false;
+
+    if (overlay) {
+      try {
+        if (overlay.parentElement) {
+          overlay.parentElement.removeChild(overlay);
+        } else if (typeof overlay.remove === 'function') {
+          overlay.remove();
+        }
+      } catch (e) {}
+      overlay = null;
+    }
+
+    element.dataset.mwHasOverlay = 'false';
+    createRevealOverlay(
+      element,
+      targetSrc,
+      category || (element.dataset ? element.dataset.mwCategory || 'flagged' : 'flagged'),
+      itemId || (element.dataset ? element.dataset.mwItemId || '' : '')
+    );
+    if (CONFIG.debug) {
+      console.log(
+        '[MW][RevealOverlay] rehydrated',
+        'reason=' + (reason || 'blur_signal'),
+        'node=' + getDiagNodeId(element),
+        'src=' + String(targetSrc || '').substring(0, 120)
+      );
+    }
+    return true;
+  }
+
   function getDiagOverlayState(node) {
     if (!node || node.nodeType !== 1) {
       return { hasOverlayFlag: false, overlayAttached: false, overlayVisible: false };
@@ -4818,8 +4875,14 @@ export function generateModerationScript(config: InjectionConfig): string {
           shortsStableSelectorUsed,
           'applyBlur_already_hard_blurred'
         );
-        if (!findRevealOverlayForElement(element, src) && element.isConnected) {
-          createRevealOverlay(element, src, category, itemId, false);
+        if (element.isConnected) {
+          ensureRevealOverlayForBlurSignal(
+            element,
+            src,
+            category || 'flagged',
+            itemId,
+            'applyBlur_already_hard_blurred'
+          );
         }
         diagScheduleBlurredNodePresenceChecks(element, src, itemId);
         return;
@@ -4880,8 +4943,14 @@ export function generateModerationScript(config: InjectionConfig): string {
       const containsOverlay = !!(typeof element.querySelector === 'function' && element.querySelector('.mw-reveal-overlay'));
       
       createRevealOverlay(element, src, category, itemId);
-      if (shortsMode && element.isConnected && !findRevealOverlayForElement(element, src)) {
-        createRevealOverlay(element, src, category, itemId, false);
+      if (element.isConnected) {
+        ensureRevealOverlayForBlurSignal(
+          element,
+          src,
+          category || 'flagged',
+          itemId,
+          'applyBlur'
+        );
       }
       const parentContainsOverlay = !!(element.parentElement && typeof element.parentElement.querySelector === 'function' && element.parentElement.querySelector('.mw-reveal-overlay'));
       console.log(
@@ -5016,6 +5085,181 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       diagBlurStateLog('clearElementBlur.exit', element, srcForClear, 'overlayFound=' + (!!overlay));
     } catch (e) {}
+  }
+
+  function emitRevealLabelRequest(element, src, category, itemId) {
+    var labelItemId = itemId || element.dataset.mwItemId || 'unknown_' + Date.now();
+    var mwModelVersion = element.dataset.mwModelVersion || null;
+    var mwDecisionReason = element.dataset.mwDecisionReason || null;
+    var mwNsfwRisk = toFiniteNumber(element.dataset.mwNsfwRisk);
+    var mwPersonPresent = element.dataset.mwPersonPresent === '1';
+    var mwSkinRatio = toFiniteNumber(element.dataset.mwSkinRatio);
+    var mwThirstScore = toFiniteNumber(element.dataset.mwThirstScore);
+    var mwSkinThreshold = toFiniteNumber(element.dataset.mwSkinThreshold);
+    var mwGrayMin = toFiniteNumber(element.dataset.mwGrayZoneMin);
+    var mwGrayMax = toFiniteNumber(element.dataset.mwGrayZoneMax);
+    var mwExplicitOverride = toFiniteNumber(element.dataset.mwExplicitOverride);
+    var mwImageWidth = toFiniteNumber(element.dataset.mwImageWidth);
+    var mwImageHeight = toFiniteNumber(element.dataset.mwImageHeight);
+    var mwHost = element.dataset.mwHost || null;
+    var labelRequest = {
+      type: 'gc-label-request',
+      requestId: 'r_' + Date.now().toString(36),
+      itemId: labelItemId,
+      src: src,
+      pageUrl: window.location.href,
+      platform: PLATFORM,
+      modelPrediction: {
+        category: category,
+        confidence: toFiniteNumber(element.dataset.mwConfidence),
+        model_version: mwModelVersion,
+        thresholds: {
+          nsfw_gray_zone_min: mwGrayMin,
+          nsfw_gray_zone_max: mwGrayMax,
+          explicit_override: mwExplicitOverride,
+          skin_ratio: mwSkinThreshold,
+        },
+        predictions: {
+          nsfwRisk: mwNsfwRisk,
+          personPresent: mwPersonPresent,
+          skinRatio: mwSkinRatio,
+          thirstScore: mwThirstScore,
+        },
+        decision_reason: mwDecisionReason,
+        image_width: mwImageWidth,
+        image_height: mwImageHeight,
+        host: mwHost,
+        timestamp: Date.now(),
+      }
+    };
+    console.log('[MW] posting gc-label-request', labelItemId);
+    postToHost(labelRequest);
+    return labelItemId;
+  }
+
+  function revealBlurredElement(element, src, category, itemId, overlayId, itemKey, triggerReason) {
+    if (!element || element.nodeType !== 1) return false;
+    if (!src) return false;
+    if (state.revealed.has(src) || element.dataset.mwRevealed === 'true') {
+      return false;
+    }
+    const revealReason = triggerReason || 'overlay_button';
+    const beforeBlurCount = countBlurredNodesForItemKey(src);
+    console.log(
+      '[DIAG][REVEAL_EVT] reveal_apply_start',
+      'overlayId=' + (overlayId || 'none'),
+      'itemKey=' + itemKey,
+      'reason=' + revealReason,
+      'beforeBlurCount=' + beforeBlurCount
+    );
+    state.revealed.add(src);
+    element.dataset.mwRevealed = 'true';
+    removeBlur(element, src);
+    const afterBlurCount = countBlurredNodesForItemKey(src);
+    const removedBlurCount = beforeBlurCount > afterBlurCount ? (beforeBlurCount - afterBlurCount) : 0;
+    console.log(
+      '[DIAG][REVEAL_EVT] reveal_apply_done',
+      'overlayId=' + (overlayId || 'none'),
+      'itemKey=' + itemKey,
+      'reason=' + revealReason,
+      'removedBlurCount=' + removedBlurCount
+    );
+    const labelItemId = emitRevealLabelRequest(element, src, category, itemId);
+    showCorrectionOverlay(element, src, category, labelItemId);
+    return true;
+  }
+
+  function selectNativeRevealCandidate() {
+    const candidates = document.querySelectorAll('[data-mw-moderated="blurred"][data-mw-src]');
+    if (!candidates || candidates.length === 0) return null;
+    const viewportWidth = Math.max(window.innerWidth || 0, 1);
+    const viewportHeight = Math.max(window.innerHeight || 0, 1);
+    const viewportCenterX = viewportWidth / 2;
+    const viewportCenterY = viewportHeight / 2;
+    let best = null;
+    let bestScore = -1;
+    for (let i = 0; i < candidates.length; i += 1) {
+      const candidate = candidates[i];
+      if (!candidate || candidate.nodeType !== 1 || !candidate.isConnected) continue;
+      if (candidate.dataset.mwRevealed === 'true') continue;
+      let rect = null;
+      try {
+        rect = candidate.getBoundingClientRect();
+      } catch (e) {
+        rect = null;
+      }
+      if (!rect) continue;
+      const visibleRect = getVisibleViewportRect(rect, viewportWidth, viewportHeight);
+      if (visibleRect.width < 16 || visibleRect.height < 16) continue;
+      const area = visibleRect.width * visibleRect.height;
+      const centerX = visibleRect.left + (visibleRect.width / 2);
+      const centerY = visibleRect.top + (visibleRect.height / 2);
+      const dist = Math.abs(centerX - viewportCenterX) + Math.abs(centerY - viewportCenterY);
+      const score = area - (dist * 2);
+      if (score > bestScore) {
+        bestScore = score;
+        best = candidate;
+      }
+    }
+    return best;
+  }
+
+  function runNativeRevealRequest(reason) {
+    const candidate = selectNativeRevealCandidate();
+    if (!candidate) {
+      return { ok: false, reason: 'no_blurred_candidate' };
+    }
+    const src = candidate.dataset.mwSrc || candidate.dataset.mwOrigSrc || '';
+    if (!src) {
+      return { ok: false, reason: 'missing_src' };
+    }
+    const category = candidate.dataset.mwCategory || 'flagged';
+    const itemId = candidate.dataset.mwItemId || '';
+    const itemKey = getDiagItemKey(src);
+    const applied = revealBlurredElement(
+      candidate,
+      src,
+      category,
+      itemId,
+      'native_overlay',
+      itemKey,
+      reason || 'native_overlay',
+    );
+    return {
+      ok: applied,
+      reason: applied ? 'revealed' : 'already_revealed',
+      src: String(src).substring(0, 180),
+      itemId: itemId || null,
+      nodeId: getDiagNodeId(candidate),
+    };
+  }
+
+  function forceRevealRehydrate(reason, options) {
+    const actionReason = reason || 'host_force_reveal';
+    const forceWebButton = !!(options && options.forceWebButton);
+    if (forceWebButton) {
+      window.__MW_NATIVE_REVEAL_FALLBACK__ = true;
+    }
+    const candidates = document.querySelectorAll('[data-mw-moderated="blurred"][data-mw-src]');
+    let ensured = 0;
+    for (let i = 0; i < candidates.length; i += 1) {
+      const candidate = candidates[i];
+      if (!candidate || candidate.nodeType !== 1 || !candidate.isConnected) continue;
+      const src = candidate.dataset && candidate.dataset.mwSrc ? candidate.dataset.mwSrc : '';
+      if (!src) continue;
+      const category = candidate.dataset && candidate.dataset.mwCategory ? candidate.dataset.mwCategory : 'flagged';
+      const itemId = candidate.dataset && candidate.dataset.mwItemId ? candidate.dataset.mwItemId : '';
+      if (ensureRevealOverlayForBlurSignal(candidate, src, category, itemId, actionReason)) {
+        ensured += 1;
+      }
+    }
+    return {
+      ok: candidates.length > 0,
+      ensured: ensured,
+      candidateCount: candidates.length,
+      forceWebButton: !!window.__MW_NATIVE_REVEAL_FALLBACK__,
+      reason: actionReason,
+    };
   }
 
   function createRevealOverlay(element, src, category, itemId, allowShortsReresolve) {
@@ -5269,142 +5513,93 @@ export function generateModerationScript(config: InjectionConfig): string {
     badge.textContent = (category || 'flagged').toUpperCase();
     overlay.appendChild(badge);
     
-    const btn = document.createElement('button');
-    btn.className = 'mw-reveal-btn';
-    btn.textContent = 'Tap to Reveal';
-    btn.style.cssText = [
-      'background: rgba(0, 0, 0, 0.9)',
-      'color: white',
-      'border: 2px solid rgba(255, 255, 255, 0.3)',
-      'padding: 10px 20px',
-      'border-radius: 8px',
-      'cursor: pointer',
-      'font-size: 14px',
-      'font-weight: bold',
-      'pointer-events: auto',
-    ].join(';');
+    const forceWebRevealButton = window.__MW_NATIVE_REVEAL_FALLBACK__ === true;
+    const useNativeRevealOverlay = CONFIG.nativeRevealOverlay === true && !forceWebRevealButton;
+    let btn = null;
+    if (!useNativeRevealOverlay) {
+      btn = document.createElement('button');
+      btn.className = 'mw-reveal-btn';
+      btn.textContent = 'Tap to Reveal';
+      btn.style.cssText = [
+        'background: rgba(0, 0, 0, 0.9)',
+        'color: white',
+        'border: 2px solid rgba(255, 255, 255, 0.3)',
+        'padding: 10px 20px',
+        'border-radius: 8px',
+        'cursor: pointer',
+        'font-size: 14px',
+        'font-weight: bold',
+        'pointer-events: auto',
+      ].join(';');
 
-    overlay.addEventListener('click', function(e) {
-      let overlayComputed = null;
-      try {
-        overlayComputed = window.getComputedStyle(overlay);
-      } catch (err) {}
-      console.log(
-        '[DIAG][REVEAL_EVT] overlay_click',
-        'overlayId=' + overlayId,
-        'target=' + getDiagTargetDescriptor(e.target),
-        'x/y=' + (Number.isFinite(e.clientX) ? e.clientX : 'n/a') + '/' + (Number.isFinite(e.clientY) ? e.clientY : 'n/a'),
-        'pointerEvents=' + (overlayComputed ? overlayComputed.pointerEvents : 'n/a')
-      );
-      logRevealHittestSnapshot(overlay, btn, overlayId, 'overlay_click', e);
-    });
-    console.log('[DIAG][REVEAL_UI] bind_overlay', 'overlayId=' + overlayId);
-    
-    btn.addEventListener('click', function(e) {
-      e.preventDefault();
-      e.stopPropagation();
-      if (typeof e.stopImmediatePropagation === 'function') {
-        e.stopImmediatePropagation();
-      }
-      console.log(
-        '[DIAG][REVEAL_EVT] button_click',
-        'overlayId=' + overlayId,
-        'target=' + getDiagTargetDescriptor(e.target)
-      );
-      logRevealHittestSnapshot(overlay, btn, overlayId, 'button_click', e);
-      const revealAllowed = !state.revealed.has(src);
-      const revealGateReason = revealAllowed ? 'not_revealed' : 'already_revealed_reblur_path';
-      console.log(
-        '[DIAG][REVEAL_EVT] reveal_allowed=' + revealAllowed,
-        'reason=' + revealGateReason,
-        'overlayId=' + overlayId,
-        'itemKey=' + itemKey
-      );
-      
-      if (state.revealed.has(src)) {
-        // Re-blur
-        state.revealed.delete(src);
-        element.dataset.mwRevealed = 'false';
-        applyBlur(element, src, category, CONFIG.blurStrength, itemId);
-        btn.textContent = 'Tap to Reveal';
-        overlay.style.display = 'flex';
-      } else {
-        // Reveal and trigger feedback
-        const beforeBlurCount = countBlurredNodesForItemKey(src);
+      overlay.addEventListener('click', function(e) {
+        let overlayComputed = null;
+        try {
+          overlayComputed = window.getComputedStyle(overlay);
+        } catch (err) {}
         console.log(
-          '[DIAG][REVEAL_EVT] reveal_apply_start',
+          '[DIAG][REVEAL_EVT] overlay_click',
           'overlayId=' + overlayId,
-          'itemKey=' + itemKey,
-          'beforeBlurCount=' + beforeBlurCount
+          'target=' + getDiagTargetDescriptor(e.target),
+          'x/y=' + (Number.isFinite(e.clientX) ? e.clientX : 'n/a') + '/' + (Number.isFinite(e.clientY) ? e.clientY : 'n/a'),
+          'pointerEvents=' + (overlayComputed ? overlayComputed.pointerEvents : 'n/a')
         );
-        state.revealed.add(src);
-        element.dataset.mwRevealed = 'true'; // Persistence
-        removeBlur(element, src);
-        btn.textContent = '🔒 Hide';
-        const afterBlurCount = countBlurredNodesForItemKey(src);
-        const removedBlurCount = beforeBlurCount > afterBlurCount ? (beforeBlurCount - afterBlurCount) : 0;
+        logRevealHittestSnapshot(overlay, btn, overlayId, 'overlay_click', e);
+      });
+      console.log('[DIAG][REVEAL_UI] bind_overlay', 'overlayId=' + overlayId);
+
+      btn.addEventListener('click', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (typeof e.stopImmediatePropagation === 'function') {
+          e.stopImmediatePropagation();
+        }
         console.log(
-          '[DIAG][REVEAL_EVT] reveal_apply_done',
+          '[DIAG][REVEAL_EVT] button_click',
           'overlayId=' + overlayId,
-          'itemKey=' + itemKey,
-          'removedBlurCount=' + removedBlurCount
+          'target=' + getDiagTargetDescriptor(e.target)
         );
-        
-        // POST a label request message so the host can open the labeling modal
-        var labelItemId = itemId || element.dataset.mwItemId || 'unknown_' + Date.now();
-        var mwModelVersion = element.dataset.mwModelVersion || null;
-        var mwDecisionReason = element.dataset.mwDecisionReason || null;
-        var mwNsfwRisk = toFiniteNumber(element.dataset.mwNsfwRisk);
-        var mwPersonPresent = element.dataset.mwPersonPresent === '1';
-        var mwSkinRatio = toFiniteNumber(element.dataset.mwSkinRatio);
-        var mwThirstScore = toFiniteNumber(element.dataset.mwThirstScore);
-        var mwSkinThreshold = toFiniteNumber(element.dataset.mwSkinThreshold);
-        var mwGrayMin = toFiniteNumber(element.dataset.mwGrayZoneMin);
-        var mwGrayMax = toFiniteNumber(element.dataset.mwGrayZoneMax);
-        var mwExplicitOverride = toFiniteNumber(element.dataset.mwExplicitOverride);
-        var mwImageWidth = toFiniteNumber(element.dataset.mwImageWidth);
-        var mwImageHeight = toFiniteNumber(element.dataset.mwImageHeight);
-        var mwHost = element.dataset.mwHost || null;
-        var labelRequest = {
-          type: 'gc-label-request',
-          requestId: 'r_' + Date.now().toString(36),
-          itemId: labelItemId,
-          src: src,
-          pageUrl: window.location.href,
-          platform: PLATFORM,
-          modelPrediction: {
-            category: category,
-            confidence: toFiniteNumber(element.dataset.mwConfidence),
-            model_version: mwModelVersion,
-            thresholds: {
-              nsfw_gray_zone_min: mwGrayMin,
-              nsfw_gray_zone_max: mwGrayMax,
-              explicit_override: mwExplicitOverride,
-              skin_ratio: mwSkinThreshold,
-            },
-            predictions: {
-              nsfwRisk: mwNsfwRisk,
-              personPresent: mwPersonPresent,
-              skinRatio: mwSkinRatio,
-              thirstScore: mwThirstScore,
-            },
-            decision_reason: mwDecisionReason,
-            image_width: mwImageWidth,
-            image_height: mwImageHeight,
-            host: mwHost,
-            timestamp: Date.now(),
-          }
-        };
-        console.log('[MW] posting gc-label-request', labelItemId);
-        postToHost(labelRequest);
-        
-        // Show brief correction overlay
-        showCorrectionOverlay(element, src, category, labelItemId);
-      }
-    });
-    console.log('[DIAG][REVEAL_UI] bind_button', 'overlayId=' + overlayId);
-    
-    overlay.appendChild(btn);
+        logRevealHittestSnapshot(overlay, btn, overlayId, 'button_click', e);
+        const revealAllowed = !state.revealed.has(src);
+        const revealGateReason = revealAllowed ? 'not_revealed' : 'already_revealed_reblur_path';
+        console.log(
+          '[DIAG][REVEAL_EVT] reveal_allowed=' + revealAllowed,
+          'reason=' + revealGateReason,
+          'overlayId=' + overlayId,
+          'itemKey=' + itemKey
+        );
+
+        if (state.revealed.has(src)) {
+          state.revealed.delete(src);
+          element.dataset.mwRevealed = 'false';
+          applyBlur(element, src, category, CONFIG.blurStrength, itemId);
+          btn.textContent = 'Tap to Reveal';
+          overlay.style.display = 'flex';
+          return;
+        }
+
+        const revealed = revealBlurredElement(
+          element,
+          src,
+          category,
+          itemId,
+          overlayId,
+          itemKey,
+          'overlay_button',
+        );
+        if (revealed) {
+          btn.textContent = '🔒 Hide';
+        }
+      });
+      console.log('[DIAG][REVEAL_UI] bind_button', 'overlayId=' + overlayId);
+      overlay.appendChild(btn);
+    } else {
+      console.log(
+        '[DIAG][REVEAL_UI] native_overlay_mode',
+        'overlayId=' + overlayId,
+        'fallbackWebButton=' + forceWebRevealButton
+      );
+    }
     if (shortsMode) {
       const activeOverlays = overlayParent.querySelectorAll('.mw-reveal-overlay');
       for (let i = 0; i < activeOverlays.length; i += 1) {
@@ -6196,6 +6391,13 @@ export function generateModerationScript(config: InjectionConfig): string {
           });
           // Apply strong blur
           applyBlur(element, src, predictedLabel || category || 'flagged', CONFIG.blurStrength, itemId);
+          ensureRevealOverlayForBlurSignal(
+            element,
+            src,
+            predictedLabel || category || 'flagged',
+            itemId,
+            'result_blur_signal'
+          );
         } else {
           if (preDecisionState === 'blurred' || element.classList.contains('mw-blurred') || preDecisionHasBlur) {
             console.log(
@@ -6484,6 +6686,47 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
   }
 
+  function resolveYouTubePreferredBlurTarget(element, sourceType) {
+    if (!element || element.nodeType !== 1) return element;
+    if (!isYouTube()) return element;
+
+    if (isShortsModeActive()) {
+      if (typeof element.closest === 'function') {
+        const shortsContainer = element.closest('.short-video-container');
+        if (shortsContainer && shortsContainer.isConnected) {
+          return shortsContainer;
+        }
+      }
+      if (typeof element.querySelector === 'function') {
+        const shortsDescendant = element.querySelector('.short-video-container');
+        if (shortsDescendant && shortsDescendant.isConnected) {
+          return shortsDescendant;
+        }
+      }
+      return element;
+    }
+
+    const shouldScopeToThumbnail =
+      sourceType === 'img' ||
+      sourceType === 'video-poster' ||
+      sourceType === 'bg-image';
+    if (!shouldScopeToThumbnail) return element;
+
+    if (typeof element.closest === 'function') {
+      const closestThumbnail = element.closest('ytd-thumbnail, ytm-thumbnail-wrapper');
+      if (closestThumbnail && closestThumbnail.isConnected) {
+        return closestThumbnail;
+      }
+    }
+    if (typeof element.querySelector === 'function') {
+      const nestedThumbnail = element.querySelector('ytd-thumbnail, ytm-thumbnail-wrapper');
+      if (nestedThumbnail && nestedThumbnail.isConnected) {
+        return nestedThumbnail;
+      }
+    }
+    return element;
+  }
+
   function queueForScan(src, element, sourceType) {
     const url = normalizeUrl(src);
     if (!url) {
@@ -6550,6 +6793,11 @@ export function generateModerationScript(config: InjectionConfig): string {
         return false;
       }
       state.pendingBySrc.delete(url);
+    }
+
+    const preferredTarget = resolveYouTubePreferredBlurTarget(element, sourceType);
+    if (preferredTarget && preferredTarget.nodeType === 1) {
+      element = preferredTarget;
     }
     
     const itemId = generateItemId();
@@ -7040,18 +7288,13 @@ export function generateModerationScript(config: InjectionConfig): string {
   const YOUTUBE_SELECTORS = [
     'ytd-thumbnail',
     'ytd-thumbnail img',
-    'ytd-rich-item-renderer',
-    'ytd-video-renderer',
-    'ytd-compact-video-renderer',
-    'ytd-grid-video-renderer',
-    'ytd-shelf-renderer',
+    'ytm-thumbnail-wrapper',
+    'ytm-thumbnail-wrapper img',
     '#thumbnail',
     '#thumbnail img',
     '.yt-core-image',
-    'yt-image',
     'yt-img-shadow',
-    '.ytd-thumbnail img',
-    '.video-thumb',
+    'yt-img-shadow img',
     'img[src*="ytimg.com"]',
     'img[src*="ggpht.com"]',
   ];
@@ -7474,6 +7717,13 @@ export function generateModerationScript(config: InjectionConfig): string {
             'applyPath=item_identity_legacy sourceType=' + (pending.sourceType || 'unknown')
           );
           applyBlur(el, src, category, blurStrengthPx, itemId);
+          ensureRevealOverlayForBlurSignal(
+            el,
+            src,
+            category || 'flagged',
+            itemId,
+            'legacy_result_blur_signal'
+          );
           clearSafeResolved(src);
         }
         clearPendingItem(itemId, 'legacy_result');
@@ -7607,8 +7857,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       .mw-correction-overlay {
         pointer-events: auto !important;
       }
-      ytd-thumbnail, ytd-rich-item-renderer, yt-img-shadow, #shorts-player,
-      [class*="DivVideoContainer"], [class*="DivPlayerContainer"], .video-card {
+      ytd-thumbnail, ytm-thumbnail-wrapper, .short-video-container {
         position: relative !important;
       }
     \`;
@@ -7624,6 +7873,20 @@ export function generateModerationScript(config: InjectionConfig): string {
       return refreshShortsFreshnessOnReentry(reason || 'host_shorts_reentry', { force: true }) ? 'OK' : 'SKIP';
     } catch (e) {
       return 'ERR';
+    }
+  };
+  window.__MW_NATIVE_REVEAL__ = function(reason) {
+    try {
+      return JSON.stringify(runNativeRevealRequest(reason || 'native_overlay'));
+    } catch (e) {
+      return JSON.stringify({ ok: false, reason: String(e || 'native_reveal_error') });
+    }
+  };
+  window.__MW_FORCE_REVEAL_REHYDRATE__ = function(reason, options) {
+    try {
+      return JSON.stringify(forceRevealRehydrate(reason || 'host_force_rehydrate', options || null));
+    } catch (e) {
+      return JSON.stringify({ ok: false, reason: String(e || 'force_rehydrate_error') });
     }
   };
 
@@ -7927,6 +8190,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     pendingRequests: () => state.pendingRequests,
     batchQueue: () => batchQueue,
     revealed: () => state.revealed,
+    nativeReveal: (reason) => runNativeRevealRequest(reason || 'debug_native_reveal'),
     setForcedBlur: (enabled) => { 
       CONFIG.forcedBlur = enabled; 
       console.log('[MW] Forced blur:', enabled);

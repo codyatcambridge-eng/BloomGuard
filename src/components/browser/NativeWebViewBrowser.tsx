@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import type { PluginListenerHandle } from '@capacitor/core';
+import { Capacitor, type PluginListenerHandle } from '@capacitor/core';
 import LabelListener from '@/components/browser/LabelListener';
 import {
   Shield,
@@ -182,6 +182,40 @@ const isYouTubeFamilyContext = (family: string): boolean => {
   return family === 'youtube_www' || family === 'youtube_mobile' || family === 'youtube_other';
 };
 
+type InAppBrowserBridgePlugin = {
+  executeScript?: (options: { code: string }) => Promise<unknown>;
+  reload?: () => Promise<unknown>;
+};
+
+const getInAppBrowserBridgePlugin = (): InAppBrowserBridgePlugin | null => {
+  const plugins = (Capacitor as unknown as { Plugins?: Record<string, unknown> }).Plugins;
+  if (!plugins || typeof plugins !== 'object') return null;
+  const plugin = plugins.InAppBrowser;
+  if (!plugin || typeof plugin !== 'object') return null;
+  return plugin as InAppBrowserBridgePlugin;
+};
+
+const parseNativeErrorCode = (error: unknown): string => {
+  if (
+    error &&
+    typeof error === 'object' &&
+    'code' in error &&
+    typeof (error as { code?: unknown }).code === 'string'
+  ) {
+    return String((error as { code?: unknown }).code).toUpperCase();
+  }
+  const message = error instanceof Error
+    ? error.message
+    : (typeof error === 'string' ? error : String(error ?? ''));
+  if (/\bUNIMPLEMENTED\b/i.test(message)) {
+    return 'UNIMPLEMENTED';
+  }
+  if (/webview is not initialized/i.test(message) || /navigation controller is not initialized/i.test(message)) {
+    return 'WEBVIEW_NOT_INITIALIZED';
+  }
+  return '';
+};
+
 interface SearchResult {
   title: string;
   url: string;
@@ -294,8 +328,12 @@ export const NativeWebViewBrowser = () => {
   const blurSignalRef = useRef({ unsafeStreak: 0, safeStreak: 0 });
   const messageFromWebViewHandlerRef = useRef<((payload: unknown) => void) | null>(null);
   const [blurSyncVersion, setBlurSyncVersion] = useState(0);
+  const pendingRevealForceReasonRef = useRef<string | null>(null);
+  const [revealForceVersion, setRevealForceVersion] = useState(0);
   const riskDecisionListenerRef = useRef<PluginListenerHandle | null>(null);
   const nativeSignalUnimplementedRef = useRef(false);
+  const lastWebViewErrorCodeRef = useRef('');
+  const bridgeReloadInFlightRef = useRef(false);
   const lastNsfwSignalAtRef = useRef(0);
   const webViewPageEpochRef = useRef(0);
   const stageBFlagDiagEpochRef = useRef<string | null>(null);
@@ -535,6 +573,17 @@ export const NativeWebViewBrowser = () => {
     },
     onImageBlurred: (_src, result) => {
       console.debug('[Browser] Image blurred:', result.category);
+      processModerationSafetySignal(true, 'image_blurred:' + String(result.category || 'unsafe'));
+      queueCurrentBlurState('image_blurred_force_reveal');
+      pendingRevealForceReasonRef.current = 'image_blurred:' + String(result.category || 'unsafe');
+      setRevealForceVersion(v => v + 1);
+      void pushNativeSignalCapped({
+        Porn: 1,
+        Hentai: 0,
+        Sexy: 1,
+        Neutral: 0,
+        Drawing: 0,
+      });
       if (localSettings.show_scan_notifications) {
         toast.info(`Image blurred: ${result.category}`, {
           duration: 2000,
@@ -1021,6 +1070,7 @@ export const NativeWebViewBrowser = () => {
       pageEpoch: webViewPageEpochRef.current,
       diagYouTubeShorts: localSettings.diag_youtube_shorts === true && isYouTubeUrl(targetUrl),
       enableShortsHealthHeal: true,
+      nativeRevealOverlay: isNative,
     };
     console.log(
       '[MW-Inject][Config]',
@@ -1114,9 +1164,45 @@ export const NativeWebViewBrowser = () => {
     };
   }, []);
 
+  const attemptNativeBridgeReload = useCallback(async (reason: string, urlHint?: string): Promise<boolean> => {
+    if (!isNative) return false;
+    if (bridgeReloadInFlightRef.current) return true;
+    const bridgePlugin = getInAppBrowserBridgePlugin();
+    if (!bridgePlugin || typeof bridgePlugin.reload !== 'function') {
+      console.warn(
+        '[Browser][Bridge] Reload unavailable',
+        'reason=' + reason,
+        'url=' + toDiagUrl(urlHint || currentUrlRef.current || ''),
+      );
+      return false;
+    }
+
+    bridgeReloadInFlightRef.current = true;
+    try {
+      await bridgePlugin.reload();
+      console.warn(
+        '[Browser][Bridge] Reload requested',
+        'reason=' + reason,
+        'url=' + toDiagUrl(urlHint || currentUrlRef.current || ''),
+      );
+      return true;
+    } catch (error) {
+      console.error(
+        '[Browser][Bridge] Reload failed',
+        'reason=' + reason,
+        'url=' + toDiagUrl(urlHint || currentUrlRef.current || ''),
+        error,
+      );
+      return false;
+    } finally {
+      bridgeReloadInFlightRef.current = false;
+    }
+  }, [isNative, toDiagUrl]);
+
   const {
     state: webViewState,
     listenersAttached: webViewListenersAttached,
+    scriptExecutionReady,
     open: openWebView,
     close: closeWebView,
     goBack: webViewGoBack,
@@ -1127,6 +1213,7 @@ export const NativeWebViewBrowser = () => {
     setFlashGuardState,
   } = useNativeWebView({
     onLoadStart: (url) => {
+      lastWebViewErrorCodeRef.current = '';
       console.log('[DIAG][LOAD] stage=start url=' + toDiagUrl(url));
       console.log('[Browser] ======= LOAD START =======');
       console.log('[Browser] URL:', url);
@@ -1156,6 +1243,7 @@ export const NativeWebViewBrowser = () => {
       }
     },
     onLoadEnd: async (url) => {
+      lastWebViewErrorCodeRef.current = '';
       console.log('[DIAG][LOAD] stage=success url=' + toDiagUrl(url));
       console.log('[Browser] ======= LOAD END =======');
       console.log('[Browser] URL:', url);
@@ -1194,10 +1282,21 @@ export const NativeWebViewBrowser = () => {
       }
     },
     onLoadError: (url, error) => {
+      const errorCode = parseNativeErrorCode(error);
+      lastWebViewErrorCodeRef.current = errorCode;
       console.log('[DIAG][LOAD] stage=error url=' + toDiagUrl(url) + ' error=' + String(error));
       console.error('[Browser] ======= LOAD ERROR =======');
       console.error('[Browser] URL:', url);
       console.error('[Browser] Error:', error);
+      if (errorCode === 'UNIMPLEMENTED') {
+        console.warn(
+          '[Browser][Bridge] executeScript is UNIMPLEMENTED; skipping fallback and reloading bridge',
+          'url=' + toDiagUrl(url),
+        );
+        void attemptNativeBridgeReload('onLoadError_unimplemented', url);
+        setIsLoading(false);
+        return;
+      }
       logHostLayerDiagnostics('load_error');
       setIsLoading(false);
       setFlashGuardState?.(true, 'load_error');
@@ -1218,17 +1317,28 @@ export const NativeWebViewBrowser = () => {
         isRuntimeModerationEnabled &&
         isYouTubeFamilyContext(previousFamily) &&
         isYouTubeFamilyContext(nextFamily);
+      const shouldRunEpochResetCleanup = !shouldDeferSafeReset;
       console.log('[Browser] ======= URL CHANGE =======');
       console.log('[Browser] New URL:', url);
       console.log('[DIAG][LOAD] stage=url_change url=' + toDiagUrl(url));
       markNavigation('onUrlChange', url, {
-        forceEpochReset: true,
-        onEpochResetCleanup: () => {
-          pendingRequestsRef.current.clear();
-          void teardownWebViewScheduling('url_change_epoch_reset', url).catch(() => undefined);
-          setFlashGuardState?.(false, 'url_change_epoch_reset');
-        },
+        forceEpochReset: !shouldDeferSafeReset,
+        onEpochResetCleanup: shouldRunEpochResetCleanup
+          ? () => {
+              pendingRequestsRef.current.clear();
+              void teardownWebViewScheduling('url_change_epoch_reset', url).catch(() => undefined);
+              setFlashGuardState?.(false, 'url_change_epoch_reset');
+            }
+          : undefined,
       });
+      if (!shouldRunEpochResetCleanup) {
+        console.log(
+          '[MW-Host][Epoch] deferred cleanup for in-family YouTube nav',
+          'from=' + previousFamily,
+          'to=' + nextFamily,
+          'url=' + toDiagUrl(url),
+        );
+      }
       logLifecycleSnapshot('url_change', url, 'onUrlChange');
       logHostLayerDiagnostics('url_change');
       setUrlInput(url);
@@ -1618,6 +1728,38 @@ export const NativeWebViewBrowser = () => {
     `);
   }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, executeScript]);
 
+  const forceRevealReachability = useCallback(async (reason: string) => {
+    if (!ENABLE_SIGNAL_PIPELINE) return;
+    if (!isNative || !webViewState.isOpen || !executeScript) return;
+    const safeReason = escapeForJs(reason || 'force_reveal_reachability');
+    const raw = await executeScript(`
+      (function() {
+        try {
+          window.__MW_NATIVE_REVEAL_FALLBACK__ = true;
+          if (typeof window.__MW_FORCE_REVEAL_REHYDRATE__ === 'function') {
+            return window.__MW_FORCE_REVEAL_REHYDRATE__('${safeReason}', { forceWebButton: true });
+          }
+          var blurred = document.querySelectorAll('[data-mw-moderated="blurred"][data-mw-src]');
+          return JSON.stringify({
+            ok: blurred && blurred.length > 0,
+            reason: blurred && blurred.length > 0 ? 'blurred_candidates_present' : 'no_blurred_candidate',
+            count: blurred ? blurred.length : 0,
+            fallback: 'native_overlay_force_unavailable'
+          });
+        } catch (e) {
+          return JSON.stringify({ ok: false, reason: String(e || 'force_reveal_failed') });
+        }
+      })();
+    `);
+    console.log(
+      '[MW-Host][RevealForce]',
+      'reason=' + reason,
+      'result=' + String(raw || 'null'),
+      'navId=' + activeNavIdRef.current,
+      'url=' + (webViewState.currentUrl || currentUrlRef.current || 'unknown'),
+    );
+  }, [ENABLE_SIGNAL_PIPELINE, isNative, webViewState.isOpen, webViewState.currentUrl, executeScript]);
+
   const flushBlurStateToWebView = useCallback(async () => {
     if (!ENABLE_DOM_BLUR) return;
     if (!isNative || !webViewState.isOpen || !executeScript) return;
@@ -1650,6 +1792,15 @@ export const NativeWebViewBrowser = () => {
     if (!blurReadyRef.current) return;
     flushBlurStateToWebView();
   }, [ENABLE_DOM_BLUR, blurSyncVersion, isNative, webViewState.isOpen, flushBlurStateToWebView]);
+
+  useEffect(() => {
+    if (!ENABLE_SIGNAL_PIPELINE) return;
+    if (!isNative || !webViewState.isOpen) return;
+    const reason = pendingRevealForceReasonRef.current;
+    if (!reason) return;
+    pendingRevealForceReasonRef.current = null;
+    void forceRevealReachability(reason);
+  }, [ENABLE_SIGNAL_PIPELINE, isNative, webViewState.isOpen, revealForceVersion, forceRevealReachability]);
 
   useEffect(() => {
     if (!ENABLE_DOM_BLUR) return;
@@ -1774,13 +1925,25 @@ export const NativeWebViewBrowser = () => {
   useEffect(() => {
     if (!ENABLE_DOM_BLUR) return;
     if (!isNative || !webViewState.isOpen) return;
+    if (!scriptExecutionReady) {
+      if (webViewState.error === 'WEBVIEW_NOT_INITIALIZED') {
+        console.warn(
+          '[MW-Host][Timer] stop',
+          'name=blurReadyPoll',
+          'reason=webview_not_initialized',
+          'navId=' + activeNavIdRef.current,
+          'url=' + (webViewState.currentUrl || currentUrlRef.current || 'unknown'),
+        );
+      }
+      return;
+    }
     const timer = setInterval(() => {
       if (!blurReadyRef.current) {
         requestBlurHandshake('ready_poll');
       }
     }, 500);
     return () => clearInterval(timer);
-  }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, requestBlurHandshake]);
+  }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, webViewState.error, webViewState.currentUrl, scriptExecutionReady, requestBlurHandshake]);
 
   useEffect(() => {
     return () => {
@@ -2059,12 +2222,15 @@ export const NativeWebViewBrowser = () => {
 
     const requestEpochForResult = requestEpoch ?? activeEpoch;
     const latestEpoch = webViewPageEpochRef.current;
-    if (isOlderPageEpoch(requestEpochForResult, latestEpoch)) {
+    const epochLag = latestEpoch - requestEpochForResult;
+    const isStaleBeyondGracePeriod = isOlderPageEpoch(requestEpochForResult, latestEpoch) && epochLag > 1;
+    if (isStaleBeyondGracePeriod) {
       console.warn(
         '[MW-Host][Epoch] stale result ignored',
         'requestId=' + requestId,
         'requestEpoch=' + requestEpochForResult,
         'activeEpoch=' + latestEpoch,
+        'epochLag=' + epochLag,
         'requestNavId=' + (requestNavId || 'none'),
         'activeNavId=' + activeNavIdRef.current,
       );
@@ -2380,6 +2546,10 @@ export const NativeWebViewBrowser = () => {
           'noncePrefix=' + String(typedMessage.noncePrefix ?? 'none'),
           'items=' + String(typedMessage.itemCount ?? '0'),
         );
+        if (blurStateRef.current.enabled) {
+          pendingRevealForceReasonRef.current = 'mw_req_timeout';
+          setRevealForceVersion(v => v + 1);
+        }
         return;
       }
 
@@ -3044,15 +3214,34 @@ export const NativeWebViewBrowser = () => {
     // Open in native WebView or fallback
     if (isNative) {
       try {
+        lastWebViewErrorCodeRef.current = '';
         const success = await openWebView(targetUrl, true);
         if (success) {
           await logEvent('allowed', targetUrl, 'native-webview');
         } else {
+          if (lastWebViewErrorCodeRef.current === 'UNIMPLEMENTED') {
+            console.warn(
+              '[Browser][Bridge] WebView open returned false with UNIMPLEMENTED; skipping fallback',
+              'url=' + toDiagUrl(targetUrl),
+            );
+            await attemptNativeBridgeReload('search_open_failed_unimplemented', targetUrl);
+            await logEvent('bridge_reload', targetUrl, 'executeScript-unimplemented');
+            setIsLoading(false);
+            return;
+          }
           setFallbackUrl(targetUrl);
           navigate('fallback', '', targetUrl);
           await logEvent('fallback', targetUrl, 'webview-failed');
         }
       } catch (error) {
+        const errorCode = parseNativeErrorCode(error);
+        if (errorCode === 'UNIMPLEMENTED') {
+          lastWebViewErrorCodeRef.current = errorCode;
+          await attemptNativeBridgeReload('search_open_throw_unimplemented', targetUrl);
+          await logEvent('bridge_reload', targetUrl, 'executeScript-unimplemented');
+          setIsLoading(false);
+          return;
+        }
         console.error('[Browser] WebView open error:', error);
         setFallbackUrl(targetUrl);
         setFailureError(error instanceof Error ? error.message : 'Failed to load');
@@ -3067,7 +3256,7 @@ export const NativeWebViewBrowser = () => {
     }
     
     setIsLoading(false);
-  }, [navigate, logEvent, isNative, openWebView, isUrlInput, toDiagUrl]);
+  }, [navigate, logEvent, isNative, openWebView, isUrlInput, toDiagUrl, attemptNativeBridgeReload]);
 
   // Main navigation handler - immediately navigate to browse view (fail-open)
   const handleNavigate = useCallback(async (targetUrl?: string, e?: React.FormEvent) => {
@@ -3128,16 +3317,35 @@ export const NativeWebViewBrowser = () => {
     // Open in native WebView (for all sites including social platforms)
     if (isNative) {
       try {
+        lastWebViewErrorCodeRef.current = '';
         const success = await openWebView(normalizedUrl, true);
         if (success) {
           await logEvent('allowed', domain, 'native-webview');
         } else {
+          if (lastWebViewErrorCodeRef.current === 'UNIMPLEMENTED') {
+            console.warn(
+              '[Browser][Bridge] WebView open returned false with UNIMPLEMENTED; skipping fallback',
+              'url=' + toDiagUrl(normalizedUrl),
+            );
+            await attemptNativeBridgeReload('navigate_open_failed_unimplemented', normalizedUrl);
+            await logEvent('bridge_reload', domain, 'executeScript-unimplemented');
+            setIsLoading(false);
+            return;
+          }
           // WebView failed to open - only then show fallback
           setFallbackUrl(normalizedUrl);
           navigate('fallback', '', normalizedUrl);
           await logEvent('fallback', domain, 'webview-failed');
         }
       } catch (error) {
+        const errorCode = parseNativeErrorCode(error);
+        if (errorCode === 'UNIMPLEMENTED') {
+          lastWebViewErrorCodeRef.current = errorCode;
+          await attemptNativeBridgeReload('navigate_open_throw_unimplemented', normalizedUrl);
+          await logEvent('bridge_reload', domain, 'executeScript-unimplemented');
+          setIsLoading(false);
+          return;
+        }
         // Network/WebView error - show failure only for actual errors
         console.error('[Browser] WebView open error:', error);
         setFallbackUrl(normalizedUrl);
@@ -3153,7 +3361,7 @@ export const NativeWebViewBrowser = () => {
     }
     
     setIsLoading(false);
-  }, [urlInput, localSettings.block_adult_sites, checkBlockedSite, deviceId, isNative, openWebView, handleSearch, navigate, logEvent, isUrlInput, toDiagUrl]);
+  }, [urlInput, localSettings.block_adult_sites, checkBlockedSite, deviceId, isNative, openWebView, handleSearch, navigate, logEvent, isUrlInput, toDiagUrl, attemptNativeBridgeReload]);
 
   // Reader Mode handler
   const handleReaderMode = useCallback(async () => {

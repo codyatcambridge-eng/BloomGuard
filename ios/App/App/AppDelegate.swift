@@ -1,7 +1,9 @@
 import UIKit
 import Capacitor
+import InappbrowserPlugin
 import WebKit
 import ObjectiveC.runtime
+import SwiftUI
 
 @UIApplicationMain
 class AppDelegate: UIResponder, UIApplicationDelegate {
@@ -11,6 +13,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         // Restore InAppBrowser lifecycle bridge so native plugins can observe the active WKWebView.
         InAppBrowserLifecycleBridge.installIfNeeded()
+        NativeRevealOverlayManager.shared.installIfNeeded()
         return true
     }
 
@@ -60,6 +63,7 @@ private enum ContentFilterBridgeUserInfoKey {
 extension Notification.Name {
     static let mwInAppBrowserDidAttachWebView = Notification.Name("mwInAppBrowserDidAttachWebView")
     static let mwInAppBrowserDidDetachWebView = Notification.Name("mwInAppBrowserDidDetachWebView")
+    static let mwNativeRevealOverlayForceVisible = Notification.Name("mwNativeRevealOverlayForceVisible")
 }
 
 private enum InAppBrowserLifecycleBridge {
@@ -194,5 +198,232 @@ private extension UIView {
 
         walk(self)
         return best
+    }
+}
+
+private final class NativeRevealOverlayViewModel: ObservableObject {
+    @Published var isVisible = false
+    var onTapReveal: (() -> Void)?
+}
+
+private struct NativeRevealOverlayView: View {
+    @ObservedObject var model: NativeRevealOverlayViewModel
+
+    var body: some View {
+        ZStack {
+            Color.clear
+            VStack {
+                Spacer()
+                if model.isVisible {
+                    Button(action: {
+                        model.onTapReveal?()
+                    }) {
+                        Text("Tap to Reveal")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 22)
+                            .padding(.vertical, 12)
+                            .background(Color.black.opacity(0.82))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 14)
+                                    .stroke(Color.white.opacity(0.38), lineWidth: 1.5)
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 14))
+                    }
+                    .padding(.bottom, 112)
+                    .shadow(color: .black.opacity(0.35), radius: 10, x: 0, y: 7)
+                    .allowsHitTesting(true)
+                }
+            }
+        }
+        .ignoresSafeArea()
+        .allowsHitTesting(true)
+    }
+}
+
+private final class NativeRevealOverlayWindow: UIWindow {
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        let hitView = super.hitTest(point, with: event)
+        if hitView === rootViewController?.view {
+            return nil
+        }
+        return hitView
+    }
+}
+
+private final class NativeRevealOverlayManager {
+    static let shared = NativeRevealOverlayManager()
+
+    private let model = NativeRevealOverlayViewModel()
+    private var installDone = false
+    private var attachObserver: NSObjectProtocol?
+    private var detachObserver: NSObjectProtocol?
+    private var forceVisibleObserver: NSObjectProtocol?
+    private weak var activeWebView: WKWebView?
+    private var overlayWindow: NativeRevealOverlayWindow?
+
+    private init() {
+        model.onTapReveal = { [weak self] in
+            self?.handleTapReveal()
+        }
+    }
+
+    func installIfNeeded() {
+        guard !installDone else { return }
+        installDone = true
+        attachObserver = NotificationCenter.default.addObserver(
+            forName: .mwInAppBrowserDidAttachWebView,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            self?.handleAttach(notification)
+        }
+        detachObserver = NotificationCenter.default.addObserver(
+            forName: .mwInAppBrowserDidDetachWebView,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            self?.handleDetach(notification)
+        }
+        forceVisibleObserver = NotificationCenter.default.addObserver(
+            forName: .mwNativeRevealOverlayForceVisible,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            self?.handleForceVisible(notification)
+        }
+    }
+
+    private func handleAttach(_ notification: Notification) {
+        guard let webView = notification.userInfo?[ContentFilterBridgeUserInfoKey.webView] as? WKWebView else {
+            return
+        }
+        activeWebView = webView
+        presentOverlay(attachedTo: webView)
+    }
+
+    private func handleDetach(_ notification: Notification) {
+        guard let detached = notification.userInfo?[ContentFilterBridgeUserInfoKey.webView] as? WKWebView else {
+            removeOverlay()
+            activeWebView = nil
+            return
+        }
+        if detached === activeWebView {
+            activeWebView = nil
+            removeOverlay()
+        }
+    }
+
+    private func handleForceVisible(_ notification: Notification) {
+        let visible = (notification.userInfo?["visible"] as? Bool) ?? true
+        if !visible {
+            return
+        }
+        if let existingWebView = activeWebView, existingWebView.window != nil {
+            presentOverlay(attachedTo: existingWebView)
+            return
+        }
+        if let discoveredWebView = findForegroundWebView() {
+            activeWebView = discoveredWebView
+            presentOverlay(attachedTo: discoveredWebView)
+            return
+        }
+        if let scene = resolveWindowScene(for: nil) {
+            if let existing = overlayWindow, existing.windowScene == scene {
+                model.isVisible = true
+                existing.isHidden = false
+                return
+            }
+            let overlayWindow = NativeRevealOverlayWindow(windowScene: scene)
+            overlayWindow.backgroundColor = .clear
+            overlayWindow.windowLevel = .alert + 1
+            let host = UIHostingController(rootView: NativeRevealOverlayView(model: model))
+            host.view.backgroundColor = .clear
+            overlayWindow.rootViewController = host
+            overlayWindow.isHidden = false
+            self.overlayWindow = overlayWindow
+            model.isVisible = true
+        }
+    }
+
+    private func resolveWindowScene(for webView: WKWebView?) -> UIWindowScene? {
+        if let scene = webView?.window?.windowScene {
+            return scene
+        }
+        return UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first(where: { $0.activationState == .foregroundActive || $0.activationState == .foregroundInactive })
+    }
+
+    private func findForegroundWebView() -> WKWebView? {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        var best: WKWebView?
+        var bestArea: CGFloat = 0
+
+        for scene in scenes where scene.activationState == .foregroundActive || scene.activationState == .foregroundInactive {
+            for window in scene.windows where !window.isHidden {
+                guard let candidate = window.mw_findLargestWKWebView() else { continue }
+                let area = candidate.bounds.width * candidate.bounds.height
+                if area > bestArea, candidate.bounds.width > 30, candidate.bounds.height > 30 {
+                    bestArea = area
+                    best = candidate
+                }
+            }
+        }
+        return best
+    }
+
+    private func presentOverlay(attachedTo webView: WKWebView) {
+        guard let scene = resolveWindowScene(for: webView) else { return }
+        if let existing = overlayWindow, existing.windowScene == scene {
+            model.isVisible = true
+            existing.isHidden = false
+            return
+        }
+        let overlayWindow = NativeRevealOverlayWindow(windowScene: scene)
+        overlayWindow.backgroundColor = .clear
+        overlayWindow.windowLevel = .alert + 1
+        let host = UIHostingController(rootView: NativeRevealOverlayView(model: model))
+        host.view.backgroundColor = .clear
+        overlayWindow.rootViewController = host
+        overlayWindow.isHidden = false
+        self.overlayWindow = overlayWindow
+        model.isVisible = true
+    }
+
+    private func removeOverlay() {
+        model.isVisible = false
+        overlayWindow?.isHidden = true
+        overlayWindow?.rootViewController = nil
+        overlayWindow = nil
+    }
+
+    private func handleTapReveal() {
+        guard let webView = activeWebView else { return }
+        let revealScript = """
+        (function() {
+          try {
+            if (typeof window.__MW_NATIVE_REVEAL__ === 'function') {
+              return window.__MW_NATIVE_REVEAL__('native_swiftui_overlay');
+            }
+            var first = document.querySelector('[data-mw-moderated="blurred"][data-mw-src]');
+            if (!first) return JSON.stringify({ ok: false, reason: 'no_blurred_candidate' });
+            first.style.removeProperty('filter');
+            first.style.removeProperty('-webkit-filter');
+            first.style.removeProperty('backdrop-filter');
+            first.style.removeProperty('-webkit-backdrop-filter');
+            first.dataset.mwModerated = 'revealed';
+            first.dataset.mwRevealed = 'true';
+            var overlays = document.querySelectorAll('.mw-reveal-overlay');
+            for (var i = 0; i < overlays.length; i += 1) {
+              overlays[i].style.display = 'none';
+            }
+            return JSON.stringify({ ok: true, reason: 'fallback_reveal' });
+          } catch (e) {
+            return JSON.stringify({ ok: false, reason: String(e) });
+          }
+        })();
+        """
+        webView.evaluateJavaScript(revealScript) { _, _ in }
     }
 }

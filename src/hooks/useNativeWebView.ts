@@ -217,6 +217,21 @@ export interface WebViewState {
   error: string | null;
 }
 
+const WEBVIEW_NOT_INITIALIZED_ERROR_CODE = 'WEBVIEW_NOT_INITIALIZED';
+
+const parseExecuteScriptErrorCode = (error: unknown): string => {
+  const rawMessage = error instanceof Error
+    ? error.message
+    : (typeof error === 'string' ? error : String(error ?? ''));
+  if (/webview is not initialized/i.test(rawMessage) || /navigation controller is not initialized/i.test(rawMessage)) {
+    return WEBVIEW_NOT_INITIALIZED_ERROR_CODE;
+  }
+  if (/\bUNIMPLEMENTED\b/i.test(rawMessage)) {
+    return 'UNIMPLEMENTED';
+  }
+  return '';
+};
+
 export interface WebViewNavigationEvent {
   url: string;
   type: 'navigation' | 'redirect';
@@ -284,6 +299,11 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
   const flashDiagLogAtRef = useRef(0);
   const listenerAttachSeqRef = useRef(0);
   const listenerHandlesRef = useRef<PluginListenerHandle[]>([]);
+  const scriptExecutionReadyRef = useRef(false);
+  const scriptExecutionReadyWaitersRef = useRef<Array<(ready: boolean) => void>>([]);
+  const executeScriptPausedRef = useRef(false);
+  const [scriptExecutionReady, setScriptExecutionReady] = useState(false);
+  const lastLoadSignalRef = useRef<{ url: string; at: number }>({ url: '', at: 0 });
   const listenerOwnerRef = useRef<{ navId: number | null; instanceId: number | null }>({
     navId: null,
     instanceId: null,
@@ -311,6 +331,19 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
   const presentAfterLoadWatchdogTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const PRESENT_AFTER_LOAD_WATCHDOG_MS = 2600;
   const NAVIGATION_GUARD_TIMEOUT_MS = 1500;
+  const EXECUTE_READY_WAIT_TIMEOUT_MS = 9000;
+  const EXECUTE_READY_DEGRADED_PROBE_MS = 1400;
+  const EXECUTE_READY_DEGRADED_PROBE_SCRIPT = `(() => {
+    try {
+      return JSON.stringify({
+        ok: true,
+        readyState: document.readyState || 'unknown',
+        href: location.href || '',
+      });
+    } catch (e) {
+      return JSON.stringify({ ok: false, reason: String(e || 'probe_error') });
+    }
+  })();`;
 
   useEffect(() => {
     onLoadStartRef.current = onLoadStart;
@@ -386,6 +419,22 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
 
   const markClosed = useCallback((reason: string) => {
     clearPresentAfterLoadWatchdog();
+    executeScriptPausedRef.current = false;
+    if (scriptExecutionReadyRef.current) {
+      scriptExecutionReadyRef.current = false;
+      setScriptExecutionReady(false);
+    }
+    if (scriptExecutionReadyWaitersRef.current.length > 0) {
+      const waiters = scriptExecutionReadyWaitersRef.current;
+      scriptExecutionReadyWaitersRef.current = [];
+      waiters.forEach((resolve) => {
+        try {
+          resolve(false);
+        } catch {
+          // ignore waiter resolution failures during close
+        }
+      });
+    }
     const previousId = activeInstanceIdRef.current;
     if (previousId == null) return;
     closeCountRef.current += 1;
@@ -429,6 +478,148 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     listenersAttachedRef.current = attached;
     setListenersAttached(attached);
   }, []);
+
+  const resolveScriptExecutionReadyWaiters = useCallback((ready: boolean) => {
+    if (scriptExecutionReadyWaitersRef.current.length === 0) return;
+    const waiters = scriptExecutionReadyWaitersRef.current;
+    scriptExecutionReadyWaitersRef.current = [];
+    waiters.forEach((resolve) => {
+      try {
+        resolve(ready);
+      } catch {
+        // ignore waiter resolution failures
+      }
+    });
+  }, []);
+
+  const setScriptExecutionReadyState = useCallback((ready: boolean, reason: string) => {
+    if (scriptExecutionReadyRef.current === ready) return;
+    scriptExecutionReadyRef.current = ready;
+    setScriptExecutionReady(ready);
+    if (ready) {
+      executeScriptPausedRef.current = false;
+    }
+    resolveScriptExecutionReadyWaiters(ready);
+    console.log(
+      '[NativeWebView][Lifecycle]',
+      'executeScriptReady=' + ready,
+      'reason=' + reason,
+      'activeInstanceId=' + (activeInstanceIdRef.current ?? 'none'),
+      'url=' + (currentUrlRef.current || 'unknown'),
+    );
+  }, [resolveScriptExecutionReadyWaiters]);
+
+  const probeScriptExecutionReadiness = useCallback(async (reason: string): Promise<boolean> => {
+    if (scriptExecutionReadyRef.current) return true;
+    if (!isOpenRef.current) return false;
+    if (executeScriptPausedRef.current) return false;
+
+    try {
+      const probeRaw = await InAppBrowser.executeScript({ code: EXECUTE_READY_DEGRADED_PROBE_SCRIPT });
+      const payload =
+        typeof probeRaw === 'string'
+          ? probeRaw
+          : (probeRaw as { result?: unknown; data?: unknown }).result ??
+            (probeRaw as { result?: unknown; data?: unknown }).data;
+      let parsed: { ok?: boolean; readyState?: string; href?: string; reason?: string } = {};
+      if (typeof payload === 'string') {
+        try {
+          parsed = JSON.parse(payload);
+        } catch {
+          parsed = { ok: true };
+        }
+      } else if (payload && typeof payload === 'object') {
+        parsed = payload as typeof parsed;
+      } else {
+        parsed = { ok: true };
+      }
+      const probeOk = parsed.ok !== false;
+      if (!probeOk) {
+        console.warn(
+          '[NativeWebView][ExecuteScript] degraded probe negative',
+          'reason=' + reason,
+          'probeReason=' + (parsed.reason || 'unknown'),
+          'activeInstanceId=' + (activeInstanceIdRef.current ?? 'none'),
+          'url=' + (currentUrlRef.current || 'unknown'),
+        );
+        return false;
+      }
+      setScriptExecutionReadyState(true, 'degraded_probe:' + reason);
+      console.warn(
+        '[NativeWebView][ExecuteScript] degraded short-circuit applied',
+        'reason=' + reason,
+        'documentReadyState=' + (parsed.readyState || 'unknown'),
+        'activeInstanceId=' + (activeInstanceIdRef.current ?? 'none'),
+        'url=' + (parsed.href || currentUrlRef.current || 'unknown'),
+      );
+      return true;
+    } catch (error) {
+      const errorCode = parseExecuteScriptErrorCode(error);
+      if (errorCode === WEBVIEW_NOT_INITIALIZED_ERROR_CODE) {
+        executeScriptPausedRef.current = true;
+        setScriptExecutionReadyState(false, 'degraded_probe_not_initialized');
+      }
+      console.warn(
+        '[NativeWebView][ExecuteScript] degraded probe failed',
+        'reason=' + reason,
+        'activeInstanceId=' + (activeInstanceIdRef.current ?? 'none'),
+        'url=' + (currentUrlRef.current || 'unknown'),
+        error,
+      );
+      return false;
+    }
+  }, [setScriptExecutionReadyState]);
+
+  const waitForScriptExecutionReady = useCallback(async (reason: string): Promise<boolean> => {
+    if (scriptExecutionReadyRef.current) return true;
+    if (!isOpenRef.current) return false;
+    if (executeScriptPausedRef.current) return false;
+
+    return new Promise<boolean>((resolve) => {
+      let done = false;
+      let waiter: ((ready: boolean) => void) | null = null;
+      const removeWaiter = () => {
+        if (!waiter) return;
+        scriptExecutionReadyWaitersRef.current = scriptExecutionReadyWaitersRef.current.filter(
+          (candidate) => candidate !== waiter,
+        );
+        waiter = null;
+      };
+      const finish = (ready: boolean) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timeout);
+        clearTimeout(degradedProbeTimeout);
+        removeWaiter();
+        resolve(ready);
+      };
+      const timeout = setTimeout(() => {
+        if (done) return;
+        console.warn(
+          '[NativeWebView][ExecuteScript] ready-wait timeout',
+          'reason=' + reason,
+          'timeoutMs=' + EXECUTE_READY_WAIT_TIMEOUT_MS,
+          'activeInstanceId=' + (activeInstanceIdRef.current ?? 'none'),
+          'url=' + (currentUrlRef.current || 'unknown'),
+        );
+        finish(scriptExecutionReadyRef.current);
+      }, EXECUTE_READY_WAIT_TIMEOUT_MS);
+      const degradedProbeTimeout = setTimeout(() => {
+        void (async () => {
+          if (done || scriptExecutionReadyRef.current) return;
+          const degradedReady = await probeScriptExecutionReadiness('wait:' + reason);
+          if (!degradedReady || done) return;
+          finish(true);
+        })();
+      }, EXECUTE_READY_DEGRADED_PROBE_MS);
+
+      waiter = (ready: boolean) => {
+        finish(ready);
+      };
+
+      scriptExecutionReadyWaitersRef.current.push(waiter);
+    });
+  }, [probeScriptExecutionReadiness]);
 
   const logChurnDiag = useCallback((
     action: string,
@@ -642,11 +833,53 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     const attachAllListeners = async () => {
       logChurnDiag('attach_begin', 'setup_start', 'useNativeWebView.listeners.setup');
 
+      const handleBrowserLoadComplete = (sourceEvent: string) => {
+        const loadedUrl = currentUrlRef.current || pageLoadErrorRecoveryRef.current.url;
+        const now = Date.now();
+        const previous = lastLoadSignalRef.current;
+        const duplicateLoadSignal =
+          previous.url === loadedUrl &&
+          loadedUrl.length > 0 &&
+          (now - previous.at) < 300;
+        if (!duplicateLoadSignal) {
+          lastLoadSignalRef.current = { url: loadedUrl, at: now };
+        }
+        setScriptExecutionReadyState(true, sourceEvent);
+        if (duplicateLoadSignal) {
+          console.log(
+            '[NativeWebView] Duplicate load signal skipped',
+            'event=' + sourceEvent,
+            'url=' + loadedUrl,
+          );
+          return;
+        }
+        console.log('[NativeWebView] Page loaded', 'event=' + sourceEvent);
+        void ensureBrowserPresented(sourceEvent, loadedUrl);
+        clearPresentAfterLoadWatchdog();
+        pageLoadErrorRecoveryRef.current = {
+          url: loadedUrl,
+          count: 0,
+          at: Date.now(),
+        };
+        setState(prev => ({ ...prev, isLoading: false, error: null }));
+        if (FLASH_GUARD_ENABLED) {
+          void (async () => {
+            await probeFlashGuard('load_end_pre_toggle');
+            await setFlashGuardState(false, 'load_end');
+            await probeFlashGuard('load_end_post_toggle');
+          })();
+        }
+        if (loadedUrl) {
+          onLoadEndRef.current?.(loadedUrl);
+        }
+      };
+
       await attachListener('urlChangeEvent', (event) => {
         const payload = event as { url?: string };
         const url = payload.url || '';
         console.log('[NativeWebView] URL changed:', url);
         currentUrlRef.current = url;
+        setScriptExecutionReadyState(false, 'url_change_event');
 
         const context = readListenerDiagContext();
         listenerOwnerRef.current = {
@@ -686,29 +919,16 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
         }
       }, 'useNativeWebView.listeners.urlChangeEvent');
 
+      await attachListener('browserFinishedLoading', () => {
+        handleBrowserLoadComplete('browserFinishedLoading');
+      }, 'useNativeWebView.listeners.browserFinishedLoading');
+
       await attachListener('browserPageLoaded', () => {
-        console.log('[NativeWebView] Page loaded');
-        void ensureBrowserPresented('browserPageLoaded', currentUrlRef.current || pageLoadErrorRecoveryRef.current.url);
-        clearPresentAfterLoadWatchdog();
-        pageLoadErrorRecoveryRef.current = {
-          url: currentUrlRef.current || pageLoadErrorRecoveryRef.current.url,
-          count: 0,
-          at: Date.now(),
-        };
-        setState(prev => ({ ...prev, isLoading: false, error: null }));
-        if (FLASH_GUARD_ENABLED) {
-          void (async () => {
-            await probeFlashGuard('load_end_pre_toggle');
-            await setFlashGuardState(false, 'load_end');
-            await probeFlashGuard('load_end_post_toggle');
-          })();
-        }
-        if (currentUrlRef.current) {
-          onLoadEndRef.current?.(currentUrlRef.current);
-        }
+        handleBrowserLoadComplete('browserPageLoaded');
       }, 'useNativeWebView.listeners.browserPageLoaded');
 
       await attachListener('pageLoadError', () => {
+        setScriptExecutionReadyState(false, 'page_load_error');
         clearPresentAfterLoadWatchdog();
         const failedUrl = currentUrlRef.current || '';
         const now = Date.now();
@@ -778,6 +998,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     return () => {
       disposed = true;
       setListenersAttachedState(false);
+      setScriptExecutionReadyState(false, 'listener_cleanup');
       const stackTag = 'useNativeWebView.listeners.cleanup';
       const handles = listenerHandlesRef.current;
       listenerHandlesRef.current = [];
@@ -822,6 +1043,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     flashDiagLog,
     ensureBrowserPresented,
     setListenersAttachedState,
+    setScriptExecutionReadyState,
     readListenerDiagContext,
     logChurnDiag,
   ]);
@@ -876,6 +1098,8 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
       flashGuardInstalledRef.current = false;
     }
 
+    executeScriptPausedRef.current = false;
+    setScriptExecutionReadyState(false, 'open_start');
     setState(prev => ({ ...prev, isLoading: true, error: null }));
     onLoadStartRef.current?.(url);
     pageLoadErrorRecoveryRef.current = { url, count: 0, at: Date.now() };
@@ -942,13 +1166,14 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
       return true;
     } catch (error) {
       clearPresentAfterLoadWatchdog();
+      setScriptExecutionReadyState(false, 'open_error');
       const errorMsg = error instanceof Error ? error.message : 'Failed to open WebView';
       console.error('[NativeWebView] Open error:', error);
       setState(prev => ({ ...prev, isLoading: false, error: errorMsg }));
       onLoadErrorRef.current?.(url, errorMsg);
       return false;
     }
-  }, [isNative, installFlashGuard, markClosed, setFlashGuardState, readListenerDiagContext, logChurnDiag, armPresentAfterLoadWatchdog, clearPresentAfterLoadWatchdog, ensureBrowserPresented]);
+  }, [isNative, installFlashGuard, markClosed, setFlashGuardState, readListenerDiagContext, logChurnDiag, armPresentAfterLoadWatchdog, clearPresentAfterLoadWatchdog, ensureBrowserPresented, setScriptExecutionReadyState]);
 
   // Close the WebView
   const close = useCallback(async () => {
@@ -982,6 +1207,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     if (!isNative || historyIndexRef.current <= 0) return false;
 
     try {
+      setScriptExecutionReadyState(false, 'go_back');
       historyIndexRef.current--;
       const prevUrl = historyStackRef.current[historyIndexRef.current];
 
@@ -999,13 +1225,14 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
       console.error('[NativeWebView] GoBack error:', error);
     }
     return false;
-  }, [isNative]);
+  }, [isNative, setScriptExecutionReadyState]);
 
   // Navigate forward in WebView history
   const goForward = useCallback(async () => {
     if (!isNative || historyIndexRef.current >= historyStackRef.current.length - 1) return false;
 
     try {
+      setScriptExecutionReadyState(false, 'go_forward');
       historyIndexRef.current++;
       const nextUrl = historyStackRef.current[historyIndexRef.current];
 
@@ -1023,33 +1250,35 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
       console.error('[NativeWebView] GoForward error:', error);
     }
     return false;
-  }, [isNative]);
+  }, [isNative, setScriptExecutionReadyState]);
 
   // Reload current page
   const reload = useCallback(async () => {
     if (!isNative || !state.currentUrl) return;
 
     try {
+      setScriptExecutionReadyState(false, 'reload');
       await InAppBrowser.reload();
       setState(prev => ({ ...prev, isLoading: true }));
       void setFlashGuardState(true, 'manual_reload');
     } catch (error) {
       console.error('[NativeWebView] Reload error:', error);
     }
-  }, [isNative, state.currentUrl, setFlashGuardState]);
+  }, [isNative, state.currentUrl, setFlashGuardState, setScriptExecutionReadyState]);
 
   // Set URL without full navigation (for redirects)
   const setUrl = useCallback(async (url: string) => {
     if (!isNative) return;
 
     try {
+      setScriptExecutionReadyState(false, 'set_url');
       await InAppBrowser.setUrl({ url });
       setState(prev => ({ ...prev, currentUrl: url, isLoading: true }));
       void setFlashGuardState(true, 'set_url');
     } catch (error) {
       console.error('[NativeWebView] SetUrl error:', error);
     }
-  }, [isNative, setFlashGuardState]);
+  }, [isNative, setFlashGuardState, setScriptExecutionReadyState]);
 
   const postMessageToWebView = useCallback(async (detail: Record<string, unknown>): Promise<boolean> => {
     if (!isNative) return false;
@@ -1065,9 +1294,18 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
   // Execute JavaScript in the WebView
   const executeScript = useCallback(async (script: string): Promise<string | null> => {
     if (!isNative) return null;
+    if (!isOpenRef.current) return null;
+
+    if (executeScriptPausedRef.current && !scriptExecutionReadyRef.current) {
+      return null;
+    }
 
     const run = async (): Promise<string | null> => {
       try {
+        const ready = await waitForScriptExecutionReady('executeScript');
+        if (!ready) {
+          return null;
+        }
         const now = Date.now();
         if (executeScript60sWindowStartRef.current === 0) {
           executeScript60sWindowStartRef.current = now;
@@ -1085,7 +1323,25 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
           executeScript60sCountRef.current = 0;
         }
 
-        const raw = await InAppBrowser.executeScript({ code: script }) as unknown;
+        const bridgePlugin = (
+          Capacitor as unknown as { Plugins?: Record<string, unknown> }
+        ).Plugins?.InAppBrowser as { executeScript?: (options: { code: string }) => Promise<unknown> } | undefined;
+
+        let raw: unknown;
+        if (bridgePlugin && typeof bridgePlugin.executeScript === 'function') {
+          try {
+            raw = await bridgePlugin.executeScript({ code: script });
+          } catch (bridgeError) {
+            console.warn(
+              '[NativeWebView] Capacitor.Plugins.InAppBrowser.executeScript failed; retrying with InAppBrowser.executeScript',
+              bridgeError,
+            );
+            raw = await InAppBrowser.executeScript({ code: script }) as unknown;
+          }
+        } else {
+          raw = await InAppBrowser.executeScript({ code: script }) as unknown;
+        }
+
         if (typeof raw === 'string') return raw;
         if (raw && typeof raw === 'object') {
           const obj = raw as { result?: unknown; data?: unknown };
@@ -1109,6 +1365,14 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
         }
         return null;
       } catch (error) {
+        const errorCode = parseExecuteScriptErrorCode(error);
+        if (errorCode === WEBVIEW_NOT_INITIALIZED_ERROR_CODE) {
+          executeScriptPausedRef.current = true;
+          setScriptExecutionReadyState(false, 'execute_error_not_initialized');
+          setState(prev => ({ ...prev, error: WEBVIEW_NOT_INITIALIZED_ERROR_CODE }));
+          console.warn('[NativeWebView] ExecuteScript paused until next successful navigation:', error);
+          return null;
+        }
         console.error('[NativeWebView] ExecuteScript error:', error);
         return null;
       }
@@ -1118,12 +1382,13 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     const next = executeChainRef.current.then(run, run);
     executeChainRef.current = next.then(() => undefined, () => undefined);
     return next;
-  }, [isNative]);
+  }, [isNative, waitForScriptExecutionReady, setScriptExecutionReadyState]);
 
   return {
     isNative,
     state,
     listenersAttached,
+    scriptExecutionReady,
     open,
     close,
     goBack,
