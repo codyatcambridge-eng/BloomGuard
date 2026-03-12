@@ -16,7 +16,6 @@ public class ContentFilterPlugin: CAPPlugin, CAPBridgedPlugin {
     private var scanning = false
     private let logCooldownMs: Double = 800
     private var lastLogAt: TimeInterval = 0
-    private var lastRevealForceAt: TimeInterval = 0
 
     public override func load() {
         super.load()
@@ -57,21 +56,8 @@ public class ContentFilterPlugin: CAPPlugin, CAPBridgedPlugin {
         let score = call.getDouble("score") ?? 0
         let reason = call.getString("reason") ?? "signal"
         rateLimitedLog("[FlashShield][DIAG] setNSFWSignal score=\(score) reason=\(reason)")
-        let nowMs = Date().timeIntervalSince1970 * 1000
-        if score >= 0.35 && (nowMs - lastRevealForceAt) > 500 {
-            lastRevealForceAt = nowMs
-            DispatchQueue.main.async {
-                NotificationCenter.default.post(
-                    name: .mwNativeRevealOverlayForceVisible,
-                    object: nil,
-                    userInfo: [
-                        "visible": true,
-                        "reason": "nsfw_signal",
-                        "score": score
-                    ]
-                )
-            }
-        }
+        // Global force-visible overlay intentionally disabled.
+        // Item-level blur/reveal controls are handled inside injected JS.
         call.resolve()
     }
 

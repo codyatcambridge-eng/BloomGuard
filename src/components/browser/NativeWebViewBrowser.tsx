@@ -109,6 +109,7 @@ const SHORTS_LEGACY_FALLBACK_MAX_POLLS = 6;
 const SHORTS_REENTRY_HOOK_RETRY_DELAY_MS = 120;
 const SHORTS_REENTRY_HOOK_MAX_ATTEMPTS = 8;
 const SMOKE_TEST_RED_SCREEN_ENABLED = false;
+const GLOBAL_SCREEN_BLUR_ENABLED = false;
 const FORCE_SHIELD_NSFW_SCORE_THRESHOLD = 0.50;
 const SMOKE_TEST_RED_SCREEN_SCRIPT = `(() => {
   const apply = () => { if (!document.body) return; document.body.style.filter = 'blur(10px) !important'; };
@@ -216,6 +217,16 @@ const parseNativeErrorCode = (error: unknown): string => {
   return '';
 };
 
+const isLikelyWebKitProcessCrash = (error: unknown): boolean => {
+  const lower = String(error || '').toLowerCase();
+  if (!lower) return false;
+  if (lower.includes('networkprocessproxy::didclose')) return true;
+  if (lower.includes('webviewwebcontentprocessdidterminate')) return true;
+  if (lower.includes('process did terminate')) return true;
+  if (lower.includes('web content process') && (lower.includes('terminate') || lower.includes('crash'))) return true;
+  return false;
+};
+
 interface SearchResult {
   title: string;
   url: string;
@@ -266,7 +277,7 @@ export const NativeWebViewBrowser = () => {
   const { isNative } = useCapacitor();
   const ENABLE_SMOKE_TEST_RED_SCREEN = SMOKE_TEST_RED_SCREEN_ENABLED;
   // Smoke branch: disable full moderation path and validate WKWebView document-start injection only.
-  const ENABLE_DOM_BLUR = !ENABLE_SMOKE_TEST_RED_SCREEN;
+  const ENABLE_DOM_BLUR = !ENABLE_SMOKE_TEST_RED_SCREEN && GLOBAL_SCREEN_BLUR_ENABLED;
   const ENABLE_SIGNAL_PIPELINE = !ENABLE_SMOKE_TEST_RED_SCREEN;
   const browserMainRef = useRef<HTMLElement | null>(null);
   const hostLayerDiagLogAtRef = useRef(0);
@@ -472,22 +483,92 @@ export const NativeWebViewBrowser = () => {
 
   const setCentralBlurState = useCallback((enabled: boolean, reason: string) => {
     const prev = blurStateRef.current;
-    if (prev.enabled === enabled && prev.reason === reason) return;
+    const normalizedEnabled = GLOBAL_SCREEN_BLUR_ENABLED ? enabled : false;
+    const normalizedReason = (!GLOBAL_SCREEN_BLUR_ENABLED && enabled)
+      ? reason + '_suppressed_global_overlay_disabled'
+      : reason;
+    if (prev.enabled === normalizedEnabled && prev.reason === normalizedReason) return;
 
     blurStateRef.current = {
-      enabled,
-      reason,
+      enabled: normalizedEnabled,
+      reason: normalizedReason,
       timestamp: Date.now(),
     };
     console.log(
       '[DIAG][OVERLAY_HOST_STATE]',
-      'enabled=' + enabled,
-      'reason=' + reason,
+      'enabled=' + normalizedEnabled,
+      'reason=' + normalizedReason,
       'prevEnabled=' + prev.enabled,
       'prevReason=' + prev.reason,
     );
-    queueCurrentBlurState(reason);
+    queueCurrentBlurState(normalizedReason);
   }, [queueCurrentBlurState]);
+
+  const forceDisarmGlobalBlurViaBridge = useCallback(async (reason: string) => {
+    const disarmReason = reason || 'host_force_disarm_global_blur';
+    setCentralBlurState(false, disarmReason);
+    blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
+    if (!isNative) return;
+    const bridgePlugin = getInAppBrowserBridgePlugin();
+    if (!bridgePlugin || typeof bridgePlugin.executeScript !== 'function') return;
+    const safeReason = escapeForJs(disarmReason);
+    try {
+      const raw = await bridgePlugin.executeScript({
+        code: `
+        (function() {
+          try {
+            var reason = '${safeReason}';
+            var clearNode = function(node) {
+              if (!node || !node.style) return;
+              node.style.removeProperty('filter');
+              node.style.removeProperty('-webkit-filter');
+              node.style.removeProperty('backdrop-filter');
+              node.style.removeProperty('-webkit-backdrop-filter');
+              if (node.classList) {
+                node.classList.remove('mw-enabled');
+                node.classList.remove('mw-softblur');
+                node.classList.remove('mw-blurred');
+              }
+            };
+            if (typeof window.__MW_HARD_DISARM_GLOBAL_OVERLAY__ === 'function') {
+              try { window.__MW_HARD_DISARM_GLOBAL_OVERLAY__(reason); } catch (e) {}
+            }
+            var overlay = document.getElementById('mw-blur-overlay');
+            if (overlay) {
+              if (overlay.classList) overlay.classList.remove('mw-enabled');
+              if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+            }
+            var styleNode = document.getElementById('mw-blur-overlay-style');
+            if (styleNode && styleNode.parentNode) {
+              styleNode.parentNode.removeChild(styleNode);
+            }
+            clearNode(document.body);
+            clearNode(document.documentElement);
+            if (window.__MW_BLUR_STATE__ && typeof window.__MW_BLUR_STATE__ === 'object') {
+              window.__MW_BLUR_STATE__.enabled = false;
+              window.__MW_BLUR_STATE__.reason = reason;
+              window.__MW_BLUR_STATE__.updatedAt = Date.now();
+            }
+            return JSON.stringify({ ok: true, reason: reason });
+          } catch (e) {
+            return JSON.stringify({ ok: false, reason: String(e || 'hard_disarm_failed') });
+          }
+        })();
+      `,
+      });
+      if (isDebugMode) {
+        console.log(
+          '[MW-Host][GlobalBlurHardDisarm]',
+          'reason=' + disarmReason,
+          'result=' + String(raw || 'null'),
+        );
+      }
+    } catch (error) {
+      if (isDebugMode) {
+        console.warn('[MW-Host][GlobalBlurHardDisarm] bridge execute failed', disarmReason, error);
+      }
+    }
+  }, [isNative, isDebugMode, setCentralBlurState]);
 
   const processModerationSafetySignal = useCallback((isUnsafe: boolean, reason: string) => {
     const signal = blurSignalRef.current;
@@ -1210,7 +1291,6 @@ export const NativeWebViewBrowser = () => {
     reload: webViewReload,
     postMessageToWebView,
     executeScript,
-    setFlashGuardState,
   } = useNativeWebView({
     onLoadStart: (url) => {
       lastWebViewErrorCodeRef.current = '';
@@ -1236,7 +1316,7 @@ export const NativeWebViewBrowser = () => {
         exitPendingReinject('navigation_load_start', url);
         setCentralBlurState(false, 'navigation_load_start');
       }
-      setFlashGuardState?.(true, 'navigation_start');
+      void forceDisarmGlobalBlurViaBridge('navigation_start');
       // Early inject to attach per-element pre-blur before first paint.
       if (executeScript) {
         void injectModerationScript(executeScript, 'onLoadStart', url);
@@ -1250,7 +1330,6 @@ export const NativeWebViewBrowser = () => {
       logLifecycleSnapshot('page_load_end', url, 'onLoadEnd');
       logHostLayerDiagnostics('load_end');
       setIsLoading(false);
-      setFlashGuardState?.(false, 'load_end');
       if (!ENABLE_SIGNAL_PIPELINE) return;
       
       // Inject moderation script after page fully loads
@@ -1288,6 +1367,15 @@ export const NativeWebViewBrowser = () => {
       console.error('[Browser] ======= LOAD ERROR =======');
       console.error('[Browser] URL:', url);
       console.error('[Browser] Error:', error);
+      const likelyProcessCrash = isLikelyWebKitProcessCrash(error) || errorCode === 'WEBVIEW_NOT_INITIALIZED';
+      if (likelyProcessCrash) {
+        console.warn(
+          '[Browser][WebKit] process instability detected; forcing global blur disarm',
+          'url=' + toDiagUrl(url),
+          'error=' + String(error),
+        );
+      }
+      void forceDisarmGlobalBlurViaBridge(likelyProcessCrash ? 'webkit_process_did_close' : 'load_error');
       if (errorCode === 'UNIMPLEMENTED') {
         console.warn(
           '[Browser][Bridge] executeScript is UNIMPLEMENTED; skipping fallback and reloading bridge',
@@ -1299,7 +1387,6 @@ export const NativeWebViewBrowser = () => {
       }
       logHostLayerDiagnostics('load_error');
       setIsLoading(false);
-      setFlashGuardState?.(true, 'load_error');
       clearLoadEndInjectTimer();
       injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
@@ -1327,7 +1414,6 @@ export const NativeWebViewBrowser = () => {
           ? () => {
               pendingRequestsRef.current.clear();
               void teardownWebViewScheduling('url_change_epoch_reset', url).catch(() => undefined);
-              setFlashGuardState?.(false, 'url_change_epoch_reset');
             }
           : undefined,
       });
@@ -1378,7 +1464,7 @@ export const NativeWebViewBrowser = () => {
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       resetShortsReentryTracking('webview_closed');
       setCentralBlurState(false, 'webview_closed');
-      setFlashGuardState?.(false, 'close');
+      void forceDisarmGlobalBlurViaBridge('webview_closed');
       navigate('home', '', '');
     },
     onMessageFromWebview: (payload) => {
@@ -1395,6 +1481,24 @@ export const NativeWebViewBrowser = () => {
     preShowScriptInjectionTime: 'documentStart',
     isPresentAfterPageLoad: ENABLE_SMOKE_TEST_RED_SCREEN,
   });
+
+  useEffect(() => {
+    const error = webViewState.error;
+    if (!error) return;
+    const likelyProcessCrash = error === 'WEBVIEW_NOT_INITIALIZED' || isLikelyWebKitProcessCrash(error);
+    if (!likelyProcessCrash) return;
+    void forceDisarmGlobalBlurViaBridge('webview_error_state:' + error);
+  }, [webViewState.error, forceDisarmGlobalBlurViaBridge]);
+
+  const lastGlobalDisarmReasonRef = useRef('');
+  useEffect(() => {
+    const state = blurPendingRef.current || blurStateRef.current;
+    if (state.enabled) return;
+    const reason = state.reason || 'overlay_disabled';
+    if (reason === lastGlobalDisarmReasonRef.current) return;
+    lastGlobalDisarmReasonRef.current = reason;
+    void forceDisarmGlobalBlurViaBridge(reason);
+  }, [blurSyncVersion, forceDisarmGlobalBlurViaBridge]);
 
   const requestShortsReentryRefresh = useCallback(async (
     reason: string,
@@ -1972,11 +2076,10 @@ export const NativeWebViewBrowser = () => {
    * Uses the new postMessage protocol with requestId/itemId tracking
    */
   const processModerationRequest = useCallback(async (request: ModerationRequestMessage, nonce: string) => {
-    setFlashGuardState?.(true, 'moderation_request');
-    flashLog('armed via moderation_request');
+    flashLog('moderation_request');
     const timeoutId = setTimeout(() => {
-      setFlashGuardState?.(false, 'moderation_request_timeout');
       flashLog('timeout -> disarm');
+      void forceDisarmGlobalBlurViaBridge('moderation_request_timeout');
     }, 8000);
 
     const { requestId, items, thresholds } = request;
@@ -2056,8 +2159,8 @@ export const NativeWebViewBrowser = () => {
 
       pendingRequestsRef.current.delete(requestId);
       clearTimeout(timeoutId);
-      setFlashGuardState?.(false, 'moderation_epoch_stale');
       flashLog('disarm stale epoch');
+      void forceDisarmGlobalBlurViaBridge('moderation_epoch_stale');
       return;
     }
     if (requestEpoch !== null && requestEpoch !== activeEpoch && (relaxedYouTubeEpochMode || epochSyncAllowed)) {
@@ -2236,8 +2339,8 @@ export const NativeWebViewBrowser = () => {
       );
       pendingRequestsRef.current.delete(requestId);
       clearTimeout(timeoutId);
-      setFlashGuardState?.(false, 'moderation_result_epoch_stale');
       flashLog('disarm stale result');
+      void forceDisarmGlobalBlurViaBridge('moderation_result_epoch_stale');
       return;
     }
 
@@ -2445,8 +2548,8 @@ export const NativeWebViewBrowser = () => {
     
     pendingRequestsRef.current.delete(requestId);
     clearTimeout(timeoutId);
-    setFlashGuardState?.(false, 'moderation_results');
     flashLog('disarm after results');
+    void forceDisarmGlobalBlurViaBridge('moderation_results');
   }, [
     moderationBridge,
     postMessageToWebView,
@@ -2467,8 +2570,8 @@ export const NativeWebViewBrowser = () => {
     currentUrl,
     processModerationSafetySignal,
     setCentralBlurState,
-    setFlashGuardState,
     flashLog,
+    forceDisarmGlobalBlurViaBridge,
   ]);
 
   /**

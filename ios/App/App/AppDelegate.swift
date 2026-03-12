@@ -316,6 +316,12 @@ private final class NativeRevealOverlayManager {
 
     private func handleForceVisible(_ notification: Notification) {
         let visible = (notification.userInfo?["visible"] as? Bool) ?? true
+        let reason = (notification.userInfo?["reason"] as? String) ?? "unknown"
+        if reason == "nsfw_signal" {
+            // Do not force global native overlay from coarse NSFW signal events.
+            // Item-level web overlays remain available for reveal actions.
+            return
+        }
         if !visible {
             return
         }

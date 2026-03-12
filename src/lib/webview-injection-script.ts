@@ -320,7 +320,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   const OVERLAY_ID = 'mw-blur-overlay';
   const OVERLAY_STYLE_ID = 'mw-blur-overlay-style';
   const REVEAL_PORTAL_ID = 'mw-reveal-portal';
-  const DOM_OVERLAY_ENABLED = true;
+  const DOM_OVERLAY_ENABLED = false;
 
   const overlayState = window.__MW_BLUR_STATE__ || {
     enabled: false,
@@ -353,6 +353,56 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (eventLike.detail && typeof eventLike.detail === 'object') return eventLike.detail;
     if (eventLike.data && typeof eventLike.data === 'object') return eventLike.data;
     return null;
+  }
+
+  function hardDisarmGlobalOverlay(reason) {
+    const actionReason = reason || 'global_overlay_hard_kill';
+    overlayState.enabled = false;
+    overlayState.reason = actionReason;
+    overlayState.updatedAt = Date.now();
+    const clearNode = function(node) {
+      if (!node || !node.style) return;
+      try {
+        node.style.removeProperty('filter');
+        node.style.removeProperty('-webkit-filter');
+        node.style.removeProperty('backdrop-filter');
+        node.style.removeProperty('-webkit-backdrop-filter');
+      } catch (e) {}
+      if (node.classList) {
+        try {
+          node.classList.remove('mw-enabled');
+          node.classList.remove('mw-softblur');
+          node.classList.remove('mw-blurred');
+        } catch (e) {}
+      }
+    };
+    try {
+      const overlay = document.getElementById(OVERLAY_ID);
+      if (overlay) {
+        if (overlay.classList) overlay.classList.remove('mw-enabled');
+        if (overlay.parentNode) {
+          overlay.parentNode.removeChild(overlay);
+        } else if (typeof overlay.remove === 'function') {
+          overlay.remove();
+        }
+      }
+    } catch (e) {}
+    try {
+      const styleNode = document.getElementById(OVERLAY_STYLE_ID);
+      if (styleNode) {
+        if (styleNode.parentNode) {
+          styleNode.parentNode.removeChild(styleNode);
+        } else if (typeof styleNode.remove === 'function') {
+          styleNode.remove();
+        }
+      }
+    } catch (e) {}
+    clearNode(document.body);
+    clearNode(document.documentElement);
+    if (CONFIG.debug) {
+      console.log('[MW][Overlay] hard_disarm reason=' + actionReason);
+    }
+    return true;
   }
 
   function ensureOverlayStyle() {
@@ -395,6 +445,13 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function setOverlayEnabled(enabled, reason) {
     const prevEnabled = !!overlayState.enabled;
+    if (!DOM_OVERLAY_ENABLED) {
+      hardDisarmGlobalOverlay(reason || 'dom_overlay_disabled');
+      if (CONFIG.debug && (prevEnabled || !!enabled)) {
+        console.log('[MW][Overlay] global disabled; forced disarm reason=' + (reason || 'dom_overlay_disabled'));
+      }
+      return;
+    }
     const nextEnabled = DOM_OVERLAY_ENABLED ? !!enabled : false;
     overlayState.enabled = nextEnabled;
     overlayState.reason = DOM_OVERLAY_ENABLED ? (reason || 'unknown') : 'dom_overlay_disabled';
@@ -560,7 +617,18 @@ export function generateModerationScript(config: InjectionConfig): string {
       handleShieldAction(message.action);
       return true;
     }
-    if (!DOM_OVERLAY_ENABLED) return false;
+    if (!DOM_OVERLAY_ENABLED) {
+      if (message.type === 'MW_BLUR_STATE') {
+        hardDisarmGlobalOverlay(message.reason || 'host_state_disable');
+        return true;
+      }
+      if (message.type === 'MW_BLUR_COMMAND') {
+        if (message.command === 'PING') return true;
+        hardDisarmGlobalOverlay(message.reason || 'host_command_disable');
+        return true;
+      }
+      return false;
+    }
     if (message.type === 'MW_BLUR_STATE') {
       if (CONFIG.debug) {
         console.log('[MW-DIAG][INJECT] source=overlay_state_message', 'enabled=' + (!!message.enabled), 'reason=' + (message.reason || 'state'));
@@ -683,6 +751,9 @@ export function generateModerationScript(config: InjectionConfig): string {
         sendReady: function() {},
         getState: function() { return { enabled: false, reason: 'dom_overlay_disabled', updatedAt: overlayState.updatedAt }; },
       };
+  window.__MW_HARD_DISARM_GLOBAL_OVERLAY__ = function(reason) {
+    return hardDisarmGlobalOverlay(reason || 'host_manual_disarm') ? 'OK' : 'NOOP';
+  };
 
   // Fail-open default: overlay starts disabled until host sends state.
   setOverlayEnabled(false, 'init_default_disabled');
@@ -8174,6 +8245,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   window.addEventListener('beforeunload', () => teardownManagedScheduling('beforeunload'));
   window.addEventListener('pagehide', () => teardownManagedScheduling('pagehide'));
   window.__MW_TEARDOWN__ = function(reason) {
+    hardDisarmGlobalOverlay(reason || 'host_teardown');
     teardownManagedScheduling(reason || 'host_teardown');
   };
 
