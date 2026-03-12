@@ -261,6 +261,9 @@ private final class NativeRevealOverlayManager {
     private var forceVisibleObserver: NSObjectProtocol?
     private weak var activeWebView: WKWebView?
     private var overlayWindow: NativeRevealOverlayWindow?
+    private var detachRemovalWorkItem: DispatchWorkItem?
+    private let detachGraceSeconds: TimeInterval = 1.1
+    private var lastKnownUrlFamily: String = "unknown"
 
     private init() {
         model.onTapReveal = { [weak self] in
@@ -298,18 +301,29 @@ private final class NativeRevealOverlayManager {
         guard let webView = notification.userInfo?[ContentFilterBridgeUserInfoKey.webView] as? WKWebView else {
             return
         }
+        cancelPendingDetachRemoval()
+        updateLastKnownUrlFamily(from: webView)
         activeWebView = webView
         presentOverlay(attachedTo: webView)
     }
 
     private func handleDetach(_ notification: Notification) {
         guard let detached = notification.userInfo?[ContentFilterBridgeUserInfoKey.webView] as? WKWebView else {
-            removeOverlay()
             activeWebView = nil
+            if lastKnownUrlFamily == "youtube_shorts" {
+                scheduleDeferredOverlayRemoval(reason: "detach_without_webview")
+                return
+            }
+            removeOverlay()
             return
         }
         if detached === activeWebView {
+            updateLastKnownUrlFamily(from: detached)
             activeWebView = nil
+            if lastKnownUrlFamily == "youtube_shorts" {
+                scheduleDeferredOverlayRemoval(reason: "shorts_detach")
+                return
+            }
             removeOverlay()
         }
     }
@@ -326,11 +340,13 @@ private final class NativeRevealOverlayManager {
             return
         }
         if let existingWebView = activeWebView, existingWebView.window != nil {
+            updateLastKnownUrlFamily(from: existingWebView)
             presentOverlay(attachedTo: existingWebView)
             return
         }
         if let discoveredWebView = findForegroundWebView() {
             activeWebView = discoveredWebView
+            updateLastKnownUrlFamily(from: discoveredWebView)
             presentOverlay(attachedTo: discoveredWebView)
             return
         }
@@ -379,7 +395,60 @@ private final class NativeRevealOverlayManager {
         return best
     }
 
+    private func cancelPendingDetachRemoval() {
+        detachRemovalWorkItem?.cancel()
+        detachRemovalWorkItem = nil
+    }
+
+    private func classifyUrlFamily(_ url: URL?) -> String {
+        guard let url = url else { return "unknown" }
+        let host = url.host?.lowercased() ?? ""
+        if (host == "youtube.com" || host == "www.youtube.com" || host == "m.youtube.com"),
+           url.path.hasPrefix("/shorts") {
+            return "youtube_shorts"
+        }
+        if host == "youtube.com" || host == "www.youtube.com" || host == "m.youtube.com" || host == "youtu.be" {
+            return "youtube"
+        }
+        return host.isEmpty ? "unknown" : host
+    }
+
+    private func updateLastKnownUrlFamily(from webView: WKWebView?) {
+        let resolved = classifyUrlFamily(webView?.url)
+        if resolved != "unknown" {
+            lastKnownUrlFamily = resolved
+        }
+    }
+
+    private func scheduleDeferredOverlayRemoval(reason: String) {
+        _ = reason
+        cancelPendingDetachRemoval()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.detachRemovalWorkItem = nil
+            if let current = self.activeWebView, current.window != nil {
+                self.updateLastKnownUrlFamily(from: current)
+                self.presentOverlay(attachedTo: current)
+                return
+            }
+            if let discovered = self.findForegroundWebView(),
+               self.classifyUrlFamily(discovered.url) == "youtube_shorts" {
+                self.activeWebView = discovered
+                self.updateLastKnownUrlFamily(from: discovered)
+                self.presentOverlay(attachedTo: discovered)
+                return
+            }
+            self.removeOverlay()
+        }
+        detachRemovalWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + detachGraceSeconds, execute: work)
+#if DEBUG
+        print("[NativeRevealOverlay][DIAG] deferred_detach_removal reason=\(reason)")
+#endif
+    }
+
     private func presentOverlay(attachedTo webView: WKWebView) {
+        cancelPendingDetachRemoval()
         guard let scene = resolveWindowScene(for: webView) else { return }
         if let existing = overlayWindow, existing.windowScene == scene {
             model.isVisible = true
@@ -398,6 +467,7 @@ private final class NativeRevealOverlayManager {
     }
 
     private func removeOverlay() {
+        cancelPendingDetachRemoval()
         model.isVisible = false
         overlayWindow?.isHidden = true
         overlayWindow?.rootViewController = nil

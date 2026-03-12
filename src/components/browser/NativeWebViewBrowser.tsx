@@ -106,6 +106,11 @@ const SHORTS_LEGACY_FALLBACK_TIMEOUT_PROBE_MS = 8000;
 const SHORTS_LEGACY_FALLBACK_REQ_GRACE_MS = 2500;
 const SHORTS_LEGACY_FALLBACK_MAX_PROBE_MS = 9000;
 const SHORTS_LEGACY_FALLBACK_MAX_POLLS = 6;
+const SHORTS_EPOCH_BRIDGE_MAX_LAG = 5;
+const SHORTS_STICKY_BLUR_TTL_MS = 120000;
+const SHORTS_STICKY_BLUR_MAX_ITEMS = 700;
+const SHORTS_CRASH_RECOVERY_WINDOW_MS = 15000;
+const SHORTS_CRASH_RECOVERY_MAX_STICKY_ITEMS = 240;
 const SHORTS_REENTRY_HOOK_RETRY_DELAY_MS = 120;
 const SHORTS_REENTRY_HOOK_MAX_ATTEMPTS = 8;
 const SMOKE_TEST_RED_SCREEN_ENABLED = false;
@@ -181,6 +186,39 @@ const getCacheFamilyContext = (value?: string): string => {
 
 const isYouTubeFamilyContext = (family: string): boolean => {
   return family === 'youtube_www' || family === 'youtube_mobile' || family === 'youtube_other';
+};
+
+type ShortsStickyBlurEntry = {
+  itemId: string;
+  src: string;
+  srcKey: string;
+  category: string;
+  confidence: number;
+  epoch: number;
+  at: number;
+  source: string;
+};
+
+type ShortsCrashRecoverySnapshot = {
+  at: number;
+  reason: string;
+  navId: number;
+  pageEpoch: number;
+  url: string;
+  urlFamily: string;
+  overlayEnabled: boolean;
+  overlayReason: string;
+  stickyItems: ShortsStickyBlurEntry[];
+};
+
+const toShortsStickySrcKey = (src?: string): string => {
+  const raw = String(src || '').trim();
+  if (!raw) return '';
+  try {
+    return new URL(raw).toString();
+  } catch {
+    return raw;
+  }
 };
 
 type InAppBrowserBridgePlugin = {
@@ -340,6 +378,7 @@ export const NativeWebViewBrowser = () => {
   const messageFromWebViewHandlerRef = useRef<((payload: unknown) => void) | null>(null);
   const [blurSyncVersion, setBlurSyncVersion] = useState(0);
   const pendingRevealForceReasonRef = useRef<string | null>(null);
+  const revealReachableEpochRef = useRef(0);
   const [revealForceVersion, setRevealForceVersion] = useState(0);
   const riskDecisionListenerRef = useRef<PluginListenerHandle | null>(null);
   const nativeSignalUnimplementedRef = useRef(false);
@@ -369,6 +408,9 @@ export const NativeWebViewBrowser = () => {
   });
   const legacyPollSelfDisabledContextRef = useRef<string | null>(null);
   const [shortsLegacyFallbackVersion, setShortsLegacyFallbackVersion] = useState(0);
+  const shortsStickyBlurByItemRef = useRef<Map<string, ShortsStickyBlurEntry>>(new Map());
+  const shortsStickyBlurBySrcRef = useRef<Map<string, ShortsStickyBlurEntry>>(new Map());
+  const shortsCrashRecoverySnapshotRef = useRef<ShortsCrashRecoverySnapshot | null>(null);
 
   const UNSAFE_STREAK_REQUIRED = 2;
   const SAFE_STREAK_REQUIRED = 2;
@@ -378,6 +420,87 @@ export const NativeWebViewBrowser = () => {
     if (!isDebugMode) return;
     console.log(...args);
   }, [isDebugMode]);
+
+  const pruneShortsStickyBlurCache = useCallback((now: number = Date.now()) => {
+    const cutoff = now - SHORTS_STICKY_BLUR_TTL_MS;
+    shortsStickyBlurByItemRef.current.forEach((entry, itemId) => {
+      if (!entry || entry.at < cutoff) {
+        shortsStickyBlurByItemRef.current.delete(itemId);
+      }
+    });
+    shortsStickyBlurBySrcRef.current.forEach((entry, srcKey) => {
+      if (!entry || entry.at < cutoff) {
+        shortsStickyBlurBySrcRef.current.delete(srcKey);
+      }
+    });
+    if (shortsStickyBlurByItemRef.current.size > SHORTS_STICKY_BLUR_MAX_ITEMS) {
+      const sorted = Array.from(shortsStickyBlurByItemRef.current.entries())
+        .sort((left, right) => left[1].at - right[1].at);
+      const overflow = shortsStickyBlurByItemRef.current.size - SHORTS_STICKY_BLUR_MAX_ITEMS;
+      for (let index = 0; index < overflow; index += 1) {
+        const pair = sorted[index];
+        if (!pair) continue;
+        shortsStickyBlurByItemRef.current.delete(pair[0]);
+      }
+    }
+    if (shortsStickyBlurBySrcRef.current.size > SHORTS_STICKY_BLUR_MAX_ITEMS) {
+      const sorted = Array.from(shortsStickyBlurBySrcRef.current.entries())
+        .sort((left, right) => left[1].at - right[1].at);
+      const overflow = shortsStickyBlurBySrcRef.current.size - SHORTS_STICKY_BLUR_MAX_ITEMS;
+      for (let index = 0; index < overflow; index += 1) {
+        const pair = sorted[index];
+        if (!pair) continue;
+        shortsStickyBlurBySrcRef.current.delete(pair[0]);
+      }
+    }
+  }, []);
+
+  const rememberShortsStickyBlur = useCallback((
+    itemId: string,
+    src: string,
+    category: string,
+    confidence: number,
+    epoch: number,
+    source: string,
+  ) => {
+    if (!itemId) return;
+    const now = Date.now();
+    const srcKey = toShortsStickySrcKey(src);
+    const normalizedConfidence = Number.isFinite(confidence) ? Number(confidence) : 0;
+    const entry: ShortsStickyBlurEntry = {
+      itemId,
+      src,
+      srcKey,
+      category: category || 'shorts_sticky_blur',
+      confidence: normalizedConfidence,
+      epoch: Number.isFinite(epoch) ? Math.max(1, Math.trunc(epoch)) : 1,
+      at: now,
+      source,
+    };
+    shortsStickyBlurByItemRef.current.set(itemId, entry);
+    if (srcKey) {
+      shortsStickyBlurBySrcRef.current.set(srcKey, entry);
+    }
+    pruneShortsStickyBlurCache(now);
+  }, [pruneShortsStickyBlurCache]);
+
+  const clearShortsStickyBlur = useCallback((itemId?: string, src?: string) => {
+    if (itemId) {
+      const existing = shortsStickyBlurByItemRef.current.get(itemId);
+      if (existing?.srcKey) {
+        shortsStickyBlurBySrcRef.current.delete(existing.srcKey);
+      }
+      shortsStickyBlurByItemRef.current.delete(itemId);
+    }
+    const srcKey = toShortsStickySrcKey(src);
+    if (srcKey) {
+      const existing = shortsStickyBlurBySrcRef.current.get(srcKey);
+      if (existing?.itemId) {
+        shortsStickyBlurByItemRef.current.delete(existing.itemId);
+      }
+      shortsStickyBlurBySrcRef.current.delete(srcKey);
+    }
+  }, []);
 
   const resetShortsReentryTracking = useCallback((reason: string) => {
     shortsReentryRefreshRef.current = {
@@ -503,6 +626,69 @@ export const NativeWebViewBrowser = () => {
     );
     queueCurrentBlurState(normalizedReason);
   }, [queueCurrentBlurState]);
+
+  const cacheShortsCrashRecoverySnapshot = useCallback((reason: string, urlHint?: string) => {
+    const activeUrl = urlHint || currentUrlRef.current || '';
+    if (!isYouTubeShortsUrl(activeUrl)) return;
+    pruneShortsStickyBlurCache();
+    const stickyItems = Array.from(shortsStickyBlurByItemRef.current.values())
+      .sort((left, right) => right.at - left.at)
+      .slice(0, SHORTS_CRASH_RECOVERY_MAX_STICKY_ITEMS);
+    shortsCrashRecoverySnapshotRef.current = {
+      at: Date.now(),
+      reason,
+      navId: activeNavIdRef.current,
+      pageEpoch: webViewPageEpochRef.current,
+      url: activeUrl,
+      urlFamily: getUrlFamily(activeUrl),
+      overlayEnabled: blurStateRef.current.enabled,
+      overlayReason: blurStateRef.current.reason,
+      stickyItems,
+    };
+    console.warn(
+      '[MW-Host][CrashRecovery] snapshot_cached',
+      'reason=' + reason,
+      'navId=' + activeNavIdRef.current,
+      'pageEpoch=' + webViewPageEpochRef.current,
+      'stickyItems=' + stickyItems.length,
+      'url=' + (activeUrl || 'unknown'),
+    );
+  }, [pruneShortsStickyBlurCache]);
+
+  const restoreShortsCrashRecoverySnapshot = useCallback((reason: string, urlHint?: string): boolean => {
+    const snapshot = shortsCrashRecoverySnapshotRef.current;
+    if (!snapshot) return false;
+    const now = Date.now();
+    if (now - snapshot.at > SHORTS_CRASH_RECOVERY_WINDOW_MS) {
+      shortsCrashRecoverySnapshotRef.current = null;
+      return false;
+    }
+    const activeUrl = urlHint || currentUrlRef.current || '';
+    if (!isYouTubeShortsUrl(activeUrl)) return false;
+    snapshot.stickyItems.forEach((entry) => {
+      if (!entry || !entry.itemId) return;
+      shortsStickyBlurByItemRef.current.set(entry.itemId, entry);
+      if (entry.srcKey) {
+        shortsStickyBlurBySrcRef.current.set(entry.srcKey, entry);
+      }
+    });
+    pruneShortsStickyBlurCache(now);
+    queueCurrentBlurState('webkit_process_restore:' + reason);
+    pendingRevealForceReasonRef.current = 'webkit_process_restore:' + reason;
+    setRevealForceVersion(v => v + 1);
+    armShortsLegacyFallbackProbe('webkit_process_restore', SHORTS_LEGACY_FALLBACK_ENTRY_PROBE_MS);
+    console.warn(
+      '[MW-Host][CrashRecovery] snapshot_restored',
+      'reason=' + reason,
+      'cachedReason=' + snapshot.reason,
+      'ageMs=' + (now - snapshot.at),
+      'cachedNavId=' + snapshot.navId,
+      'cachedPageEpoch=' + snapshot.pageEpoch,
+      'stickyItems=' + snapshot.stickyItems.length,
+      'url=' + (activeUrl || 'unknown'),
+    );
+    return true;
+  }, [armShortsLegacyFallbackProbe, pruneShortsStickyBlurCache, queueCurrentBlurState]);
 
   const forceDisarmGlobalBlurViaBridge = useCallback(async (reason: string) => {
     const disarmReason = reason || 'host_force_disarm_global_blur';
@@ -1070,6 +1256,14 @@ export const NativeWebViewBrowser = () => {
       });
     }
 
+    if (getUrlFamily(url) !== 'youtube_shorts') {
+      shortsStickyBlurByItemRef.current.clear();
+      shortsStickyBlurBySrcRef.current.clear();
+      if (!isYouTubeFamilyContext(nextFamily)) {
+        shortsCrashRecoverySnapshotRef.current = null;
+      }
+    }
+
     if (url) {
       currentUrlRef.current = url;
     }
@@ -1240,6 +1434,7 @@ export const NativeWebViewBrowser = () => {
   const getWebViewListenerDiagContext = useCallback(() => {
     return {
       navId: activeNavIdRef.current || null,
+      pageEpoch: webViewPageEpochRef.current || null,
       url: currentUrlRef.current || '',
       activeInstanceId: webViewActiveInstanceIdRef.current,
     };
@@ -1298,6 +1493,8 @@ export const NativeWebViewBrowser = () => {
       console.log('[Browser] ======= LOAD START =======');
       console.log('[Browser] URL:', url);
       markNavigation('onLoadStart', url);
+      revealReachableEpochRef.current = 0;
+      const restoredCrashSnapshot = restoreShortsCrashRecoverySnapshot('onLoadStart', url);
       teardownWebViewScheduling('navigation_start', url).catch(() => undefined);
       logHostLayerDiagnostics('load_start');
       setIsLoading(true);
@@ -1306,9 +1503,15 @@ export const NativeWebViewBrowser = () => {
       injectionInFlightRef.current = false;
       blurReadyRef.current = false;
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
+      const shortsPreserveMode =
+        isYouTubeShortsUrl(url) &&
+        (restoredCrashSnapshot || pendingReinjectRef.current?.active === true);
       const canDeferLoadStartReset =
-        pendingReinjectRef.current?.active === true &&
-        isYouTubeFamilyContext(getCacheFamilyContext(url));
+        shortsPreserveMode ||
+        (
+          pendingReinjectRef.current?.active === true &&
+          isYouTubeFamilyContext(getCacheFamilyContext(url))
+        );
       if (canDeferLoadStartReset) {
         logSafeResetDiag('safe_reset_deferred', 'navigation_load_start_pending_reinject', url);
         queueCurrentBlurState('navigation_load_start_deferred');
@@ -1316,7 +1519,17 @@ export const NativeWebViewBrowser = () => {
         exitPendingReinject('navigation_load_start', url);
         setCentralBlurState(false, 'navigation_load_start');
       }
-      void forceDisarmGlobalBlurViaBridge('navigation_start');
+      if (shortsPreserveMode) {
+        console.log(
+          '[MW-Host][ShortsPreserve] skip_force_disarm',
+          'reason=navigation_start',
+          'navId=' + activeNavIdRef.current,
+          'pageEpoch=' + webViewPageEpochRef.current,
+          'url=' + (url || 'unknown'),
+        );
+      } else {
+        void forceDisarmGlobalBlurViaBridge('navigation_start');
+      }
       // Early inject to attach per-element pre-blur before first paint.
       if (executeScript) {
         void injectModerationScript(executeScript, 'onLoadStart', url);
@@ -1329,6 +1542,11 @@ export const NativeWebViewBrowser = () => {
       console.log('[Browser] URL:', url);
       logLifecycleSnapshot('page_load_end', url, 'onLoadEnd');
       logHostLayerDiagnostics('load_end');
+      void restoreShortsCrashRecoverySnapshot('onLoadEnd', url);
+      if (isYouTubeShortsUrl(url)) {
+        pendingRevealForceReasonRef.current = 'epoch_reveal_probe_onLoadEnd';
+        setRevealForceVersion(v => v + 1);
+      }
       setIsLoading(false);
       if (!ENABLE_SIGNAL_PIPELINE) return;
       
@@ -1369,13 +1587,21 @@ export const NativeWebViewBrowser = () => {
       console.error('[Browser] Error:', error);
       const likelyProcessCrash = isLikelyWebKitProcessCrash(error) || errorCode === 'WEBVIEW_NOT_INITIALIZED';
       if (likelyProcessCrash) {
+        cacheShortsCrashRecoverySnapshot('webkit_process_did_close', url);
         console.warn(
-          '[Browser][WebKit] process instability detected; forcing global blur disarm',
+          '[Browser][WebKit] process instability detected; caching blur hold state',
           'url=' + toDiagUrl(url),
           'error=' + String(error),
         );
       }
-      void forceDisarmGlobalBlurViaBridge(likelyProcessCrash ? 'webkit_process_did_close' : 'load_error');
+      const shortsCrashHold = likelyProcessCrash && isYouTubeShortsUrl(url || currentUrlRef.current || '');
+      if (shortsCrashHold) {
+        queueCurrentBlurState('webkit_process_did_close_hold');
+        pendingRevealForceReasonRef.current = 'webkit_process_did_close_hold';
+        setRevealForceVersion(v => v + 1);
+      } else {
+        void forceDisarmGlobalBlurViaBridge(likelyProcessCrash ? 'webkit_process_did_close' : 'load_error');
+      }
       if (errorCode === 'UNIMPLEMENTED') {
         console.warn(
           '[Browser][Bridge] executeScript is UNIMPLEMENTED; skipping fallback and reloading bridge',
@@ -1417,6 +1643,7 @@ export const NativeWebViewBrowser = () => {
             }
           : undefined,
       });
+      revealReachableEpochRef.current = 0;
       if (!shouldRunEpochResetCleanup) {
         console.log(
           '[MW-Host][Epoch] deferred cleanup for in-family YouTube nav',
@@ -1462,6 +1689,10 @@ export const NativeWebViewBrowser = () => {
       blurReadyRef.current = false;
       blurPendingRef.current = null;
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
+      revealReachableEpochRef.current = 0;
+      shortsStickyBlurByItemRef.current.clear();
+      shortsStickyBlurBySrcRef.current.clear();
+      shortsCrashRecoverySnapshotRef.current = null;
       resetShortsReentryTracking('webview_closed');
       setCentralBlurState(false, 'webview_closed');
       void forceDisarmGlobalBlurViaBridge('webview_closed');
@@ -1487,8 +1718,16 @@ export const NativeWebViewBrowser = () => {
     if (!error) return;
     const likelyProcessCrash = error === 'WEBVIEW_NOT_INITIALIZED' || isLikelyWebKitProcessCrash(error);
     if (!likelyProcessCrash) return;
+    const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
+    cacheShortsCrashRecoverySnapshot('webview_error_state:' + error, activeUrl);
+    if (isYouTubeShortsUrl(activeUrl)) {
+      queueCurrentBlurState('webview_error_state_hold:' + error);
+      pendingRevealForceReasonRef.current = 'webview_error_state_hold:' + error;
+      setRevealForceVersion(v => v + 1);
+      return;
+    }
     void forceDisarmGlobalBlurViaBridge('webview_error_state:' + error);
-  }, [webViewState.error, forceDisarmGlobalBlurViaBridge]);
+  }, [webViewState.error, webViewState.currentUrl, queueCurrentBlurState, cacheShortsCrashRecoverySnapshot, forceDisarmGlobalBlurViaBridge]);
 
   const lastGlobalDisarmReasonRef = useRef('');
   useEffect(() => {
@@ -1833,35 +2072,68 @@ export const NativeWebViewBrowser = () => {
   }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, executeScript]);
 
   const forceRevealReachability = useCallback(async (reason: string) => {
-    if (!ENABLE_SIGNAL_PIPELINE) return;
-    if (!isNative || !webViewState.isOpen || !executeScript) return;
+    if (!ENABLE_SIGNAL_PIPELINE) return false;
+    if (!isNative || !webViewState.isOpen || !executeScript) return false;
     const safeReason = escapeForJs(reason || 'force_reveal_reachability');
     const raw = await executeScript(`
       (function() {
         try {
           window.__MW_NATIVE_REVEAL_FALLBACK__ = true;
+          var hasNativeReveal = typeof window.__MW_NATIVE_REVEAL__ === 'function';
+          var hasRehydrate = typeof window.__MW_FORCE_REVEAL_REHYDRATE__ === 'function';
           if (typeof window.__MW_FORCE_REVEAL_REHYDRATE__ === 'function') {
-            return window.__MW_FORCE_REVEAL_REHYDRATE__('${safeReason}', { forceWebButton: true });
+            var rehydrate = window.__MW_FORCE_REVEAL_REHYDRATE__('${safeReason}', { forceWebButton: true });
+            if (typeof rehydrate === 'string') {
+              return rehydrate;
+            }
+            return JSON.stringify({
+              ok: true,
+              reachable: true,
+              reason: 'rehydrate_called',
+              detail: rehydrate || null
+            });
           }
           var blurred = document.querySelectorAll('[data-mw-moderated="blurred"][data-mw-src]');
           return JSON.stringify({
-            ok: blurred && blurred.length > 0,
+            ok: hasNativeReveal || (blurred && blurred.length > 0),
+            reachable: hasNativeReveal || hasRehydrate || (blurred && blurred.length > 0),
             reason: blurred && blurred.length > 0 ? 'blurred_candidates_present' : 'no_blurred_candidate',
             count: blurred ? blurred.length : 0,
+            hasNativeReveal: hasNativeReveal,
+            hasRehydrate: hasRehydrate,
             fallback: 'native_overlay_force_unavailable'
           });
         } catch (e) {
-          return JSON.stringify({ ok: false, reason: String(e || 'force_reveal_failed') });
+          return JSON.stringify({ ok: false, reachable: false, reason: String(e || 'force_reveal_failed') });
         }
       })();
     `);
+    let reachable = false;
+    const rawString = String(raw || '');
+    if (raw && typeof raw === 'object') {
+      const payload = raw as { ok?: unknown; reachable?: unknown };
+      reachable = payload.reachable === true || payload.ok === true;
+    } else if (rawString) {
+      try {
+        const parsed = JSON.parse(rawString) as { ok?: unknown; reachable?: unknown };
+        reachable = parsed.reachable === true || parsed.ok === true;
+      } catch {
+        reachable = /ok|ready|blurred_candidates_present/i.test(rawString);
+      }
+    }
+    if (reachable) {
+      revealReachableEpochRef.current = Math.max(revealReachableEpochRef.current, webViewPageEpochRef.current);
+    }
     console.log(
       '[MW-Host][RevealForce]',
       'reason=' + reason,
+      'reachable=' + reachable,
+      'reachEpoch=' + revealReachableEpochRef.current,
       'result=' + String(raw || 'null'),
       'navId=' + activeNavIdRef.current,
       'url=' + (webViewState.currentUrl || currentUrlRef.current || 'unknown'),
     );
+    return reachable;
   }, [ENABLE_SIGNAL_PIPELINE, isNative, webViewState.isOpen, webViewState.currentUrl, executeScript]);
 
   const flushBlurStateToWebView = useCallback(async () => {
@@ -2326,7 +2598,18 @@ export const NativeWebViewBrowser = () => {
     const requestEpochForResult = requestEpoch ?? activeEpoch;
     const latestEpoch = webViewPageEpochRef.current;
     const epochLag = latestEpoch - requestEpochForResult;
-    const isStaleBeyondGracePeriod = isOlderPageEpoch(requestEpochForResult, latestEpoch) && epochLag > 1;
+    const staleEpoch = isOlderPageEpoch(requestEpochForResult, latestEpoch);
+    const shortsEpochBridgeAllowed = (
+      stickyShortsMode &&
+      staleEpoch &&
+      epochLag > 0 &&
+      epochLag <= SHORTS_EPOCH_BRIDGE_MAX_LAG
+    );
+    const isStaleBeyondGracePeriod = staleEpoch && (
+      stickyShortsMode
+        ? epochLag > SHORTS_EPOCH_BRIDGE_MAX_LAG
+        : epochLag > 1
+    );
     if (isStaleBeyondGracePeriod) {
       console.warn(
         '[MW-Host][Epoch] stale result ignored',
@@ -2339,9 +2622,88 @@ export const NativeWebViewBrowser = () => {
       );
       pendingRequestsRef.current.delete(requestId);
       clearTimeout(timeoutId);
-      flashLog('disarm stale result');
-      void forceDisarmGlobalBlurViaBridge('moderation_result_epoch_stale');
+      if (stickyShortsMode) {
+        flashLog('preserve stale shorts result');
+        queueCurrentBlurState('moderation_result_epoch_stale_preserved');
+        pendingRevealForceReasonRef.current = 'moderation_result_epoch_stale_preserved';
+        setRevealForceVersion(v => v + 1);
+      } else {
+        flashLog('disarm stale result');
+        void forceDisarmGlobalBlurViaBridge('moderation_result_epoch_stale');
+      }
       return;
+    }
+    if (shortsEpochBridgeAllowed) {
+      console.warn(
+        '[MW-Host][EpochBridge] stale result bridged',
+        'requestId=' + requestId,
+        'requestEpoch=' + requestEpochForResult,
+        'activeEpoch=' + latestEpoch,
+        'epochLag=' + epochLag,
+        'urlFamily=' + getUrlFamily(activeUrl),
+      );
+    }
+    const resultEpochForBridge = shortsEpochBridgeAllowed ? latestEpoch : requestEpochForResult;
+    if (stickyShortsMode) {
+      pruneShortsStickyBlurCache();
+      const requiresFreshSafeScan = requestEpochForResult < latestEpoch;
+      const revealReadyForCurrentEpoch = revealReachableEpochRef.current >= latestEpoch;
+      let stickyForcedCount = 0;
+      results.forEach((item) => {
+        const srcKey = toShortsStickySrcKey(item.src);
+        const stickyEntry = shortsStickyBlurByItemRef.current.get(item.itemId) || (
+          srcKey ? shortsStickyBlurBySrcRef.current.get(srcKey) : undefined
+        );
+        if (item.shouldBlur) {
+          rememberShortsStickyBlur(
+            item.itemId,
+            item.src,
+            item.category,
+            item.confidence,
+            latestEpoch,
+            shortsEpochBridgeAllowed ? 'epoch_bridge' : 'result',
+          );
+          return;
+        }
+        if (stickyEntry && (requiresFreshSafeScan || !revealReadyForCurrentEpoch)) {
+          item.shouldBlur = true;
+          item.severity = 'hard';
+          item.category = stickyEntry.category || item.category || 'shorts_sticky_blur';
+          item.confidence = Math.max(
+            Number.isFinite(item.confidence) ? item.confidence : 0,
+            Number.isFinite(stickyEntry.confidence) ? stickyEntry.confidence : 0.91,
+            0.91,
+          );
+          item.decision_reason = [
+            item.decision_reason || '',
+            requiresFreshSafeScan ? 'sticky_blur_persistence' : 'reveal_reachability_pending',
+          ].filter(Boolean).join('/');
+          rememberShortsStickyBlur(
+            item.itemId,
+            item.src,
+            item.category,
+            item.confidence,
+            latestEpoch,
+            'persistence_hold',
+          );
+          stickyForcedCount += 1;
+          return;
+        }
+        if (!requiresFreshSafeScan && revealReadyForCurrentEpoch) {
+          clearShortsStickyBlur(item.itemId, item.src);
+        }
+      });
+      if (stickyForcedCount > 0) {
+        console.warn(
+          '[MW-Host][ShortsSticky] persistence_hold_applied',
+          'requestId=' + requestId,
+          'count=' + stickyForcedCount,
+          'requestEpoch=' + requestEpochForResult,
+          'activeEpoch=' + latestEpoch,
+          'revealReady=' + (revealReadyForCurrentEpoch ? 'yes' : 'no'),
+        );
+      }
+      pruneShortsStickyBlurCache();
     }
 
     const blurMode = localSettings.blur_mode || 'balanced';
@@ -2522,7 +2884,7 @@ export const NativeWebViewBrowser = () => {
       'forceShieldAllowed=' + forceShieldAllowed,
       'forceShieldMax=' + maxForceShieldScore.toFixed(3),
       'domOverlay=' + (ENABLE_DOM_BLUR ? 'on' : 'off'),
-      'epoch=' + (requestEpoch ?? activeEpoch),
+      'epoch=' + resultEpochForBridge,
     );
     
     // Post results back to the WebView with nonce for security
@@ -2533,7 +2895,7 @@ export const NativeWebViewBrowser = () => {
         requestId,
         results,
         nonce,
-        requestEpoch ?? undefined,
+        resultEpochForBridge,
         requestNavId ?? activeNavIdRef.current,
       );
       const posted = await postMessageToWebView(resultMessage as unknown as Record<string, unknown>);
@@ -2570,6 +2932,10 @@ export const NativeWebViewBrowser = () => {
     currentUrl,
     processModerationSafetySignal,
     setCentralBlurState,
+    queueCurrentBlurState,
+    pruneShortsStickyBlurCache,
+    rememberShortsStickyBlur,
+    clearShortsStickyBlur,
     flashLog,
     forceDisarmGlobalBlurViaBridge,
   ]);
@@ -2600,6 +2966,15 @@ export const NativeWebViewBrowser = () => {
 
       const typedMessage = message as Record<string, unknown>;
       if (typedMessage.type === 'MW_INJECTED_ACK') {
+        const ackEpoch = Number.isFinite(typedMessage.pageEpoch) ? Number(typedMessage.pageEpoch) : null;
+        if (ackEpoch !== null) {
+          revealReachableEpochRef.current = Math.max(revealReachableEpochRef.current, ackEpoch);
+        }
+        const ackUrl = String(typedMessage.url || webViewState.currentUrl || currentUrlRef.current || '');
+        if (isYouTubeShortsUrl(ackUrl)) {
+          pendingRevealForceReasonRef.current = 'mw_injected_ack';
+          setRevealForceVersion(v => v + 1);
+        }
         console.log(
           '[MW-Host][ACK] MW_INJECTED_ACK',
           'source=' + source,
@@ -3678,10 +4053,16 @@ export const NativeWebViewBrowser = () => {
       injectionDoneRef.current = false;
       blurReadyRef.current = false;
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
-      setCentralBlurState(false, 'manual_reload');
+      revealReachableEpochRef.current = 0;
+      const activeReloadUrl = webViewState.currentUrl || currentUrlRef.current || '';
+      if (isYouTubeShortsUrl(activeReloadUrl)) {
+        queueCurrentBlurState('manual_reload_shorts_preserved');
+      } else {
+        setCentralBlurState(false, 'manual_reload');
+      }
       return;
     }
-  }, [readerContent, currentView, searchQuery, isNative, webViewState.isOpen, handleReaderMode, handleSearch, webViewReload, setCentralBlurState]);
+  }, [readerContent, currentView, searchQuery, isNative, webViewState.isOpen, webViewState.currentUrl, handleReaderMode, handleSearch, webViewReload, queueCurrentBlurState, setCentralBlurState]);
 
   const handleHome = useCallback(async () => {
     teardownWebViewScheduling('home_reset', webViewState.currentUrl).catch(() => undefined);
@@ -3701,6 +4082,10 @@ export const NativeWebViewBrowser = () => {
     blurReadyRef.current = false;
     blurPendingRef.current = null;
     blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
+    revealReachableEpochRef.current = 0;
+    shortsStickyBlurByItemRef.current.clear();
+    shortsStickyBlurBySrcRef.current.clear();
+    shortsCrashRecoverySnapshotRef.current = null;
     setCentralBlurState(false, 'home_reset');
     resetShortsReentryTracking('home_reset');
     setReaderContent(null);

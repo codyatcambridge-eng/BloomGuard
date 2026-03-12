@@ -248,6 +248,7 @@ export interface UseNativeWebViewOptions {
   onActiveInstanceIdChange?: (activeInstanceId: number | null) => void;
   getListenerDiagContext?: () => {
     navId?: number | null;
+    pageEpoch?: number | null;
     url?: string;
     activeInstanceId?: number | null;
   };
@@ -304,8 +305,9 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
   const executeScriptPausedRef = useRef(false);
   const [scriptExecutionReady, setScriptExecutionReady] = useState(false);
   const lastLoadSignalRef = useRef<{ url: string; at: number }>({ url: '', at: 0 });
-  const listenerOwnerRef = useRef<{ navId: number | null; instanceId: number | null }>({
+  const listenerOwnerRef = useRef<{ navId: number | null; pageEpoch: number | null; instanceId: number | null }>({
     navId: null,
+    pageEpoch: null,
     instanceId: null,
   });
   const [listenersAttached, setListenersAttached] = useState(false);
@@ -455,6 +457,9 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     const navId = context && typeof context.navId === 'number' && Number.isFinite(context.navId)
       ? context.navId
       : null;
+    const pageEpoch = context && typeof context.pageEpoch === 'number' && Number.isFinite(context.pageEpoch)
+      ? context.pageEpoch
+      : null;
     const hostInstanceId = context && typeof context.activeInstanceId === 'number' && Number.isFinite(context.activeInstanceId)
       ? context.activeInstanceId
       : null;
@@ -466,6 +471,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     const instanceId = hookInstanceId ?? hostInstanceId;
     return {
       navId,
+      pageEpoch,
       url,
       activeInstanceId: instanceId,
       hookActiveInstanceId: hookInstanceId,
@@ -635,6 +641,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
       'stack=' + stackTag,
       'listenerKey=' + (listenerKey || 'none'),
       'navId=' + (context.navId ?? 'unknown'),
+      'pageEpoch=' + (context.pageEpoch ?? 'unknown'),
       'url=' + context.url,
       'activeInstanceId=' + (context.activeInstanceId ?? 'none'),
       'hookActiveInstanceId=' + (context.hookActiveInstanceId ?? 'none'),
@@ -834,7 +841,17 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
       logChurnDiag('attach_begin', 'setup_start', 'useNativeWebView.listeners.setup');
 
       const handleBrowserLoadComplete = (sourceEvent: string) => {
-        const loadedUrl = currentUrlRef.current || pageLoadErrorRecoveryRef.current.url;
+        const context = readListenerDiagContext();
+        const contextUrl = context.url && context.url !== 'unknown' ? context.url : '';
+        listenerOwnerRef.current = {
+          navId: context.navId,
+          pageEpoch: context.pageEpoch,
+          instanceId: context.activeInstanceId,
+        };
+        const loadedUrl = currentUrlRef.current || pageLoadErrorRecoveryRef.current.url || contextUrl;
+        if (!currentUrlRef.current && loadedUrl) {
+          currentUrlRef.current = loadedUrl;
+        }
         const now = Date.now();
         const previous = lastLoadSignalRef.current;
         const duplicateLoadSignal =
@@ -850,10 +867,17 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
             '[NativeWebView] Duplicate load signal skipped',
             'event=' + sourceEvent,
             'url=' + loadedUrl,
+            'navId=' + (context.navId ?? 'none'),
+            'pageEpoch=' + (context.pageEpoch ?? 'none'),
           );
           return;
         }
-        console.log('[NativeWebView] Page loaded', 'event=' + sourceEvent);
+        console.log(
+          '[NativeWebView] Page loaded',
+          'event=' + sourceEvent,
+          'navId=' + (context.navId ?? 'none'),
+          'pageEpoch=' + (context.pageEpoch ?? 'none'),
+        );
         void ensureBrowserPresented(sourceEvent, loadedUrl);
         clearPresentAfterLoadWatchdog();
         pageLoadErrorRecoveryRef.current = {
@@ -884,6 +908,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
         const context = readListenerDiagContext();
         listenerOwnerRef.current = {
           navId: context.navId,
+          pageEpoch: context.pageEpoch,
           instanceId: context.activeInstanceId,
         };
         logChurnDiag('urlChangeEvent', 'event_received', 'useNativeWebView.listeners.urlChangeEvent');
@@ -988,6 +1013,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
       const context = readListenerDiagContext();
       listenerOwnerRef.current = {
         navId: context.navId,
+        pageEpoch: context.pageEpoch,
         instanceId: context.activeInstanceId,
       };
       logChurnDiag('attach_complete', 'all_listeners_attached', 'useNativeWebView.listeners.setup');
@@ -1019,8 +1045,10 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
         'reason=before_removeAllListeners',
         'stack=' + stackTag,
         'ownerNavId=' + (owner.navId ?? 'none'),
+        'ownerPageEpoch=' + (owner.pageEpoch ?? 'none'),
         'ownerActiveInstanceId=' + (owner.instanceId ?? 'none'),
         'contextNavId=' + (context.navId ?? 'none'),
+        'contextPageEpoch=' + (context.pageEpoch ?? 'none'),
         'contextActiveInstanceId=' + (context.activeInstanceId ?? 'none'),
         'isOpen=' + isOpenRef.current,
       );
@@ -1148,6 +1176,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
       const context = readListenerDiagContext();
       listenerOwnerRef.current = {
         navId: context.navId,
+        pageEpoch: context.pageEpoch,
         instanceId,
       };
       openCountRef.current += 1;
