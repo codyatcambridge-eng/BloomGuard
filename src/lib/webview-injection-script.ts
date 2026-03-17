@@ -1374,6 +1374,21 @@ export function generateModerationScript(config: InjectionConfig): string {
       var path = String(parsed.pathname || '').toLowerCase();
       return (
         (host === 'youtube.com' || host === 'www.youtube.com' || host === 'm.youtube.com') &&
+        path.indexOf('/shorts') === 0
+      );
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function isYouTubeShortsRelatedUrl(value) {
+    if (!value) return false;
+    try {
+      var parsed = new URL(value, window.location.href);
+      var host = String(parsed.hostname || '').toLowerCase();
+      var path = String(parsed.pathname || '').toLowerCase();
+      return (
+        (host === 'youtube.com' || host === 'www.youtube.com' || host === 'm.youtube.com') &&
         /(^|[/])shorts([/]|$)/.test(path)
       );
     } catch (e) {
@@ -1386,8 +1401,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     try {
       var parsed = new URL(value, window.location.href);
       var host = String(parsed.hostname || '').toLowerCase();
-      var path = String(parsed.pathname || '').toLowerCase();
-      return host === 'm.youtube.com' && /(^|[/])shorts([/]|$)/.test(path);
+      return host === 'm.youtube.com' && String(parsed.pathname || '').toLowerCase().indexOf('/shorts') === 0;
     } catch (e) {
       return false;
     }
@@ -1400,6 +1414,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   function getDiagUrlFamily(value) {
     if (!value) return 'unknown';
     if (isYouTubeShortsUrl(value)) return 'youtube_shorts';
+    if (isYouTubeShortsRelatedUrl(value)) return 'youtube_shorts_related';
     if (isYouTubeDomainUrl(value)) {
       try {
         const parsed = new URL(value, window.location.href);

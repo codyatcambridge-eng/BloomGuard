@@ -81,6 +81,21 @@ const isYouTubeShortsUrl = (value?: string) => {
     const path = String(parsed.pathname || '').toLowerCase();
     return (
       (host === 'youtube.com' || host === 'www.youtube.com' || host === 'm.youtube.com') &&
+      path.startsWith('/shorts')
+    );
+  } catch {
+    return false;
+  }
+};
+
+const isYouTubeShortsRelatedUrl = (value?: string) => {
+  if (!value) return false;
+  try {
+    const parsed = new URL(value);
+    const host = parsed.hostname.toLowerCase();
+    const path = String(parsed.pathname || '').toLowerCase();
+    return (
+      (host === 'youtube.com' || host === 'www.youtube.com' || host === 'm.youtube.com') &&
       /(^|[/])shorts([/]|$)/.test(path)
     );
   } catch {
@@ -110,6 +125,7 @@ const SHORTS_LEGACY_FALLBACK_MAX_POLLS = 6;
 const getUrlFamily = (value?: string) => {
   if (!value) return 'unknown';
   if (isYouTubeShortsUrl(value)) return 'youtube_shorts';
+  if (isYouTubeShortsRelatedUrl(value)) return 'youtube_shorts_related';
   if (isYouTubeDomainUrl(value)) {
     try {
       const parsed = new URL(value);
