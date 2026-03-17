@@ -1232,6 +1232,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   const SHORTS_HEALTH_HEAL_ENABLED = CONFIG.enableShortsHealthHeal === true;
   const SHORTS_HEALTH_LOG_PREFIX = '[MW-YT][DIAG][SHORTS_HEALTH]';
   const SHORTS_REENTRY_REFRESH_COOLDOWN_MS = 1200;
+  const SHORTS_RELAXED_EPOCH_MAX_DELTA = 10;
   const ADAPTIVE_SHORTS_RESCAN_DEBOUNCE_MS = 140;
   const ADAPTIVE_SHORTS_RESCAN_COOLDOWN_MS = 700;
   const ADAPTIVE_SHORTS_WATCH_ATTRIBUTE_FILTER = [
@@ -4814,11 +4815,13 @@ export function generateModerationScript(config: InjectionConfig): string {
     
     const requestId = generateRequestId();
     const timestamp = Date.now();
+    const shortsVideoId = isShortsModeActive() ? (getCurrentShortsUrlId() || '') : '';
     if (isShortsModeActive()) {
       console.log(
         '[DIAG][SHORTS_SCAN] scanBatch_start',
         'requestId=' + requestId,
-        'itemCount=' + items.length
+        'itemCount=' + items.length,
+        'videoId=' + (shortsVideoId || 'none')
       );
       if (diagLastShortsScanBatchStartAt > 0) {
         console.log(
@@ -4842,6 +4845,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       })),
       thresholds: effectiveThresholds,
       pageEpoch: state.pageEpoch,
+      videoId: shortsVideoId || undefined,
       nonce: CONFIG.nonce,
       timestamp: timestamp,
     };
@@ -4867,6 +4871,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       'requestId=' + requestId,
       'navId=' + NAV_ID,
       'pageEpoch=' + state.pageEpoch,
+      'videoId=' + (shortsVideoId || 'none'),
       'noncePrefix=' + NONCE_PREFIX,
       'items=' + items.length,
     );
@@ -4875,6 +4880,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       requestId: requestId,
       navId: NAV_ID,
       pageEpoch: state.pageEpoch,
+      videoId: shortsVideoId || undefined,
       noncePrefix: NONCE_PREFIX,
       itemCount: items.length,
       timestamp: timestamp,
@@ -4995,15 +5001,48 @@ export function generateModerationScript(config: InjectionConfig): string {
     try {
       const { requestId, results, nonce } = message;
       const resultEpoch = Number.isFinite(message.pageEpoch) ? Number(message.pageEpoch) : null;
+      const resultVideoId = typeof message.videoId === 'string' ? String(message.videoId) : '';
       const expectedNoncePrefix = String(CONFIG.nonce || '').substring(0, 6);
       const receivedNoncePrefix = String(nonce || 'none').substring(0, 6);
       const stickyShortsMode = isYouTubeShortsUrl(window.location.href);
+      const activeShortsVideoId = getCurrentShortsUrlId() || '';
+      const shouldEnforceResultVideoId = !!resultVideoId;
+      const shortsVideoIdMatch = shouldEnforceResultVideoId && resultVideoId === activeShortsVideoId;
+      if (shouldEnforceResultVideoId && !shortsVideoIdMatch) {
+        logShortsScanSkip('videoid_mismatch', null, 'request:' + String(requestId || 'none'), 'result');
+        console.warn(
+          '[MW][RejectResult]',
+          'reason=videoid',
+          'requestId=' + String(requestId || 'none'),
+          'resultVideoId=' + resultVideoId,
+          'activeVideoId=' + activeShortsVideoId,
+          'url=' + window.location.href,
+        );
+        cleanupRejectedOrTimedOutRequest(requestId, 'reject_videoid');
+        return;
+      }
       const relaxedYouTubeEpochMode = isYouTubeDomainUrl(window.location.href);
-      if (resultEpoch !== null && resultEpoch !== state.pageEpoch && !relaxedYouTubeEpochMode) {
+      const resultEpochDelta = resultEpoch === null ? 0 : Math.abs(resultEpoch - state.pageEpoch);
+      const shortsRelaxedEpochAllowed = !stickyShortsMode || resultEpochDelta <= SHORTS_RELAXED_EPOCH_MAX_DELTA;
+      const shouldBypassShortsEpochByVideoId = shortsVideoIdMatch;
+      if (
+        resultEpoch !== null &&
+        resultEpoch !== state.pageEpoch &&
+        (
+          !relaxedYouTubeEpochMode ||
+          (
+            !shouldBypassShortsEpochByVideoId &&
+            !shortsRelaxedEpochAllowed
+          )
+        )
+      ) {
+        const blockReason = !relaxedYouTubeEpochMode
+          ? 'result_epoch_mismatch_non_youtube'
+          : 'result_epoch_mismatch_shorts_delta_exceeded';
         diagEpochBypassCounters.epoch_bypass_blocked += 1;
         diagLogEpochBypass(
           'epoch_bypass_blocked',
-          'result_epoch_mismatch_non_youtube',
+          blockReason,
           resultEpoch,
           state.pageEpoch,
           window.location.href
@@ -5029,16 +5068,26 @@ export function generateModerationScript(config: InjectionConfig): string {
           'expectedNonce=' + expectedNoncePrefix,
           'gotNonce=' + receivedNoncePrefix,
           'resultEpoch=' + resultEpoch,
-          'activeEpoch=' + state.pageEpoch
+          'activeEpoch=' + state.pageEpoch,
+          'epochDelta=' + resultEpochDelta,
+          'maxDelta=' + SHORTS_RELAXED_EPOCH_MAX_DELTA
         );
         cleanupRejectedOrTimedOutRequest(requestId, 'reject_epoch');
         return;
       }
-      if (resultEpoch !== null && resultEpoch !== state.pageEpoch && relaxedYouTubeEpochMode) {
+      if (
+        resultEpoch !== null &&
+        resultEpoch !== state.pageEpoch &&
+        relaxedYouTubeEpochMode &&
+        (shouldBypassShortsEpochByVideoId || shortsRelaxedEpochAllowed)
+      ) {
         diagEpochBypassCounters.epoch_bypass_allowed += 1;
+        const allowReason = shouldBypassShortsEpochByVideoId
+          ? 'result_videoid_match_shorts'
+          : 'result_epoch_mismatch_youtube_relaxed';
         diagLogEpochBypass(
           'epoch_bypass_allowed',
-          'result_epoch_mismatch_youtube_relaxed',
+          allowReason,
           resultEpoch,
           state.pageEpoch,
           window.location.href
@@ -5631,6 +5680,14 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!url) {
       state.stats.skipped++;
       logShortsScanSkip('invalid_url', null, src, sourceType);
+      return false;
+    }
+
+    // Shorts-only crash hardening: never bridge data URLs from frame captures.
+    // Keep poster/img http(s) paths active for verification stability.
+    if (isShortsModeActive() && url.startsWith('data:')) {
+      state.stats.skipped++;
+      logShortsScanSkip('shorts_data_url_disabled', null, url, sourceType);
       return false;
     }
     

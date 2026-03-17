@@ -86,6 +86,8 @@ export interface ModerationRequestMessage {
   type: 'gc-moderation-request';
   requestId: string;
   pageEpoch?: number;
+  /** Shorts URL identity (e.g. /shorts/<videoId>) for stale-result gating */
+  videoId?: string;
   items: ModerationRequestItem[];
   thresholds?: {
     porn: number;
@@ -131,6 +133,8 @@ export interface ModerationResultMessage {
   type: 'gc-moderation-result';
   requestId: string;
   pageEpoch?: number;
+  /** Mirrors request videoId so receiver can gate stale Shorts results */
+  videoId?: string;
   results: ModerationResultItem[];
   nonce: string;
   timestamp?: number;
@@ -185,6 +189,7 @@ export function isValidModerationRequest(message: unknown): message is Moderatio
     m.type === 'gc-moderation-request' &&
     typeof m.requestId === 'string' &&
     typeof m.nonce === 'string' &&
+    (m.videoId === undefined || typeof m.videoId === 'string') &&
     Array.isArray(m.items) &&
     m.items.every((item: unknown) => {
       const it = item as Record<string, unknown>;
@@ -209,6 +214,7 @@ export function isValidModerationResult(message: unknown): message is Moderation
     m.type === 'gc-moderation-result' &&
     typeof m.requestId === 'string' &&
     typeof m.nonce === 'string' &&
+    (m.videoId === undefined || typeof m.videoId === 'string') &&
     Array.isArray(m.results)
   );
 }
@@ -253,12 +259,14 @@ export function createResultMessage(
   requestId: string,
   results: ModerationResultItem[],
   nonce: string,
-  pageEpoch?: number
+  pageEpoch?: number,
+  videoId?: string,
 ): ModerationResultMessage {
   return {
     type: 'gc-moderation-result',
     requestId,
     pageEpoch,
+    videoId,
     results,
     nonce,
     timestamp: Date.now(),

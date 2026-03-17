@@ -84,6 +84,19 @@ const isYouTubeShortsUrl = (value?: string) => {
   }
 };
 
+const getYouTubeShortsVideoId = (value?: string) => {
+  if (!value) return '';
+  try {
+    const parsed = new URL(value);
+    const host = parsed.hostname.toLowerCase();
+    if (!(host === 'youtube.com' || host === 'www.youtube.com' || host === 'm.youtube.com')) return '';
+    const match = String(parsed.pathname || '').match(/^\/shorts\/([^/?#]+)/);
+    return match && match[1] ? String(match[1]) : '';
+  } catch {
+    return '';
+  }
+};
+
 const isDiagYtBlurEnabledForUrl = (value?: string) => {
   if (!isYouTubeShortsUrl(value)) return false;
   if (typeof window === 'undefined') return false;
@@ -102,6 +115,7 @@ const SHORTS_LEGACY_FALLBACK_TIMEOUT_PROBE_MS = 8000;
 const SHORTS_LEGACY_FALLBACK_REQ_GRACE_MS = 2500;
 const SHORTS_LEGACY_FALLBACK_MAX_PROBE_MS = 9000;
 const SHORTS_LEGACY_FALLBACK_MAX_POLLS = 6;
+const SHORTS_RELAXED_EPOCH_MAX_DELTA = 10;
 
 const getUrlFamily = (value?: string) => {
   if (!value) return 'unknown';
@@ -1624,11 +1638,17 @@ export const NativeWebViewBrowser = () => {
     }, 8000);
 
     const { requestId, items, thresholds } = request;
+    const requestVideoId = typeof request.videoId === 'string' ? String(request.videoId) : '';
     const requestEpoch = Number.isFinite(request.pageEpoch) ? Number(request.pageEpoch) : null;
     const activeEpoch = webViewPageEpochRef.current;
     const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
     const stickyShortsMode = isYouTubeShortsUrl(activeUrl);
+    const activeShortsVideoId = getYouTubeShortsVideoId(activeUrl);
+    const shouldEnforceRequestVideoId = !!requestVideoId;
+    const shortsVideoIdMatch = shouldEnforceRequestVideoId && requestVideoId === activeShortsVideoId;
     const relaxedYouTubeEpochMode = isYouTubeDomainUrl(activeUrl);
+    const requestEpochDelta = requestEpoch === null ? 0 : Math.abs(requestEpoch - activeEpoch);
+    const shortsRelaxedEpochAllowed = !stickyShortsMode || requestEpochDelta <= SHORTS_RELAXED_EPOCH_MAX_DELTA;
     
     if (pendingRequestsRef.current.has(requestId)) {
       console.log('[MW-Host] Duplicate request ignored:', requestId);
@@ -1636,14 +1656,74 @@ export const NativeWebViewBrowser = () => {
     }
     pendingRequestsRef.current.add(requestId);
 
-    if (requestEpoch !== null && requestEpoch !== activeEpoch && !relaxedYouTubeEpochMode) {
+    if (shouldEnforceRequestVideoId && !shortsVideoIdMatch) {
+      console.warn(
+        '[DIAG][SHORTS_VIDEO]',
+        'videoid_bypass_blocked',
+        'reason=request_videoid_mismatch',
+        'navId=' + activeNavIdRef.current,
+        'requestId=' + requestId,
+        'requestVideoId=' + requestVideoId,
+        'activeVideoId=' + activeShortsVideoId,
+        'url=' + (activeUrl || 'unknown'),
+      );
+      console.log(
+        '[DIAG][SHORTS_SCAN] skip',
+        'reason=videoid_mismatch',
+        'itemId=batch',
+        'src=request:' + requestId,
+      );
+      const staleResults = items.map(item => ({
+        itemId: item.itemId,
+        src: item.src,
+        shouldBlur: false,
+        category: 'safe_videoid_stale',
+        confidence: 0,
+        severity: 'safe' as ModerationSeverity,
+      }));
+      try {
+        const staleMessage = createResultMessage(
+          requestId,
+          staleResults,
+          nonce,
+          requestEpoch ?? undefined,
+          requestVideoId || undefined,
+        );
+        await postMessageToWebView(staleMessage as unknown as Record<string, unknown>);
+      } catch {
+        // Fail-open by design for stale requests.
+      }
+      pendingRequestsRef.current.delete(requestId);
+      clearTimeout(timeoutId);
+      setFlashGuardState?.(false, 'moderation_videoid_stale');
+      flashLog('disarm stale videoid');
+      return;
+    }
+
+    const shouldBypassShortsEpochByVideoId = shortsVideoIdMatch;
+    if (
+      requestEpoch !== null &&
+      requestEpoch !== activeEpoch &&
+      (
+        !relaxedYouTubeEpochMode ||
+        (
+          !shouldBypassShortsEpochByVideoId &&
+          !shortsRelaxedEpochAllowed
+        )
+      )
+    ) {
+      const blockReason = !relaxedYouTubeEpochMode
+        ? 'request_epoch_mismatch_non_youtube'
+        : 'request_epoch_mismatch_shorts_delta_exceeded';
       console.warn(
         '[DIAG][EPOCH_BYPASS]',
         'epoch_bypass_blocked',
-        'reason=request_epoch_mismatch_non_youtube',
+        'reason=' + blockReason,
         'navId=' + activeNavIdRef.current,
         'requestPageEpoch=' + requestEpoch,
         'currentPageEpoch=' + activeEpoch,
+        'epochDelta=' + requestEpochDelta,
+        'maxDelta=' + SHORTS_RELAXED_EPOCH_MAX_DELTA,
         'urlFamily=' + getUrlFamily(activeUrl),
         'url=' + (activeUrl || 'unknown'),
       );
@@ -1695,7 +1775,13 @@ export const NativeWebViewBrowser = () => {
       }));
 
       try {
-        const staleMessage = createResultMessage(requestId, staleResults, nonce, requestEpoch ?? undefined);
+        const staleMessage = createResultMessage(
+          requestId,
+          staleResults,
+          nonce,
+          requestEpoch ?? undefined,
+          requestVideoId || undefined,
+        );
         await postMessageToWebView(staleMessage as unknown as Record<string, unknown>);
       } catch {
         // Fail-open by design for stale requests.
@@ -1707,14 +1793,24 @@ export const NativeWebViewBrowser = () => {
       flashLog('disarm stale epoch');
       return;
     }
-    if (requestEpoch !== null && requestEpoch !== activeEpoch && relaxedYouTubeEpochMode) {
+    if (
+      requestEpoch !== null &&
+      requestEpoch !== activeEpoch &&
+      relaxedYouTubeEpochMode &&
+      (shouldBypassShortsEpochByVideoId || shortsRelaxedEpochAllowed)
+    ) {
+      const allowReason = shouldBypassShortsEpochByVideoId
+        ? 'request_videoid_match_shorts'
+        : 'request_epoch_mismatch_youtube_relaxed';
       console.log(
         '[DIAG][EPOCH_BYPASS]',
         'epoch_bypass_allowed',
-        'reason=request_epoch_mismatch_youtube_relaxed',
+        'reason=' + allowReason,
         'navId=' + activeNavIdRef.current,
         'requestPageEpoch=' + requestEpoch,
         'currentPageEpoch=' + activeEpoch,
+        'epochDelta=' + requestEpochDelta,
+        'maxDelta=' + SHORTS_RELAXED_EPOCH_MAX_DELTA,
         'urlFamily=' + getUrlFamily(activeUrl),
         'url=' + (activeUrl || 'unknown'),
       );
@@ -1738,6 +1834,7 @@ export const NativeWebViewBrowser = () => {
         '[DIAG][SHORTS_SCAN] scanBatch_start',
         'requestId=' + requestId,
         'itemCount=' + items.length,
+        'videoId=' + (requestVideoId || 'none'),
       );
       const previousStart = shortsScanDiagRef.current.lastScanBatchStartAt;
       if (previousStart > 0) {
@@ -1748,7 +1845,13 @@ export const NativeWebViewBrowser = () => {
       }
       shortsScanDiagRef.current.lastScanBatchStartAt = scanBatchStartTs;
     }
-    console.log('[MW-Host] request received', requestId, 'items=' + items.length, 'epoch=' + (requestEpoch ?? 'n/a'));
+    console.log(
+      '[MW-Host] request received',
+      requestId,
+      'items=' + items.length,
+      'epoch=' + (requestEpoch ?? 'n/a'),
+      'videoId=' + (requestVideoId || 'none'),
+    );
     if (import.meta.env.DEV) {
       const epochKey = String(requestEpoch ?? activeEpoch);
       if (stageBFlagDiagEpochRef.current !== epochKey) {
@@ -2002,15 +2105,60 @@ export const NativeWebViewBrowser = () => {
     );
     
     // Post results back to the WebView with nonce for security
-    console.log('[MW-Host] posting results back', requestId, 'count=' + results.length, 'nonce=' + nonce.substring(0, 10));
-    
+    const activeUrlAtPost = webViewState.currentUrl || currentUrlRef.current || '';
+    const activeShortsVideoIdAtPost = getYouTubeShortsVideoId(activeUrlAtPost);
+    const staleShortsResultByVideoId =
+      !!requestVideoId &&
+      requestVideoId !== activeShortsVideoIdAtPost;
+    console.log(
+      '[MW-Host] posting results back',
+      requestId,
+      'count=' + results.length,
+      'nonce=' + nonce.substring(0, 10),
+      'videoId=' + (requestVideoId || 'none'),
+    );
+
     try {
-      const resultMessage = createResultMessage(requestId, results, nonce, requestEpoch ?? undefined);
-      const posted = await postMessageToWebView(resultMessage as unknown as Record<string, unknown>);
-      if (posted) {
-        console.log('[MW-Host] Results posted via postMessage for', requestId);
+      if (staleShortsResultByVideoId) {
+        console.warn(
+          '[DIAG][SHORTS_VIDEO]',
+          'videoid_bypass_blocked',
+          'reason=result_videoid_mismatch',
+          'requestId=' + requestId,
+          'requestVideoId=' + requestVideoId,
+          'activeVideoId=' + activeShortsVideoIdAtPost,
+          'url=' + (activeUrlAtPost || 'unknown'),
+        );
+        const staleResults = items.map(item => ({
+          itemId: item.itemId,
+          src: item.src,
+          shouldBlur: false,
+          category: 'safe_videoid_stale',
+          confidence: 0,
+          severity: 'safe' as ModerationSeverity,
+        }));
+        const staleMessage = createResultMessage(
+          requestId,
+          staleResults,
+          nonce,
+          requestEpoch ?? undefined,
+          requestVideoId || undefined,
+        );
+        await postMessageToWebView(staleMessage as unknown as Record<string, unknown>);
       } else {
-        console.warn('[MW-Host] Results postMessage returned false for', requestId);
+        const resultMessage = createResultMessage(
+          requestId,
+          results,
+          nonce,
+          requestEpoch ?? undefined,
+          requestVideoId || undefined,
+        );
+        const posted = await postMessageToWebView(resultMessage as unknown as Record<string, unknown>);
+        if (posted) {
+          console.log('[MW-Host] Results posted via postMessage for', requestId);
+        } else {
+          console.warn('[MW-Host] Results postMessage returned false for', requestId);
+        }
       }
     } catch (error) {
       console.log('[MW-Host] Failed to post results via postMessage:', error);
@@ -2157,6 +2305,7 @@ export const NativeWebViewBrowser = () => {
           message.requestId,
           'noncePrefix=' + String(message.nonce || '').substring(0, 6),
           'pageEpoch=' + String(message.pageEpoch ?? 'none'),
+          'videoId=' + String(message.videoId || 'none'),
           'source=' + source,
         );
         await processModerationRequest(message, message.nonce);
