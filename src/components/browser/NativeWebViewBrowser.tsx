@@ -826,6 +826,7 @@ export const NativeWebViewBrowser = () => {
 
     const targetUrl = urlHint || currentUrlRef.current || '';
     const navId = activeNavIdRef.current || 0;
+    const shortsProbeActive = isYouTubeShortsUrl(targetUrl);
     const now = Date.now();
     const recentlyInjectedSameUrl =
       injectionDoneRef.current &&
@@ -842,10 +843,31 @@ export const NativeWebViewBrowser = () => {
         'targetUrl=' + (targetUrl || 'unknown'),
         'skipCount=' + duplicateInjectionSkipsRef.current,
       );
+      if (shortsProbeActive) {
+        console.log(
+          '[DIAG][SHORTS_PROBE]',
+          'event=host_inject_skip',
+          'navId=' + navId,
+          'hostPageEpoch=' + webViewPageEpochRef.current,
+          'reason=' + reason,
+          'url=' + toDiagUrl(targetUrl || 'unknown'),
+          'skipCount=' + duplicateInjectionSkipsRef.current,
+        );
+      }
       return;
     }
 
     injectionInFlightRef.current = true;
+    if (shortsProbeActive) {
+      console.log(
+        '[DIAG][SHORTS_PROBE]',
+        'event=host_inject_attempt',
+        'navId=' + navId,
+        'hostPageEpoch=' + webViewPageEpochRef.current,
+        'reason=' + reason,
+        'url=' + toDiagUrl(targetUrl || 'unknown'),
+      );
+    }
     console.log(
       '[DIAG][INJECT] start',
       'reason=' + reason,
@@ -895,7 +917,29 @@ export const NativeWebViewBrowser = () => {
     // Full moderation script: request scanning + host bridge + DOM blur/reveal behavior.
     const mainScript = generateModerationScript(config);
     try {
-      await scriptExecutor(mainScript);
+      const injectResult = await scriptExecutor(mainScript);
+      if (shortsProbeActive) {
+        const resultRaw = injectResult === undefined
+          ? 'undefined'
+          : injectResult === null
+            ? 'null'
+            : String(injectResult);
+        const resultClass = resultRaw === 'MW_ALREADY_ACTIVE'
+          ? 'MW_ALREADY_ACTIVE'
+          : resultRaw === 'OK'
+            ? 'OK'
+            : 'OTHER';
+        console.log(
+          '[DIAG][SHORTS_PROBE]',
+          'event=host_inject_result',
+          'navId=' + navId,
+          'hostPageEpoch=' + webViewPageEpochRef.current,
+          'reason=' + reason,
+          'url=' + toDiagUrl(targetUrl || 'unknown'),
+          'resultClass=' + resultClass,
+          'resultRaw=' + resultRaw.substring(0, 160),
+        );
+      }
       injectionDoneRef.current = true;
       lastInjectedUrlRef.current = targetUrl;
       lastInjectionAtRef.current = Date.now();
@@ -921,6 +965,17 @@ export const NativeWebViewBrowser = () => {
       exitPendingReinject('inject_success', targetUrl);
     } catch (error) {
       console.error('[MW-Bridge] Moderation script injection failed:', error);
+      if (shortsProbeActive) {
+        console.log(
+          '[DIAG][SHORTS_PROBE]',
+          'event=host_inject_error',
+          'navId=' + navId,
+          'hostPageEpoch=' + webViewPageEpochRef.current,
+          'reason=' + reason,
+          'url=' + toDiagUrl(targetUrl || 'unknown'),
+          'message=' + (error instanceof Error ? error.message : String(error)),
+        );
+      }
       console.log(
         '[DIAG][INJECT] error',
         'reason=' + reason,
@@ -931,7 +986,7 @@ export const NativeWebViewBrowser = () => {
     } finally {
       injectionInFlightRef.current = false;
     }
-  }, [ENABLE_SIGNAL_PIPELINE, settingsLoaded, isRuntimeModerationEnabled, getModerationConfig, localSettings.diag_youtube_shorts, exitPendingReinject]);
+  }, [ENABLE_SIGNAL_PIPELINE, settingsLoaded, isRuntimeModerationEnabled, getModerationConfig, localSettings.diag_youtube_shorts, exitPendingReinject, toDiagUrl]);
 
   const getWebViewListenerDiagContext = useCallback(() => {
     return {

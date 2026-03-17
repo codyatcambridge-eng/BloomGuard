@@ -157,11 +157,38 @@ export function generateModerationScript(config: InjectionConfig): string {
     'use strict';
     const REQUESTED_BLUR_STRENGTH = ${requestedBlurStrength};
     const CLAMPED_BLUR_STRENGTH = ${clampedBlurStrength};
+    const SHORTS_PROBE_PREFIX = '[DIAG][SHORTS_PROBE]';
+    const previousShortsProbeGenerationSeq = Number(window.__MW_SHORTS_PROBE_GEN_SEQ__ || 0);
+    const shortsProbeGenerationSeq = Number.isFinite(previousShortsProbeGenerationSeq) ? (previousShortsProbeGenerationSeq + 1) : 1;
+    window.__MW_SHORTS_PROBE_GEN_SEQ__ = shortsProbeGenerationSeq;
+    const SHORTS_PROBE_GENERATION_ID = 'g' + shortsProbeGenerationSeq + '_' + Date.now().toString(36);
+    function logShortsProbe(eventName, details) {
+      if (!isYouTubeShortsUrl(window.location.href)) return;
+      console.log(
+        SHORTS_PROBE_PREFIX,
+        'event=' + (eventName || 'unknown'),
+        'generationId=' + SHORTS_PROBE_GENERATION_ID,
+        details || ''
+      );
+    }
   
   // ==================== INITIALIZATION ====================
   
   // Prevent double injection
+  logShortsProbe(
+    'generation_attempt',
+    'url=' + window.location.href +
+    ' navId=' + String(window.__MW_NAV_ID__ || 'none') +
+    ' pageEpoch=' + (Number.isFinite(${pageEpoch}) ? ${pageEpoch} : 'none')
+  );
   if (window.__MW_ACTIVE__) {
+    logShortsProbe(
+      'generation_skip_already_active',
+      'url=' + window.location.href +
+      ' navId=' + String(window.__MW_NAV_ID__ || 'none') +
+      ' pageEpoch=' + (Number.isFinite(${pageEpoch}) ? ${pageEpoch} : 'none') +
+      ' activeGenerationId=' + String(window.__MW_SHORTS_PROBE_ACTIVE_GENERATION_ID__ || 'none')
+    );
     console.log('[MW] Already injected, skipping');
     try {
       if (window.__MW_BLUR_OVERLAY_API__ && typeof window.__MW_BLUR_OVERLAY_API__.sendReady === 'function') {
@@ -171,6 +198,13 @@ export function generateModerationScript(config: InjectionConfig): string {
     return 'MW_ALREADY_ACTIVE';
   }
   window.__MW_ACTIVE__ = true;
+  window.__MW_SHORTS_PROBE_ACTIVE_GENERATION_ID__ = SHORTS_PROBE_GENERATION_ID;
+  logShortsProbe(
+    'generation_attach',
+    'url=' + window.location.href +
+    ' navId=' + String(window.__MW_NAV_ID__ || 'none') +
+    ' pageEpoch=' + (Number.isFinite(${pageEpoch}) ? ${pageEpoch} : 'none')
+  );
   console.log('[MW-INJECT] version=${buildVersion} commit=${buildCommit}');
   
   console.log('[MW] ========================================');
@@ -542,9 +576,19 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function sendBlurReady(reason) {
     if (!DOM_OVERLAY_ENABLED) return;
+    const readyReason = reason || 'ready';
+    const shortsUrlId = getCurrentShortsUrlId() || 'none';
+    logShortsProbe(
+      'mw_blur_ready_emit',
+      'reason=' + readyReason +
+      ' navId=' + String(window.__MW_NAV_ID__ || 'none') +
+      ' pageEpoch=' + (Number.isFinite(CONFIG.pageEpoch) ? CONFIG.pageEpoch : 'none') +
+      ' hostPageEpoch=' + String(window.__MW_HOST_PAGE_EPOCH__ || 'none') +
+      ' shortsUrlId=' + shortsUrlId
+    );
     postToHost({
       type: 'MW_BLUR_READY',
-      reason: reason || 'ready',
+      reason: readyReason,
       url: window.location.href,
       timestamp: Date.now(),
     });
@@ -3208,6 +3252,32 @@ export function generateModerationScript(config: InjectionConfig): string {
     return count;
   }
 
+  function getBlurredNodeIdsForItemKey(src, limit) {
+    const ids = [];
+    if (!src) return ids;
+    const max = Number.isFinite(limit) ? Math.max(1, Math.floor(limit)) : 20;
+    const nodes = document.querySelectorAll('[data-mw-src]');
+    for (let i = 0; i < nodes.length; i += 1) {
+      const node = nodes[i];
+      if (!node || node.nodeType !== 1) continue;
+      if ((node.dataset && node.dataset.mwSrc) !== src) continue;
+      const inlineFilter = String(node.style.getPropertyValue('filter') || node.style.filter || '').toLowerCase();
+      const inlineBackdrop = String(node.style.getPropertyValue('backdrop-filter') || '').toLowerCase();
+      if (
+        inlineFilter.includes('blur(') ||
+        inlineBackdrop.includes('blur(') ||
+        node.dataset.mwModerated === 'blurred' ||
+        node.dataset.mwModerated === 'softblur' ||
+        node.classList.contains('mw-blurred') ||
+        node.classList.contains('mw-softblur')
+      ) {
+        ids.push(getDiagNodeId(node));
+        if (ids.length >= max) break;
+      }
+    }
+    return ids;
+  }
+
   function logRevealHittestSnapshot(overlay, btn, overlayId, phase, event) {
     if (!overlay || !btn) return;
     let overlayComputed = null;
@@ -4440,6 +4510,17 @@ export function generateModerationScript(config: InjectionConfig): string {
       existingOverlay.style.display = 'flex';
       if (shortsMode) {
         setRevealOverlayAnchorTarget(existingOverlay, element, 'existing_overlay');
+        const reboundAnchor = resolveShortsRevealOverlayAnchor(existingOverlay);
+        logShortsProbe(
+          'reveal_overlay_rebind',
+          'overlayId=' + String((existingOverlay.dataset && existingOverlay.dataset.mwOverlayId) || 'unknown') +
+          ' closureNodeId=' + getDiagNodeId(element) +
+          ' closureSrc=' + String(src || '').substring(0, 180) +
+          ' overlayNodeId=' + String((existingOverlay.dataset && existingOverlay.dataset.mwNodeId) || 'none') +
+          ' overlayFor=' + String((existingOverlay.dataset && existingOverlay.dataset.mwFor) || '').substring(0, 180) +
+          ' resolvedAnchorNodeId=' + getDiagNodeId(reboundAnchor) +
+          ' shortsUrlId=' + (getCurrentShortsUrlId() || 'none')
+        );
         const portal = ensureRevealPortal();
         if (portal && existingOverlay.parentElement !== portal) {
           portal.appendChild(existingOverlay);
@@ -4525,6 +4606,15 @@ export function generateModerationScript(config: InjectionConfig): string {
     overlay.dataset.mwNodeId = getDiagNodeId(element);
     overlay.dataset.mwOverlayId = overlayId;
     setRevealOverlayAnchorTarget(overlay, element, 'overlay_created');
+    logShortsProbe(
+      'reveal_overlay_create',
+      'overlayId=' + overlayId +
+      ' closureNodeId=' + getDiagNodeId(element) +
+      ' closureSrc=' + String(src || '').substring(0, 180) +
+      ' overlayNodeId=' + String((overlay.dataset && overlay.dataset.mwNodeId) || 'none') +
+      ' overlayFor=' + String((overlay.dataset && overlay.dataset.mwFor) || '').substring(0, 180) +
+      ' shortsUrlId=' + (getCurrentShortsUrlId() || 'none')
+    );
     overlay.style.cssText = [
       shortsMode ? 'position: fixed' : 'position: absolute',
       'inset: 0',
@@ -4600,6 +4690,17 @@ export function generateModerationScript(config: InjectionConfig): string {
         'target=' + getDiagTargetDescriptor(e.target)
       );
       logRevealHittestSnapshot(overlay, btn, overlayId, 'button_click', e);
+      const resolvedAnchorAtClick = resolveShortsRevealOverlayAnchor(overlay);
+      logShortsProbe(
+        'reveal_click_target',
+        'overlayId=' + overlayId +
+        ' closureNodeId=' + getDiagNodeId(element) +
+        ' closureSrc=' + String(src || '').substring(0, 180) +
+        ' overlayNodeId=' + String((overlay.dataset && overlay.dataset.mwNodeId) || 'none') +
+        ' overlayFor=' + String((overlay.dataset && overlay.dataset.mwFor) || '').substring(0, 180) +
+        ' resolvedAnchorNodeId=' + getDiagNodeId(resolvedAnchorAtClick) +
+        ' shortsUrlId=' + (getCurrentShortsUrlId() || 'none')
+      );
       const revealAllowed = !state.revealed.has(src);
       const revealGateReason = revealAllowed ? 'not_revealed' : 'already_revealed_reblur_path';
       console.log(
@@ -4631,11 +4732,21 @@ export function generateModerationScript(config: InjectionConfig): string {
         btn.textContent = '🔒 Hide';
         const afterBlurCount = countBlurredNodesForItemKey(src);
         const removedBlurCount = beforeBlurCount > afterBlurCount ? (beforeBlurCount - afterBlurCount) : 0;
+        const remainingBlurNodeIds = getBlurredNodeIdsForItemKey(src, 24);
         console.log(
           '[DIAG][REVEAL_EVT] reveal_apply_done',
           'overlayId=' + overlayId,
           'itemKey=' + itemKey,
           'removedBlurCount=' + removedBlurCount
+        );
+        logShortsProbe(
+          'reveal_post_blur_state',
+          'overlayId=' + overlayId +
+          ' clickedSrc=' + String(src || '').substring(0, 180) +
+          ' clickedNodeId=' + getDiagNodeId(element) +
+          ' remainingBlurCount=' + remainingBlurNodeIds.length +
+          ' remainingBlurNodeIds=' + (remainingBlurNodeIds.length ? remainingBlurNodeIds.join('|') : 'none') +
+          ' shortsUrlId=' + (getCurrentShortsUrlId() || 'none')
         );
         
         // POST a label request message so the host can open the labeling modal
@@ -4870,6 +4981,15 @@ export function generateModerationScript(config: InjectionConfig): string {
       'noncePrefix=' + NONCE_PREFIX,
       'items=' + items.length,
     );
+    logShortsProbe(
+      'mw_req_sent',
+      'requestId=' + requestId +
+      ' navId=' + NAV_ID +
+      ' pageEpoch=' + state.pageEpoch +
+      ' shortsUrlId=' + (getCurrentShortsUrlId() || 'none') +
+      ' itemCount=' + items.length +
+      ' itemIds=' + items.map(item => String(item.itemId || 'none')).join(',')
+    );
     postToHost({
       type: 'MW_REQ_SENT',
       requestId: requestId,
@@ -4999,7 +5119,36 @@ export function generateModerationScript(config: InjectionConfig): string {
       const receivedNoncePrefix = String(nonce || 'none').substring(0, 6);
       const stickyShortsMode = isYouTubeShortsUrl(window.location.href);
       const relaxedYouTubeEpochMode = isYouTubeDomainUrl(window.location.href);
+      const requestIdLabel = typeof requestId === 'string' ? requestId : 'none';
+      const resultCount = Array.isArray(results) ? results.length : 0;
+      const itemIdsPreview = Array.isArray(results)
+        ? results
+            .slice(0, 6)
+            .map(result => String(result && result.itemId ? result.itemId : 'none'))
+            .join(',')
+        : 'none';
+      const hasPendingRequestAtEntry = requestIdLabel !== 'none' && state.pendingRequests.has(requestIdLabel);
+      let epochBypassState = 'none';
+      logShortsProbe(
+        'result_identity_enter',
+        'requestId=' + requestIdLabel +
+        ' resultCount=' + resultCount +
+        ' itemIds=' + itemIdsPreview +
+        ' resultEpoch=' + (resultEpoch === null ? 'none' : resultEpoch) +
+        ' currentPageEpoch=' + state.pageEpoch +
+        ' hasPendingRequest=' + hasPendingRequestAtEntry +
+        ' shortsUrlId=' + (getCurrentShortsUrlId() || 'none')
+      );
       if (resultEpoch !== null && resultEpoch !== state.pageEpoch && !relaxedYouTubeEpochMode) {
+        epochBypassState = 'blocked_non_youtube';
+        logShortsProbe(
+          'result_epoch_gate',
+          'requestId=' + requestIdLabel +
+          ' gate=' + epochBypassState +
+          ' resultEpoch=' + resultEpoch +
+          ' currentPageEpoch=' + state.pageEpoch +
+          ' shortsUrlId=' + (getCurrentShortsUrlId() || 'none')
+        );
         diagEpochBypassCounters.epoch_bypass_blocked += 1;
         diagLogEpochBypass(
           'epoch_bypass_blocked',
@@ -5035,6 +5184,15 @@ export function generateModerationScript(config: InjectionConfig): string {
         return;
       }
       if (resultEpoch !== null && resultEpoch !== state.pageEpoch && relaxedYouTubeEpochMode) {
+        epochBypassState = 'allowed_youtube_relaxed';
+        logShortsProbe(
+          'result_epoch_gate',
+          'requestId=' + requestIdLabel +
+          ' gate=' + epochBypassState +
+          ' resultEpoch=' + resultEpoch +
+          ' currentPageEpoch=' + state.pageEpoch +
+          ' shortsUrlId=' + (getCurrentShortsUrlId() || 'none')
+        );
         diagEpochBypassCounters.epoch_bypass_allowed += 1;
         diagLogEpochBypass(
           'epoch_bypass_allowed',
@@ -5063,6 +5221,15 @@ export function generateModerationScript(config: InjectionConfig): string {
       
       // SECURITY: Validate nonce
       if (nonce !== CONFIG.nonce) {
+        logShortsProbe(
+          'result_nonce_reject',
+          'requestId=' + requestIdLabel +
+          ' expectedNonce=' + expectedNoncePrefix +
+          ' gotNonce=' + receivedNoncePrefix +
+          ' resultEpoch=' + (resultEpoch === null ? 'none' : resultEpoch) +
+          ' currentPageEpoch=' + state.pageEpoch +
+          ' shortsUrlId=' + (getCurrentShortsUrlId() || 'none')
+        );
         state.stats.nonceRejected++;
         logShortsScanSkip('nonce_mismatch', null, 'request:' + String(requestId || 'none'), 'result');
         console.warn(
@@ -5086,6 +5253,14 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       
       state.stats.responsesReceived++;
+      logShortsProbe(
+        'result_identity_accept',
+        'requestId=' + requestIdLabel +
+        ' hasPendingRequest=' + hasPendingRequestAtEntry +
+        ' epochBypass=' + epochBypassState +
+        ' resultCount=' + resultCount +
+        ' shortsUrlId=' + (getCurrentShortsUrlId() || 'none')
+      );
       console.log('[MW] received result', requestId, 'count=' + results.length);
       if (isShortsModeActive()) {
         const startedAt = diagScanBatchStartAtByRequestId.get(requestId);
@@ -5296,6 +5471,19 @@ export function generateModerationScript(config: InjectionConfig): string {
         );
       }
       const dims = element ? getElementDimensions(element) : { width: 0, height: 0 };
+      logShortsProbe(
+        'result_apply_decision',
+        'requestId=' + requestIdLabel +
+        ' itemId=' + String(itemId || 'none') +
+        ' src=' + String(src || '').substring(0, 180) +
+        ' finalBlur=' + finalBlur +
+        ' hasElement=' + (!!(element && element.isConnected)) +
+        ' elementNodeId=' + getDiagNodeId(element) +
+        ' resultEpoch=' + (resultEpoch === null ? 'none' : resultEpoch) +
+        ' currentPageEpoch=' + state.pageEpoch +
+        ' epochBypass=' + epochBypassState +
+        ' shortsUrlId=' + (getCurrentShortsUrlId() || 'none')
+      );
       
       if (element && element.isConnected) {
         try {
@@ -5587,11 +5775,45 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   // ==================== MESSAGE LISTENER ====================
 
+  const previousShortsProbeResultListenerSeq = Number(window.__MW_SHORTS_PROBE_RESULT_LISTENER_SEQ__ || 0);
+  const shortsProbeResultListenerSeq = Number.isFinite(previousShortsProbeResultListenerSeq)
+    ? (previousShortsProbeResultListenerSeq + 1)
+    : 1;
+  window.__MW_SHORTS_PROBE_RESULT_LISTENER_SEQ__ = shortsProbeResultListenerSeq;
+  const SHORTS_PROBE_RESULT_LISTENER_ID = 'rl' + shortsProbeResultListenerSeq;
+  logShortsProbe(
+    'result_listener_attach',
+    'listenerId=' + SHORTS_PROBE_RESULT_LISTENER_ID +
+    ' navId=' + String(window.__MW_NAV_ID__ || 'none') +
+    ' pageEpoch=' + (Number.isFinite(state.pageEpoch) ? state.pageEpoch : 'none') +
+    ' shortsUrlId=' + (getCurrentShortsUrlId() || 'none')
+  );
+
   const onModerationResultEvent = function(event) {
     const message = readHostEventPayload(event);
     if (!message || typeof message !== 'object') return;
     
     if (message.type === 'gc-moderation-result') {
+      const requestId = typeof message.requestId === 'string' ? message.requestId : 'none';
+      const resultEpoch = Number.isFinite(message.pageEpoch) ? Number(message.pageEpoch) : null;
+      const resultCount = Array.isArray(message.results) ? message.results.length : 0;
+      const itemPreview = Array.isArray(message.results)
+        ? message.results
+            .slice(0, 5)
+            .map(result => String(result && result.itemId ? result.itemId : 'none'))
+            .join(',')
+        : 'none';
+      logShortsProbe(
+        'result_listener_handle_entry',
+        'listenerId=' + SHORTS_PROBE_RESULT_LISTENER_ID +
+        ' requestId=' + requestId +
+        ' resultEpoch=' + (resultEpoch === null ? 'none' : resultEpoch) +
+        ' currentPageEpoch=' + state.pageEpoch +
+        ' hasPendingRequest=' + state.pendingRequests.has(requestId) +
+        ' resultCount=' + resultCount +
+        ' itemIds=' + itemPreview +
+        ' shortsUrlId=' + (getCurrentShortsUrlId() || 'none')
+      );
       handleModerationResult(message);
     }
   };
@@ -5668,7 +5890,18 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     
     // Skip if already revealed by user (persistence)
-    if (state.revealed.has(url) || element.dataset.mwRevealed === 'true') {
+    if (state.revealed.has(url)) {
+      logShortsScanSkip('revealed_persistence', null, url, sourceType);
+      return false;
+    }
+    if (element.dataset.mwRevealed === 'true') {
+      logShortsProbe(
+        'queue_skip_mwRevealed_dataset',
+        'nodeId=' + getDiagNodeId(element) +
+        ' src=' + String(url || '').substring(0, 180) +
+        ' previousSrc=' + String(element.dataset.mwLastScanSrc || element.dataset.mwSrc || '').substring(0, 180) +
+        ' shortsUrlId=' + (getCurrentShortsUrlId() || 'none')
+      );
       logShortsScanSkip('revealed_persistence', null, url, sourceType);
       return false;
     }
