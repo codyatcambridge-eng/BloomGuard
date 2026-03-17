@@ -4601,6 +4601,41 @@ export function generateModerationScript(config: InjectionConfig): string {
         'target=' + getDiagTargetDescriptor(e.target)
       );
       logRevealHittestSnapshot(overlay, btn, overlayId, 'button_click', e);
+      let actionElement = element;
+      if (shortsMode) {
+        const runtimeAnchor = resolveShortsRevealOverlayAnchor(overlay);
+        if (runtimeAnchor && runtimeAnchor.nodeType === 1 && runtimeAnchor.isConnected) {
+          if (runtimeAnchor !== actionElement) {
+            console.log(
+              '[DIAG][SHORTS_REVEAL_TARGET]',
+              'action=retarget_click',
+              'overlayId=' + overlayId,
+              'src=' + String(src || '').substring(0, 180),
+              'fromNode=' + getDiagNodeId(actionElement),
+              'toNode=' + getDiagNodeId(runtimeAnchor)
+            );
+          }
+          actionElement = runtimeAnchor;
+          setRevealOverlayAnchorTarget(overlay, actionElement, 'button_click_runtime');
+        }
+      }
+      if (!actionElement || !actionElement.isConnected) {
+        console.warn(
+          '[DIAG][SHORTS_REVEAL_TARGET]',
+          'action=click_target_missing',
+          'overlayId=' + overlayId,
+          'src=' + String(src || '').substring(0, 180),
+          'shortsMode=' + shortsMode
+        );
+        return;
+      }
+      console.log(
+        '[DIAG][SHORTS_REVEAL_TARGET]',
+        'action=click_target_selected',
+        'overlayId=' + overlayId,
+        'src=' + String(src || '').substring(0, 180),
+        'node=' + getDiagNodeId(actionElement)
+      );
       const revealAllowed = !state.revealed.has(src);
       const revealGateReason = revealAllowed ? 'not_revealed' : 'already_revealed_reblur_path';
       console.log(
@@ -4613,8 +4648,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (state.revealed.has(src)) {
         // Re-blur
         state.revealed.delete(src);
-        element.dataset.mwRevealed = 'false';
-        applyBlur(element, src, category, CONFIG.blurStrength, itemId);
+        actionElement.dataset.mwRevealed = 'false';
+        applyBlur(actionElement, src, category, CONFIG.blurStrength, itemId);
         btn.textContent = '👁 Reveal';
         overlay.style.display = 'flex';
       } else {
@@ -4627,8 +4662,8 @@ export function generateModerationScript(config: InjectionConfig): string {
           'beforeBlurCount=' + beforeBlurCount
         );
         state.revealed.add(src);
-        element.dataset.mwRevealed = 'true'; // Persistence
-        removeBlur(element, src);
+        actionElement.dataset.mwRevealed = 'true'; // Persistence
+        removeBlur(actionElement, src);
         btn.textContent = '🔒 Hide';
         const afterBlurCount = countBlurredNodesForItemKey(src);
         const removedBlurCount = beforeBlurCount > afterBlurCount ? (beforeBlurCount - afterBlurCount) : 0;
@@ -4640,20 +4675,20 @@ export function generateModerationScript(config: InjectionConfig): string {
         );
         
         // POST a label request message so the host can open the labeling modal
-        var labelItemId = itemId || element.dataset.mwItemId || 'unknown_' + Date.now();
-        var mwModelVersion = element.dataset.mwModelVersion || null;
-        var mwDecisionReason = element.dataset.mwDecisionReason || null;
-        var mwNsfwRisk = toFiniteNumber(element.dataset.mwNsfwRisk);
-        var mwPersonPresent = element.dataset.mwPersonPresent === '1';
-        var mwSkinRatio = toFiniteNumber(element.dataset.mwSkinRatio);
-        var mwThirstScore = toFiniteNumber(element.dataset.mwThirstScore);
-        var mwSkinThreshold = toFiniteNumber(element.dataset.mwSkinThreshold);
-        var mwGrayMin = toFiniteNumber(element.dataset.mwGrayZoneMin);
-        var mwGrayMax = toFiniteNumber(element.dataset.mwGrayZoneMax);
-        var mwExplicitOverride = toFiniteNumber(element.dataset.mwExplicitOverride);
-        var mwImageWidth = toFiniteNumber(element.dataset.mwImageWidth);
-        var mwImageHeight = toFiniteNumber(element.dataset.mwImageHeight);
-        var mwHost = element.dataset.mwHost || null;
+        var labelItemId = itemId || actionElement.dataset.mwItemId || 'unknown_' + Date.now();
+        var mwModelVersion = actionElement.dataset.mwModelVersion || null;
+        var mwDecisionReason = actionElement.dataset.mwDecisionReason || null;
+        var mwNsfwRisk = toFiniteNumber(actionElement.dataset.mwNsfwRisk);
+        var mwPersonPresent = actionElement.dataset.mwPersonPresent === '1';
+        var mwSkinRatio = toFiniteNumber(actionElement.dataset.mwSkinRatio);
+        var mwThirstScore = toFiniteNumber(actionElement.dataset.mwThirstScore);
+        var mwSkinThreshold = toFiniteNumber(actionElement.dataset.mwSkinThreshold);
+        var mwGrayMin = toFiniteNumber(actionElement.dataset.mwGrayZoneMin);
+        var mwGrayMax = toFiniteNumber(actionElement.dataset.mwGrayZoneMax);
+        var mwExplicitOverride = toFiniteNumber(actionElement.dataset.mwExplicitOverride);
+        var mwImageWidth = toFiniteNumber(actionElement.dataset.mwImageWidth);
+        var mwImageHeight = toFiniteNumber(actionElement.dataset.mwImageHeight);
+        var mwHost = actionElement.dataset.mwHost || null;
         var labelRequest = {
           type: 'gc-label-request',
           requestId: 'r_' + Date.now().toString(36),
@@ -4663,7 +4698,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           platform: PLATFORM,
           modelPrediction: {
             category: category,
-            confidence: toFiniteNumber(element.dataset.mwConfidence),
+            confidence: toFiniteNumber(actionElement.dataset.mwConfidence),
             model_version: mwModelVersion,
             thresholds: {
               nsfw_gray_zone_min: mwGrayMin,
@@ -4688,7 +4723,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         postToHost(labelRequest);
         
         // Show brief correction overlay
-        showCorrectionOverlay(element, src, category, labelItemId);
+        showCorrectionOverlay(actionElement, src, category, labelItemId);
       }
     });
     console.log('[DIAG][REVEAL_UI] bind_button', 'overlayId=' + overlayId);

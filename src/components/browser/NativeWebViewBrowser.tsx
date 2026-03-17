@@ -97,6 +97,36 @@ const getYouTubeShortsVideoId = (value?: string) => {
   }
 };
 
+const getYouTubeMediaVideoIdFromSrc = (value?: string) => {
+  if (!value) return '';
+  try {
+    const parsed = new URL(value, 'https://m.youtube.com');
+    const host = parsed.hostname.toLowerCase();
+    const queryV = parsed.searchParams.get('v');
+    if (queryV) return String(queryV);
+    const queryId = parsed.searchParams.get('id');
+    if (queryId && (host.includes('googlevideo.com') || host.includes('youtube.com'))) {
+      return String(queryId);
+    }
+    const path = String(parsed.pathname || '');
+    const shortsMatch = path.match(/^\/shorts\/([^/?#]+)/);
+    if (shortsMatch && shortsMatch[1]) return String(shortsMatch[1]);
+    if (host === 'youtu.be') {
+      const shortPathMatch = path.match(/^\/([^/?#]+)/);
+      if (shortPathMatch && shortPathMatch[1]) return String(shortPathMatch[1]);
+    }
+    if (host.includes('ytimg.com')) {
+      const viMatch = path.match(/\/vi(?:_webp)?\/([^/?#]+)/);
+      if (viMatch && viMatch[1]) return String(viMatch[1]);
+      const anWebpMatch = path.match(/\/an_webp\/([^/?#]+)/);
+      if (anWebpMatch && anWebpMatch[1]) return String(anWebpMatch[1]);
+    }
+    return '';
+  } catch {
+    return '';
+  }
+};
+
 const isDiagYtBlurEnabledForUrl = (value?: string) => {
   if (!isYouTubeShortsUrl(value)) return false;
   if (typeof window === 'undefined') return false;
@@ -1827,13 +1857,55 @@ export const NativeWebViewBrowser = () => {
       }
     }
     
+    const shouldEnforceShortsSrcOwnership = stickyShortsMode && shouldEnforceRequestVideoId;
+    const droppedItemsBySourceOwnership: Array<{ item: typeof items[number]; srcVideoId: string }> = [];
+    const scanItems = shouldEnforceShortsSrcOwnership
+      ? items.filter((item) => {
+          const srcVideoId = getYouTubeMediaVideoIdFromSrc(item.src);
+          if (!srcVideoId || srcVideoId === requestVideoId) return true;
+          droppedItemsBySourceOwnership.push({ item, srcVideoId });
+          return false;
+        })
+      : items;
+    if (shouldEnforceShortsSrcOwnership && droppedItemsBySourceOwnership.length > 0) {
+      droppedItemsBySourceOwnership.forEach(({ item, srcVideoId }) => {
+        console.warn(
+          '[DIAG][SHORTS_OWNERSHIP]',
+          'action=drop_request_item_src_videoid_mismatch',
+          'requestId=' + requestId,
+          'itemId=' + item.itemId,
+          'sourceType=' + String(item.sourceType || 'unknown'),
+          'requestVideoId=' + requestVideoId,
+          'srcVideoId=' + srcVideoId,
+          'src=' + String(item.src || '').substring(0, 180),
+          'url=' + (activeUrl || 'unknown'),
+        );
+        console.log(
+          '[DIAG][SHORTS_SCAN] skip',
+          'reason=source_videoid_mismatch',
+          'itemId=' + item.itemId,
+          'src=' + String(item.src || '').substring(0, 180),
+          'sourceType=' + String(item.sourceType || 'unknown'),
+        );
+      });
+      console.log(
+        '[DIAG][SHORTS_OWNERSHIP]',
+        'action=request_filter_summary',
+        'requestId=' + requestId,
+        'kept=' + scanItems.length,
+        'dropped=' + droppedItemsBySourceOwnership.length,
+        'requestVideoId=' + requestVideoId,
+      );
+    }
+
     const startTime = performance.now();
     const scanBatchStartTs = Date.now();
     if (stickyShortsMode) {
       console.log(
         '[DIAG][SHORTS_SCAN] scanBatch_start',
         'requestId=' + requestId,
-        'itemCount=' + items.length,
+        'itemCount=' + scanItems.length,
+        'droppedByOwnership=' + droppedItemsBySourceOwnership.length,
         'videoId=' + (requestVideoId || 'none'),
       );
       const previousStart = shortsScanDiagRef.current.lastScanBatchStartAt;
@@ -1848,7 +1920,8 @@ export const NativeWebViewBrowser = () => {
     console.log(
       '[MW-Host] request received',
       requestId,
-      'items=' + items.length,
+      'items=' + scanItems.length,
+      'droppedByOwnership=' + droppedItemsBySourceOwnership.length,
       'epoch=' + (requestEpoch ?? 'n/a'),
       'videoId=' + (requestVideoId || 'none'),
     );
@@ -1869,13 +1942,18 @@ export const NativeWebViewBrowser = () => {
         );
       }
     }
-    items.forEach(item => {
+    scanItems.forEach(item => {
       console.log('[MW-Host]   -', item.itemId, '[' + item.sourceType + ']:', item.src.substring(0, 60));
     });
     
-    console.log('[MW-Host] calling scanBatch', requestId, 'itemCount=' + items.length);
+    console.log(
+      '[MW-Host] calling scanBatch',
+      requestId,
+      'itemCount=' + scanItems.length,
+      'droppedByOwnership=' + droppedItemsBySourceOwnership.length,
+    );
     
-    const results: Array<{
+    let results: Array<{
       itemId: string;
       src: string;
       shouldBlur: boolean;
@@ -1891,10 +1969,23 @@ export const NativeWebViewBrowser = () => {
       host?: string;
       ts?: number;
       diagnostics?: Record<string, unknown>;
-    }> = [];
+    }> = droppedItemsBySourceOwnership.map(({ item, srcVideoId }) => ({
+      itemId: item.itemId,
+      src: item.src,
+      shouldBlur: false,
+      category: 'safe_videoid_src_mismatch',
+      confidence: 0,
+      severity: 'safe' as ModerationSeverity,
+      diagnostics: {
+        ownershipGuard: 'request_src_videoid_mismatch',
+        requestVideoId,
+        srcVideoId,
+        sourceType: item.sourceType || 'unknown',
+      },
+    }));
     
     // Process each item using the moderation bridge
-    for (const item of items) {
+    for (const item of scanItems) {
       try {
         const scanResult = await moderationBridge.scanImage(item.src, thresholds, {
           requestId,
@@ -1955,6 +2046,49 @@ export const NativeWebViewBrowser = () => {
         });
       }
     }
+
+    if (shouldEnforceShortsSrcOwnership) {
+      results = results.map((result) => {
+        const srcVideoId = getYouTubeMediaVideoIdFromSrc(result.src);
+        if (!srcVideoId || srcVideoId === requestVideoId) return result;
+        if (
+          result.category === 'safe_videoid_src_mismatch' &&
+          result.shouldBlur === false
+        ) {
+          return result;
+        }
+        console.warn(
+          '[DIAG][SHORTS_OWNERSHIP]',
+          'action=sanitize_result_src_videoid_mismatch',
+          'requestId=' + requestId,
+          'itemId=' + result.itemId,
+          'requestVideoId=' + requestVideoId,
+          'srcVideoId=' + srcVideoId,
+          'src=' + String(result.src || '').substring(0, 180),
+          'url=' + (activeUrl || 'unknown'),
+        );
+        console.log(
+          '[DIAG][SHORTS_SCAN] skip',
+          'reason=result_source_videoid_mismatch',
+          'itemId=' + result.itemId,
+          'src=' + String(result.src || '').substring(0, 180),
+          'sourceType=result',
+        );
+        return {
+          ...result,
+          shouldBlur: false,
+          category: 'safe_videoid_src_mismatch',
+          confidence: 0,
+          severity: 'safe' as ModerationSeverity,
+          diagnostics: {
+            ...(result.diagnostics || {}),
+            ownershipGuard: 'result_src_videoid_mismatch',
+            requestVideoId,
+            srcVideoId,
+          },
+        };
+      });
+    }
     
     const elapsedMs = performance.now() - startTime;
     console.log('[MW-Host] scan complete', requestId, 'elapsed=' + elapsedMs.toFixed(0) + 'ms');
@@ -2014,7 +2148,8 @@ export const NativeWebViewBrowser = () => {
     const tinyDimensionThreshold = 80;
 
     const itemSizeById = new Map(request.items.map(item => [item.itemId, item]));
-    const eligibleResults = results.filter(item => {
+    const ownedResults = results.filter(item => item.category !== 'safe_videoid_src_mismatch');
+    const eligibleResults = ownedResults.filter(item => {
       const requestItem = itemSizeById.get(item.itemId);
       if (!requestItem) return true;
       const width = typeof requestItem.width === 'number' ? requestItem.width : 0;
@@ -2022,8 +2157,8 @@ export const NativeWebViewBrowser = () => {
       if (width <= 0 || height <= 0) return true;
       return width >= tinyDimensionThreshold && height >= tinyDimensionThreshold;
     });
-    const denominator = eligibleResults.length > 0 ? eligibleResults.length : results.length;
-    const tinyExcludedCount = Math.max(results.length - eligibleResults.length, 0);
+    const denominator = eligibleResults.length > 0 ? eligibleResults.length : ownedResults.length;
+    const tinyExcludedCount = Math.max(ownedResults.length - eligibleResults.length, 0);
     if (stickyShortsMode && tinyExcludedCount > 0) {
       console.log(
         '[DIAG][SHORTS_SCAN] skip',
@@ -2072,7 +2207,7 @@ export const NativeWebViewBrowser = () => {
         }
       })();
       console.log(
-        `[MW-Host][ScanSummary] url=${shortUrl} req=${requestId} total=${results.length} eligible=${denominator} tinyExcluded=${tinyExcludedCount} hardHits=${hardStrongHits.length} softHits=${softQualifiedHits.length} safeHits=${Math.max(denominator - hardStrongHits.length - softQualifiedHits.length, 0)} hardMax=${hardUnsafeMaxConf.toFixed(3)} softMax=${softQualifiedHits.reduce((max, item) => Math.max(max, item.confidence), 0).toFixed(3)} softRatio=${softRatio.toFixed(3)} mode=${blurMode} decision=${overlayDecision ? 'ON' : 'OFF'} reason=${decisionReason}`
+        `[MW-Host][ScanSummary] url=${shortUrl} req=${requestId} total=${results.length} ownedTotal=${ownedResults.length} ownershipDropped=${droppedItemsBySourceOwnership.length} eligible=${denominator} tinyExcluded=${tinyExcludedCount} hardHits=${hardStrongHits.length} softHits=${softQualifiedHits.length} safeHits=${Math.max(denominator - hardStrongHits.length - softQualifiedHits.length, 0)} hardMax=${hardUnsafeMaxConf.toFixed(3)} softMax=${softQualifiedHits.reduce((max, item) => Math.max(max, item.confidence), 0).toFixed(3)} softRatio=${softRatio.toFixed(3)} mode=${blurMode} decision=${overlayDecision ? 'ON' : 'OFF'} reason=${decisionReason}`
       );
     }
 
@@ -2770,7 +2905,7 @@ export const NativeWebViewBrowser = () => {
         const shouldSelfDisableNonShortsLegacyPoll =
           isNonShortsYouTubeContext &&
           lastPollStatus === 'EMPTY' &&
-          lastEmptyPollReason === 'queue_empty' &&
+          LEGACY_EMPTY_REASONS.has(lastEmptyPollReason) &&
           lastProducerMode === 'disabled';
         if (shouldSelfDisableNonShortsLegacyPoll) {
           legacyPollSelfDisabledContextRef.current = pollContextKey;
