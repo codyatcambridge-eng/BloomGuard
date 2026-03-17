@@ -577,12 +577,18 @@ export function generateModerationScript(config: InjectionConfig): string {
   function sendBlurReady(reason) {
     if (!DOM_OVERLAY_ENABLED) return;
     const readyReason = reason || 'ready';
+    const readyPageEpoch = Number.isFinite(window.__MW_HOST_PAGE_EPOCH__)
+      ? Number(window.__MW_HOST_PAGE_EPOCH__)
+      : (Number.isFinite(CONFIG.pageEpoch) ? Number(CONFIG.pageEpoch) : null);
+    const readyHostNavId = Number.isFinite(window.__MW_HOST_NAV_ID__)
+      ? Number(window.__MW_HOST_NAV_ID__)
+      : null;
     const shortsUrlId = getCurrentShortsUrlId() || 'none';
     logShortsProbe(
       'mw_blur_ready_emit',
       'reason=' + readyReason +
       ' navId=' + String(window.__MW_NAV_ID__ || 'none') +
-      ' pageEpoch=' + (Number.isFinite(CONFIG.pageEpoch) ? CONFIG.pageEpoch : 'none') +
+      ' pageEpoch=' + (readyPageEpoch === null ? 'none' : readyPageEpoch) +
       ' hostPageEpoch=' + String(window.__MW_HOST_PAGE_EPOCH__ || 'none') +
       ' shortsUrlId=' + shortsUrlId
     );
@@ -590,6 +596,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       type: 'MW_BLUR_READY',
       reason: readyReason,
       url: window.location.href,
+      navId: window.__MW_NAV_ID__ || 'none',
+      hostNavId: readyHostNavId,
+      pageEpoch: readyPageEpoch,
       timestamp: Date.now(),
     });
   }
@@ -1362,7 +1371,11 @@ export function generateModerationScript(config: InjectionConfig): string {
     try {
       var parsed = new URL(value, window.location.href);
       var host = String(parsed.hostname || '').toLowerCase();
-      return (host === 'youtube.com' || host === 'www.youtube.com' || host === 'm.youtube.com') && parsed.pathname.indexOf('/shorts') === 0;
+      var path = String(parsed.pathname || '').toLowerCase();
+      return (
+        (host === 'youtube.com' || host === 'www.youtube.com' || host === 'm.youtube.com') &&
+        /(^|[/])shorts([/]|$)/.test(path)
+      );
     } catch (e) {
       return false;
     }
@@ -1373,7 +1386,8 @@ export function generateModerationScript(config: InjectionConfig): string {
     try {
       var parsed = new URL(value, window.location.href);
       var host = String(parsed.hostname || '').toLowerCase();
-      return host === 'm.youtube.com' && parsed.pathname.indexOf('/shorts') === 0;
+      var path = String(parsed.pathname || '').toLowerCase();
+      return host === 'm.youtube.com' && /(^|[/])shorts([/]|$)/.test(path);
     } catch (e) {
       return false;
     }
@@ -5118,7 +5132,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       const expectedNoncePrefix = String(CONFIG.nonce || '').substring(0, 6);
       const receivedNoncePrefix = String(nonce || 'none').substring(0, 6);
       const stickyShortsMode = isYouTubeShortsUrl(window.location.href);
-      const relaxedYouTubeEpochMode = isYouTubeDomainUrl(window.location.href);
+      const relaxedYouTubeEpochMode = isYouTubeDomainUrl(window.location.href) && !stickyShortsMode;
       const requestIdLabel = typeof requestId === 'string' ? requestId : 'none';
       const resultCount = Array.isArray(results) ? results.length : 0;
       const itemIdsPreview = Array.isArray(results)
@@ -5140,6 +5154,9 @@ export function generateModerationScript(config: InjectionConfig): string {
         ' shortsUrlId=' + (getCurrentShortsUrlId() || 'none')
       );
       if (resultEpoch !== null && resultEpoch !== state.pageEpoch && !relaxedYouTubeEpochMode) {
+        const rejectReason = stickyShortsMode
+          ? 'result_epoch_mismatch_shorts_strict'
+          : 'result_epoch_mismatch_non_youtube';
         epochBypassState = 'blocked_non_youtube';
         logShortsProbe(
           'result_epoch_gate',
@@ -5152,7 +5169,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         diagEpochBypassCounters.epoch_bypass_blocked += 1;
         diagLogEpochBypass(
           'epoch_bypass_blocked',
-          'result_epoch_mismatch_non_youtube',
+          rejectReason,
           resultEpoch,
           state.pageEpoch,
           window.location.href
