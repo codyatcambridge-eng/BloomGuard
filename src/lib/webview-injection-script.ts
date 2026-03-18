@@ -720,7 +720,9 @@ export function generateModerationScript(config: InjectionConfig): string {
   // ==================== STATE MANAGEMENT ====================
   
   const state = {
-    pageEpoch: Number.isFinite(CONFIG.pageEpoch) ? Number(CONFIG.pageEpoch) : 1,
+    pageEpoch: Number.isFinite(window.__MW_HOST_PAGE_EPOCH__)
+      ? Number(window.__MW_HOST_PAGE_EPOCH__)
+      : (Number.isFinite(CONFIG.pageEpoch) ? Number(CONFIG.pageEpoch) : 1),
     scanned: new Set(),
     pending: new Map(), // itemId -> { element, src, sourceType, requestId, timestamp, state, blurTimer }
     pendingBySrc: new Map(), // src -> itemId (dedupe)
@@ -893,7 +895,12 @@ export function generateModerationScript(config: InjectionConfig): string {
   // Batch queue for collecting items before sending request
   let batchQueue = [];
   let batchTimer = null;
-  const NAV_ID = window.__MW_NAV_ID__ || ('mw_' + Date.now().toString(36));
+  const initialHostNavId = Number.isFinite(window.__MW_HOST_NAV_ID__)
+    ? Number(window.__MW_HOST_NAV_ID__)
+    : null;
+  let NAV_ID = initialHostNavId !== null
+    ? initialHostNavId
+    : (window.__MW_NAV_ID__ || ('mw_' + Date.now().toString(36)));
   window.__MW_NAV_ID__ = NAV_ID;
   const NONCE_PREFIX = String(CONFIG.nonce || '').substring(0, 6);
   postToHost({
@@ -1163,6 +1170,118 @@ export function generateModerationScript(config: InjectionConfig): string {
     });
     toClear.forEach(function(itemId) { clearPendingItem(itemId, reason || 'disconnected'); });
   }
+
+  function readHostContextIdentity() {
+    const hostNavId = Number.isFinite(window.__MW_HOST_NAV_ID__)
+      ? Number(window.__MW_HOST_NAV_ID__)
+      : null;
+    const hostPageEpoch = Number.isFinite(window.__MW_HOST_PAGE_EPOCH__)
+      ? Number(window.__MW_HOST_PAGE_EPOCH__)
+      : null;
+    return {
+      hostNavId: hostNavId,
+      hostPageEpoch: hostPageEpoch,
+    };
+  }
+
+  function resetTransientModerationState(reason, options) {
+    const opts = options || {};
+    if (batchTimer) {
+      clearTimeout(batchTimer);
+      batchTimer = null;
+    }
+    if (mutationScanTimer) {
+      clearTimeout(mutationScanTimer);
+      mutationScanTimer = null;
+    }
+    mutationScanQueue.length = 0;
+    mutationScanSet.clear();
+    batchQueue = [];
+    state.pendingRequests.forEach(function(req) {
+      if (req && req.timeoutId) clearTimeout(req.timeoutId);
+    });
+    state.pendingRequests.clear();
+    state.pending.forEach(function(_item, itemId) {
+      clearPendingItem(itemId, reason || 'context_sync_reset');
+    });
+    state.pendingBySrc.clear();
+    diagScanBatchStartAtByRequestId.clear();
+    if (opts.clearScanState === true) {
+      state.scanned.clear();
+      state.elements.clear();
+    }
+  }
+
+  function syncActiveContextFromHost(reason, options) {
+    const opts = options || {};
+    const identity = readHostContextIdentity();
+    const previousNavId = NAV_ID;
+    const previousPageEpoch = state.pageEpoch;
+    let navChanged = false;
+    let epochChanged = false;
+
+    if (identity.hostNavId !== null && String(identity.hostNavId) !== String(NAV_ID)) {
+      NAV_ID = identity.hostNavId;
+      window.__MW_NAV_ID__ = NAV_ID;
+      navChanged = true;
+    }
+
+    if (identity.hostPageEpoch !== null && identity.hostPageEpoch !== state.pageEpoch) {
+      state.pageEpoch = identity.hostPageEpoch;
+      CONFIG.pageEpoch = identity.hostPageEpoch;
+      epochChanged = true;
+    }
+
+    const contextChanged = navChanged || epochChanged;
+    if (contextChanged && opts.resetTransientState !== false) {
+      resetTransientModerationState('host_context_sync_' + (reason || 'unknown'), {
+        clearScanState: opts.clearScanState === true,
+      });
+    }
+
+    if (contextChanged) {
+      console.log(
+        '[DIAG][HOST_CONTEXT_SYNC]',
+        'action=applied',
+        'reason=' + (reason || 'unknown'),
+        'oldNavId=' + String(previousNavId || 'none'),
+        'newNavId=' + String(NAV_ID || 'none'),
+        'oldPageEpoch=' + String(previousPageEpoch || 'none'),
+        'newPageEpoch=' + String(state.pageEpoch || 'none'),
+        'hostNavId=' + String(identity.hostNavId === null ? 'none' : identity.hostNavId),
+        'hostPageEpoch=' + String(identity.hostPageEpoch === null ? 'none' : identity.hostPageEpoch),
+        'url=' + window.location.href
+      );
+    }
+
+    return {
+      contextChanged: contextChanged,
+      navChanged: navChanged,
+      epochChanged: epochChanged,
+      hostNavId: identity.hostNavId,
+      hostPageEpoch: identity.hostPageEpoch,
+    };
+  }
+
+  window.__MW_ACTIVE_CONTEXT_API__ = {
+    applyHostContextSync: function(reason) {
+      return syncActiveContextFromHost(reason || 'host_api', {
+        resetTransientState: true,
+        clearScanState: true,
+      });
+    },
+    getContext: function() {
+      const identity = readHostContextIdentity();
+      return {
+        navId: NAV_ID,
+        pageEpoch: state.pageEpoch,
+        hostNavId: identity.hostNavId,
+        hostPageEpoch: identity.hostPageEpoch,
+      };
+    },
+  };
+
+  syncActiveContextFromHost('inject_bootstrap', { resetTransientState: false });
 
   function resetBlurState(reason) {
     state.pending.forEach(function(_item, itemId) {
@@ -4951,6 +5070,25 @@ export function generateModerationScript(config: InjectionConfig): string {
    */
   function sendModerationRequest(items) {
     if (items.length === 0) return;
+    const contextSync = syncActiveContextFromHost('request_preflight', {
+      resetTransientState: true,
+      clearScanState: false,
+    });
+    if (contextSync.contextChanged) {
+      if (isShortsModeActive()) {
+        logShortsScanSkip('context_resync_drop_batch', null, 'request_batch', 'preflight');
+      }
+      items.forEach(function(item) {
+        if (item && item.itemId) {
+          clearPendingItem(item.itemId, 'context_resync_drop_batch');
+        }
+      });
+      scheduleInitTimeout('contextResyncFullScan', scanFullPage, 80);
+      if (isYouTube()) {
+        scheduleYouTubeScan('context_resync_preflight');
+      }
+      return;
+    }
     
     const requestId = generateRequestId();
     const timestamp = Date.now();
@@ -7115,8 +7253,14 @@ export function generateModerationScript(config: InjectionConfig): string {
       });
       lastUrl = nextUrl;
       const holdEpoch = isYouTubeShortsUrl(previousUrl) && isYouTubeShortsUrl(nextUrl);
-      if (!holdEpoch) {
+      const hostContextSync = syncActiveContextFromHost('url_change_detected', {
+        resetTransientState: true,
+        clearScanState: false,
+      });
+      const hostEpochAuthoritative = hostContextSync.hostPageEpoch !== null;
+      if (!holdEpoch && !hostEpochAuthoritative) {
         state.pageEpoch += 1;
+        CONFIG.pageEpoch = state.pageEpoch;
         if (CONFIG.debug) {
           console.log('[MW][Epoch] incremented pageEpoch=' + state.pageEpoch);
         }
@@ -7131,6 +7275,17 @@ export function generateModerationScript(config: InjectionConfig): string {
             'nextUrl=' + nextUrl
           );
         }
+      } else if (!holdEpoch && hostEpochAuthoritative && DIAG_YT_BLUR) {
+        diagEpochCounters.epochHeldCount += 1;
+        console.log(
+          '[MW-YT][DIAG][EPOCH][INJECT]',
+          'action=epoch_host_authoritative',
+          'count=' + diagEpochCounters.epochHeldCount,
+          'pageEpoch=' + state.pageEpoch,
+          'hostPageEpoch=' + hostContextSync.hostPageEpoch,
+          'prevUrl=' + previousUrl,
+          'nextUrl=' + nextUrl
+        );
       } else if (DIAG_YT_BLUR) {
         diagEpochCounters.epochHeldCount += 1;
         console.log(
@@ -7161,23 +7316,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         scheduleYouTubeScan('url_change_mode_on');
       }
 
-      if (batchTimer) {
-        clearTimeout(batchTimer);
-        batchTimer = null;
-      }
-      if (mutationScanTimer) {
-        clearTimeout(mutationScanTimer);
-        mutationScanTimer = null;
-      }
-      mutationScanQueue.length = 0;
-      mutationScanSet.clear();
-      batchQueue = [];
-      state.pendingRequests.forEach(req => {
-        if (req && req.timeoutId) clearTimeout(req.timeoutId);
-      });
-      state.pendingRequests.clear();
-      state.pending.forEach((_item, itemId) => clearPendingItem(itemId, 'spa_epoch_reset'));
-      state.pendingBySrc.clear();
+      resetTransientModerationState('spa_epoch_reset');
       // Clear scanned state for fresh scan
       state.scanned.clear();
       state.elements.clear();
@@ -7285,6 +7424,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     });
     state.mutationObservers = [];
     window.__MW_ACTIVE__ = false;
+    window.__MW_ACTIVE_CONTEXT_API__ = null;
   }
 
   document.addEventListener('visibilitychange', () => {

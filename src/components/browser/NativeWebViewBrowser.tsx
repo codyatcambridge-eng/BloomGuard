@@ -910,6 +910,14 @@ export const NativeWebViewBrowser = () => {
           window.__MW_ACTIVE_INSTANCE_ID__ = ${activeInstanceId === null ? 'null' : String(activeInstanceId)};
           window.__MW_HOST_NAV_ID__ = ${navId};
           window.__MW_HOST_PAGE_EPOCH__ = ${webViewPageEpochRef.current};
+          if (
+            window.__MW_ACTIVE_CONTEXT_API__ &&
+            typeof window.__MW_ACTIVE_CONTEXT_API__.applyHostContextSync === 'function'
+          ) {
+            try {
+              window.__MW_ACTIVE_CONTEXT_API__.applyHostContextSync('host_context_sync');
+            } catch (contextSyncError) {}
+          }
           return 'OK';
         } catch (e) {
           return 'ERR';
