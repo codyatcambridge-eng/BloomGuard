@@ -300,11 +300,14 @@ export const NativeWebViewBrowser = () => {
     at: 0,
   });
   const legacyPollSelfDisabledContextRef = useRef<string | null>(null);
+  const shortsRelatedLegacyPollContextRef = useRef<string | null>(null);
   const [shortsLegacyFallbackVersion, setShortsLegacyFallbackVersion] = useState(0);
+  const [shortsRelatedLegacyPollVersion, setShortsRelatedLegacyPollVersion] = useState(0);
 
   const UNSAFE_STREAK_REQUIRED = 2;
   const SAFE_STREAK_REQUIRED = 2;
   const PENDING_REINJECT_WINDOW_MS = 1500;
+  const SHORTS_NAV_GRACE_MS = 200;
   const isDebugMode = localSettings.debug_mode === true;
   const debugLog = useCallback((...args: unknown[]) => {
     if (!isDebugMode) return;
@@ -760,6 +763,7 @@ export const NativeWebViewBrowser = () => {
       );
     navigationSeqRef.current += 1;
     activeNavIdRef.current = navigationSeqRef.current;
+    shortsRelatedLegacyPollContextRef.current = null;
     if (!holdEpoch || previousEpoch <= 0) {
       webViewPageEpochRef.current = activeNavIdRef.current;
       if (isDiagYtBlurEnabledForUrl(url || previousUrl)) {
@@ -1186,7 +1190,25 @@ export const NativeWebViewBrowser = () => {
       messageFromWebViewHandlerRef.current?.(payload);
     },
     onActiveInstanceIdChange: (activeInstanceId) => {
+      const previousInstanceId = webViewActiveInstanceIdRef.current;
       webViewActiveInstanceIdRef.current = activeInstanceId;
+      if (previousInstanceId === activeInstanceId) return;
+      blurReadyRef.current = false;
+      blurReadyBurstRef.current = {
+        navId: 0,
+        pageEpoch: 0,
+        url: '',
+        at: 0,
+      };
+      queueCurrentBlurState('active_instance_id_change');
+      console.log(
+        '[DIAG][BLUR_READY_GATE]',
+        'action=instance_change_reset',
+        'prevActiveInstanceId=' + (previousInstanceId ?? 'none'),
+        'nextActiveInstanceId=' + (activeInstanceId ?? 'none'),
+        'navId=' + (activeNavIdRef.current || 0),
+        'url=' + (currentUrlRef.current || 'unknown'),
+      );
     },
     getListenerDiagContext: getWebViewListenerDiagContext,
   });
@@ -1717,7 +1739,8 @@ export const NativeWebViewBrowser = () => {
     const activeEpoch = webViewPageEpochRef.current;
     const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
     const stickyShortsMode = isYouTubeShortsUrl(activeUrl);
-    const relaxedYouTubeEpochMode = isYouTubeDomainUrl(activeUrl) && !stickyShortsMode;
+    const stickyShortsRelatedMode = getUrlFamily(activeUrl) === 'youtube_shorts_related';
+    const relaxedYouTubeEpochMode = isYouTubeDomainUrl(activeUrl) && !stickyShortsMode && !stickyShortsRelatedMode;
     
     if (pendingRequestsRef.current.has(requestId)) {
       console.log('[MW-Host] Duplicate request ignored:', requestId);
@@ -1728,6 +1751,8 @@ export const NativeWebViewBrowser = () => {
     if (requestEpoch !== null && requestEpoch !== activeEpoch && !relaxedYouTubeEpochMode) {
       const rejectReason = stickyShortsMode
         ? 'request_epoch_mismatch_shorts_strict'
+        : stickyShortsRelatedMode
+          ? 'request_epoch_mismatch_shorts_related_strict'
         : 'request_epoch_mismatch_non_youtube';
       console.warn(
         '[DIAG][EPOCH_BYPASS]',
@@ -2161,6 +2186,28 @@ export const NativeWebViewBrowser = () => {
       if (!message || typeof message !== 'object') return;
 
       const typedMessage = message as Record<string, unknown>;
+      const markShortsRelatedLegacyPollContextReady = (
+        reason: string,
+        activeUrl: string,
+        activeEpoch: number,
+        messageEpoch: number | null,
+      ) => {
+        if (getUrlFamily(activeUrl) !== 'youtube_shorts_related') return;
+        if (messageEpoch === null || messageEpoch !== activeEpoch) return;
+        const contextKey = String(activeNavIdRef.current) + ':' + String(activeEpoch);
+        if (shortsRelatedLegacyPollContextRef.current === contextKey) return;
+        shortsRelatedLegacyPollContextRef.current = contextKey;
+        console.log(
+          '[DIAG][LEGACY_POLL_GATE]',
+          'action=context_ready',
+          'reason=' + reason,
+          'navId=' + activeNavIdRef.current,
+          'pageEpoch=' + activeEpoch,
+          'url=' + (activeUrl || 'unknown'),
+          'source=' + source,
+        );
+        setShortsRelatedLegacyPollVersion(v => v + 1);
+      };
       if (typedMessage.type === 'MW_INJECTED_ACK') {
         console.log(
           '[MW-Host][ACK] MW_INJECTED_ACK',
@@ -2186,6 +2233,7 @@ export const NativeWebViewBrowser = () => {
           typeof typedMessage.pageEpoch === 'number' && Number.isFinite(typedMessage.pageEpoch)
         ) ? Number(typedMessage.pageEpoch) : null;
         const isActiveEpochMessage = messageEpoch === null || messageEpoch === activeEpoch;
+        markShortsRelatedLegacyPollContextReady('mw_req_sent', activeUrl, activeEpoch, messageEpoch);
         if (isYouTubeShortsUrl(activeUrl) && isActiveEpochMessage) {
           shortsLegacyFallbackRef.current.lastReqSentAt = Date.now();
           disarmShortsLegacyFallbackProbe('req_sent');
@@ -2243,9 +2291,11 @@ export const NativeWebViewBrowser = () => {
       }
 
       if (ENABLE_DOM_BLUR && isBlurOverlayReadyMessage(message)) {
+        const now = Date.now();
         const activeNavId = activeNavIdRef.current || 0;
         const activeEpoch = webViewPageEpochRef.current || 0;
         const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
+        const activeUrlFamily = getUrlFamily(activeUrl);
         const readyEpoch = (
           typeof typedMessage.pageEpoch === 'number' && Number.isFinite(typedMessage.pageEpoch)
         ) ? Number(typedMessage.pageEpoch) : null;
@@ -2254,8 +2304,34 @@ export const NativeWebViewBrowser = () => {
         ) ? Number(typedMessage.hostNavId) : null;
         const readyReason = String(typedMessage.reason || 'ready');
         const readyUrl = String(typedMessage.url || activeUrl || 'unknown');
+        const readyTimestamp = (
+          typeof typedMessage.timestamp === 'number' && Number.isFinite(typedMessage.timestamp)
+        ) ? Number(typedMessage.timestamp) : null;
+        const readySignalAgeMs = readyTimestamp === null ? null : (now - readyTimestamp);
+        const withinShortsNavGrace =
+          activeUrlFamily === 'youtube_shorts' &&
+          readyHostNavId !== null &&
+          readyHostNavId === (activeNavId - 1) &&
+          readySignalAgeMs !== null &&
+          readySignalAgeMs >= 0 &&
+          readySignalAgeMs <= SHORTS_NAV_GRACE_MS;
         const staleEpoch = readyEpoch !== null && readyEpoch !== activeEpoch;
-        const staleNav = readyHostNavId !== null && readyHostNavId !== activeNavId;
+        const staleNav =
+          readyHostNavId !== null &&
+          readyHostNavId !== activeNavId &&
+          !withinShortsNavGrace;
+        if (withinShortsNavGrace) {
+          console.log(
+            '[DIAG][BLUR_READY_GATE]',
+            'action=shorts_nav_grace_accept',
+            'reason=' + readyReason,
+            'messageHostNavId=' + (readyHostNavId ?? 'none'),
+            'activeNavId=' + activeNavId,
+            'signalAgeMs=' + (readySignalAgeMs ?? 'none'),
+            'graceMs=' + SHORTS_NAV_GRACE_MS,
+            'url=' + readyUrl,
+          );
+        }
         if (staleEpoch || staleNav) {
           console.log(
             '[DIAG][BLUR_READY_GATE]',
@@ -2265,11 +2341,16 @@ export const NativeWebViewBrowser = () => {
             'activeEpoch=' + activeEpoch,
             'messageHostNavId=' + (readyHostNavId ?? 'none'),
             'activeNavId=' + activeNavId,
+            'messageTimestamp=' + (readyTimestamp ?? 'none'),
+            'signalAgeMs=' + (readySignalAgeMs ?? 'none'),
+            'withinShortsNavGrace=' + withinShortsNavGrace,
+            'shortsGraceMs=' + SHORTS_NAV_GRACE_MS,
+            'staleEpoch=' + staleEpoch,
+            'staleNav=' + staleNav,
             'url=' + readyUrl,
           );
           return;
         }
-        const now = Date.now();
         const lastReady = blurReadyBurstRef.current;
         const duplicateBurst = (
           blurReadyRef.current &&
@@ -2325,6 +2406,7 @@ export const NativeWebViewBrowser = () => {
           typeof message.pageEpoch === 'number' && Number.isFinite(message.pageEpoch)
         ) ? Number(message.pageEpoch) : null;
         const isActiveEpochMessage = messageEpoch === null || messageEpoch === activeEpoch;
+        markShortsRelatedLegacyPollContextReady('request_received', activeUrl, activeEpoch, messageEpoch);
         if (isYouTubeShortsUrl(activeUrl) && isActiveEpochMessage) {
           shortsLegacyFallbackRef.current.lastReqSentAt = Date.now();
           disarmShortsLegacyFallbackProbe('request_received');
@@ -2429,8 +2511,22 @@ export const NativeWebViewBrowser = () => {
       return;
     }
     const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
-    const stickyShortsMode = isYouTubeShortsUrl(activeUrl);
+    const activeUrlFamily = getUrlFamily(activeUrl);
+    const stickyShortsMode = activeUrlFamily === 'youtube_shorts';
+    const isShortsRelatedContext = activeUrlFamily === 'youtube_shorts_related';
     const isNonShortsYouTubeContext = isYouTubeDomainUrl(activeUrl) && !stickyShortsMode;
+    const activeContextKey = String(activeNavIdRef.current) + ':' + String(webViewPageEpochRef.current);
+    if (isShortsRelatedContext && shortsRelatedLegacyPollContextRef.current !== activeContextKey) {
+      console.log(
+        '[DIAG][LEGACY_POLL_GATE]',
+        'action=defer',
+        'reason=shorts_related_waiting_fresh_context',
+        'navId=' + activeNavIdRef.current,
+        'pageEpoch=' + webViewPageEpochRef.current,
+        'url=' + (activeUrl || 'unknown'),
+      );
+      return;
+    }
     const pollContextKey = String(activeNavIdRef.current) + ':' + getUrlFamily(activeUrl);
     if (isNonShortsYouTubeContext && legacyPollSelfDisabledContextRef.current === pollContextKey) {
       return;
@@ -2873,6 +2969,7 @@ export const NativeWebViewBrowser = () => {
     localSettings.blur_strength_px,
     webViewState.currentUrl,
     shortsLegacyFallbackVersion,
+    shortsRelatedLegacyPollVersion,
   ]);
 
   /**

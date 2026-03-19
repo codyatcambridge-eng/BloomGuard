@@ -583,22 +583,33 @@ export function generateModerationScript(config: InjectionConfig): string {
     const readyHostNavId = Number.isFinite(window.__MW_HOST_NAV_ID__)
       ? Number(window.__MW_HOST_NAV_ID__)
       : null;
-    const shortsUrlId = getCurrentShortsUrlId() || 'none';
+    const readyActiveInstanceId = Number.isFinite(window.__MW_ACTIVE_INSTANCE_ID__)
+      ? Number(window.__MW_ACTIVE_INSTANCE_ID__)
+      : null;
+    const shortsVideoId = getCurrentShortsUrlId() || 'none';
+    const currentNavId = String(window.__MW_NAV_ID__ || 'none');
+    const sovereignId = currentNavId +
+      '|' + String(readyPageEpoch === null ? 'none' : readyPageEpoch) +
+      '|' + shortsVideoId;
     logShortsProbe(
       'mw_blur_ready_emit',
       'reason=' + readyReason +
-      ' navId=' + String(window.__MW_NAV_ID__ || 'none') +
+      ' navId=' + currentNavId +
       ' pageEpoch=' + (readyPageEpoch === null ? 'none' : readyPageEpoch) +
       ' hostPageEpoch=' + String(window.__MW_HOST_PAGE_EPOCH__ || 'none') +
-      ' shortsUrlId=' + shortsUrlId
+      ' shortsUrlId=' + shortsVideoId +
+      ' sovereignId=' + sovereignId
     );
     postToHost({
       type: 'MW_BLUR_READY',
       reason: readyReason,
       url: window.location.href,
-      navId: window.__MW_NAV_ID__ || 'none',
+      navId: currentNavId,
       hostNavId: readyHostNavId,
       pageEpoch: readyPageEpoch,
+      hostActiveInstanceId: readyActiveInstanceId,
+      shortsUrlId: shortsVideoId,
+      sovereignId: sovereignId,
       timestamp: Date.now(),
     });
   }
@@ -1406,6 +1417,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   const SHORTS_REENTRY_REFRESH_COOLDOWN_MS = 1200;
   const ADAPTIVE_SHORTS_RESCAN_DEBOUNCE_MS = 140;
   const ADAPTIVE_SHORTS_RESCAN_COOLDOWN_MS = 700;
+  const SHORTS_ANCHOR_SYNC_COOLDOWN_MS = 80;
   const ADAPTIVE_SHORTS_WATCH_ATTRIBUTE_FILTER = [
     'class',
     'style',
@@ -1421,6 +1433,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     'data-id',
     'data-index',
   ];
+  const SHORTS_ANCHOR_ATTRIBUTE_FILTER = [
+    'v',
+    'data-video-id',
+  ];
   let shortsBlurContextByContainer = new WeakMap();
   let shortsBlurContextCount = 0;
   let shortsHealthStateByContainer = new WeakMap();
@@ -1434,6 +1450,13 @@ export function generateModerationScript(config: InjectionConfig): string {
     lastRescanIdentity: '',
     lastRescanAt: 0,
     active: false,
+  };
+  const shortsAnchorObserverState = {
+    observer: null,
+    rootNode: null,
+    rootNodeId: 'none',
+    lastSignature: '',
+    lastSyncAt: 0,
   };
   const shortsReentryState = {
     lastRefreshAt: 0,
@@ -2146,6 +2169,163 @@ export function generateModerationScript(config: InjectionConfig): string {
       force: true,
       immediate: true,
     });
+    return true;
+  }
+
+  function stopShortsAnchorObserver(reason) {
+    const hadObserver = !!shortsAnchorObserverState.observer;
+    if (shortsAnchorObserverState.observer) {
+      try { shortsAnchorObserverState.observer.disconnect(); } catch (e) {}
+      shortsAnchorObserverState.observer = null;
+    }
+    shortsAnchorObserverState.rootNode = null;
+    shortsAnchorObserverState.rootNodeId = 'none';
+    shortsAnchorObserverState.lastSignature = '';
+    shortsAnchorObserverState.lastSyncAt = 0;
+    if (hadObserver) {
+      logShortsProbe(
+        'shorts_anchor_observer_stop',
+        'reason=' + (reason || 'unknown')
+      );
+    }
+  }
+
+  function resolveShortsAnchorRoot() {
+    const shortsContainer = document.getElementById('shorts-container');
+    if (shortsContainer && shortsContainer.isConnected) return shortsContainer;
+    const shortsPlayer = document.getElementById('shorts-player');
+    if (shortsPlayer && shortsPlayer.isConnected) return shortsPlayer;
+    const activeRenderer = document.querySelector(
+      'ytm-reel-video-renderer[selected], ytm-reel-video-renderer[is-active], ytm-reel-video-renderer[aria-hidden="false"]'
+    );
+    if (activeRenderer && activeRenderer.isConnected) return activeRenderer;
+    return null;
+  }
+
+  function readShortsAnchorSignature(root) {
+    const anchorRoot = (root && root.nodeType === 1) ? root : resolveShortsAnchorRoot();
+    if (!anchorRoot) return '';
+
+    const activeRenderer = (
+      anchorRoot.matches && anchorRoot.matches('ytm-reel-video-renderer')
+    )
+      ? anchorRoot
+      : (anchorRoot.querySelector &&
+          anchorRoot.querySelector(
+            'ytm-reel-video-renderer[selected], ytm-reel-video-renderer[is-active], ytm-reel-video-renderer[aria-hidden="false"]'
+          )) || null;
+    const reelRoot = activeRenderer || anchorRoot;
+    const attrV = reelRoot.getAttribute ? reelRoot.getAttribute('v') : '';
+    const dataVideoId = reelRoot.getAttribute ? reelRoot.getAttribute('data-video-id') : '';
+    const dataItemId = reelRoot.getAttribute ? reelRoot.getAttribute('data-item-id') : '';
+    const dataId = reelRoot.getAttribute ? reelRoot.getAttribute('data-id') : '';
+    const shortsUrlId = getCurrentShortsUrlId() || '';
+    let queryV = '';
+    try {
+      const parsed = new URL(window.location.href);
+      queryV = String(parsed.searchParams.get('v') || '');
+    } catch (e) {}
+    const resolvedId = attrV || dataVideoId || dataItemId || dataId || shortsUrlId || queryV || 'none';
+    return [
+      resolvedId,
+      shortsUrlId || 'none',
+      String(window.location.href || ''),
+      getDiagNodeId(reelRoot),
+    ].join('|');
+  }
+
+  function forceShortsAnchorIdentitySync(reason, details) {
+    const activeUrl = window.location.href;
+    if (!isYouTubeShortsUrl(activeUrl)) return;
+    if (!isShortsModeActive()) return;
+    const now = Date.now();
+    if ((now - shortsAnchorObserverState.lastSyncAt) < SHORTS_ANCHOR_SYNC_COOLDOWN_MS) return;
+    shortsAnchorObserverState.lastSyncAt = now;
+    const syncResult = syncActiveContextFromHost('shorts_anchor_observer:' + (reason || 'unknown'), {
+      resetTransientState: true,
+      clearScanState: false,
+    });
+    resetShortsBlurContext('shorts_anchor_observer');
+    refreshShortsFreshnessOnReentry('shorts_anchor_observer', { force: true, resetContext: false });
+    scheduleShortsRevealOverlayReposition('shorts_anchor_observer');
+    sendBlurReady('shorts_anchor_observer:' + (reason || 'unknown'));
+    logShortsProbe(
+      'shorts_anchor_identity_sync',
+      'reason=' + (reason || 'unknown') +
+      ' hostNavId=' + String(syncResult.hostNavId === null ? 'none' : syncResult.hostNavId) +
+      ' hostPageEpoch=' + String(syncResult.hostPageEpoch === null ? 'none' : syncResult.hostPageEpoch) +
+      ' details=' + String(details || '').substring(0, 180)
+    );
+  }
+
+  function installShortsAnchorObserver(reason) {
+    const activeUrl = window.location.href;
+    if (!isYouTubeShortsUrl(activeUrl)) {
+      stopShortsAnchorObserver('url_not_shorts:' + (reason || 'unknown'));
+      return false;
+    }
+    const host = String(window.location.hostname || '').toLowerCase();
+    if (host !== 'm.youtube.com') {
+      stopShortsAnchorObserver('host_not_mobile:' + (reason || 'unknown'));
+      return false;
+    }
+    if (!isShortsModeActive()) {
+      stopShortsAnchorObserver('not_shorts:' + (reason || 'unknown'));
+      return false;
+    }
+    const root = resolveShortsAnchorRoot();
+    if (!root || !root.isConnected) {
+      stopShortsAnchorObserver('no_root:' + (reason || 'unknown'));
+      return false;
+    }
+    if (shortsAnchorObserverState.observer && shortsAnchorObserverState.rootNode === root) {
+      return true;
+    }
+
+    stopShortsAnchorObserver('refresh:' + (reason || 'unknown'));
+    shortsAnchorObserverState.rootNode = root;
+    shortsAnchorObserverState.rootNodeId = getDiagNodeId(root);
+    shortsAnchorObserverState.lastSignature = readShortsAnchorSignature(root);
+
+    const observer = new MutationObserver(function(mutations) {
+      if (!isYouTubeShortsUrl(window.location.href)) return;
+      if (timerState.paused || timerState.teardownDone || !isShortsModeActive()) return;
+      const previousSignature = shortsAnchorObserverState.lastSignature || '';
+      let sawIdentityAttrChange = false;
+      for (let i = 0; i < mutations.length; i += 1) {
+        const mutation = mutations[i];
+        if (mutation.type !== 'attributes') continue;
+        const attrName = String(mutation.attributeName || '');
+        if (!attrName) continue;
+        if (attrName === 'v' || attrName === 'data-video-id') {
+          sawIdentityAttrChange = true;
+          break;
+        }
+      }
+      if (!sawIdentityAttrChange) return;
+      const nextSignature = readShortsAnchorSignature(shortsAnchorObserverState.rootNode || root);
+      if (nextSignature === previousSignature) return;
+      shortsAnchorObserverState.lastSignature = nextSignature;
+      forceShortsAnchorIdentitySync(
+        'identity_attr_change',
+        'prev=' + String(previousSignature || 'none').substring(0, 180) +
+        ' next=' + String(nextSignature || 'none').substring(0, 180)
+      );
+      scanActiveShortsPlayerContainer('shorts_anchor_observer');
+    });
+    observer.observe(root, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: SHORTS_ANCHOR_ATTRIBUTE_FILTER,
+    });
+    shortsAnchorObserverState.observer = observer;
+    logShortsProbe(
+      'shorts_anchor_observer_start',
+      'reason=' + (reason || 'unknown') +
+      ' rootNodeId=' + shortsAnchorObserverState.rootNodeId +
+      ' signature=' + String(shortsAnchorObserverState.lastSignature || 'none').substring(0, 180)
+    );
     return true;
   }
 
@@ -5285,7 +5465,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       const expectedNoncePrefix = String(CONFIG.nonce || '').substring(0, 6);
       const receivedNoncePrefix = String(nonce || 'none').substring(0, 6);
       const stickyShortsMode = isYouTubeShortsUrl(window.location.href);
-      const relaxedYouTubeEpochMode = isYouTubeDomainUrl(window.location.href) && !stickyShortsMode;
+      const stickyShortsRelatedMode = isYouTubeShortsRelatedUrl(window.location.href);
+      const relaxedYouTubeEpochMode = isYouTubeDomainUrl(window.location.href) && !stickyShortsMode && !stickyShortsRelatedMode;
       const requestIdLabel = typeof requestId === 'string' ? requestId : 'none';
       const resultCount = Array.isArray(results) ? results.length : 0;
       const itemIdsPreview = Array.isArray(results)
@@ -5309,6 +5490,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (resultEpoch !== null && resultEpoch !== state.pageEpoch && !relaxedYouTubeEpochMode) {
         const rejectReason = stickyShortsMode
           ? 'result_epoch_mismatch_shorts_strict'
+          : stickyShortsRelatedMode
+            ? 'result_epoch_mismatch_shorts_related_strict'
           : 'result_epoch_mismatch_non_youtube';
         epochBypassState = 'blocked_non_youtube';
         logShortsProbe(
@@ -7159,6 +7342,7 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   // Set up observers
   setupMutationObserver(document.body);
+  installShortsAnchorObserver('init');
   state.viewportObserver = setupViewportObserver();
   
   // YouTube-specific: Set up scroll handler for infinite scroll
@@ -7303,6 +7487,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         resetShortsBlurContext('url_change');
       }
       if (nextIsShorts) {
+        installShortsAnchorObserver('url_change');
         if (!previousIsShorts) {
           refreshShortsFreshnessOnReentry('url_change_return_to_shorts', { force: true, resetContext: false });
         } else {
@@ -7310,6 +7495,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         }
         scheduleShortsRevealOverlayReposition('url_change_shorts');
       } else {
+        stopShortsAnchorObserver('url_change_non_shorts');
         stopAdaptiveShortsOverlayWatch('url_change_non_shorts');
       }
       if (observerModeResult.transitioned && observerModeResult.mode) {
@@ -7334,6 +7520,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function stopManagedTimers(reason) {
+    stopShortsAnchorObserver('stopManagedTimers:' + (reason || 'unknown'));
     stopAdaptiveShortsOverlayWatch('stopManagedTimers:' + (reason || 'unknown'));
     clearNamedInterval('legacyResultsInterval', reason);
     clearNamedInterval('urlChangeInterval', reason);
@@ -7372,6 +7559,7 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function startManagedTimers(reason) {
     if (timerState.paused || timerState.teardownDone) return;
+    installShortsAnchorObserver('startManagedTimers:' + (reason || 'unknown'));
     refreshAdaptiveShortsOverlayWatch('startManagedTimers:' + (reason || 'unknown'));
     startLegacyResultsPoll(reason);
     startUrlChangePoll(reason);
@@ -7397,6 +7585,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (timerState.teardownDone) return;
     timerState.teardownDone = true;
     pauseManagedTimers(reason || 'teardown');
+    stopShortsAnchorObserver('teardown:' + (reason || 'unknown'));
     stopAdaptiveShortsOverlayWatch('teardown:' + (reason || 'unknown'));
     if (timerState.mainScrollHandler) {
       window.removeEventListener('scroll', timerState.mainScrollHandler);

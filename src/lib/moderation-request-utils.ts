@@ -151,6 +151,12 @@ export interface BlurOverlayReadyMessage {
   type: 'MW_BLUR_READY';
   url?: string;
   reason?: string;
+  navId?: string | number;
+  hostNavId?: number;
+  pageEpoch?: number;
+  hostActiveInstanceId?: number;
+  shortsUrlId?: string;
+  sovereignId?: string;
   timestamp: number;
 }
 
