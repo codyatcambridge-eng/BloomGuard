@@ -103,6 +103,18 @@ const isYouTubeShortsRelatedUrl = (value?: string) => {
   }
 };
 
+const getYouTubeShortsId = (value?: string): string => {
+  if (!value) return 'none';
+  try {
+    const parsed = new URL(value);
+    const match = String(parsed.pathname || '').match(/\/shorts\/([^/?#]+)/i);
+    if (match && match[1]) return match[1];
+  } catch {
+    return 'none';
+  }
+  return 'none';
+};
+
 const isDiagYtBlurEnabledForUrl = (value?: string) => {
   if (!isYouTubeShortsUrl(value)) return false;
   if (typeof window === 'undefined') return false;
@@ -205,6 +217,14 @@ interface SocialContent {
   sourceUrl: string;
 }
 
+interface ShortsOverlayPendingState {
+  sovereignId: string;
+  hasBlurSignal: boolean;
+  hasModerationResult: boolean;
+  result: 'BLUR' | 'CLEAR' | null;
+  startedAt: number;
+}
+
 /**
  * NativeWebViewBrowser - Unified browser component
  * Uses native WebView on mobile, fallback modes on web
@@ -301,18 +321,33 @@ export const NativeWebViewBrowser = () => {
   });
   const legacyPollSelfDisabledContextRef = useRef<string | null>(null);
   const shortsRelatedLegacyPollContextRef = useRef<string | null>(null);
+  const shortsOverlayPendingRef = useRef<ShortsOverlayPendingState | null>(null);
+  const shortsOverlayTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const [shortsLegacyFallbackVersion, setShortsLegacyFallbackVersion] = useState(0);
   const [shortsRelatedLegacyPollVersion, setShortsRelatedLegacyPollVersion] = useState(0);
 
   const UNSAFE_STREAK_REQUIRED = 2;
   const SAFE_STREAK_REQUIRED = 2;
   const PENDING_REINJECT_WINDOW_MS = 1500;
+  const SHORTS_OVERLAY_ATOMIC_TIMEOUT_MS = 300;
   const SHORTS_NAV_GRACE_MS = 200;
   const isDebugMode = localSettings.debug_mode === true;
   const debugLog = useCallback((...args: unknown[]) => {
     if (!isDebugMode) return;
     console.log(...args);
   }, [isDebugMode]);
+
+  const getSovereignIdForContext = useCallback((
+    urlHint?: string,
+    navIdHint?: number,
+    pageEpochHint?: number,
+  ) => {
+    const resolvedUrl = urlHint || currentUrlRef.current || '';
+    const resolvedNavId = Number.isFinite(navIdHint) ? Number(navIdHint) : (activeNavIdRef.current || 0);
+    const resolvedEpoch = Number.isFinite(pageEpochHint) ? Number(pageEpochHint) : (webViewPageEpochRef.current || 0);
+    const shortsUrlId = getYouTubeShortsId(resolvedUrl);
+    return String(resolvedNavId) + '|' + String(resolvedEpoch) + '|' + (shortsUrlId || 'none');
+  }, []);
 
   const armShortsLegacyFallbackProbe = useCallback((reason: string, durationMs: number) => {
     const boundedDuration = Math.max(200, Math.floor(durationMs));
@@ -374,6 +409,122 @@ export const NativeWebViewBrowser = () => {
     );
     queueCurrentBlurState(reason);
   }, [queueCurrentBlurState]);
+
+  const clearShortsOverlayAtomicTimeout = useCallback(() => {
+    if (!shortsOverlayTimeoutRef.current) return;
+    clearTimeout(shortsOverlayTimeoutRef.current);
+    shortsOverlayTimeoutRef.current = null;
+  }, []);
+
+  const resetShortsOverlayCoordinator = useCallback((reason: string) => {
+    clearShortsOverlayAtomicTimeout();
+    const pending = shortsOverlayPendingRef.current;
+    if (!pending) return;
+    shortsOverlayPendingRef.current = null;
+    console.log(
+      '[DIAG][SHORTS_ATOMIC]',
+      'action=reset',
+      'reason=' + reason,
+      'sovereignId=' + pending.sovereignId,
+      'hasBlurSignal=' + pending.hasBlurSignal,
+      'hasModerationResult=' + pending.hasModerationResult,
+      'result=' + (pending.result || 'none'),
+    );
+  }, [clearShortsOverlayAtomicTimeout]);
+
+  const armShortsOverlayAtomicTimeout = useCallback((sovereignId: string) => {
+    clearShortsOverlayAtomicTimeout();
+    shortsOverlayTimeoutRef.current = setTimeout(() => {
+      const pending = shortsOverlayPendingRef.current;
+      if (!pending || pending.sovereignId !== sovereignId) return;
+      console.log(
+        '[DIAG][SHORTS_ATOMIC]',
+        'action=timeout_release',
+        'sovereignId=' + sovereignId,
+        'hasBlurSignal=' + pending.hasBlurSignal,
+        'hasModerationResult=' + pending.hasModerationResult,
+        'result=' + (pending.result || 'none'),
+        'timeoutMs=' + SHORTS_OVERLAY_ATOMIC_TIMEOUT_MS,
+      );
+      queueCurrentBlurState('shorts_atomic_timeout_release');
+    }, SHORTS_OVERLAY_ATOMIC_TIMEOUT_MS);
+  }, [SHORTS_OVERLAY_ATOMIC_TIMEOUT_MS, clearShortsOverlayAtomicTimeout, queueCurrentBlurState]);
+
+  const markShortsOverlayBlurSignal = useCallback((sovereignId: string, signalReason: string) => {
+    if (!sovereignId) return;
+    const now = Date.now();
+    let pending = shortsOverlayPendingRef.current;
+    if (!pending || pending.sovereignId !== sovereignId) {
+      pending = {
+        sovereignId,
+        hasBlurSignal: false,
+        hasModerationResult: false,
+        result: null,
+        startedAt: now,
+      };
+      shortsOverlayPendingRef.current = pending;
+      armShortsOverlayAtomicTimeout(sovereignId);
+    }
+    pending.hasBlurSignal = true;
+    console.log(
+      '[DIAG][SHORTS_ATOMIC]',
+      'action=mark_blur_signal',
+      'reason=' + signalReason,
+      'sovereignId=' + sovereignId,
+      'hasModerationResult=' + pending.hasModerationResult,
+      'result=' + (pending.result || 'none'),
+    );
+    if (pending.hasModerationResult) {
+      clearShortsOverlayAtomicTimeout();
+      queueCurrentBlurState('shorts_atomic_both_ready_from_blur_signal');
+    }
+  }, [armShortsOverlayAtomicTimeout, clearShortsOverlayAtomicTimeout, queueCurrentBlurState]);
+
+  const markShortsOverlayModerationResult = useCallback((
+    sovereignId: string,
+    result: 'BLUR' | 'CLEAR',
+    decisionReason: string,
+  ) => {
+    if (!sovereignId) return;
+    const now = Date.now();
+    let pending = shortsOverlayPendingRef.current;
+    if (!pending || pending.sovereignId !== sovereignId) {
+      pending = {
+        sovereignId,
+        hasBlurSignal: false,
+        hasModerationResult: false,
+        result: null,
+        startedAt: now,
+      };
+      shortsOverlayPendingRef.current = pending;
+      armShortsOverlayAtomicTimeout(sovereignId);
+    }
+    pending.hasModerationResult = true;
+    pending.result = result;
+    console.log(
+      '[DIAG][SHORTS_ATOMIC]',
+      'action=mark_moderation_result',
+      'reason=' + decisionReason,
+      'sovereignId=' + sovereignId,
+      'result=' + result,
+      'hasBlurSignal=' + pending.hasBlurSignal,
+    );
+    if (result === 'CLEAR' && pending.hasBlurSignal) {
+      setCentralBlurState(false, 'shorts_atomic_force_clear:' + decisionReason);
+      clearShortsOverlayAtomicTimeout();
+      queueCurrentBlurState('shorts_atomic_force_clear');
+      return;
+    }
+    if (pending.hasBlurSignal) {
+      clearShortsOverlayAtomicTimeout();
+      queueCurrentBlurState('shorts_atomic_both_ready_from_moderation');
+    }
+  }, [
+    armShortsOverlayAtomicTimeout,
+    clearShortsOverlayAtomicTimeout,
+    queueCurrentBlurState,
+    setCentralBlurState,
+  ]);
 
   const processModerationSafetySignal = useCallback((isUnsafe: boolean, reason: string) => {
     const signal = blurSignalRef.current;
@@ -1058,6 +1209,7 @@ export const NativeWebViewBrowser = () => {
       injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
       blurReadyRef.current = false;
+      resetShortsOverlayCoordinator('navigation_load_start');
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       const canDeferLoadStartReset =
         pendingReinjectRef.current?.active === true &&
@@ -1151,6 +1303,7 @@ export const NativeWebViewBrowser = () => {
       injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
       blurReadyRef.current = false;
+      resetShortsOverlayCoordinator('url_change');
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       if (shouldDeferSafeReset) {
         logSafeResetDiag('safe_reset_deferred', deferReason, url);
@@ -1177,6 +1330,7 @@ export const NativeWebViewBrowser = () => {
       injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
       blurReadyRef.current = false;
+      resetShortsOverlayCoordinator('webview_closed');
       blurPendingRef.current = null;
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       setCentralBlurState(false, 'webview_closed');
@@ -1194,6 +1348,7 @@ export const NativeWebViewBrowser = () => {
       webViewActiveInstanceIdRef.current = activeInstanceId;
       if (previousInstanceId === activeInstanceId) return;
       blurReadyRef.current = false;
+      resetShortsOverlayCoordinator('active_instance_change');
       blurReadyBurstRef.current = {
         navId: 0,
         pageEpoch: 0,
@@ -1536,10 +1691,37 @@ export const NativeWebViewBrowser = () => {
     `);
   }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, executeScript]);
 
+  const shouldHoldShortsOverlaySync = useCallback(() => {
+    const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
+    if (getUrlFamily(activeUrl) !== 'youtube_shorts') return false;
+    const pending = shortsOverlayPendingRef.current;
+    if (!pending) return false;
+    const activeSovereignId = getSovereignIdForContext(activeUrl);
+    if (pending.sovereignId !== activeSovereignId) return false;
+    const readyToCommit = pending.hasBlurSignal && pending.hasModerationResult;
+    if (readyToCommit) return false;
+    const timedOut = (Date.now() - pending.startedAt) >= SHORTS_OVERLAY_ATOMIC_TIMEOUT_MS;
+    return !timedOut;
+  }, [SHORTS_OVERLAY_ATOMIC_TIMEOUT_MS, webViewState.currentUrl, getSovereignIdForContext]);
+
   const flushBlurStateToWebView = useCallback(async () => {
     if (!ENABLE_DOM_BLUR) return;
     if (!isNative || !webViewState.isOpen || !executeScript) return;
     if (!blurReadyRef.current) return;
+    if (shouldHoldShortsOverlaySync()) {
+      const pending = shortsOverlayPendingRef.current;
+      if (pending) {
+        console.log(
+          '[DIAG][SHORTS_ATOMIC]',
+          'action=hold_overlay_sync',
+          'sovereignId=' + pending.sovereignId,
+          'hasBlurSignal=' + pending.hasBlurSignal,
+          'hasModerationResult=' + pending.hasModerationResult,
+          'result=' + (pending.result || 'none'),
+        );
+      }
+      return;
+    }
 
     const pending = blurPendingRef.current || blurStateRef.current;
     const stateMessage = createBlurOverlayStateMessage(pending.enabled, pending.reason);
@@ -1560,7 +1742,18 @@ export const NativeWebViewBrowser = () => {
     await executeScript(script);
     blurPendingRef.current = null;
     return;
-  }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, executeScript]);
+  }, [
+    ENABLE_DOM_BLUR,
+    isNative,
+    webViewState.isOpen,
+    executeScript,
+    shouldHoldShortsOverlaySync,
+  ]);
+
+  const syncOverlayState = useCallback(async (reason: string) => {
+    queueCurrentBlurState(reason);
+    await flushBlurStateToWebView();
+  }, [queueCurrentBlurState, flushBlurStateToWebView]);
 
   useEffect(() => {
     if (!ENABLE_DOM_BLUR) return;
@@ -1575,8 +1768,7 @@ export const NativeWebViewBrowser = () => {
 
     const onVisible = () => {
       requestBlurHandshake('host_visible');
-      queueCurrentBlurState('host_visible_resync');
-      flushBlurStateToWebView();
+      void syncOverlayState('host_visible_resync');
     };
 
     window.addEventListener('focus', onVisible);
@@ -1585,7 +1777,7 @@ export const NativeWebViewBrowser = () => {
       window.removeEventListener('focus', onVisible);
       document.removeEventListener('visibilitychange', onVisible);
     };
-  }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, requestBlurHandshake, queueCurrentBlurState, flushBlurStateToWebView]);
+  }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, requestBlurHandshake, syncOverlayState]);
 
   useEffect(() => {
     if (!ENABLE_SIGNAL_PIPELINE) return;
@@ -1614,6 +1806,7 @@ export const NativeWebViewBrowser = () => {
 
     if (ENABLE_DOM_BLUR) {
       blurReadyRef.current = false;
+      resetShortsOverlayCoordinator('settings_reinject');
     }
 
     const reinjectAndPing = async () => {
@@ -1658,6 +1851,7 @@ export const NativeWebViewBrowser = () => {
     injectModerationScript,
     requestBlurHandshake,
     clearLoadEndInjectTimer,
+    resetShortsOverlayCoordinator,
   ]);
 
   useEffect(() => {
@@ -1705,11 +1899,12 @@ export const NativeWebViewBrowser = () => {
       clearLoadEndInjectTimer();
       clearPendingReinjectTimer();
       pendingReinjectRef.current = null;
+      clearShortsOverlayAtomicTimeout();
       if (blurRetryTimerRef.current) {
         clearTimeout(blurRetryTimerRef.current);
       }
     };
-  }, [clearLoadEndInjectTimer, clearPendingReinjectTimer]);
+  }, [clearLoadEndInjectTimer, clearPendingReinjectTimer, clearShortsOverlayAtomicTimeout]);
 
   // ==================== MODERATION MESSAGE HANDLING ====================
   // 
@@ -1736,8 +1931,10 @@ export const NativeWebViewBrowser = () => {
 
     const { requestId, items, thresholds } = request;
     const requestEpoch = Number.isFinite(request.pageEpoch) ? Number(request.pageEpoch) : null;
+    const requestSovereignId = typeof request.sovereignId === 'string' ? request.sovereignId : '';
     const activeEpoch = webViewPageEpochRef.current;
     const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
+    const activeSovereignId = getSovereignIdForContext(activeUrl, activeNavIdRef.current, activeEpoch);
     const stickyShortsMode = isYouTubeShortsUrl(activeUrl);
     const stickyShortsRelatedMode = getUrlFamily(activeUrl) === 'youtube_shorts_related';
     const relaxedYouTubeEpochMode = isYouTubeDomainUrl(activeUrl) && !stickyShortsMode && !stickyShortsRelatedMode;
@@ -1812,7 +2009,13 @@ export const NativeWebViewBrowser = () => {
       }));
 
       try {
-        const staleMessage = createResultMessage(requestId, staleResults, nonce, requestEpoch ?? undefined);
+        const staleMessage = createResultMessage(
+          requestId,
+          staleResults,
+          nonce,
+          requestEpoch ?? undefined,
+          requestSovereignId || undefined,
+        );
         await postMessageToWebView(staleMessage as unknown as Record<string, unknown>);
       } catch {
         // Fail-open by design for stale requests.
@@ -1822,6 +2025,43 @@ export const NativeWebViewBrowser = () => {
       clearTimeout(timeoutId);
       setFlashGuardState?.(false, 'moderation_epoch_stale');
       flashLog('disarm stale epoch');
+      return;
+    }
+    if (stickyShortsMode && requestSovereignId && requestSovereignId !== activeSovereignId) {
+      console.warn(
+        '[DIAG][SHORTS_ATOMIC]',
+        'action=reject_stale_sovereign',
+        'requestId=' + requestId,
+        'requestSovereignId=' + requestSovereignId,
+        'activeSovereignId=' + activeSovereignId,
+        'navId=' + activeNavIdRef.current,
+        'pageEpoch=' + activeEpoch,
+        'url=' + (activeUrl || 'unknown'),
+      );
+      const staleResults = items.map(item => ({
+        itemId: item.itemId,
+        src: item.src,
+        shouldBlur: false,
+        category: 'safe_sovereign_stale',
+        confidence: 0,
+        severity: 'safe' as ModerationSeverity,
+      }));
+      try {
+        const staleMessage = createResultMessage(
+          requestId,
+          staleResults,
+          nonce,
+          requestEpoch ?? undefined,
+          requestSovereignId,
+        );
+        await postMessageToWebView(staleMessage as unknown as Record<string, unknown>);
+      } catch {
+        // Fail-open by design for stale requests.
+      }
+      pendingRequestsRef.current.delete(requestId);
+      clearTimeout(timeoutId);
+      setFlashGuardState?.(false, 'moderation_sovereign_stale');
+      flashLog('disarm stale sovereign');
       return;
     }
     if (requestEpoch !== null && requestEpoch !== activeEpoch && relaxedYouTubeEpochMode) {
@@ -2090,6 +2330,17 @@ export const NativeWebViewBrowser = () => {
       );
     }
 
+    const resultSovereignId = stickyShortsMode
+      ? (requestSovereignId || activeSovereignId)
+      : '';
+    if (stickyShortsMode && resultSovereignId) {
+      markShortsOverlayModerationResult(
+        resultSovereignId,
+        overlayDecision ? 'BLUR' : 'CLEAR',
+        decisionReason,
+      );
+    }
+
     // Hysteresis is based on hard conditions only.
     if (hardOverlayDecision) {
       processModerationSafetySignal(true, `moderation_request_hard:${decisionReason}`);
@@ -2122,7 +2373,13 @@ export const NativeWebViewBrowser = () => {
     console.log('[MW-Host] posting results back', requestId, 'count=' + results.length, 'nonce=' + nonce.substring(0, 10));
     
     try {
-      const resultMessage = createResultMessage(requestId, results, nonce, requestEpoch ?? undefined);
+      const resultMessage = createResultMessage(
+        requestId,
+        results,
+        nonce,
+        requestEpoch ?? undefined,
+        resultSovereignId || undefined,
+      );
       const posted = await postMessageToWebView(resultMessage as unknown as Record<string, unknown>);
       if (posted) {
         console.log('[MW-Host] Results posted via postMessage for', requestId);
@@ -2155,6 +2412,8 @@ export const NativeWebViewBrowser = () => {
     localSettings.segmentationMaxInputPx,
     localSettings.segmentationCacheTtlMs,
     currentUrl,
+    getSovereignIdForContext,
+    markShortsOverlayModerationResult,
     processModerationSafetySignal,
     setCentralBlurState,
     setFlashGuardState,
@@ -2304,6 +2563,9 @@ export const NativeWebViewBrowser = () => {
         ) ? Number(typedMessage.hostNavId) : null;
         const readyReason = String(typedMessage.reason || 'ready');
         const readyUrl = String(typedMessage.url || activeUrl || 'unknown');
+        const readySovereignId = typeof typedMessage.sovereignId === 'string'
+          ? typedMessage.sovereignId
+          : getSovereignIdForContext(readyUrl, activeNavId, readyEpoch ?? activeEpoch);
         const readyTimestamp = (
           typeof typedMessage.timestamp === 'number' && Number.isFinite(typedMessage.timestamp)
         ) ? Number(typedMessage.timestamp) : null;
@@ -2351,6 +2613,9 @@ export const NativeWebViewBrowser = () => {
           );
           return;
         }
+        if (activeUrlFamily === 'youtube_shorts' && readySovereignId) {
+          markShortsOverlayBlurSignal(readySovereignId, readyReason);
+        }
         const lastReady = blurReadyBurstRef.current;
         const duplicateBurst = (
           blurReadyRef.current &&
@@ -2368,6 +2633,9 @@ export const NativeWebViewBrowser = () => {
             'pageEpoch=' + activeEpoch,
             'url=' + readyUrl,
           );
+          if (activeUrlFamily === 'youtube_shorts') {
+            void syncOverlayState('shorts_dedupe_burst_resync:' + readyReason);
+          }
           return;
         }
         blurReadyBurstRef.current = {
@@ -2378,8 +2646,7 @@ export const NativeWebViewBrowser = () => {
         };
         blurReadyRef.current = true;
         console.log('[MW-Host] Blur overlay READY:', readyReason, readyUrl);
-        queueCurrentBlurState('webview_ready_sync');
-        await flushBlurStateToWebView();
+        await syncOverlayState('webview_ready_sync');
         return;
       }
 
@@ -2483,8 +2750,9 @@ export const NativeWebViewBrowser = () => {
     moderationBridge,
     postMessageToWebView,
     getNonce,
-    queueCurrentBlurState,
-    flushBlurStateToWebView,
+    syncOverlayState,
+    getSovereignIdForContext,
+    markShortsOverlayBlurSignal,
     armShortsLegacyFallbackProbe,
     disarmShortsLegacyFallbackProbe,
     webViewState.currentUrl,
@@ -3359,11 +3627,12 @@ export const NativeWebViewBrowser = () => {
       // Reset injection flag to re-inject moderation script
       injectionDoneRef.current = false;
       blurReadyRef.current = false;
+      resetShortsOverlayCoordinator('manual_reload');
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       setCentralBlurState(false, 'manual_reload');
       return;
     }
-  }, [readerContent, currentView, searchQuery, isNative, webViewState.isOpen, handleReaderMode, handleSearch, webViewReload, setCentralBlurState]);
+  }, [readerContent, currentView, searchQuery, isNative, webViewState.isOpen, handleReaderMode, handleSearch, webViewReload, setCentralBlurState, resetShortsOverlayCoordinator]);
 
   const handleHome = useCallback(async () => {
     teardownWebViewScheduling('home_reset', webViewState.currentUrl).catch(() => undefined);
@@ -3381,6 +3650,7 @@ export const NativeWebViewBrowser = () => {
     });
     injectionDoneRef.current = false;
     blurReadyRef.current = false;
+    resetShortsOverlayCoordinator('home_reset');
     blurPendingRef.current = null;
     blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
     setCentralBlurState(false, 'home_reset');
@@ -3394,7 +3664,7 @@ export const NativeWebViewBrowser = () => {
     setUrlInput('');
     setFallbackUrl('');
     goHome();
-  }, [isNative, webViewState.isOpen, webViewState.currentUrl, closeWebView, goHome, moderationBridge, setCentralBlurState, teardownWebViewScheduling, exitPendingReinject]);
+  }, [isNative, webViewState.isOpen, webViewState.currentUrl, closeWebView, goHome, moderationBridge, setCentralBlurState, teardownWebViewScheduling, exitPendingReinject, resetShortsOverlayCoordinator]);
 
   // Manual scan trigger for current page
   const handleScanPage = useCallback(async () => {

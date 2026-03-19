@@ -547,6 +547,21 @@ export function generateModerationScript(config: InjectionConfig): string {
     applySensitivityLevel(nextLevel, 'floating_toggle_cycle');
   }
 
+  function computeSovereignId(pageEpochHint) {
+    const normalizedEpoch = Number.isFinite(pageEpochHint)
+      ? Number(pageEpochHint)
+      : (
+          Number.isFinite(window.__MW_HOST_PAGE_EPOCH__)
+            ? Number(window.__MW_HOST_PAGE_EPOCH__)
+            : (Number.isFinite(CONFIG.pageEpoch) ? Number(CONFIG.pageEpoch) : null)
+        );
+    const shortsVideoId = getCurrentShortsUrlId() || 'none';
+    const currentNavId = String(window.__MW_NAV_ID__ || 'none');
+    return currentNavId +
+      '|' + String(normalizedEpoch === null ? 'none' : normalizedEpoch) +
+      '|' + shortsVideoId;
+  }
+
   function applySensitivityLevel(level, reason) {
     const normalized = Math.min(4, Math.max(0, Math.round(level)));
     if (normalized === CONFIG.sensitivity && (normalized > 0) === CONFIG.enabled) {
@@ -588,9 +603,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       : null;
     const shortsVideoId = getCurrentShortsUrlId() || 'none';
     const currentNavId = String(window.__MW_NAV_ID__ || 'none');
-    const sovereignId = currentNavId +
-      '|' + String(readyPageEpoch === null ? 'none' : readyPageEpoch) +
-      '|' + shortsVideoId;
+    const sovereignId = computeSovereignId(readyPageEpoch);
     logShortsProbe(
       'mw_blur_ready_emit',
       'reason=' + readyReason +
@@ -3801,6 +3814,11 @@ export function generateModerationScript(config: InjectionConfig): string {
     const btn = overlay.querySelector('.mw-reveal-btn');
     const viewportWidth = Math.max(window.innerWidth || 0, 1);
     const viewportHeight = Math.max(window.innerHeight || 0, 1);
+    const isBlurredContainer = overlay.dataset && overlay.dataset.blurred !== 'false';
+    if (!isBlurredContainer) {
+      overlay.style.display = 'none';
+      return false;
+    }
     const visibleRect = getVisibleViewportRect(rect, viewportWidth, viewportHeight);
     if (visibleRect.width < 16 || visibleRect.height < 16) {
       overlay.style.display = 'none';
@@ -4018,6 +4036,25 @@ export function generateModerationScript(config: InjectionConfig): string {
     return null;
   }
 
+  function setRevealOverlayBlurState(overlay, blurred) {
+    if (!overlay || overlay.nodeType !== 1) return;
+    const nextBlurred = blurred ? 'true' : 'false';
+    overlay.classList.add('mw-shorts-blur-container');
+    overlay.dataset.blurred = nextBlurred;
+    overlay.style.setProperty('--mw-reveal-button-opacity', blurred ? '1' : '0');
+    const btn = typeof overlay.querySelector === 'function'
+      ? overlay.querySelector('.mw-reveal-button, .mw-reveal-btn')
+      : null;
+    if (btn && btn.nodeType === 1) {
+      btn.style.opacity = 'var(--mw-reveal-button-opacity)';
+      btn.style.pointerEvents = blurred ? 'auto' : 'none';
+      btn.style.display = blurred ? 'flex' : 'none';
+    }
+    if (!blurred) {
+      overlay.style.display = 'none';
+    }
+  }
+
   function getDiagOverlayState(node) {
     if (!node || node.nodeType !== 1) {
       return { hasOverlayFlag: false, overlayAttached: false, overlayVisible: false };
@@ -4035,6 +4072,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     const overlay = findRevealOverlayForElement(node, src || node.dataset.mwSrc || '');
     if (overlay && overlay.parentElement) {
       const overlayId = overlay.dataset && overlay.dataset.mwOverlayId ? overlay.dataset.mwOverlayId : 'unknown';
+      setRevealOverlayBlurState(overlay, false);
       overlay.parentElement.removeChild(overlay);
       console.log(
         '[DIAG][REVEAL_UI] overlay_removed',
@@ -4836,6 +4874,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       existingOverlay.dataset.mwNodeId = getDiagNodeId(element);
       existingOverlay.style.pointerEvents = 'none';
       existingOverlay.style.display = 'flex';
+      existingOverlay.classList.add('mw-shorts-blur-container');
+      setRevealOverlayBlurState(existingOverlay, true);
       if (shortsMode) {
         setRevealOverlayAnchorTarget(existingOverlay, element, 'existing_overlay');
         const reboundAnchor = resolveShortsRevealOverlayAnchor(existingOverlay);
@@ -4929,7 +4969,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     const overlay = document.createElement('div');
     diagRevealOverlaySeq += 1;
     const overlayId = 'mwov_' + Date.now().toString(36) + '_' + diagRevealOverlaySeq;
-    overlay.className = 'mw-reveal-overlay';
+    overlay.className = 'mw-reveal-overlay mw-shorts-blur-container';
     overlay.dataset.mwFor = src;
     overlay.dataset.mwNodeId = getDiagNodeId(element);
     overlay.dataset.mwOverlayId = overlayId;
@@ -4979,7 +5019,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     overlay.appendChild(badge);
     
     const btn = document.createElement('button');
-    btn.className = 'mw-reveal-btn';
+    btn.className = 'mw-reveal-btn mw-reveal-button';
     btn.textContent = '👁 Reveal';
     btn.style.cssText = [
       'background: rgba(0, 0, 0, 0.9)',
@@ -5044,6 +5084,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         element.dataset.mwRevealed = 'false';
         applyBlur(element, src, category, CONFIG.blurStrength, itemId);
         btn.textContent = '👁 Reveal';
+        setRevealOverlayBlurState(overlay, true);
         overlay.style.display = 'flex';
       } else {
         // Reveal and trigger feedback
@@ -5056,6 +5097,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         );
         state.revealed.add(src);
         element.dataset.mwRevealed = 'true'; // Persistence
+        setRevealOverlayBlurState(overlay, false);
         removeBlur(element, src);
         btn.textContent = '🔒 Hide';
         const afterBlurCount = countBlurredNodesForItemKey(src);
@@ -5132,6 +5174,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     console.log('[DIAG][REVEAL_UI] bind_button', 'overlayId=' + overlayId);
     
     overlay.appendChild(btn);
+    setRevealOverlayBlurState(overlay, true);
     if (shortsMode) {
       const activeOverlays = overlayParent.querySelectorAll('.mw-reveal-overlay');
       for (let i = 0; i < activeOverlays.length; i += 1) {
@@ -5272,6 +5315,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     
     const requestId = generateRequestId();
     const timestamp = Date.now();
+    const requestSovereignId = computeSovereignId(state.pageEpoch);
     if (isShortsModeActive()) {
       console.log(
         '[DIAG][SHORTS_SCAN] scanBatch_start',
@@ -5300,6 +5344,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       })),
       thresholds: effectiveThresholds,
       pageEpoch: state.pageEpoch,
+      sovereignId: requestSovereignId,
       nonce: CONFIG.nonce,
       timestamp: timestamp,
     };
@@ -5312,6 +5357,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     state.pendingRequests.set(requestId, {
       items: items,
       pageEpoch: state.pageEpoch,
+      sovereignId: requestSovereignId,
       timestamp: timestamp,
       timeoutId: timeoutId,
       state: 'waitingForHost',
@@ -5327,6 +5373,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       'pageEpoch=' + state.pageEpoch,
       'noncePrefix=' + NONCE_PREFIX,
       'items=' + items.length,
+      'sovereignId=' + requestSovereignId,
     );
     logShortsProbe(
       'mw_req_sent',
@@ -5334,6 +5381,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       ' navId=' + NAV_ID +
       ' pageEpoch=' + state.pageEpoch +
       ' shortsUrlId=' + (getCurrentShortsUrlId() || 'none') +
+      ' sovereignId=' + requestSovereignId +
       ' itemCount=' + items.length +
       ' itemIds=' + items.map(item => String(item.itemId || 'none')).join(',')
     );
@@ -5462,6 +5510,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     try {
       const { requestId, results, nonce } = message;
       const resultEpoch = Number.isFinite(message.pageEpoch) ? Number(message.pageEpoch) : null;
+      const resultSovereignId = typeof message.sovereignId === 'string' ? message.sovereignId : '';
       const expectedNoncePrefix = String(CONFIG.nonce || '').substring(0, 6);
       const receivedNoncePrefix = String(nonce || 'none').substring(0, 6);
       const stickyShortsMode = isYouTubeShortsUrl(window.location.href);
@@ -5476,6 +5525,11 @@ export function generateModerationScript(config: InjectionConfig): string {
             .join(',')
         : 'none';
       const hasPendingRequestAtEntry = requestIdLabel !== 'none' && state.pendingRequests.has(requestIdLabel);
+      const pendingRequestAtEntry = requestIdLabel !== 'none' ? state.pendingRequests.get(requestIdLabel) : null;
+      const expectedSovereignId = pendingRequestAtEntry && typeof pendingRequestAtEntry.sovereignId === 'string'
+        ? pendingRequestAtEntry.sovereignId
+        : '';
+      const currentSovereignId = computeSovereignId(state.pageEpoch);
       let epochBypassState = 'none';
       logShortsProbe(
         'result_identity_enter',
@@ -5485,6 +5539,9 @@ export function generateModerationScript(config: InjectionConfig): string {
         ' resultEpoch=' + (resultEpoch === null ? 'none' : resultEpoch) +
         ' currentPageEpoch=' + state.pageEpoch +
         ' hasPendingRequest=' + hasPendingRequestAtEntry +
+        ' resultSovereignId=' + (resultSovereignId || 'none') +
+        ' expectedSovereignId=' + (expectedSovereignId || 'none') +
+        ' currentSovereignId=' + currentSovereignId +
         ' shortsUrlId=' + (getCurrentShortsUrlId() || 'none')
       );
       if (resultEpoch !== null && resultEpoch !== state.pageEpoch && !relaxedYouTubeEpochMode) {
@@ -5597,8 +5654,37 @@ export function generateModerationScript(config: InjectionConfig): string {
         cleanupRejectedOrTimedOutRequest(requestId, 'reject_nonce');
         return;
       }
-      
-      const pendingRequest = state.pendingRequests.get(requestId);
+
+      if (stickyShortsMode) {
+        const missingSovereign = !resultSovereignId;
+        const pendingMismatch = !!expectedSovereignId && resultSovereignId !== expectedSovereignId;
+        const currentMismatch = !!resultSovereignId && resultSovereignId !== currentSovereignId;
+        if (missingSovereign || pendingMismatch || currentMismatch) {
+          logShortsProbe(
+            'result_sovereign_reject',
+            'requestId=' + requestIdLabel +
+            ' missing=' + missingSovereign +
+            ' pendingMismatch=' + pendingMismatch +
+            ' currentMismatch=' + currentMismatch +
+            ' resultSovereignId=' + (resultSovereignId || 'none') +
+            ' expectedSovereignId=' + (expectedSovereignId || 'none') +
+            ' currentSovereignId=' + currentSovereignId
+          );
+          state.stats.staleEpochDiscarded++;
+          console.warn(
+            '[MW][RejectResult]',
+            'reason=sovereign',
+            'requestId=' + requestIdLabel,
+            'resultSovereignId=' + (resultSovereignId || 'none'),
+            'expectedSovereignId=' + (expectedSovereignId || 'none'),
+            'currentSovereignId=' + currentSovereignId,
+          );
+          cleanupRejectedOrTimedOutRequest(requestId, 'reject_sovereign');
+          return;
+        }
+      }
+
+      const pendingRequest = pendingRequestAtEntry || state.pendingRequests.get(requestId);
       if (pendingRequest) {
         clearTimeout(pendingRequest.timeoutId);
         pendingRequest.state = 'handled';
@@ -5612,6 +5698,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         ' hasPendingRequest=' + hasPendingRequestAtEntry +
         ' epochBypass=' + epochBypassState +
         ' resultCount=' + resultCount +
+        ' resultSovereignId=' + (resultSovereignId || 'none') +
         ' shortsUrlId=' + (getCurrentShortsUrlId() || 'none')
       );
       console.log('[MW] received result', requestId, 'count=' + results.length);
@@ -7307,7 +7394,24 @@ export function generateModerationScript(config: InjectionConfig): string {
         z-index: 9998 !important;
         pointer-events: none !important;
       }
-      .mw-reveal-btn {
+      .mw-shorts-blur-container {
+        --mw-reveal-button-opacity: 0;
+      }
+      .mw-shorts-blur-container[data-blurred="true"] {
+        --mw-reveal-button-opacity: 1;
+      }
+      .mw-shorts-blur-container[data-blurred="true"] .mw-reveal-button {
+        display: flex !important;
+      }
+      .mw-shorts-blur-container[data-blurred="false"] .mw-reveal-button {
+        display: none !important;
+      }
+      .mw-reveal-button {
+        opacity: var(--mw-reveal-button-opacity, 0) !important;
+        transition: opacity 120ms ease !important;
+      }
+      .mw-reveal-btn,
+      .mw-reveal-button {
         z-index: 9999 !important;
         pointer-events: auto !important;
       }
