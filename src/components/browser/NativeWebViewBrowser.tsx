@@ -277,6 +277,8 @@ interface SocialContent {
 interface ShortsOverlayPendingState {
   sovereignId: string;
   hasBlurSignal: boolean;
+  jsBlurApplied: boolean;
+  jsRevealApplied: boolean;
   hasModerationResult: boolean;
   fallbackRevealEnsured: boolean;
   result: 'BLUR' | 'CLEAR' | null;
@@ -421,6 +423,7 @@ export const NativeWebViewBrowser = () => {
   const SAFE_STREAK_REQUIRED = 2;
   const PENDING_REINJECT_WINDOW_MS = 1500;
   const STABLE_INJECTION_DEBOUNCE_MS = 300;
+  const STABLE_INJECTION_SHORTS_DEBOUNCE_MS = 600;
   const BLUR_READY_PING_SUPPRESS_MS = 400;
   const OVERLAY_LIFT_HANDSHAKE_MS = 50;
   const SHORTS_OVERLAY_ATOMIC_TIMEOUT_MS = 1200;
@@ -648,6 +651,12 @@ export const NativeWebViewBrowser = () => {
     retryState.timer = null;
   }, []);
 
+  const hasEffectiveShortsBlurSignal = useCallback((pending: ShortsOverlayPendingState | null): boolean => {
+    if (!pending) return false;
+    if (pending.jsRevealApplied && !pending.jsBlurApplied) return false;
+    return pending.hasBlurSignal || pending.jsBlurApplied;
+  }, []);
+
   const resetShortsOverlayCoordinator = useCallback((reason: string) => {
     clearShortsOverlayAtomicTimeout();
     clearShortsMatchingRetryTimer();
@@ -664,10 +673,13 @@ export const NativeWebViewBrowser = () => {
       'reason=' + reason,
       'sovereignId=' + pending.sovereignId,
       'hasBlurSignal=' + pending.hasBlurSignal,
+      'jsBlurApplied=' + pending.jsBlurApplied,
+      'jsRevealApplied=' + pending.jsRevealApplied,
+      'effectiveBlurSignal=' + hasEffectiveShortsBlurSignal(pending),
       'hasModerationResult=' + pending.hasModerationResult,
       'result=' + (pending.result || 'none'),
     );
-  }, [clearShortsOverlayAtomicTimeout, clearShortsMatchingRetryTimer]);
+  }, [clearShortsOverlayAtomicTimeout, clearShortsMatchingRetryTimer, hasEffectiveShortsBlurSignal]);
 
   const armShortsOverlayAtomicTimeout = useCallback((sovereignId: string, startedAtMs?: number) => {
     clearShortsOverlayAtomicTimeout();
@@ -686,6 +698,9 @@ export const NativeWebViewBrowser = () => {
         'action=timeout_release',
         'sovereignId=' + sovereignId,
         'hasBlurSignal=' + pending.hasBlurSignal,
+        'jsBlurApplied=' + pending.jsBlurApplied,
+        'jsRevealApplied=' + pending.jsRevealApplied,
+        'effectiveBlurSignal=' + hasEffectiveShortsBlurSignal(pending),
         'hasModerationResult=' + pending.hasModerationResult,
         'result=' + (pending.result || 'none'),
         'timeoutMs=' + SHORTS_OVERLAY_ATOMIC_TIMEOUT_MS,
@@ -693,7 +708,7 @@ export const NativeWebViewBrowser = () => {
       );
       queueCurrentBlurState('shorts_atomic_timeout_release');
     }, delayMs);
-  }, [SHORTS_OVERLAY_ATOMIC_TIMEOUT_MS, clearShortsOverlayAtomicTimeout, queueCurrentBlurState]);
+  }, [SHORTS_OVERLAY_ATOMIC_TIMEOUT_MS, clearShortsOverlayAtomicTimeout, hasEffectiveShortsBlurSignal, queueCurrentBlurState]);
 
   const markShortsOverlayBlurSignal = useCallback((
     sovereignId: string,
@@ -713,6 +728,8 @@ export const NativeWebViewBrowser = () => {
       pending = {
         sovereignId,
         hasBlurSignal: false,
+        jsBlurApplied: false,
+        jsRevealApplied: false,
         hasModerationResult: false,
         fallbackRevealEnsured: false,
         result: null,
@@ -732,14 +749,91 @@ export const NativeWebViewBrowser = () => {
       'reason=' + signalReason,
       'sovereignId=' + sovereignId,
       'preserveWindow=' + (shouldPreserveWindow ? 'true' : 'false'),
+      'jsBlurApplied=' + pending.jsBlurApplied,
+      'jsRevealApplied=' + pending.jsRevealApplied,
+      'effectiveBlurSignal=' + hasEffectiveShortsBlurSignal(pending),
       'hasModerationResult=' + pending.hasModerationResult,
       'result=' + (pending.result || 'none'),
     );
-    if (pending.hasModerationResult) {
+    if (pending.hasModerationResult && hasEffectiveShortsBlurSignal(pending)) {
       clearShortsOverlayAtomicTimeout();
       queueCurrentBlurState('shorts_atomic_both_ready_from_blur_signal');
     }
-  }, [armShortsOverlayAtomicTimeout, clearShortsOverlayAtomicTimeout, queueCurrentBlurState]);
+  }, [armShortsOverlayAtomicTimeout, clearShortsOverlayAtomicTimeout, hasEffectiveShortsBlurSignal, queueCurrentBlurState]);
+
+  const markShortsOverlayJsState = useCallback((
+    sovereignId: string,
+    jsBlurApplied: boolean,
+    jsRevealApplied: boolean,
+    signalReason: string,
+  ) => {
+    if (!sovereignId) return;
+    const activeUrl = currentUrlRef.current || '';
+    const activeSovereignId = getSovereignIdForContext(activeUrl);
+    if (activeSovereignId && sovereignId !== activeSovereignId) {
+      console.log(
+        '[DIAG][SHORTS_ATOMIC]',
+        'action=ignore_stale_js_state',
+        'reason=' + signalReason,
+        'sovereignId=' + sovereignId,
+        'activeSovereignId=' + activeSovereignId,
+      );
+      return;
+    }
+    const now = Date.now();
+    let pending = shortsOverlayPendingRef.current;
+    if (!pending || pending.sovereignId !== sovereignId) {
+      pending = {
+        sovereignId,
+        hasBlurSignal: false,
+        jsBlurApplied: false,
+        jsRevealApplied: false,
+        hasModerationResult: false,
+        fallbackRevealEnsured: false,
+        result: null,
+        startedAt: now,
+      };
+      shortsOverlayPendingRef.current = pending;
+      armShortsOverlayAtomicTimeout(sovereignId, now);
+    }
+    pending.jsBlurApplied = jsBlurApplied;
+    pending.jsRevealApplied = jsRevealApplied;
+    if (jsBlurApplied && !jsRevealApplied) {
+      pending.hasBlurSignal = true;
+      lastShortsBlurSignalRef.current = {
+        sovereignId,
+        at: pending.startedAt,
+      };
+    }
+    if (jsRevealApplied) {
+      pending.hasBlurSignal = false;
+    }
+    const effectiveBlurSignal = hasEffectiveShortsBlurSignal(pending);
+    console.log(
+      '[DIAG][SHORTS_ATOMIC]',
+      'action=mark_js_state',
+      'reason=' + signalReason,
+      'sovereignId=' + sovereignId,
+      'jsBlurApplied=' + pending.jsBlurApplied,
+      'jsRevealApplied=' + pending.jsRevealApplied,
+      'hasBlurSignal=' + pending.hasBlurSignal,
+      'effectiveBlurSignal=' + effectiveBlurSignal,
+      'hasModerationResult=' + pending.hasModerationResult,
+      'result=' + (pending.result || 'none'),
+    );
+    if (pending.hasModerationResult && effectiveBlurSignal) {
+      clearShortsOverlayAtomicTimeout();
+      queueCurrentBlurState('shorts_atomic_both_ready_from_js_state');
+      return;
+    }
+    queueCurrentBlurState('shorts_atomic_js_state_update');
+  }, [
+    armShortsOverlayAtomicTimeout,
+    clearShortsOverlayAtomicTimeout,
+    getSovereignIdForContext,
+    hasEffectiveShortsBlurSignal,
+    queueCurrentBlurState,
+  ]);
 
   const markShortsOverlayModerationResult = useCallback((
     sovereignId: string,
@@ -769,6 +863,8 @@ export const NativeWebViewBrowser = () => {
       pending = {
         sovereignId,
         hasBlurSignal: false,
+        jsBlurApplied: false,
+        jsRevealApplied: false,
         hasModerationResult: false,
         fallbackRevealEnsured: false,
         result: null,
@@ -787,15 +883,20 @@ export const NativeWebViewBrowser = () => {
       'result=' + effectiveResult,
       'softHits=' + softHits,
       'hasBlurSignal=' + pending.hasBlurSignal,
+      'jsBlurApplied=' + pending.jsBlurApplied,
+      'jsRevealApplied=' + pending.jsRevealApplied,
+      'effectiveBlurSignal=' + hasEffectiveShortsBlurSignal(pending),
     );
     if (effectiveResult === 'CLEAR') {
       setCentralBlurState(false, 'shorts_atomic_force_clear:' + effectiveDecisionReason);
-      pending.hasBlurSignal = true;
+      pending.hasBlurSignal = false;
+      pending.jsBlurApplied = false;
+      pending.jsRevealApplied = false;
       clearShortsOverlayAtomicTimeout();
       queueCurrentBlurState('shorts_atomic_force_clear');
       return;
     }
-    if (pending.hasBlurSignal) {
+    if (hasEffectiveShortsBlurSignal(pending)) {
       clearShortsOverlayAtomicTimeout();
       queueCurrentBlurState('shorts_atomic_both_ready_from_moderation');
     }
@@ -803,6 +904,7 @@ export const NativeWebViewBrowser = () => {
     armShortsOverlayAtomicTimeout,
     clearShortsOverlayAtomicTimeout,
     getSovereignIdForContext,
+    hasEffectiveShortsBlurSignal,
     queueCurrentBlurState,
     setCentralBlurState,
   ]);
@@ -1401,7 +1503,6 @@ export const NativeWebViewBrowser = () => {
         }
       })();
     `;
-    await scriptExecutor(hostContextSyncScript);
     console.log(
       '[DIAG][INJECT] host_context_sync',
       'reason=' + reason,
@@ -1427,8 +1528,9 @@ export const NativeWebViewBrowser = () => {
     );
     // Full moderation script: request scanning + host bridge + DOM blur/reveal behavior.
     const mainScript = generateModerationScript(config);
+    const combinedInjectionScript = hostContextSyncScript + '\n' + mainScript;
     try {
-      const injectResult = await scriptExecutor(mainScript);
+      const injectResult = await scriptExecutor(combinedInjectionScript);
       if (shortsProbeActive) {
         const resultRaw = injectResult === undefined
           ? 'undefined'
@@ -1781,9 +1883,11 @@ export const NativeWebViewBrowser = () => {
     const safeReason = escapeForJs(reason || 'id_mismatch_fallback');
     const safeSovereignId = escapeForJs(sovereignId || 'none');
     const safeVideoId = escapeForJs(videoId || 'none');
+    const isTimeoutSafeFailure = String(reason || '').indexOf('timeout_safe_failure') !== -1;
     const ensureResult = await executeScript(`
       (function() {
         try {
+          var ensured = false;
           if (typeof window.__MW_START_REVEAL_WATCH__ === 'function') {
             try {
               window.__MW_START_REVEAL_WATCH__('${safeReason}', {
@@ -1794,17 +1898,20 @@ export const NativeWebViewBrowser = () => {
             } catch (watchErr) {}
           }
           if (typeof window.__MW_ENSURE_REVEAL_UI__ === 'function') {
-            return !!window.__MW_ENSURE_REVEAL_UI__('${safeReason}');
-          }
-          if (typeof window.__MW_SCAN_FULL__ === 'function') {
+            ensured = !!window.__MW_ENSURE_REVEAL_UI__('${safeReason}');
+          } else if (typeof window.__MW_SCAN_FULL__ === 'function') {
             window.__MW_SCAN_FULL__();
-            return false;
-          }
-          if (window.__MW_DEBUG__ && typeof window.__MW_DEBUG__.scanAll === 'function') {
+            ensured = false;
+          } else if (window.__MW_DEBUG__ && typeof window.__MW_DEBUG__.scanAll === 'function') {
             window.__MW_DEBUG__.scanAll();
-            return false;
+            ensured = false;
           }
-          return false;
+          if (${isTimeoutSafeFailure ? 'true' : 'false'} && typeof window.__MW_APPLY_REVEAL_UI_LOCK__ === 'function') {
+            try {
+              window.__MW_APPLY_REVEAL_UI_LOCK__('timeout_safe_failure:${safeReason}', 2000, '${safeVideoId}');
+            } catch (lockErr) {}
+          }
+          return ensured;
         } catch (e) {
           return false;
         }
@@ -2286,6 +2393,13 @@ export const NativeWebViewBrowser = () => {
     ].join('|');
   }, [webViewState.currentUrl]);
 
+  const getStableInjectionDebounceMs = useCallback((urlHint?: string) => {
+    const resolvedUrl = urlHint || webViewState.currentUrl || currentUrlRef.current || '';
+    return getUrlFamily(resolvedUrl) === 'youtube_shorts'
+      ? STABLE_INJECTION_SHORTS_DEBOUNCE_MS
+      : STABLE_INJECTION_DEBOUNCE_MS;
+  }, [STABLE_INJECTION_SHORTS_DEBOUNCE_MS, STABLE_INJECTION_DEBOUNCE_MS, webViewState.currentUrl]);
+
   const scheduleStableInjection = useCallback((reason: string, urlHint?: string) => {
     if (!ENABLE_SIGNAL_PIPELINE) return;
     if (!isNative || !webViewState.isOpen || !executeScript) return;
@@ -2315,6 +2429,7 @@ export const NativeWebViewBrowser = () => {
       stableInjectionPendingRef.current = nextState;
     }
     clearStableInjectionTimer('reschedule');
+    const debounceMs = getStableInjectionDebounceMs(targetUrl);
     stableInjectionTimerRef.current = setTimeout(() => {
       stableInjectionTimerRef.current = null;
       const pendingState = stableInjectionPendingRef.current;
@@ -2337,13 +2452,15 @@ export const NativeWebViewBrowser = () => {
       }
       const now = Date.now();
       const last = lastStableInjectionRef.current;
-      if (last.key === activeKey && (now - last.at) < STABLE_INJECTION_DEBOUNCE_MS) {
+      const activeDebounceMs = getStableInjectionDebounceMs(activeUrl);
+      if (last.key === activeKey && (now - last.at) < activeDebounceMs) {
         console.log(
           '[DIAG][INJECT_STABLE]',
           'action=skip_recent_same_key',
           'reason=' + pendingState.reasons.join('+'),
           'key=' + activeKey,
           'deltaMs=' + (now - last.at),
+          'debounceMs=' + activeDebounceMs,
         );
         return;
       }
@@ -2392,12 +2509,12 @@ export const NativeWebViewBrowser = () => {
           'message=' + (error instanceof Error ? error.message : String(error)),
         );
       });
-    }, STABLE_INJECTION_DEBOUNCE_MS);
+    }, debounceMs);
     console.log(
       '[DIAG][INJECT_STABLE]',
       'action=scheduled',
       'reason=' + reason,
-      'debounceMs=' + STABLE_INJECTION_DEBOUNCE_MS,
+      'debounceMs=' + debounceMs,
       'key=' + (stableInjectionPendingRef.current?.key || nextState.key),
       'navId=' + (stableInjectionPendingRef.current?.navId || nextState.navId),
       'url=' + (stableInjectionPendingRef.current?.url || nextState.url),
@@ -2406,7 +2523,6 @@ export const NativeWebViewBrowser = () => {
     ENABLE_SIGNAL_PIPELINE,
     ENABLE_DOM_BLUR,
     BLUR_READY_PING_SUPPRESS_MS,
-    STABLE_INJECTION_DEBOUNCE_MS,
     isNative,
     webViewState.isOpen,
     webViewState.currentUrl,
@@ -2414,6 +2530,7 @@ export const NativeWebViewBrowser = () => {
     settingsLoaded,
     isRuntimeModerationEnabled,
     getStableInjectionKey,
+    getStableInjectionDebounceMs,
     clearStableInjectionTimer,
     injectModerationScript,
     requestBlurHandshake,
@@ -2426,17 +2543,22 @@ export const NativeWebViewBrowser = () => {
     if (!pending) return false;
     const activeSovereignId = getSovereignIdForContext(activeUrl);
     if (pending.sovereignId !== activeSovereignId) return false;
-    const readyToCommit = pending.hasBlurSignal && pending.hasModerationResult;
+    const readyToCommit = hasEffectiveShortsBlurSignal(pending) && pending.hasModerationResult;
     if (readyToCommit) return false;
     const timedOut = (Date.now() - pending.startedAt) >= SHORTS_OVERLAY_ATOMIC_TIMEOUT_MS;
     return !timedOut;
-  }, [SHORTS_OVERLAY_ATOMIC_TIMEOUT_MS, webViewState.currentUrl, getSovereignIdForContext]);
+  }, [SHORTS_OVERLAY_ATOMIC_TIMEOUT_MS, webViewState.currentUrl, getSovereignIdForContext, hasEffectiveShortsBlurSignal]);
 
   const flushBlurStateToWebView = useCallback(async () => {
     if (!ENABLE_DOM_BLUR) return;
     if (!isNative || !webViewState.isOpen || !executeScript) return;
     if (!blurReadyRef.current) return;
     const pending = blurPendingRef.current || blurStateRef.current;
+    const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
+    const activeUrlFamily = getUrlFamily(activeUrl);
+    const overlayLiftHandshakeMs = activeUrlFamily === 'youtube_shorts'
+      ? 0
+      : OVERLAY_LIFT_HANDSHAKE_MS;
     const holdShortsOverlaySync = shouldHoldShortsOverlaySync();
     if (holdShortsOverlaySync && pending.enabled) {
       const pendingShorts = shortsOverlayPendingRef.current;
@@ -2446,6 +2568,9 @@ export const NativeWebViewBrowser = () => {
           'action=hold_overlay_sync',
           'sovereignId=' + pendingShorts.sovereignId,
           'hasBlurSignal=' + pendingShorts.hasBlurSignal,
+          'jsBlurApplied=' + pendingShorts.jsBlurApplied,
+          'jsRevealApplied=' + pendingShorts.jsRevealApplied,
+          'effectiveBlurSignal=' + hasEffectiveShortsBlurSignal(pendingShorts),
           'hasModerationResult=' + pendingShorts.hasModerationResult,
           'result=' + (pendingShorts.result || 'none'),
         );
@@ -2461,19 +2586,21 @@ export const NativeWebViewBrowser = () => {
           'reason=' + pending.reason,
           'sovereignId=' + pendingShorts.sovereignId,
           'hasBlurSignal=' + pendingShorts.hasBlurSignal,
+          'jsBlurApplied=' + pendingShorts.jsBlurApplied,
+          'jsRevealApplied=' + pendingShorts.jsRevealApplied,
+          'effectiveBlurSignal=' + hasEffectiveShortsBlurSignal(pendingShorts),
           'hasModerationResult=' + pendingShorts.hasModerationResult,
           'result=' + (pendingShorts.result || 'none'),
         );
       }
     }
     if (!holdShortsOverlaySync) {
-      const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
-      if (getUrlFamily(activeUrl) === 'youtube_shorts') {
+      if (activeUrlFamily === 'youtube_shorts') {
         const pendingShorts = shortsOverlayPendingRef.current;
         const activeSovereignId = getSovereignIdForContext(activeUrl);
         const timedOutWithoutResult = !!pendingShorts &&
           pendingShorts.sovereignId === activeSovereignId &&
-          pendingShorts.hasBlurSignal &&
+          hasEffectiveShortsBlurSignal(pendingShorts) &&
           !pendingShorts.hasModerationResult &&
           (Date.now() - pendingShorts.startedAt) >= SHORTS_OVERLAY_ATOMIC_TIMEOUT_MS;
         if (timedOutWithoutResult && !pendingShorts.fallbackRevealEnsured) {
@@ -2502,19 +2629,19 @@ export const NativeWebViewBrowser = () => {
     } else {
       const now = Date.now();
       const needsLiftHandshake = overlayLastSyncedEnabledRef.current;
-      if (needsLiftHandshake && overlayLiftHandshakeUntilRef.current === 0) {
-        overlayLiftHandshakeUntilRef.current = now + OVERLAY_LIFT_HANDSHAKE_MS;
-        scheduleOverlayLiftHandshakeRetry(OVERLAY_LIFT_HANDSHAKE_MS, 'disable_prepare');
+      if (needsLiftHandshake && overlayLiftHandshakeMs > 0 && overlayLiftHandshakeUntilRef.current === 0) {
+        overlayLiftHandshakeUntilRef.current = now + overlayLiftHandshakeMs;
+        scheduleOverlayLiftHandshakeRetry(overlayLiftHandshakeMs, 'disable_prepare');
         console.log(
           '[DIAG][OVERLAY_HANDSHAKE]',
           'action=hold_before_disable',
           'reason=' + pending.reason,
-          'windowMs=' + OVERLAY_LIFT_HANDSHAKE_MS,
+          'windowMs=' + overlayLiftHandshakeMs,
         );
         void requestBlurHandshake('overlay_lift_prepare:' + pending.reason).catch(() => undefined);
         return;
       }
-      if (overlayLiftHandshakeUntilRef.current > now) {
+      if (overlayLiftHandshakeMs > 0 && overlayLiftHandshakeUntilRef.current > now) {
         const remainingMs = Math.max(1, overlayLiftHandshakeUntilRef.current - now);
         scheduleOverlayLiftHandshakeRetry(remainingMs, 'disable_wait');
         console.log(
@@ -2554,6 +2681,7 @@ export const NativeWebViewBrowser = () => {
     webViewState.currentUrl,
     executeScript,
     shouldHoldShortsOverlaySync,
+    hasEffectiveShortsBlurSignal,
     SHORTS_OVERLAY_ATOMIC_TIMEOUT_MS,
     OVERLAY_LIFT_HANDSHAKE_MS,
     cancelOverlayLiftHandshakeWindow,
@@ -3670,6 +3798,44 @@ export const NativeWebViewBrowser = () => {
         return;
       }
 
+      if (typedMessage.type === 'MW_JS_REVEAL_STATE') {
+        const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
+        const activeEpoch = webViewPageEpochRef.current;
+        const messageEpoch = (
+          typeof typedMessage.pageEpoch === 'number' && Number.isFinite(typedMessage.pageEpoch)
+        ) ? Number(typedMessage.pageEpoch) : null;
+        const messageSovereignId = typeof typedMessage.sovereignId === 'string'
+          ? typedMessage.sovereignId
+          : getSovereignIdForContext(activeUrl);
+        const isActiveEpochMessage = isGraceEpochAcceptedForActiveShortsVideo(
+          messageEpoch,
+          activeEpoch,
+          activeUrl,
+          messageSovereignId,
+        );
+        if (!isYouTubeShortsUrl(activeUrl) || !isActiveEpochMessage) {
+          console.log(
+            '[DIAG][SHORTS_ATOMIC]',
+            'action=ignore_stale_js_state_message',
+            'messageEpoch=' + messageEpoch,
+            'activeEpoch=' + activeEpoch,
+            'messageSovereignId=' + (messageSovereignId || 'none'),
+            'activeSovereignId=' + getSovereignIdForContext(activeUrl),
+          );
+          return;
+        }
+        const jsBlurApplied = typedMessage.jsBlurApplied === true;
+        const jsRevealApplied = typedMessage.jsRevealApplied === true;
+        const signalReason = String(typedMessage.reason || 'js_state');
+        markShortsOverlayJsState(
+          messageSovereignId,
+          jsBlurApplied,
+          jsRevealApplied,
+          signalReason,
+        );
+        return;
+      }
+
       if (ENABLE_DOM_BLUR && isBlurOverlayReadyMessage(message)) {
         const now = Date.now();
         const activeNavId = activeNavIdRef.current || 0;
@@ -3912,6 +4078,7 @@ export const NativeWebViewBrowser = () => {
     syncOverlayState,
     getSovereignIdForContext,
     markShortsOverlayBlurSignal,
+    markShortsOverlayJsState,
     armShortsLegacyFallbackProbe,
     disarmShortsLegacyFallbackProbe,
     unwrapIncomingMessagePayload,
