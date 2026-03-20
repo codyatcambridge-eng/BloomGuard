@@ -88,6 +88,41 @@ const isYouTubeShortsUrl = (value?: string) => {
   }
 };
 
+const normalizePathname = (value: string): string => {
+  if (!value) return '/';
+  const trimmed = value.replace(/\/+$/, '');
+  return trimmed || '/';
+};
+
+const isLivePlayerView = (value?: string) => {
+  if (!value) return false;
+  try {
+    const parsed = new URL(value);
+    const host = parsed.hostname.toLowerCase();
+    if (host !== 'youtube.com' && host !== 'www.youtube.com' && host !== 'm.youtube.com') {
+      return false;
+    }
+    const normalizedPath = normalizePathname(String(parsed.pathname || ''));
+    return /^\/shorts\/[^/?#]+$/i.test(normalizedPath);
+  } catch {
+    return false;
+  }
+};
+
+const hasSameUrlOriginAndPath = (left?: string, right?: string): boolean => {
+  if (!left || !right) return false;
+  try {
+    const leftUrl = new URL(left);
+    const rightUrl = new URL(right);
+    return (
+      leftUrl.origin === rightUrl.origin &&
+      normalizePathname(String(leftUrl.pathname || '')) === normalizePathname(String(rightUrl.pathname || ''))
+    );
+  } catch {
+    return false;
+  }
+};
+
 const isYouTubeShortsRelatedUrl = (value?: string) => {
   if (!value) return false;
   try {
@@ -1485,6 +1520,11 @@ export const NativeWebViewBrowser = () => {
       const nextFamily = getCacheFamilyContext(url);
       const deferReason = `youtube_internal_nav_${previousFamily}_to_${nextFamily}`;
       const nextIsShorts = isYouTubeShortsUrl(url);
+      const nextIsLivePlayer = isLivePlayerView(url);
+      const nextIsShortsProfileSurface = getUrlFamily(url) === 'youtube_shorts_related' && !nextIsLivePlayer;
+      const shouldSkipHardResetForProfileReveal =
+        nextIsShortsProfileSurface &&
+        hasSameUrlOriginAndPath(previousUrl, url);
       const shouldDeferSafeReset =
         !nextIsShorts &&
         !!previousUrl &&
@@ -1506,7 +1546,17 @@ export const NativeWebViewBrowser = () => {
       blurReadyRef.current = false;
       resetShortsOverlayCoordinator('url_change');
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
-      hardResetOverlayHostState('url_change_hard_reset');
+      if (shouldSkipHardResetForProfileReveal) {
+        console.log(
+          '[DIAG][OVERLAY_HOST_STATE]',
+          'action=skip_hard_reset',
+          'reason=profile_soft_url_change',
+          'prevUrl=' + (previousUrl || 'unknown'),
+          'nextUrl=' + (url || 'unknown'),
+        );
+      } else {
+        hardResetOverlayHostState('url_change_hard_reset');
+      }
       if (nextIsShorts) {
         exitPendingReinject(`shorts_nav_reset_${previousFamily}_to_${nextFamily}`, url);
         setCentralBlurState(false, 'nav_reset');
@@ -2952,6 +3002,7 @@ export const NativeWebViewBrowser = () => {
     const softQualifiedHits = softResults.filter(item => item.confidence >= softConfidenceFloor);
     const softUnsafeMaxConf = softResults.reduce((max, item) => Math.max(max, item.confidence), 0);
     const softRatio = denominator > 0 ? softQualifiedHits.length / denominator : 0;
+    const livePlayerView = isLivePlayerView(activeUrl);
     const shortsSoftThresholdBypassFloor = 0.60;
     const shortsSoftOnlySexyHit = (
       stickyShortsMode &&
@@ -2979,9 +3030,20 @@ export const NativeWebViewBrowser = () => {
         softUnsafeMaxConf > hardSensitivityThreshold &&
         !shortsSoftOnlyLowConfidenceBypass
       );
+    const thresholdHitAllowedForHost = thresholdHit && livePlayerView;
+    if (thresholdHit && !thresholdHitAllowedForHost) {
+      console.log(
+        '[DIAG][OVERLAY_HOST_STATE]',
+        'action=threshold_hit_bypassed_non_live_player',
+        'requestId=' + requestId,
+        'url=' + (activeUrl || 'unknown'),
+        'hardMax=' + hardUnsafeMaxConf.toFixed(3),
+        'hardThr=' + hardSensitivityThreshold.toFixed(3),
+      );
+    }
 
     const hardOverlayDecision =
-      thresholdHit ||
+      thresholdHitAllowedForHost ||
       hardStrongHits.length >= 1 ||
       hardLowHits.length >= modePolicy.hardMultiMinHits;
     const softOverlayDecision =
@@ -3021,8 +3083,10 @@ export const NativeWebViewBrowser = () => {
     if (holdForMismatchedThumbnails) {
       overlayDecision = true;
       decisionReason = 'id_mismatch_fallback';
-    } else if (thresholdHit) {
+    } else if (thresholdHitAllowedForHost) {
       decisionReason = 'threshold_hit';
+    } else if (thresholdHit) {
+      decisionReason = 'threshold_hit_non_live_bypass';
     } else if (hardStrongHits.length > 0) {
       decisionReason = 'hard_confidence_hit';
     } else if (hardLowHits.length >= modePolicy.hardMultiMinHits) {
@@ -3042,7 +3106,7 @@ export const NativeWebViewBrowser = () => {
         }
       })();
       console.log(
-        `[MW-Host][ScanSummary] url=${shortUrl} req=${requestId} total=${results.length} eligible=${denominator} tinyExcluded=${tinyExcludedCount} hardHits=${hardSensitivityHits.length} softHits=${softSensitivityHits.length} safeHits=${Math.max(denominator - hardSensitivityHits.length - softSensitivityHits.length, 0)} hardMax=${hardUnsafeMaxConf.toFixed(3)} hardThr=${hardSensitivityThreshold.toFixed(3)} softMax=${softUnsafeMaxConf.toFixed(3)} softRatio=${softRatio.toFixed(3)} videoFrameSafe=${hasVideoFrameSafeResult ? 1 : 0} videoFrameUnsafe=${hasVideoFrameUnsafeResult ? 1 : 0} videoFrameOverride=${videoFrameSafeOverrideActive ? 1 : 0} mismatchSafety=${holdForMismatchedThumbnails ? 1 : 0} mode=${blurMode} decision=${overlayDecision ? 'ON' : 'OFF'} reason=${decisionReason}`
+        `[MW-Host][ScanSummary] url=${shortUrl} req=${requestId} total=${results.length} eligible=${denominator} tinyExcluded=${tinyExcludedCount} hardHits=${hardSensitivityHits.length} softHits=${softSensitivityHits.length} safeHits=${Math.max(denominator - hardSensitivityHits.length - softSensitivityHits.length, 0)} hardMax=${hardUnsafeMaxConf.toFixed(3)} hardThr=${hardSensitivityThreshold.toFixed(3)} softMax=${softUnsafeMaxConf.toFixed(3)} softRatio=${softRatio.toFixed(3)} videoFrameSafe=${hasVideoFrameSafeResult ? 1 : 0} videoFrameUnsafe=${hasVideoFrameUnsafeResult ? 1 : 0} videoFrameOverride=${videoFrameSafeOverrideActive ? 1 : 0} mismatchSafety=${holdForMismatchedThumbnails ? 1 : 0} livePlayer=${livePlayerView ? 1 : 0} mode=${blurMode} decision=${overlayDecision ? 'ON' : 'OFF'} reason=${decisionReason}`
       );
     }
 
@@ -3588,6 +3652,7 @@ export const NativeWebViewBrowser = () => {
     const IDLE_MIN_POLL_MS = 2000;
     const IDLE_MAX_POLL_MS = 5000;
     const IDLE_BACKOFF_MS = 500;
+    const PROFILE_DECISION_ON_POLL_MS = 5000;
     const LEGACY_EMPTY_REASONS = new Set([
       'queue_empty',
       'legacy_empty_literal',
@@ -3621,6 +3686,16 @@ export const NativeWebViewBrowser = () => {
         'lastEmpty=' + lastEmptyPollReason,
         'producer=' + lastProducerMode,
         'navId=' + activeNavIdRef.current,
+      );
+    };
+
+    const isProfileDecisionOnContext = (pollUrl: string): boolean => {
+      const overlayReason = blurStateRef.current.reason || '';
+      const hostDecisionOn = blurStateRef.current.enabled && overlayReason.startsWith('moderation_request_');
+      return (
+        getUrlFamily(pollUrl) === 'youtube_shorts_related' &&
+        !isLivePlayerView(pollUrl) &&
+        hostDecisionOn
       );
     };
 
@@ -3962,6 +4037,18 @@ export const NativeWebViewBrowser = () => {
           pollDelayMs = Math.min(pollDelayMs + EMPTY_BACKOFF_MS, MAX_POLL_MS);
         }
       }
+      const pollUrl = webViewState.currentUrl || currentUrlRef.current || activeUrl;
+      const shouldThrottleProfileDecisionOnPoll = isProfileDecisionOnContext(pollUrl);
+      if (shouldThrottleProfileDecisionOnPoll && pollDelayMs < PROFILE_DECISION_ON_POLL_MS) {
+        pollDelayMs = PROFILE_DECISION_ON_POLL_MS;
+        console.log(
+          '[DIAG][LEGACY_POLL_THROTTLE]',
+          'action=profile_decision_on',
+          'delayMs=' + pollDelayMs,
+          'overlayReason=' + blurStateRef.current.reason,
+          'url=' + (pollUrl || 'unknown'),
+        );
+      }
       scheduleNextPoll(pollDelayMs);
     };
     console.log(
@@ -3972,7 +4059,10 @@ export const NativeWebViewBrowser = () => {
       'url=' + (webViewState.currentUrl || currentUrlRef.current || 'unknown'),
       'listenersAttached=' + webViewListenersAttached,
     );
-    scheduleNextPoll(MIN_POLL_MS);
+    const initialPollDelayMs = isProfileDecisionOnContext(activeUrl)
+      ? PROFILE_DECISION_ON_POLL_MS
+      : MIN_POLL_MS;
+    scheduleNextPoll(initialPollDelayMs);
 
     return () => {
       cancelled = true;
