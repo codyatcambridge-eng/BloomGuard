@@ -285,6 +285,20 @@ interface ShortsOverlayPendingState {
   startedAt: number;
 }
 
+interface ShortsHardRevealLockState {
+  videoId: string;
+  sovereignId: string;
+  lockedAt: number;
+  reason: string;
+}
+
+interface PendingForceRevealEnforcementSignal {
+  videoId: string;
+  sovereignId: string;
+  reason: string;
+  requestedAt: number;
+}
+
 interface StableInjectionState {
   key: string;
   url: string;
@@ -418,6 +432,17 @@ export const NativeWebViewBrowser = () => {
   });
   const [shortsLegacyFallbackVersion, setShortsLegacyFallbackVersion] = useState(0);
   const [shortsRelatedLegacyPollVersion, setShortsRelatedLegacyPollVersion] = useState(0);
+  const shortsHardRevealLocksRef = useRef<Map<string, ShortsHardRevealLockState>>(new Map());
+  const pendingForceRevealEnforcementRef = useRef<PendingForceRevealEnforcementSignal | null>(null);
+  const lastForceRevealEnforcementSignalRef = useRef<{
+    videoId: string;
+    sovereignId: string;
+    sentAt: number;
+  }>({
+    videoId: 'none',
+    sovereignId: 'none',
+    sentAt: 0,
+  });
 
   const UNSAFE_STREAK_REQUIRED = 2;
   const SAFE_STREAK_REQUIRED = 2;
@@ -446,6 +471,104 @@ export const NativeWebViewBrowser = () => {
     const shortsUrlId = getYouTubeShortsId(resolvedUrl);
     return String(resolvedNavId) + '|' + String(resolvedEpoch) + '|' + (shortsUrlId || 'none');
   }, []);
+
+  const getShortsHardRevealLockForSovereign = useCallback((sovereignId?: string) => {
+    const parsed = parseSovereignId(sovereignId || '');
+    const videoId = parsed.videoId || 'none';
+    if (!videoId || videoId === 'none') return null;
+    return shortsHardRevealLocksRef.current.get(videoId) || null;
+  }, []);
+
+  const setShortsHardRevealLockForSovereign = useCallback((sovereignId: string, reason: string) => {
+    const parsed = parseSovereignId(sovereignId || '');
+    const videoId = parsed.videoId || 'none';
+    if (!videoId || videoId === 'none') {
+      console.log(
+        '[DIAG][REVEAL_LOCK]',
+        'action=skip_set',
+        'reason=missing_video_id',
+        'sovereignId=' + (sovereignId || 'none'),
+      );
+      return null;
+    }
+    const nextLock: ShortsHardRevealLockState = {
+      videoId,
+      sovereignId: sovereignId || 'none',
+      lockedAt: Date.now(),
+      reason: reason || 'unknown',
+    };
+    shortsHardRevealLocksRef.current.set(videoId, nextLock);
+    console.log(
+      '[DIAG][REVEAL_LOCK]',
+      'action=set',
+      'reason=' + (reason || 'unknown'),
+      'videoId=' + videoId,
+      'sovereignId=' + (sovereignId || 'none'),
+      'lockCount=' + shortsHardRevealLocksRef.current.size,
+    );
+    return nextLock;
+  }, []);
+
+  const queueCurrentBlurState = useCallback((reason: string) => {
+    blurPendingRef.current = {
+      enabled: blurStateRef.current.enabled,
+      reason,
+      timestamp: Date.now(),
+    };
+    setBlurSyncVersion(v => v + 1);
+  }, []);
+
+  const hydrateShortsPendingStateFromHardRevealLock = useCallback((sovereignId: string, reason: string) => {
+    const lock = getShortsHardRevealLockForSovereign(sovereignId);
+    if (!lock) return false;
+    if (lock.sovereignId !== sovereignId) {
+      lock.sovereignId = sovereignId;
+      lock.reason = reason || lock.reason;
+      shortsHardRevealLocksRef.current.set(lock.videoId, lock);
+    }
+    let pending = shortsOverlayPendingRef.current;
+    if (!pending || pending.sovereignId !== sovereignId) {
+      pending = {
+        sovereignId,
+        hasBlurSignal: false,
+        jsBlurApplied: false,
+        jsRevealApplied: true,
+        hasModerationResult: true,
+        fallbackRevealEnsured: false,
+        result: 'CLEAR',
+        startedAt: lock.lockedAt || Date.now(),
+      };
+      shortsOverlayPendingRef.current = pending;
+    } else {
+      pending.hasBlurSignal = false;
+      pending.jsBlurApplied = false;
+      pending.jsRevealApplied = true;
+      pending.hasModerationResult = true;
+      pending.result = 'CLEAR';
+    }
+    console.log(
+      '[DIAG][REVEAL_LOCK]',
+      'action=hydrate_pending',
+      'reason=' + (reason || 'unknown'),
+      'videoId=' + lock.videoId,
+      'sovereignId=' + sovereignId,
+    );
+    pendingForceRevealEnforcementRef.current = {
+      videoId: lock.videoId,
+      sovereignId,
+      reason: reason || lock.reason || 'hard_reveal_lock',
+      requestedAt: Date.now(),
+    };
+    console.log(
+      '[DIAG][REVEAL_LOCK]',
+      'action=queue_force_reveal_enforcement',
+      'reason=' + (reason || 'unknown'),
+      'videoId=' + lock.videoId,
+      'sovereignId=' + sovereignId,
+    );
+    queueCurrentBlurState('hard_reveal_lock:' + (reason || 'unknown'));
+    return true;
+  }, [getShortsHardRevealLockForSovereign, queueCurrentBlurState]);
 
   const isGraceEpochAcceptedForActiveShortsVideo = useCallback((
     messageEpoch: number | null,
@@ -499,15 +622,6 @@ export const NativeWebViewBrowser = () => {
       'navId=' + activeNavIdRef.current,
     );
     setShortsLegacyFallbackVersion(v => v + 1);
-  }, []);
-
-  const queueCurrentBlurState = useCallback((reason: string) => {
-    blurPendingRef.current = {
-      enabled: blurStateRef.current.enabled,
-      reason,
-      timestamp: Date.now(),
-    };
-    setBlurSyncVersion(v => v + 1);
   }, []);
 
   const cancelOverlayLiftHandshakeWindow = useCallback((reason: string) => {
@@ -627,16 +741,37 @@ export const NativeWebViewBrowser = () => {
     const messageSovereignId = typeof typedMessage.sovereignId === 'string'
       ? typedMessage.sovereignId
       : 'none';
+    const activeUrl = currentUrlRef.current || '';
+    const resolvedSovereignId = messageSovereignId !== 'none'
+      ? messageSovereignId
+      : getSovereignIdForContext(activeUrl, activeNavIdRef.current, webViewPageEpochRef.current);
+    const revealLock = setShortsHardRevealLockForSovereign(
+      resolvedSovereignId,
+      'mw_user_reveal_request:' + source,
+    );
+    const hydratedRevealLock = hydrateShortsPendingStateFromHardRevealLock(
+      resolvedSovereignId,
+      'mw_user_reveal_request',
+    );
     console.log(
       '[MW-Host][Reveal] MW_USER_REVEAL_REQUEST',
       'source=' + source,
       'sovereignId=' + messageSovereignId,
+      'resolvedSovereignId=' + resolvedSovereignId,
+      'videoId=' + (revealLock?.videoId || parseSovereignId(resolvedSovereignId).videoId || 'none'),
       'navId=' + activeNavIdRef.current,
       'pageEpoch=' + webViewPageEpochRef.current,
+      'lockHydrated=' + hydratedRevealLock,
     );
-    setCentralBlurState(false, 'user_reveal_request');
+    setCentralBlurState(false, hydratedRevealLock ? 'user_reveal_request_hard_lock' : 'user_reveal_request');
     return true;
-  }, [setCentralBlurState, unwrapIncomingMessagePayload]);
+  }, [
+    getSovereignIdForContext,
+    hydrateShortsPendingStateFromHardRevealLock,
+    setCentralBlurState,
+    setShortsHardRevealLockForSovereign,
+    unwrapIncomingMessagePayload,
+  ]);
 
   const clearShortsOverlayAtomicTimeout = useCallback(() => {
     if (!shortsOverlayTimeoutRef.current) return;
@@ -653,9 +788,10 @@ export const NativeWebViewBrowser = () => {
 
   const hasEffectiveShortsBlurSignal = useCallback((pending: ShortsOverlayPendingState | null): boolean => {
     if (!pending) return false;
+    if (getShortsHardRevealLockForSovereign(pending.sovereignId)) return false;
     if (pending.jsRevealApplied && !pending.jsBlurApplied) return false;
     return pending.hasBlurSignal || pending.jsBlurApplied;
-  }, []);
+  }, [getShortsHardRevealLockForSovereign]);
 
   const resetShortsOverlayCoordinator = useCallback((reason: string) => {
     clearShortsOverlayAtomicTimeout();
@@ -716,6 +852,19 @@ export const NativeWebViewBrowser = () => {
     preserveStartedAtMs?: number,
   ) => {
     if (!sovereignId) return;
+    if (getShortsHardRevealLockForSovereign(sovereignId)) {
+      hydrateShortsPendingStateFromHardRevealLock(
+        sovereignId,
+        'mark_blur_signal:' + signalReason,
+      );
+      console.log(
+        '[DIAG][SHORTS_ATOMIC]',
+        'action=skip_blur_signal_hard_reveal_lock',
+        'reason=' + signalReason,
+        'sovereignId=' + sovereignId,
+      );
+      return;
+    }
     const now = Date.now();
     const shouldPreserveWindow = (
       typeof preserveStartedAtMs === 'number' &&
@@ -759,7 +908,14 @@ export const NativeWebViewBrowser = () => {
       clearShortsOverlayAtomicTimeout();
       queueCurrentBlurState('shorts_atomic_both_ready_from_blur_signal');
     }
-  }, [armShortsOverlayAtomicTimeout, clearShortsOverlayAtomicTimeout, hasEffectiveShortsBlurSignal, queueCurrentBlurState]);
+  }, [
+    armShortsOverlayAtomicTimeout,
+    clearShortsOverlayAtomicTimeout,
+    getShortsHardRevealLockForSovereign,
+    hasEffectiveShortsBlurSignal,
+    hydrateShortsPendingStateFromHardRevealLock,
+    queueCurrentBlurState,
+  ]);
 
   const markShortsOverlayJsState = useCallback((
     sovereignId: string,
@@ -777,6 +933,21 @@ export const NativeWebViewBrowser = () => {
         'reason=' + signalReason,
         'sovereignId=' + sovereignId,
         'activeSovereignId=' + activeSovereignId,
+      );
+      return;
+    }
+    if (getShortsHardRevealLockForSovereign(sovereignId)) {
+      hydrateShortsPendingStateFromHardRevealLock(
+        sovereignId,
+        'mark_js_state:' + signalReason,
+      );
+      console.log(
+        '[DIAG][SHORTS_ATOMIC]',
+        'action=force_reveal_state_hard_lock',
+        'reason=' + signalReason,
+        'sovereignId=' + sovereignId,
+        'incomingJsBlurApplied=' + jsBlurApplied,
+        'incomingJsRevealApplied=' + jsRevealApplied,
       );
       return;
     }
@@ -831,7 +1002,9 @@ export const NativeWebViewBrowser = () => {
     armShortsOverlayAtomicTimeout,
     clearShortsOverlayAtomicTimeout,
     getSovereignIdForContext,
+    getShortsHardRevealLockForSovereign,
     hasEffectiveShortsBlurSignal,
+    hydrateShortsPendingStateFromHardRevealLock,
     queueCurrentBlurState,
   ]);
 
@@ -846,9 +1019,25 @@ export const NativeWebViewBrowser = () => {
     const activeUrl = currentUrlRef.current || '';
     const activeSovereignId = getSovereignIdForContext(activeUrl);
     const isActiveSovereign = sovereignId === activeSovereignId;
-    const effectiveResult = result;
-    const effectiveDecisionReason = decisionReason;
-    if (effectiveResult === 'CLEAR' && !isActiveSovereign) {
+    let effectiveResult = result;
+    let effectiveDecisionReason = decisionReason;
+    const hardRevealLock = getShortsHardRevealLockForSovereign(sovereignId);
+    if (hardRevealLock) {
+      effectiveResult = 'CLEAR';
+      effectiveDecisionReason = 'hard_reveal_lock';
+      hydrateShortsPendingStateFromHardRevealLock(
+        sovereignId,
+        'mark_moderation_result:' + decisionReason,
+      );
+      console.log(
+        '[DIAG][SHORTS_ATOMIC]',
+        'action=force_clear_hard_reveal_lock',
+        'reason=' + decisionReason,
+        'sovereignId=' + sovereignId,
+        'videoId=' + hardRevealLock.videoId,
+      );
+    }
+    if (effectiveResult === 'CLEAR' && !isActiveSovereign && !hardRevealLock) {
       console.log(
         '[DIAG][SHORTS_ATOMIC]',
         'action=ignore_stale_clear',
@@ -891,9 +1080,11 @@ export const NativeWebViewBrowser = () => {
       setCentralBlurState(false, 'shorts_atomic_force_clear:' + effectiveDecisionReason);
       pending.hasBlurSignal = false;
       pending.jsBlurApplied = false;
-      pending.jsRevealApplied = false;
+      pending.jsRevealApplied = !!hardRevealLock;
       clearShortsOverlayAtomicTimeout();
-      queueCurrentBlurState('shorts_atomic_force_clear');
+      queueCurrentBlurState(
+        hardRevealLock ? 'shorts_atomic_force_clear_hard_reveal_lock' : 'shorts_atomic_force_clear',
+      );
       return;
     }
     if (hasEffectiveShortsBlurSignal(pending)) {
@@ -904,7 +1095,9 @@ export const NativeWebViewBrowser = () => {
     armShortsOverlayAtomicTimeout,
     clearShortsOverlayAtomicTimeout,
     getSovereignIdForContext,
+    getShortsHardRevealLockForSovereign,
     hasEffectiveShortsBlurSignal,
+    hydrateShortsPendingStateFromHardRevealLock,
     queueCurrentBlurState,
     setCentralBlurState,
   ]);
@@ -1708,6 +1901,9 @@ export const NativeWebViewBrowser = () => {
         isRuntimeModerationEnabled &&
         isYouTubeFamilyContext(previousFamily) &&
         isYouTubeFamilyContext(nextFamily);
+      const nextSovereignId = nextIsShorts
+        ? getSovereignIdForContext(url, activeNavIdRef.current, webViewPageEpochRef.current)
+        : '';
       console.log('[Browser] ======= URL CHANGE =======');
       console.log('[Browser] New URL:', url);
       console.log('[DIAG][LOAD] stage=url_change url=' + toDiagUrl(url));
@@ -1734,6 +1930,12 @@ export const NativeWebViewBrowser = () => {
         );
       } else {
         hardResetOverlayHostState('url_change_hard_reset');
+        if (
+          nextIsShorts &&
+          hydrateShortsPendingStateFromHardRevealLock(nextSovereignId, 'url_change_hard_reset')
+        ) {
+          setCentralBlurState(false, 'url_change_hard_reset_reveal_lock');
+        }
       }
       if (nextIsShorts) {
         exitPendingReinject(`shorts_nav_reset_${previousFamily}_to_${nextFamily}`, url);
@@ -1766,6 +1968,13 @@ export const NativeWebViewBrowser = () => {
       blurReadyRef.current = false;
       resetOverlayLiftHandshakeState('webview_closed');
       resetShortsOverlayCoordinator('webview_closed');
+      shortsHardRevealLocksRef.current.clear();
+      pendingForceRevealEnforcementRef.current = null;
+      lastForceRevealEnforcementSignalRef.current = {
+        videoId: 'none',
+        sovereignId: 'none',
+        sentAt: 0,
+      };
       blurPendingRef.current = null;
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       setCentralBlurState(false, 'webview_closed');
@@ -2374,6 +2583,80 @@ export const NativeWebViewBrowser = () => {
     `);
   }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, executeScript]);
 
+  const flushPendingForceRevealEnforcementSignal = useCallback(async (source: string) => {
+    const pendingSignal = pendingForceRevealEnforcementRef.current;
+    if (!pendingSignal) return false;
+    if (!isNative || !webViewState.isOpen || !executeScript) return false;
+    const now = Date.now();
+    const lastSignal = lastForceRevealEnforcementSignalRef.current;
+    const dedupeWindowMs = 350;
+    if (
+      lastSignal.videoId === pendingSignal.videoId &&
+      lastSignal.sovereignId === pendingSignal.sovereignId &&
+      (now - lastSignal.sentAt) < dedupeWindowMs
+    ) {
+      pendingForceRevealEnforcementRef.current = null;
+      return false;
+    }
+    const payload = {
+      type: 'MW_FORCE_REVEAL_ENFORCEMENT',
+      videoId: pendingSignal.videoId || 'none',
+      sovereignId: pendingSignal.sovereignId || 'none',
+      reason: pendingSignal.reason || 'hard_reveal_lock',
+      source: source || 'overlay_sync',
+      timestamp: Date.now(),
+    };
+    const escapedPayload = escapeForJs(JSON.stringify(payload));
+    let result: unknown = null;
+    try {
+      result = await executeScript(`
+        (function() {
+          try {
+            var msg = JSON.parse('${escapedPayload}');
+            window.postMessage(msg, '*');
+            return 'OK';
+          } catch (e) {
+            return 'ERR';
+          }
+        })();
+      `);
+    } catch (error) {
+      console.warn(
+        '[DIAG][REVEAL_LOCK]',
+        'action=force_reveal_enforcement_signal_throw',
+        'videoId=' + (pendingSignal.videoId || 'none'),
+        'sovereignId=' + (pendingSignal.sovereignId || 'none'),
+        'message=' + (error instanceof Error ? error.message : String(error)),
+      );
+      return false;
+    }
+    if (String(result || '') === 'ERR') {
+      console.warn(
+        '[DIAG][REVEAL_LOCK]',
+        'action=force_reveal_enforcement_signal_error',
+        'videoId=' + (pendingSignal.videoId || 'none'),
+        'sovereignId=' + (pendingSignal.sovereignId || 'none'),
+      );
+      return false;
+    }
+    pendingForceRevealEnforcementRef.current = null;
+    lastForceRevealEnforcementSignalRef.current = {
+      videoId: pendingSignal.videoId || 'none',
+      sovereignId: pendingSignal.sovereignId || 'none',
+      sentAt: now,
+    };
+    console.log(
+      '[DIAG][REVEAL_LOCK]',
+      'action=force_reveal_enforcement_signal_sent',
+      'videoId=' + (pendingSignal.videoId || 'none'),
+      'sovereignId=' + (pendingSignal.sovereignId || 'none'),
+      'reason=' + (pendingSignal.reason || 'hard_reveal_lock'),
+      'source=' + (source || 'overlay_sync'),
+      'ageMs=' + Math.max(0, now - pendingSignal.requestedAt),
+    );
+    return true;
+  }, [isNative, webViewState.isOpen, executeScript]);
+
   const getStableInjectionKey = useCallback((urlHint?: string) => {
     const resolvedUrl = urlHint || webViewState.currentUrl || currentUrlRef.current || '';
     const navId = activeNavIdRef.current || 0;
@@ -2550,8 +2833,9 @@ export const NativeWebViewBrowser = () => {
   }, [SHORTS_OVERLAY_ATOMIC_TIMEOUT_MS, webViewState.currentUrl, getSovereignIdForContext, hasEffectiveShortsBlurSignal]);
 
   const flushBlurStateToWebView = useCallback(async () => {
-    if (!ENABLE_DOM_BLUR) return;
     if (!isNative || !webViewState.isOpen || !executeScript) return;
+    await flushPendingForceRevealEnforcementSignal('flush_blur_state');
+    if (!ENABLE_DOM_BLUR) return;
     if (!blurReadyRef.current) return;
     const pending = blurPendingRef.current || blurStateRef.current;
     const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
@@ -2687,6 +2971,7 @@ export const NativeWebViewBrowser = () => {
     cancelOverlayLiftHandshakeWindow,
     scheduleOverlayLiftHandshakeRetry,
     requestBlurHandshake,
+    flushPendingForceRevealEnforcementSignal,
     getSovereignIdForContext,
     ensureShortsRevealUi,
   ]);
@@ -3278,6 +3563,37 @@ export const NativeWebViewBrowser = () => {
         'elapsed=' + elapsedMs.toFixed(0) + 'ms',
       );
     }
+    const revealLockSovereignId = stickyShortsMode
+      ? (effectiveRequestSovereignId || activeSovereignId)
+      : '';
+    const activeRevealLock = stickyShortsMode
+      ? getShortsHardRevealLockForSovereign(revealLockSovereignId)
+      : null;
+    if (stickyShortsMode && activeRevealLock) {
+      let forcedSafeCount = 0;
+      results.forEach((entry) => {
+        if (!entry.shouldBlur) return;
+        forcedSafeCount += 1;
+        entry.shouldBlur = false;
+        entry.severity = 'safe';
+        entry.category = 'revealed_lock';
+        entry.confidence = 0;
+        entry.decision_reason = 'hard_reveal_lock';
+      });
+      console.log(
+        '[DIAG][REVEAL_LOCK]',
+        'action=force_safe_results',
+        'requestId=' + requestId,
+        'sovereignId=' + revealLockSovereignId,
+        'videoId=' + activeRevealLock.videoId,
+        'forcedSafe=' + forcedSafeCount,
+        'resultCount=' + results.length,
+      );
+      hydrateShortsPendingStateFromHardRevealLock(
+        revealLockSovereignId,
+        'process_moderation_request',
+      );
+    }
 
     const blurMode = localSettings.blur_mode || 'balanced';
     const modePolicy = blurMode === 'strict'
@@ -3651,6 +3967,8 @@ export const NativeWebViewBrowser = () => {
     localSettings.segmentationCacheTtlMs,
     currentUrl,
     getSovereignIdForContext,
+    getShortsHardRevealLockForSovereign,
+    hydrateShortsPendingStateFromHardRevealLock,
     clearShortsMatchingRetryTimer,
     markShortsOverlayModerationResult,
     processModerationSafetySignal,

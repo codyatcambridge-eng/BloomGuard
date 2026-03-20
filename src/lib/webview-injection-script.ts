@@ -677,23 +677,295 @@ export function generateModerationScript(config: InjectionConfig): string {
     } catch (e) {}
   }
 
-  function isCurrentShortsVideoRevealed() {
+  function getShortsRevealSetKeys(videoId) {
+    const normalizedId = String(videoId || '').trim();
+    if (!normalizedId || normalizedId === 'none') return [];
+    return [normalizedId, 'shorts_video:' + normalizedId];
+  }
+
+  function hasRevealLockForShortsVideoId(videoId) {
     if (!isShortsModeActive()) return false;
     const revealedSet = window.__MW_REVEALED_SET__;
     if (!revealedSet || typeof revealedSet.has !== 'function') return false;
+    const revealKeys = getShortsRevealSetKeys(videoId);
+    for (let i = 0; i < revealKeys.length; i += 1) {
+      if (revealedSet.has(revealKeys[i])) return true;
+    }
+    return false;
+  }
+
+  function isCurrentShortsVideoRevealed() {
+    if (!isShortsModeActive()) return false;
     const shortsVideoId = getCurrentShortsUrlId() || 'none';
     if (!shortsVideoId || shortsVideoId === 'none') return false;
+    return hasRevealLockForShortsVideoId(shortsVideoId);
+  }
+
+  function stopForceRevealEnforcement(reason) {
+    if (forceRevealEnforcementState.observer) {
+      try {
+        forceRevealEnforcementState.observer.disconnect();
+      } catch (e) {}
+      forceRevealEnforcementState.observer = null;
+    }
+    if (forceRevealEnforcementState.intervalId) {
+      clearInterval(forceRevealEnforcementState.intervalId);
+      forceRevealEnforcementState.intervalId = null;
+    }
+    if (forceRevealEnforcementState.timeoutId) {
+      clearTimeout(forceRevealEnforcementState.timeoutId);
+      forceRevealEnforcementState.timeoutId = null;
+    }
+    forceRevealEnforcementState.active = false;
+    forceRevealEnforcementState.videoId = 'none';
+    forceRevealEnforcementState.expiresAt = 0;
+    forceRevealEnforcementState.reason = reason || 'stopped';
+    forceRevealEnforcementState.source = 'none';
+  }
+
+  function forceRemoveRevealOverlayNode(overlay) {
+    if (!overlay || overlay.nodeType !== 1) return false;
     try {
-      return revealedSet.has('shorts_video:' + shortsVideoId);
-    } catch (e) {
+      if (overlay.__mwRevealDeferredRemovalTimer) {
+        clearTimeout(overlay.__mwRevealDeferredRemovalTimer);
+        overlay.__mwRevealDeferredRemovalTimer = null;
+      }
+    } catch (e) {}
+    try {
+      setRevealOverlayBlurState(overlay, false);
+      overlay.style.display = 'none';
+      overlay.dataset.blurred = 'false';
+    } catch (e) {}
+    if (overlay.parentElement) {
+      overlay.parentElement.removeChild(overlay);
+      return true;
+    }
+    return false;
+  }
+
+  function isNodeBlurredForRevealEnforcement(node) {
+    if (!node || node.nodeType !== 1) return false;
+    const inlineFilter = String(node.style.getPropertyValue('filter') || node.style.filter || '').toLowerCase();
+    const inlineBackdrop = String(node.style.getPropertyValue('backdrop-filter') || '').toLowerCase();
+    let computedFilter = '';
+    let computedBackdrop = '';
+    try {
+      const computed = window.getComputedStyle(node);
+      computedFilter = String((computed && computed.filter) || '').toLowerCase();
+      computedBackdrop = String((computed && computed.backdropFilter) || '').toLowerCase();
+    } catch (e) {}
+    return (
+      inlineFilter.indexOf('blur(') !== -1 ||
+      inlineBackdrop.indexOf('blur(') !== -1 ||
+      computedFilter.indexOf('blur(') !== -1 ||
+      computedBackdrop.indexOf('blur(') !== -1 ||
+      node.classList.contains('mw-blurred') ||
+      node.classList.contains('mw-softblur') ||
+      node.dataset.mwModerated === 'blurred' ||
+      node.dataset.mwModerated === 'softblur'
+    );
+  }
+
+  function clearNodeBlurForRevealEnforcement(node, revealKey) {
+    if (!node || node.nodeType !== 1) return false;
+    const hadBlur = isNodeBlurredForRevealEnforcement(node);
+    try {
+      node.style.setProperty('filter', 'none', 'important');
+      node.style.setProperty('-webkit-filter', 'none', 'important');
+      node.style.removeProperty('backdrop-filter');
+      node.style.removeProperty('-webkit-backdrop-filter');
+      node.style.removeProperty('background');
+      node.style.removeProperty('opacity');
+      node.classList.remove('mw-softblur');
+      node.classList.remove('mw-blurred');
+      node.dataset.mwModerated = 'revealed';
+      node.dataset.mwHasOverlay = 'false';
+      node.dataset.mwPreblurClear = 'true';
+      setElementRevealMarker(node, true, revealKey);
+    } catch (e) {}
+    return hadBlur;
+  }
+
+  function collectForceRevealTargets(videoId) {
+    const targets = [];
+    const seen = new WeakSet();
+    const addTarget = function(node) {
+      if (!node || node.nodeType !== 1 || !node.isConnected) return;
+      if (seen.has(node)) return;
+      seen.add(node);
+      targets.push(node);
+    };
+
+    const activeContainer = getActiveShortsPlayerContainer();
+    const stableResolution = resolveShortsStableBlurTarget(activeContainer, '');
+    const stableTarget = (
+      stableResolution &&
+      stableResolution.target &&
+      stableResolution.target.isConnected
+    ) ? stableResolution.target : (
+      activeContainer && activeContainer.isConnected ? activeContainer : null
+    );
+    addTarget(stableTarget);
+
+    if (stableTarget && typeof stableTarget.querySelector === 'function') {
+      addTarget(stableTarget.querySelector('video.html5-main-video, video'));
+      addTarget(stableTarget.querySelector('video'));
+    }
+
+    if (videoId && videoId !== 'none') {
+      try {
+        const scopedVideos = document.querySelectorAll(
+          '[data-video-id="' + videoId + '"], [data-item-id="' + videoId + '"], #shorts-player video, video.html5-main-video'
+        );
+        for (let i = 0; i < scopedVideos.length; i += 1) {
+          addTarget(scopedVideos[i]);
+        }
+      } catch (e) {}
+    }
+
+    return targets;
+  }
+
+  function runForceRevealEnforcementPass(reason) {
+    if (!forceRevealEnforcementState.active) return false;
+    if (Date.now() > forceRevealEnforcementState.expiresAt) {
+      stopForceRevealEnforcement('expired:' + (reason || 'pass'));
       return false;
     }
+    if (!isShortsModeActive()) return false;
+    const activeVideoId = getCurrentShortsUrlId() || 'none';
+    if (!activeVideoId || activeVideoId === 'none') return false;
+    if (activeVideoId !== forceRevealEnforcementState.videoId) return false;
+
+    const revealKey = 'shorts_video:' + activeVideoId;
+    state.revealed.add(revealKey);
+    state.revealed.add(activeVideoId);
+
+    let removedAnyBlur = false;
+    let removedAnyOverlay = false;
+
+    const overlays = document.querySelectorAll('.mw-reveal-overlay, #mw-reveal-overlay');
+    for (let i = 0; i < overlays.length; i += 1) {
+      const overlay = overlays[i];
+      if (!overlay || !overlay.isConnected) continue;
+      const overlayVideoId = String(
+        (overlay.dataset && overlay.dataset.mwShortsVideoId) ||
+        resolveRevealOverlayShortsVideoId(overlay) ||
+        'none'
+      );
+      const isCurrentOverlay = (
+        overlayVideoId === activeVideoId ||
+        overlayVideoId === 'none'
+      );
+      if (!isCurrentOverlay) continue;
+      if (forceRemoveRevealOverlayNode(overlay)) {
+        removedAnyOverlay = true;
+      }
+    }
+
+    const targets = collectForceRevealTargets(activeVideoId);
+    for (let i = 0; i < targets.length; i += 1) {
+      const target = targets[i];
+      if (!target || !target.isConnected) continue;
+      const targetSrc = String(
+        (target.dataset && target.dataset.mwSrc) ||
+        ('shorts://video/' + activeVideoId + '#force_reveal_enforcement')
+      );
+      if (clearNodeBlurForRevealEnforcement(target, revealKey)) {
+        removedAnyBlur = true;
+      }
+      const overlay = findRevealOverlayForElement(target, targetSrc);
+      if (overlay && forceRemoveRevealOverlayNode(overlay)) {
+        removedAnyOverlay = true;
+      }
+      if (target.tagName !== 'VIDEO' && typeof target.querySelector === 'function') {
+        const nestedVideo = target.querySelector('video.html5-main-video, video');
+        if (nestedVideo && clearNodeBlurForRevealEnforcement(nestedVideo, revealKey)) {
+          removedAnyBlur = true;
+        }
+      }
+    }
+
+    if (removedAnyBlur || removedAnyOverlay) {
+      console.log('[REVEAL_ENFORCED] Actively removing blur due to Hard Lock.');
+      emitJsOverlayStateSignal(
+        false,
+        true,
+        'force_reveal_enforcement:' + (reason || 'unknown'),
+        'shorts://video/' + activeVideoId
+      );
+      return true;
+    }
+    return false;
+  }
+
+  function startForceRevealEnforcement(videoId, reason, source) {
+    if (!isShortsModeActive()) return 'SKIP_NOT_SHORTS';
+    const resolvedVideoId = String(videoId || getCurrentShortsUrlId() || 'none').trim() || 'none';
+    if (!resolvedVideoId || resolvedVideoId === 'none') return 'SKIP_NO_VIDEO';
+    stopForceRevealEnforcement('restart');
+    forceRevealEnforcementState.active = true;
+    forceRevealEnforcementState.videoId = resolvedVideoId;
+    forceRevealEnforcementState.reason = reason || 'hard_reveal_lock';
+    forceRevealEnforcementState.source = source || 'host';
+    forceRevealEnforcementState.expiresAt = Date.now() + FORCE_REVEAL_ENFORCEMENT_WINDOW_MS;
+
+    const root = document.body || document.documentElement;
+    if (root) {
+      const observer = new MutationObserver(function() {
+        runForceRevealEnforcementPass('mutation');
+      });
+      forceRevealEnforcementState.observer = observer;
+      observer.observe(root, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: FORCE_REVEAL_ENFORCEMENT_ATTRIBUTE_FILTER,
+      });
+    }
+    forceRevealEnforcementState.intervalId = setInterval(function() {
+      runForceRevealEnforcementPass('interval');
+    }, FORCE_REVEAL_ENFORCEMENT_INTERVAL_MS);
+    forceRevealEnforcementState.timeoutId = setTimeout(function() {
+      stopForceRevealEnforcement('window_complete');
+    }, FORCE_REVEAL_ENFORCEMENT_WINDOW_MS);
+    runForceRevealEnforcementPass('start');
+    return 'STARTED';
   }
 
   function handleBlurCommand(message) {
     if (!message || typeof message !== 'object') return false;
     if (message.type === 'MW_SHIELD_ACTION') {
       handleShieldAction(message.action);
+      return true;
+    }
+    if (message.type === 'MW_FORCE_REVEAL_ENFORCEMENT') {
+      const fromSovereign = typeof message.sovereignId === 'string'
+        ? (String(message.sovereignId).split('|')[2] || '')
+        : '';
+      const requestedVideoId = (
+        typeof message.videoId === 'string' &&
+        String(message.videoId || '').trim() &&
+        String(message.videoId || '').trim() !== 'none'
+      ) ? String(message.videoId).trim() : (
+        fromSovereign && fromSovereign !== 'none'
+          ? fromSovereign
+          : (getCurrentShortsUrlId() || 'none')
+      );
+      const startResult = startForceRevealEnforcement(
+        requestedVideoId,
+        String(message.reason || 'hard_reveal_lock'),
+        String(message.source || 'host'),
+      );
+      if (CONFIG.debug || DIAG_YT_BLUR) {
+        console.log(
+          '[DIAG][REVEAL_LOCK]',
+          'action=force_reveal_enforcement_start',
+          'videoId=' + (requestedVideoId || 'none'),
+          'result=' + startResult,
+          'reason=' + String(message.reason || 'hard_reveal_lock')
+        );
+      }
       return true;
     }
     if (!DOM_OVERLAY_ENABLED) return false;
@@ -910,6 +1182,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       const resolvedVideoId = srcVideoId !== 'none' ? srcVideoId : activeVideoId;
       if (resolvedVideoId && resolvedVideoId !== 'none') {
         keys.push('shorts_video:' + resolvedVideoId);
+        keys.push(resolvedVideoId);
       } else {
         const sovereignId = computeSovereignId(state.pageEpoch);
         if (sovereignId && sovereignId !== 'none|none|none') {
@@ -1525,6 +1798,9 @@ export function generateModerationScript(config: InjectionConfig): string {
         clearElementBlur(element);
       }
     });
+    if (isShortsModeActive()) {
+      emitJsOverlayStateSignal(false, isCurrentShortsVideoRevealed(), 'reset_state', '');
+    }
   }
 
   function flushMutationScanQueue() {
@@ -1709,6 +1985,8 @@ export function generateModerationScript(config: InjectionConfig): string {
   const ADAPTIVE_SHORTS_RESCAN_COOLDOWN_MS = 700;
   const SHORTS_ANCHOR_SYNC_COOLDOWN_MS = 80;
   const SHORTS_REVEAL_WATCH_TIMEOUT_MS = 12000;
+  const FORCE_REVEAL_ENFORCEMENT_WINDOW_MS = 2000;
+  const FORCE_REVEAL_ENFORCEMENT_INTERVAL_MS = 200;
   const REVEAL_INTERACTION_LOCK_MS = 300;
   const TIMEOUT_SAFE_FAILURE_UI_LOCK_MS = 2000;
   const ADAPTIVE_SHORTS_WATCH_ATTRIBUTE_FILTER = [
@@ -1745,6 +2023,13 @@ export function generateModerationScript(config: InjectionConfig): string {
     'v',
     'data-video-id',
   ];
+  const FORCE_REVEAL_ENFORCEMENT_ATTRIBUTE_FILTER = [
+    'style',
+    'class',
+    'data-mw-moderated',
+    'data-mw-revealed',
+    'data-blurred',
+  ];
   let shortsBlurContextByContainer = new WeakMap();
   let shortsBlurContextCount = 0;
   let shortsHealthStateByContainer = new WeakMap();
@@ -1778,6 +2063,16 @@ export function generateModerationScript(config: InjectionConfig): string {
     startedAt: 0,
     reason: 'none',
     attempts: 0,
+  };
+  const forceRevealEnforcementState = {
+    observer: null,
+    intervalId: null,
+    timeoutId: null,
+    active: false,
+    videoId: 'none',
+    reason: 'none',
+    source: 'none',
+    expiresAt: 0,
   };
   const revealInteractionLockState = {
     until: 0,
@@ -5205,7 +5500,15 @@ export function generateModerationScript(config: InjectionConfig): string {
         clearShortsBlurContextForNode(element, reason || 'clear_all');
       }
       if (changed) {
-        emitJsOverlayStateSignal(false, false, 'clear_blur_overlay', src || element.dataset.mwSrc || '');
+        const srcForSignal = src || element.dataset.mwSrc || '';
+        const preserveRevealSignal = isShortsModeActive() && (
+          hasRevealPersistence(srcForSignal, element) ||
+          isCurrentShortsVideoRevealed()
+        );
+        if (preserveRevealSignal) {
+          ensureRevealMarkerForElement(element, srcForSignal);
+        }
+        emitJsOverlayStateSignal(false, preserveRevealSignal, 'clear_blur_overlay', srcForSignal);
       }
     } catch (e) {}
     return changed;
@@ -5427,6 +5730,27 @@ export function generateModerationScript(config: InjectionConfig): string {
    * Uses !important to override site styles on iOS
    */
   function applyBlur(element, src, category, blurStrengthPx, itemId) {
+    const shortsMode = isShortsModeActive();
+    const activeShortsVideoId = shortsMode ? (getCurrentShortsUrlId() || 'none') : 'none';
+    if (shortsMode && hasRevealLockForShortsVideoId(activeShortsVideoId)) {
+      if (element && element.nodeType === 1) {
+        const revealKey = activeShortsVideoId !== 'none'
+          ? 'shorts_video:' + activeShortsVideoId
+          : '';
+        if (revealKey) {
+          state.revealed.add(revealKey);
+          state.revealed.add(activeShortsVideoId);
+        }
+        setElementRevealMarker(element, true, revealKey);
+      }
+      console.log(
+        '[REVEAL_BLOCK] Skipping blur application because video is in revealed set.',
+        'videoId=' + activeShortsVideoId,
+        'itemId=' + (itemId || 'none')
+      );
+      return;
+    }
+
     // Check persistence
     if (hasRevealPersistence(src, element)) {
       ensureRevealMarkerForElement(element, src);
@@ -5437,8 +5761,6 @@ export function generateModerationScript(config: InjectionConfig): string {
       return;
     }
     
-    const shortsMode = isShortsModeActive();
-    const activeShortsVideoId = shortsMode ? (getCurrentShortsUrlId() || 'none') : 'none';
     let shortsStableSelectorUsed = '';
     if (shortsMode) {
       const stableResolution = resolveShortsStableBlurTarget(element, src);
@@ -5627,6 +5949,36 @@ export function generateModerationScript(config: InjectionConfig): string {
         'filter=' + appliedFilter,
         'priority=' + filterPriority
       );
+      if (shortsMode) {
+        const currentVideoId = getCurrentShortsUrlId() || 'none';
+        if (currentVideoId !== 'none' && state.revealed.has(currentVideoId)) {
+          const revealKey = 'shorts_video:' + currentVideoId;
+          state.revealed.add(revealKey);
+          setElementRevealMarker(element, true, revealKey);
+          if (overlayAfterApply && overlayAfterApply.isConnected) {
+            setRevealOverlayBlurState(overlayAfterApply, false);
+            overlayAfterApply.style.display = 'none';
+          }
+          clearNodeBlurForRevealEnforcement(element, revealKey);
+          element.style.filter = 'none';
+          element.style.setProperty('filter', 'none', 'important');
+          element.style.setProperty('-webkit-filter', 'none', 'important');
+          const activeVideoNode = element.tagName === 'VIDEO'
+            ? element
+            : (
+              typeof element.querySelector === 'function'
+                ? element.querySelector('video.html5-main-video, video')
+                : null
+            );
+          if (activeVideoNode && activeVideoNode.nodeType === 1) {
+            clearNodeBlurForRevealEnforcement(activeVideoNode, revealKey);
+            activeVideoNode.style.filter = 'none';
+            activeVideoNode.style.setProperty('filter', 'none', 'important');
+            activeVideoNode.style.setProperty('-webkit-filter', 'none', 'important');
+          }
+          console.log('[REVEAL_ENFORCED] Actively removing blur due to Hard Lock.');
+        }
+      }
       emitJsOverlayStateSignal(true, false, 'apply_blur', src);
       diagBlurStateLog('applyBlur.exit', element, src, 'itemId=' + (itemId || 'N/A') + ' category=' + (category || 'flagged'));
       console.log('[MW] applied blur [' + category + '] itemId=' + (itemId || 'N/A') + ':', src.substring(0, 60));
@@ -7073,6 +7425,29 @@ export function generateModerationScript(config: InjectionConfig): string {
         if (finalBlur) state.stats.blurSkippedByKillSwitch++;
         finalBlur = false;
         decisionReason = 'kill-switch/youtube-domain';
+      }
+      const activeShortsVideoIdForDecision = isShortsModeActive()
+        ? (getCurrentShortsUrlId() || 'none')
+        : 'none';
+      const hardRevealVideoLock = (
+        finalBlur &&
+        activeShortsVideoIdForDecision !== 'none' &&
+        hasRevealLockForShortsVideoId(activeShortsVideoIdForDecision)
+      );
+      if (hardRevealVideoLock) {
+        finalBlur = false;
+        decisionReason = (decisionReason ? decisionReason + '/' : '') + 'revealed_video_lock';
+        if (element && element.nodeType === 1) {
+          const revealKey = 'shorts_video:' + activeShortsVideoIdForDecision;
+          state.revealed.add(revealKey);
+          state.revealed.add(activeShortsVideoIdForDecision);
+          setElementRevealMarker(element, true, revealKey);
+        }
+        console.log(
+          '[REVEAL_BLOCK] Skipping blur application because video is in revealed set.',
+          'videoId=' + activeShortsVideoIdForDecision,
+          'itemId=' + String(itemId || 'none')
+        );
       }
       if (CONFIG.debug) {
         console.log('[MW][Decision] itemId=' + itemId, 'src=' + (src || '').substring(0, 60), 'finalBlur=' + finalBlur, 'reason=' + decisionReason);
@@ -9241,6 +9616,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     stopShortsAnchorObserver('stopManagedTimers:' + (reason || 'unknown'));
     stopAdaptiveShortsOverlayWatch('stopManagedTimers:' + (reason || 'unknown'));
     stopShortsRevealWatch('stopManagedTimers:' + (reason || 'unknown'));
+    stopForceRevealEnforcement('stopManagedTimers:' + (reason || 'unknown'));
     clearNamedInterval('legacyResultsInterval', reason);
     clearNamedInterval('urlChangeInterval', reason);
     clearNamedInterval('youtubePeriodicInterval', reason);
