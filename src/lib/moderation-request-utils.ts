@@ -62,7 +62,7 @@ export function escapeForJs(str: string): string {
 export interface ModerationRequestItem {
   itemId: string;
   src: string;
-  sourceType: 'img' | 'bg-image' | 'video-poster';
+  sourceType: string;
   /** Image dimensions for size filtering */
   width?: number;
   height?: number;

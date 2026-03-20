@@ -352,6 +352,8 @@ export function generateModerationScript(config: InjectionConfig): string {
   const OVERLAY_ID = 'mw-blur-overlay';
   const OVERLAY_STYLE_ID = 'mw-blur-overlay-style';
   const REVEAL_PORTAL_ID = 'mw-reveal-portal';
+  const LAYER_GLOBAL_BLUR_Z = 2147483646;
+  const LAYER_REVEAL_PORTAL_Z = 2147483647;
   const DOM_OVERLAY_ENABLED = true;
 
   const overlayState = window.__MW_BLUR_STATE__ || {
@@ -396,7 +398,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       '#' + OVERLAY_ID + ' {',
       'position: fixed !important;',
       'inset: 0 !important;',
-      'z-index: 2147483646 !important;',
+      'z-index: ' + String(LAYER_GLOBAL_BLUR_Z) + ' !important;',
       'pointer-events: none !important;',
       'display: none !important;',
       'opacity: 0 !important;',
@@ -1411,14 +1413,93 @@ export function generateModerationScript(config: InjectionConfig): string {
   const diagShortsBlurParentObserverByNode = new WeakMap();
   const diagShortsBlurredHtml5MainVideoNodeIds = new Set();
   const diagShortsLastBlurNodeIdBySrc = {};
+  const SHORTS_ACTIVE_RENDERER_SELECTOR = [
+    'ytm-reel-video-renderer[selected]',
+    'ytm-reel-video-renderer[is-active]',
+    'ytm-reel-video-renderer[aria-hidden="false"]',
+    'ytm-reel-video-renderer[aria-current="true"]',
+    'ytm-shorts-lockup-view-model[selected]',
+    'ytm-shorts-lockup-view-model[is-active]',
+    'ytm-shorts-lockup-view-model[aria-hidden="false"]',
+    'ytm-shorts-lockup-view-model[aria-current="true"]',
+    'ytm-shorts-lockup-view-model-v2[selected]',
+    'ytm-shorts-lockup-view-model-v2[is-active]',
+    'ytm-shorts-lockup-view-model-v2[aria-hidden="false"]',
+    'ytm-shorts-lockup-view-model-v2[aria-current="true"]',
+    'ytd-reel-video-renderer[is-active]',
+    'ytd-reel-video-renderer[aria-hidden="false"]',
+    'ytd-reel-video-renderer[aria-current="true"]',
+  ].join(', ');
   const SHORTS_STABLE_CONTAINER_SELECTORS = [
-    '#shorts-player ytm-reel-video-renderer[aria-hidden="false"]',
     '#shorts-player ytm-reel-video-renderer[selected]',
     '#shorts-player ytm-reel-video-renderer[is-active]',
+    '#shorts-player ytm-reel-video-renderer[aria-hidden="false"]',
+    '#shorts-player ytm-reel-video-renderer[aria-current="true"]',
+    '#shorts-player ytm-shorts-lockup-view-model[selected]',
+    '#shorts-player ytm-shorts-lockup-view-model[is-active]',
+    '#shorts-player ytm-shorts-lockup-view-model[aria-hidden="false"]',
+    '#shorts-player ytm-shorts-lockup-view-model[aria-current="true"]',
+    '#shorts-player ytm-shorts-lockup-view-model-v2[selected]',
+    '#shorts-player ytm-shorts-lockup-view-model-v2[is-active]',
+    '#shorts-player ytm-shorts-lockup-view-model-v2[aria-hidden="false"]',
+    '#shorts-player ytm-shorts-lockup-view-model-v2[aria-current="true"]',
+    '#shorts-player ytd-reel-video-renderer[is-active]',
+    '#shorts-player ytd-reel-video-renderer[aria-hidden="false"]',
+    '#shorts-player ytd-reel-video-renderer[aria-current="true"]',
+    'ytm-shorts-lockup-view-model[selected]',
+    'ytm-shorts-lockup-view-model[is-active]',
+    'ytm-shorts-lockup-view-model[aria-hidden="false"]',
+    'ytm-shorts-lockup-view-model[aria-current="true"]',
+    'ytm-shorts-lockup-view-model-v2[selected]',
+    'ytm-shorts-lockup-view-model-v2[is-active]',
+    'ytm-shorts-lockup-view-model-v2[aria-hidden="false"]',
+    'ytm-shorts-lockup-view-model-v2[aria-current="true"]',
+    'ytd-reel-video-renderer[is-active]',
+    'ytd-reel-video-renderer[aria-hidden="false"]',
+    'ytd-reel-video-renderer[aria-current="true"]',
+    'ytm-reel-video-renderer[selected]',
+    'ytm-reel-video-renderer[is-active]',
+    'ytm-reel-video-renderer[aria-hidden="false"]',
+    'div#player-container',
+    '#player-container',
+    '#shorts-player ytm-shorts-lockup-view-model-v2',
+    '#shorts-player ytm-shorts-lockup-view-model',
     '#shorts-player ytm-reel-video-renderer',
+    '#shorts-player ytd-reel-video-renderer',
+    'ytm-shorts-lockup-view-model-v2',
+    'ytm-shorts-lockup-view-model',
     '#shorts-player',
   ];
-  const SHORTS_STABLE_CONTAINER_TAG_SELECTOR = 'ytm-reel-video-renderer, ytm-shorts-lockup-view-model, #shorts-player';
+  const SHORTS_STABLE_CONTAINER_TAG_SELECTOR = 'ytm-reel-video-renderer, ytd-reel-video-renderer, ytm-shorts-lockup-view-model, ytm-shorts-lockup-view-model-v2, #shorts-player, #player-container, div#player-container';
+  const SHORTS_FALLBACK_VIDEO_SELECTOR = [
+    '#shorts-player video.html5-main-video',
+    '#shorts-player video',
+    '#shorts-player ytm-shorts-lockup-view-model-v2 video.html5-main-video',
+    '#shorts-player ytm-shorts-lockup-view-model-v2 video',
+    '#shorts-player ytm-shorts-lockup-view-model video.html5-main-video',
+    '#shorts-player ytm-shorts-lockup-view-model video',
+    'ytd-reel-video-renderer[is-active] video.html5-main-video',
+    'ytd-reel-video-renderer[is-active] video',
+    'ytd-reel-video-renderer[aria-hidden="false"] video',
+    'ytd-reel-video-renderer[aria-current="true"] video',
+    'ytm-shorts-lockup-view-model-v2[selected] video',
+    'ytm-shorts-lockup-view-model-v2[is-active] video',
+    'ytm-shorts-lockup-view-model-v2[aria-hidden="false"] video',
+    'ytm-shorts-lockup-view-model-v2[aria-current="true"] video',
+    'ytm-shorts-lockup-view-model[selected] video',
+    'ytm-shorts-lockup-view-model[is-active] video',
+    'ytm-shorts-lockup-view-model[aria-hidden="false"] video',
+    'ytm-shorts-lockup-view-model[aria-current="true"] video',
+    'ytm-reel-video-renderer[selected] video',
+    'ytm-reel-video-renderer[is-active] video',
+    'ytm-reel-video-renderer[aria-hidden="false"] video',
+    'div#player-container video.html5-main-video',
+    'div#player-container video',
+    '#player-container video.html5-main-video',
+    '#player-container video',
+    'video.html5-main-video',
+    'video',
+  ].join(', ');
   const SHORTS_SWAP_REATTACH_WINDOW_MS = 2600;
   const SHORTS_HEALTH_HEAL_COOLDOWN_MS = 1500;
   const SHORTS_HEALTH_HEAL_MAX_ATTEMPTS = 5;
@@ -1431,7 +1512,23 @@ export function generateModerationScript(config: InjectionConfig): string {
   const ADAPTIVE_SHORTS_RESCAN_DEBOUNCE_MS = 140;
   const ADAPTIVE_SHORTS_RESCAN_COOLDOWN_MS = 700;
   const SHORTS_ANCHOR_SYNC_COOLDOWN_MS = 80;
+  const SHORTS_REVEAL_WATCH_TIMEOUT_MS = 12000;
   const ADAPTIVE_SHORTS_WATCH_ATTRIBUTE_FILTER = [
+    'class',
+    'style',
+    'hidden',
+    'aria-hidden',
+    'aria-current',
+    'selected',
+    'is-active',
+    'src',
+    'poster',
+    'data-video-id',
+    'data-item-id',
+    'data-id',
+    'data-index',
+  ];
+  const SHORTS_REVEAL_WATCH_ATTRIBUTE_FILTER = [
     'class',
     'style',
     'hidden',
@@ -1474,6 +1571,15 @@ export function generateModerationScript(config: InjectionConfig): string {
   const shortsReentryState = {
     lastRefreshAt: 0,
     lastReason: 'none',
+  };
+  const shortsRevealWatchState = {
+    observer: null,
+    timeoutId: null,
+    active: false,
+    key: '',
+    startedAt: 0,
+    reason: 'none',
+    attempts: 0,
   };
   const diagEpochCounters = {
     staleInjectedDiscardCount: 0,
@@ -1799,7 +1905,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       const found = document.querySelector(SHORTS_STABLE_CONTAINER_SELECTORS[i]);
       if (found && found.isConnected) return found;
     }
-    const fallbackVideo = document.querySelector('#shorts-player video, ytm-reel-video-renderer video, video');
+    const fallbackVideo = document.querySelector(SHORTS_FALLBACK_VIDEO_SELECTOR);
     if (fallbackVideo && fallbackVideo.isConnected) {
       const fallbackContainer = getShortsCardOrPlayerContainerFromNode(fallbackVideo);
       return fallbackContainer || fallbackVideo;
@@ -1821,7 +1927,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     const element = node;
     if (root && typeof root.contains === 'function' && root.contains(element)) return true;
     if (typeof element.closest === 'function') {
-      return !!element.closest('#shorts-player, ytm-reel-video-renderer, ytm-shorts-lockup-view-model');
+      return !!element.closest('#shorts-player, #player-container, ytm-reel-video-renderer, ytd-reel-video-renderer, ytm-shorts-lockup-view-model');
     }
     return false;
   }
@@ -2208,10 +2314,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (shortsContainer && shortsContainer.isConnected) return shortsContainer;
     const shortsPlayer = document.getElementById('shorts-player');
     if (shortsPlayer && shortsPlayer.isConnected) return shortsPlayer;
-    const activeRenderer = document.querySelector(
-      'ytm-reel-video-renderer[selected], ytm-reel-video-renderer[is-active], ytm-reel-video-renderer[aria-hidden="false"]'
-    );
+    const activeRenderer = document.querySelector(SHORTS_ACTIVE_RENDERER_SELECTOR);
     if (activeRenderer && activeRenderer.isConnected) return activeRenderer;
+    const playerContainer = document.querySelector('div#player-container, #player-container');
+    if (playerContainer && playerContainer.isConnected) return playerContainer;
     return null;
   }
 
@@ -2220,13 +2326,11 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!anchorRoot) return '';
 
     const activeRenderer = (
-      anchorRoot.matches && anchorRoot.matches('ytm-reel-video-renderer')
+      anchorRoot.matches && anchorRoot.matches('ytm-reel-video-renderer, ytd-reel-video-renderer')
     )
       ? anchorRoot
       : (anchorRoot.querySelector &&
-          anchorRoot.querySelector(
-            'ytm-reel-video-renderer[selected], ytm-reel-video-renderer[is-active], ytm-reel-video-renderer[aria-hidden="false"]'
-          )) || null;
+          anchorRoot.querySelector(SHORTS_ACTIVE_RENDERER_SELECTOR)) || null;
     const reelRoot = activeRenderer || anchorRoot;
     const attrV = reelRoot.getAttribute ? reelRoot.getAttribute('v') : '';
     const dataVideoId = reelRoot.getAttribute ? reelRoot.getAttribute('data-video-id') : '';
@@ -3699,13 +3803,17 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function ensureRevealPortal() {
     let portal = document.getElementById(REVEAL_PORTAL_ID);
-    if (portal) return portal;
+    if (portal) {
+      portal.style.setProperty('z-index', String(LAYER_REVEAL_PORTAL_Z), 'important');
+      portal.style.setProperty('pointer-events', 'none', 'important');
+      return portal;
+    }
     portal = document.createElement('div');
     portal.id = REVEAL_PORTAL_ID;
     portal.style.cssText = [
       'position: fixed',
       'inset: 0',
-      'z-index: 2147483647',
+      'z-index: ' + String(LAYER_REVEAL_PORTAL_Z),
       'pointer-events: none',
       'overflow: hidden',
       'filter: none',
@@ -3713,9 +3821,242 @@ export function generateModerationScript(config: InjectionConfig): string {
       'backdrop-filter: none',
       '-webkit-backdrop-filter: none',
     ].join(';');
+    portal.style.setProperty('z-index', String(LAYER_REVEAL_PORTAL_Z), 'important');
+    portal.style.setProperty('pointer-events', 'none', 'important');
     (document.documentElement || document.body || document.documentElement).appendChild(portal);
     console.log('[DIAG][REVEAL_UI] portal_created');
     return portal;
+  }
+
+  function isRevealWatchNodeVisible(node) {
+    if (!node || node.nodeType !== 1 || !node.isConnected) return false;
+    let rect = null;
+    let style = null;
+    try {
+      rect = node.getBoundingClientRect();
+    } catch (e) {}
+    try {
+      style = window.getComputedStyle(node);
+    } catch (e) {}
+    if (!rect || rect.width < 2 || rect.height < 2) return false;
+    if (!style) return true;
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
+    const opacity = Number(style.opacity);
+    if (Number.isFinite(opacity) && opacity <= 0.02) return false;
+    const ariaHidden = node.getAttribute ? String(node.getAttribute('aria-hidden') || '').toLowerCase() : '';
+    if (ariaHidden === 'true') return false;
+    if (typeof node.closest === 'function') {
+      const hiddenAncestor = node.closest('[aria-hidden="true"], [hidden]');
+      if (hiddenAncestor) return false;
+    }
+    return true;
+  }
+
+  function isRevealWatchVideoVisible(video) {
+    if (!isRevealWatchNodeVisible(video)) return false;
+    let rect = null;
+    try {
+      rect = video.getBoundingClientRect();
+    } catch (e) {}
+    if (!rect) return true;
+    const centerX = Math.max(0, Math.min(window.innerWidth - 1, rect.left + rect.width / 2));
+    const centerY = Math.max(0, Math.min(window.innerHeight - 1, rect.top + rect.height / 2));
+    let top = null;
+    try {
+      top = document.elementFromPoint(centerX, centerY);
+    } catch (e) {}
+    if (!top || top.nodeType !== 1) return true;
+    return (
+      top === video ||
+      (typeof video.contains === 'function' && video.contains(top)) ||
+      (typeof top.contains === 'function' && top.contains(video))
+    );
+  }
+
+  function findActiveHunterShortsContainer(reason) {
+    if (!isShortsModeActive()) return null;
+    const activeContainer = getActiveShortsPlayerContainer();
+    if (activeContainer && activeContainer.isConnected) {
+      const activeVideo = typeof activeContainer.querySelector === 'function'
+        ? activeContainer.querySelector('video.html5-main-video, video')
+        : null;
+      if ((activeVideo && isRevealWatchVideoVisible(activeVideo)) || isRevealWatchNodeVisible(activeContainer)) {
+        return activeContainer;
+      }
+    }
+
+    const selectorSet = new Set([
+      ...SHORTS_STABLE_CONTAINER_SELECTORS,
+      ...SHORTS_STABLE_CONTAINER_TAG_SELECTOR.split(',').map(selector => selector.trim()).filter(Boolean),
+    ]);
+    const selectorList = Array.from(selectorSet);
+    for (let i = 0; i < selectorList.length; i += 1) {
+      const selector = selectorList[i];
+      let nodes = [];
+      try {
+        nodes = Array.from(document.querySelectorAll(selector));
+      } catch (e) {
+        continue;
+      }
+      for (let j = 0; j < nodes.length; j += 1) {
+        const node = nodes[j];
+        if (!node || !node.isConnected) continue;
+        const ariaHidden = node.getAttribute ? String(node.getAttribute('aria-hidden') || '').toLowerCase() : '';
+        if (ariaHidden === 'true') continue;
+        const nodeVideo = typeof node.querySelector === 'function'
+          ? node.querySelector('video.html5-main-video, video')
+          : null;
+        if ((nodeVideo && isRevealWatchVideoVisible(nodeVideo)) || isRevealWatchNodeVisible(node)) {
+          return node;
+        }
+      }
+    }
+
+    let videos = [];
+    try {
+      videos = Array.from(document.querySelectorAll(SHORTS_FALLBACK_VIDEO_SELECTOR));
+    } catch (e) {}
+    for (let i = 0; i < videos.length; i += 1) {
+      const video = videos[i];
+      if (!video || !video.isConnected || !isRevealWatchVideoVisible(video)) continue;
+      const container =
+        getShortsCardOrPlayerContainerFromNode(video) ||
+        (typeof video.closest === 'function' ? video.closest(SHORTS_STABLE_CONTAINER_TAG_SELECTOR) : null) ||
+        video;
+      if (container && container.isConnected) {
+        return container;
+      }
+    }
+    if (DIAG_YT_BLUR) {
+      console.log(
+        '[MW-YT][DIAG][SHORTS_TARGET]',
+        'action=active_hunter_no_container',
+        'reason=' + (reason || 'unknown')
+      );
+    }
+    return null;
+  }
+
+  function stopShortsRevealWatch(reason) {
+    const hadObserver = !!shortsRevealWatchState.observer;
+    if (shortsRevealWatchState.observer) {
+      try { shortsRevealWatchState.observer.disconnect(); } catch (e) {}
+      shortsRevealWatchState.observer = null;
+    }
+    if (shortsRevealWatchState.timeoutId) {
+      clearTimeout(shortsRevealWatchState.timeoutId);
+      shortsRevealWatchState.timeoutId = null;
+    }
+    if (!shortsRevealWatchState.active && !hadObserver) return;
+    logShortsProbe(
+      'reveal_watch_stop',
+      'reason=' + (reason || 'unknown') +
+      ' key=' + (shortsRevealWatchState.key || 'none') +
+      ' attempts=' + shortsRevealWatchState.attempts
+    );
+    shortsRevealWatchState.active = false;
+    shortsRevealWatchState.key = '';
+    shortsRevealWatchState.startedAt = 0;
+    shortsRevealWatchState.reason = reason || 'stopped';
+    shortsRevealWatchState.attempts = 0;
+  }
+
+  function ensureActiveHunterOverlay(reason) {
+    if (!isShortsModeActive()) return false;
+    const target = findActiveHunterShortsContainer(reason);
+    if (!target || !target.isConnected) return false;
+    const shortsUrlId = getCurrentShortsUrlId() || 'none';
+    const fallbackSrc = String(
+      (target.dataset && target.dataset.mwSrc) ||
+      ('shorts://video/' + shortsUrlId + '#active_hunter')
+    );
+    const fallbackCategory = String(
+      (target.dataset && target.dataset.mwCategory) ||
+      'shorts_active_hunter'
+    );
+    const fallbackItemId = String((target.dataset && target.dataset.mwItemId) || '');
+    applyBlur(target, fallbackSrc, fallbackCategory, CONFIG.blurStrength, fallbackItemId);
+    let overlay = findRevealOverlayForElement(target, fallbackSrc);
+    if (!overlay || !overlay.isConnected) {
+      createRevealOverlay(target, fallbackSrc, fallbackCategory, fallbackItemId);
+      overlay = findRevealOverlayForElement(target, fallbackSrc);
+    }
+    if (!overlay || !overlay.isConnected) return false;
+    setRevealOverlayBlurState(overlay, true);
+    overlay.style.display = 'flex';
+    scheduleShortsRevealOverlayReposition('active_hunter:' + (reason || 'unknown'));
+    return true;
+  }
+
+  function runShortsRevealWatchPass(reason) {
+    if (!shortsRevealWatchState.active) return false;
+    if (!isShortsModeActive()) {
+      stopShortsRevealWatch('left_shorts');
+      return false;
+    }
+    shortsRevealWatchState.attempts += 1;
+    const passReason = 'active_hunter:' + (reason || 'mutation');
+    const ensured = ensureTapToRevealOverlay(passReason);
+    if (ensured) {
+      stopShortsRevealWatch('ensured');
+      return true;
+    }
+    const mounted = ensureActiveHunterOverlay(reason || 'mutation');
+    if (mounted) {
+      stopShortsRevealWatch('active_hunter_overlay');
+      return true;
+    }
+    return false;
+  }
+
+  function startShortsRevealWatch(reason, opts) {
+    const options = opts && typeof opts === 'object' ? opts : {};
+    if (!isShortsModeActive()) return 'SKIP_NOT_SHORTS';
+    const normalizedReason = String(reason || 'active_hunter');
+    const watchKey = String(
+      options.key ||
+      computeSovereignId(state.pageEpoch) ||
+      (getCurrentShortsUrlId() || 'none')
+    );
+    const force = options.force === true;
+    if (shortsRevealWatchState.active && shortsRevealWatchState.key === watchKey && !force) {
+      runShortsRevealWatchPass('dedupe:' + normalizedReason);
+      return 'ALREADY_ACTIVE';
+    }
+
+    stopShortsRevealWatch('restart');
+    const root = document.body || document.documentElement;
+    if (!root) return 'NO_ROOT';
+
+    shortsRevealWatchState.active = true;
+    shortsRevealWatchState.key = watchKey;
+    shortsRevealWatchState.startedAt = Date.now();
+    shortsRevealWatchState.reason = normalizedReason;
+    shortsRevealWatchState.attempts = 0;
+
+    const observer = new MutationObserver(function() {
+      if (timerState.paused || timerState.teardownDone || !shortsRevealWatchState.active) return;
+      runShortsRevealWatchPass('mutation');
+    });
+    shortsRevealWatchState.observer = observer;
+    observer.observe(root, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: SHORTS_REVEAL_WATCH_ATTRIBUTE_FILTER,
+    });
+    shortsRevealWatchState.timeoutId = setTimeout(function() {
+      stopShortsRevealWatch('timeout');
+    }, SHORTS_REVEAL_WATCH_TIMEOUT_MS);
+
+    logShortsProbe(
+      'reveal_watch_start',
+      'reason=' + normalizedReason +
+      ' key=' + watchKey +
+      ' timeoutMs=' + SHORTS_REVEAL_WATCH_TIMEOUT_MS
+    );
+    runShortsRevealWatchPass('start');
+    return 'STARTED';
   }
 
   function setRevealOverlayAnchorTarget(overlay, element, reason) {
@@ -4628,6 +4969,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (shortsMode && element.isConnected && !findRevealOverlayForElement(element, src)) {
         createRevealOverlay(element, src, category, itemId, false);
       }
+      if (shortsMode) {
+        startShortsRevealWatch('apply_blur:' + String(itemId || 'none'), { force: false });
+      }
       const parentContainsOverlay = !!(element.parentElement && typeof element.parentElement.querySelector === 'function' && element.parentElement.querySelector('.mw-reveal-overlay'));
       console.log(
         '[DIAG][BLUR_LAYER] apply',
@@ -4990,7 +5334,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       'align-items: center',
       'justify-content: center',
       shortsMode ? 'background: transparent' : 'background: rgba(0, 0, 0, 0.3)',
-      shortsMode ? 'z-index: 2147483647' : 'z-index: 9998',
+      shortsMode ? ('z-index: ' + String(LAYER_REVEAL_PORTAL_Z)) : 'z-index: 9998',
       'cursor: default',
       'pointer-events: none',
     ].join(';');
@@ -5099,6 +5443,20 @@ export function generateModerationScript(config: InjectionConfig): string {
         element.dataset.mwRevealed = 'true'; // Persistence
         setRevealOverlayBlurState(overlay, false);
         removeBlur(element, src);
+        const currentSovereignId = computeSovereignId(state.pageEpoch);
+        postToHost({
+          type: 'MW_USER_REVEAL_REQUEST',
+          sovereignId: currentSovereignId,
+          pageEpoch: state.pageEpoch,
+          navId: NAV_ID,
+          timestamp: Date.now(),
+        });
+        console.log(
+          '[MW][SYNC] reveal_request',
+          'sovereignId=' + (currentSovereignId || 'none'),
+          'navId=' + NAV_ID,
+          'pageEpoch=' + state.pageEpoch
+        );
         btn.textContent = '🔒 Hide';
         const afterBlurCount = countBlurredNodesForItemKey(src);
         const removedBlurCount = beforeBlurCount > afterBlurCount ? (beforeBlurCount - afterBlurCount) : 0;
@@ -5390,6 +5748,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       requestId: requestId,
       navId: NAV_ID,
       pageEpoch: state.pageEpoch,
+      sovereignId: requestSovereignId,
       noncePrefix: NONCE_PREFIX,
       itemCount: items.length,
       timestamp: timestamp,
@@ -5458,6 +5817,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       requestId: requestId,
       navId: NAV_ID,
       pageEpoch: state.pageEpoch,
+      sovereignId: pendingRequest.sovereignId || computeSovereignId(state.pageEpoch),
       noncePrefix: NONCE_PREFIX,
       itemCount: pendingRequest.items.length,
       timestamp: Date.now(),
@@ -6262,11 +6622,163 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   // ==================== BATCH QUEUE MANAGEMENT ====================
 
+  function collectCurrentShortsMatchTokens() {
+    const tokens = new Set();
+    const shortsUrlId = getCurrentShortsUrlId();
+    if (shortsUrlId && shortsUrlId !== 'none') {
+      tokens.add(shortsUrlId);
+    }
+    const candidateNodes = [];
+    const activeContainer = getActiveShortsPlayerContainer();
+    if (activeContainer && activeContainer.nodeType === 1) {
+      candidateNodes.push(activeContainer);
+      if (typeof activeContainer.querySelector === 'function') {
+        const nested = activeContainer.querySelector('ytd-reel-video-renderer, ytm-reel-video-renderer');
+        if (nested && nested.nodeType === 1) {
+          candidateNodes.push(nested);
+        }
+      }
+    }
+    for (let i = 0; i < candidateNodes.length; i += 1) {
+      const node = candidateNodes[i];
+      if (!node || !node.getAttribute) continue;
+      const attrs = ['v', 'data-video-id', 'data-item-id', 'data-id'];
+      for (let j = 0; j < attrs.length; j += 1) {
+        const value = String(node.getAttribute(attrs[j]) || '').trim();
+        if (value && value !== 'none' && value.length >= 4) {
+          tokens.add(value);
+        }
+      }
+    }
+    return Array.from(tokens);
+  }
+
+  function countTrustedOrMatchingShortsItems(items, matchTokens) {
+    if (!Array.isArray(items) || items.length === 0) return 0;
+    return items.reduce(function(count, item) {
+      if (!item) return count;
+      const sourceType = String(item.sourceType || '');
+      if (sourceType === 'video-frame') return count + 1;
+      const src = String(item.src || '');
+      for (let i = 0; i < matchTokens.length; i += 1) {
+        const token = String(matchTokens[i] || '');
+        if (token && src.indexOf(token) !== -1) {
+          return count + 1;
+        }
+      }
+      return count;
+    }, 0);
+  }
+
+  function resolveActiveShortsVideoForForcedCapture() {
+    const activeContainer = getActiveShortsPlayerContainer();
+    if (activeContainer && activeContainer.isConnected) {
+      const tagName = String(activeContainer.tagName || '').toUpperCase();
+      if (tagName === 'VIDEO') return activeContainer;
+      if (typeof activeContainer.querySelector === 'function') {
+        const fromContainer = activeContainer.querySelector('video.html5-main-video, video');
+        if (fromContainer && fromContainer.isConnected) {
+          return fromContainer;
+        }
+      }
+    }
+    const fallbackVideo = document.querySelector(SHORTS_FALLBACK_VIDEO_SELECTOR);
+    if (fallbackVideo && fallbackVideo.isConnected) return fallbackVideo;
+    return null;
+  }
+
+  function buildForcedShortsFrameItem(reason, matchTokens) {
+    const videoNode = resolveActiveShortsVideoForForcedCapture();
+    if (!videoNode) {
+      console.log(
+        '[DIAG][SHORTS_SCAN] force_frame_capture',
+        'reason=' + (reason || 'unknown'),
+        'result=failed',
+        'error=no_video_node',
+        'matchTokens=' + (matchTokens.length ? matchTokens.join(',') : 'none')
+      );
+      return null;
+    }
+
+    const frameCapture = tryCaptureActiveShortsVideoFrame(videoNode);
+    if (!frameCapture.ok || !frameCapture.src) {
+      console.log(
+        '[DIAG][SHORTS_SCAN] force_frame_capture',
+        'reason=' + (reason || 'unknown'),
+        'result=failed',
+        'error=' + String(frameCapture.reason || 'capture_failed'),
+        'readyState=' + String(frameCapture.readyState || 'n/a'),
+        'matchTokens=' + (matchTokens.length ? matchTokens.join(',') : 'none')
+      );
+      return null;
+    }
+
+    const frameSrc = frameCapture.src;
+    const existingPendingId = state.pendingBySrc.get(frameSrc);
+    if (existingPendingId) {
+      const existingPending = state.pending.get(existingPendingId);
+      if (existingPending) {
+        const existingDims = getElementDimensions(existingPending.element || videoNode);
+        return {
+          itemId: existingPendingId,
+          src: existingPending.src,
+          sourceType: existingPending.sourceType || 'video-frame',
+          width: existingDims.width,
+          height: existingDims.height,
+        };
+      }
+      state.pendingBySrc.delete(frameSrc);
+    }
+
+    const itemId = generateItemId();
+    const sourceType = 'video-frame';
+    const width = Math.max(1, Number(frameCapture.width) || getElementDimensions(videoNode).width || 1);
+    const height = Math.max(1, Number(frameCapture.height) || getElementDimensions(videoNode).height || 1);
+    videoNode.dataset.mwSourceType = sourceType;
+    state.elements.set(itemId, videoNode);
+    applySoftBlur(videoNode, frameSrc, itemId);
+    state.pending.set(itemId, {
+      element: videoNode,
+      src: frameSrc,
+      sourceType: sourceType,
+      timestamp: Date.now(),
+      state: 'pending',
+      blurTimer: null,
+    });
+    state.pendingBySrc.set(frameSrc, itemId);
+    state.stats.videoPosters++;
+    diagScanSourceCounters.video_frame_scan_used += 1;
+    console.log(
+      '[DIAG][SHORTS_SCAN] force_frame_capture',
+      'reason=' + (reason || 'unknown'),
+      'result=queued',
+      'itemId=' + itemId,
+      'capture=' + width + 'x' + height,
+      'matchTokens=' + (matchTokens.length ? matchTokens.join(',') : 'none')
+    );
+    return {
+      itemId: itemId,
+      src: frameSrc,
+      sourceType: sourceType,
+      width: width,
+      height: height,
+    };
+  }
+
   function flushBatchQueue() {
     if (batchQueue.length === 0) return;
     
     const itemsToSend = batchQueue.splice(0, CONFIG.batchSize);
     if (isShortsModeActive()) {
+      const matchTokens = collectCurrentShortsMatchTokens();
+      const matchingBefore = countTrustedOrMatchingShortsItems(itemsToSend, matchTokens);
+      if (matchingBefore <= 0) {
+        const forcedFrameItem = buildForcedShortsFrameItem('pre_request_zero_match', matchTokens);
+        if (forcedFrameItem) {
+          itemsToSend.push(forcedFrameItem);
+        }
+      }
+      const matchingAfter = countTrustedOrMatchingShortsItems(itemsToSend, matchTokens);
       const discoveredItems = itemsToSend.map(item => ({
         itemId: item.itemId,
         src: String(item.src || '').substring(0, 180),
@@ -6275,6 +6787,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       console.log(
         '[DIAG][SHORTS_SCAN] discovered',
         'count=' + discoveredItems.length,
+        'matching=' + matchingAfter,
+        'matchTokens=' + (matchTokens.length ? matchTokens.join(',') : 'none'),
         'items=' + JSON.stringify(discoveredItems)
       );
     }
@@ -6973,7 +7487,30 @@ export function generateModerationScript(config: InjectionConfig): string {
     timerLog('start', 'youtubeMutationScanTimeout:' + (reason || 'mutation'));
   }
 
+  let primaryMutationObserverBootstrapped = false;
+
+  function bootstrapPrimaryMutationObserver(reason) {
+    if (primaryMutationObserverBootstrapped) return true;
+    const root = document.body || document.documentElement;
+    if (!root) {
+      console.log('[MW][Observer] bootstrap_deferred', 'reason=' + (reason || 'unknown'));
+      return false;
+    }
+    const observer = setupMutationObserver(root);
+    if (!observer) return false;
+    primaryMutationObserverBootstrapped = true;
+    return true;
+  }
+
   function setupMutationObserver(root) {
+    if (!root || (
+      root.nodeType !== 1 &&
+      root.nodeType !== 9 &&
+      root.nodeType !== 11
+    )) {
+      console.log('[MW][Observer] setup_skipped_invalid_root');
+      return null;
+    }
     const observerRootNodeId = getDiagNodeId(root);
     let shortsAttrMode = reevaluateShortsObserverMode(
       'setupMutationObserver',
@@ -7433,9 +7970,153 @@ export function generateModerationScript(config: InjectionConfig): string {
     console.log('[MW] CSS styles injected');
   }
 
+  function ensureTapToRevealOverlay(reason) {
+    const normalizedReason = String(reason || 'host_force_reveal_ui');
+    const isActiveHunterReason = normalizedReason.indexOf('active_hunter') === 0;
+    try {
+      if (isShortsModeActive() && !isActiveHunterReason) {
+        startShortsRevealWatch(normalizedReason, { force: false });
+      }
+      let shownCount = 0;
+      let createdCount = 0;
+      const candidates = document.querySelectorAll('[data-mw-moderated="blurred"], .mw-blurred');
+      for (let i = 0; i < candidates.length; i += 1) {
+        const candidate = candidates[i];
+        if (!candidate || !candidate.isConnected) continue;
+        const src = String((candidate.dataset && candidate.dataset.mwSrc) || '');
+        if (!src) continue;
+        const category = String((candidate.dataset && candidate.dataset.mwCategory) || 'flagged');
+        const itemId = String((candidate.dataset && candidate.dataset.mwItemId) || '');
+        let overlay = findRevealOverlayForElement(candidate, src);
+        if (!overlay || !overlay.isConnected) {
+          createRevealOverlay(candidate, src, category, itemId);
+          overlay = findRevealOverlayForElement(candidate, src);
+          if (overlay && overlay.isConnected) {
+            createdCount += 1;
+          }
+        } else {
+          shownCount += 1;
+        }
+        if (overlay && overlay.isConnected) {
+          setRevealOverlayBlurState(overlay, true);
+          overlay.style.display = 'flex';
+        }
+      }
+
+      if (shownCount + createdCount <= 0 && isShortsModeActive()) {
+        let activeContainer = getActiveShortsPlayerContainer();
+        if (!activeContainer || !activeContainer.isConnected) {
+          activeContainer = findActiveHunterShortsContainer('ensure_fallback');
+        }
+        if (!activeContainer || !activeContainer.isConnected) {
+          const aggressiveShortsSelectors = [
+            'ytd-reel-video-renderer[is-active]',
+            'ytd-reel-video-renderer[aria-hidden="false"]',
+            'ytd-reel-video-renderer[aria-current="true"]',
+            'ytm-reel-video-renderer[is-active]',
+            'ytm-reel-video-renderer[aria-hidden="false"]',
+            'ytm-reel-video-renderer[aria-current="true"]',
+            'ytm-shorts-lockup-view-model[is-active]',
+            'ytm-shorts-lockup-view-model[aria-hidden="false"]',
+            'ytm-shorts-lockup-view-model[aria-current="true"]',
+            'ytm-shorts-lockup-view-model-v2[is-active]',
+            'ytm-shorts-lockup-view-model-v2[aria-hidden="false"]',
+            'ytm-shorts-lockup-view-model-v2[aria-current="true"]',
+            'div#player-container',
+            '#player-container',
+            '#shorts-player',
+          ];
+          for (let i = 0; i < aggressiveShortsSelectors.length; i += 1) {
+            const candidate = document.querySelector(aggressiveShortsSelectors[i]);
+            if (candidate && candidate.isConnected) {
+              activeContainer = candidate;
+              break;
+            }
+          }
+        }
+        const stableTarget = resolveShortsStableBlurTarget(activeContainer, '');
+        const fallbackTarget = (
+          stableTarget &&
+          stableTarget.target &&
+          stableTarget.target.isConnected
+        ) ? stableTarget.target : (
+          activeContainer && activeContainer.isConnected ? activeContainer : null
+        );
+        if (fallbackTarget && fallbackTarget.nodeType === 1) {
+          const shortsUrlId = getCurrentShortsUrlId() || 'none';
+          const fallbackSrc = String(
+            (fallbackTarget.dataset && fallbackTarget.dataset.mwSrc) ||
+            ('shorts://video/' + shortsUrlId + '#id_mismatch_fallback')
+          );
+          const fallbackCategory = String(
+            (fallbackTarget.dataset && fallbackTarget.dataset.mwCategory) ||
+            'shorts_mismatch_hold'
+          );
+          const fallbackItemId = String((fallbackTarget.dataset && fallbackTarget.dataset.mwItemId) || '');
+          applyBlur(fallbackTarget, fallbackSrc, fallbackCategory, CONFIG.blurStrength, fallbackItemId);
+          let fallbackOverlay = findRevealOverlayForElement(fallbackTarget, fallbackSrc);
+          if (!fallbackOverlay || !fallbackOverlay.isConnected) {
+            createRevealOverlay(fallbackTarget, fallbackSrc, fallbackCategory, fallbackItemId);
+            fallbackOverlay = findRevealOverlayForElement(fallbackTarget, fallbackSrc);
+          }
+          if (fallbackOverlay && fallbackOverlay.isConnected) {
+            setRevealOverlayBlurState(fallbackOverlay, true);
+            fallbackOverlay.style.display = 'flex';
+            createdCount += 1;
+          }
+        }
+      }
+
+      const didEnsure = shownCount + createdCount > 0;
+      if (didEnsure) {
+        if (!isActiveHunterReason) {
+          stopShortsRevealWatch('ensure_success');
+        }
+        scheduleShortsRevealOverlayReposition('ensure_reveal_ui:' + normalizedReason);
+        console.log(
+          '[DIAG][REVEAL_UI] ensure',
+          'reason=' + normalizedReason,
+          'shown=' + shownCount,
+          'created=' + createdCount,
+          'result=ensured'
+        );
+        return true;
+      }
+      console.log(
+        '[DIAG][REVEAL_UI] ensure',
+        'reason=' + normalizedReason,
+        'shown=' + shownCount,
+        'created=' + createdCount,
+        'result=no_target'
+      );
+      if (isShortsModeActive() && !isActiveHunterReason) {
+        startShortsRevealWatch('ensure_no_target:' + normalizedReason, { force: false });
+      }
+      return false;
+    } catch (e) {
+      return false;
+    }
+  }
+
   // Expose targeted rescan hooks for the host (NativeWebViewBrowser)
   window.__MW_SCAN_FULL__ = scanFullPage;
   window.__MW_SCAN_YT__ = scanYouTubeThumbnails;
+  window.__MW_ENSURE_REVEAL_UI__ = ensureTapToRevealOverlay;
+  window.__MW_START_REVEAL_WATCH__ = function(reason, opts) {
+    try {
+      return startShortsRevealWatch(reason || 'host_start_reveal_watch', opts || {});
+    } catch (e) {
+      return 'ERR';
+    }
+  };
+  window.__MW_STOP_REVEAL_WATCH__ = function(reason) {
+    try {
+      stopShortsRevealWatch(reason || 'host_stop_reveal_watch');
+      return 'OK';
+    } catch (e) {
+      return 'ERR';
+    }
+  };
   window.__MW_SHORTS_REENTRY_REFRESH__ = function(reason) {
     try {
       return refreshShortsFreshnessOnReentry(reason || 'host_shorts_reentry', { force: true }) ? 'OK' : 'SKIP';
@@ -7443,15 +8124,6 @@ export function generateModerationScript(config: InjectionConfig): string {
       return 'ERR';
     }
   };
-
-  // Set up observers
-  setupMutationObserver(document.body);
-  installShortsAnchorObserver('init');
-  state.viewportObserver = setupViewportObserver();
-  
-  // YouTube-specific: Set up scroll handler for infinite scroll
-  setupYouTubeScrollHandler();
-  refreshAdaptiveShortsOverlayWatch('init');
 
   function scheduleInitTimeout(label, fn, delayMs) {
     const id = setTimeout(() => {
@@ -7462,6 +8134,25 @@ export function generateModerationScript(config: InjectionConfig): string {
     timerState.initialTimeouts.push(id);
     timerLog('start', label + ':' + delayMs + 'ms');
   }
+
+  // Set up observers before any initial scan scheduling.
+  if (!bootstrapPrimaryMutationObserver('init')) {
+    const onDomReadyForObserver = function() {
+      if (timerState.teardownDone) return;
+      bootstrapPrimaryMutationObserver('dom_content_loaded');
+    };
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', onDomReadyForObserver, { once: true });
+    } else {
+      scheduleInitTimeout('observerBootstrapRetry', onDomReadyForObserver, 60);
+    }
+  }
+  installShortsAnchorObserver('init');
+  state.viewportObserver = setupViewportObserver();
+  
+  // YouTube-specific: Set up scroll handler for infinite scroll
+  setupYouTubeScrollHandler();
+  refreshAdaptiveShortsOverlayWatch('init');
 
   // Initial scan – run immediately to pre-blur anything already in the DOM.
   scanFullPage();
@@ -7601,6 +8292,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       } else {
         stopShortsAnchorObserver('url_change_non_shorts');
         stopAdaptiveShortsOverlayWatch('url_change_non_shorts');
+        stopShortsRevealWatch('url_change_non_shorts');
       }
       if (observerModeResult.transitioned && observerModeResult.mode) {
         scheduleYouTubeScan('url_change_mode_on');
@@ -7626,6 +8318,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   function stopManagedTimers(reason) {
     stopShortsAnchorObserver('stopManagedTimers:' + (reason || 'unknown'));
     stopAdaptiveShortsOverlayWatch('stopManagedTimers:' + (reason || 'unknown'));
+    stopShortsRevealWatch('stopManagedTimers:' + (reason || 'unknown'));
     clearNamedInterval('legacyResultsInterval', reason);
     clearNamedInterval('urlChangeInterval', reason);
     clearNamedInterval('youtubePeriodicInterval', reason);
