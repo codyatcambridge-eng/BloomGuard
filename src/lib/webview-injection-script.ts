@@ -355,6 +355,10 @@ export function generateModerationScript(config: InjectionConfig): string {
   const LAYER_GLOBAL_BLUR_Z = 2147483646;
   const LAYER_REVEAL_PORTAL_Z = 2147483647;
   const DOM_OVERLAY_ENABLED = true;
+  const HARD_GLASS_BACKDROP_FILTER = 'blur(20px) brightness(0.8)';
+  const HARD_GLASS_BACKGROUND = 'rgba(255, 255, 255, 0.1)';
+  const REVEAL_TRANSITION_CSS = 'filter 0.3s ease-in-out, opacity 0.3s ease-in-out';
+  const REVEAL_TRANSITION_MS = 300;
 
   const overlayState = window.__MW_BLUR_STATE__ || {
     enabled: false,
@@ -4673,9 +4677,31 @@ export function generateModerationScript(config: InjectionConfig): string {
   // ==================== BLUR MANAGEMENT ====================
 
   /**
-   * Apply soft blur (semantic delay) - light blur while waiting for result
-   * After CONFIG.semanticDelayMs, if no result, keep soft blur only
+   * Animate reveal so blur removal does not snap on/off.
    */
+  function animateRevealTransition(element) {
+    if (!element || element.nodeType !== 1) return;
+    try {
+      element.style.setProperty('transition', REVEAL_TRANSITION_CSS, 'important');
+      element.style.setProperty('opacity', '0.82', 'important');
+      const runReveal = function() {
+        try {
+          element.style.setProperty('filter', 'none', 'important');
+          element.style.setProperty('-webkit-filter', 'none', 'important');
+          element.style.removeProperty('backdrop-filter');
+          element.style.removeProperty('-webkit-backdrop-filter');
+          element.style.removeProperty('background');
+          element.style.setProperty('opacity', '1', 'important');
+        } catch (e) {}
+      };
+      if (typeof window.requestAnimationFrame === 'function') {
+        window.requestAnimationFrame(runReveal);
+      } else {
+        setTimeout(runReveal, 0);
+      }
+    } catch (e) {}
+  }
+
   function clearAllBlurAndOverlay(element, src, reason, nextModeratedState) {
     if (!element || element.nodeType !== 1) return false;
     let changed = false;
@@ -4705,7 +4731,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       element.style.removeProperty('-webkit-filter');
       element.style.removeProperty('backdrop-filter');
       element.style.removeProperty('-webkit-backdrop-filter');
-      element.style.removeProperty('opacity');
+      element.style.removeProperty('background');
       element.classList.remove('mw-softblur');
       element.classList.remove('mw-blurred');
       const removedOverlay = removeRevealOverlay(element, src || element.dataset.mwSrc || '', reason || 'clear_all');
@@ -4722,6 +4748,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     return changed;
   }
 
+  /**
+   * Apply soft blur (semantic delay) - light blur while waiting for result
+   * After CONFIG.semanticDelayMs, if no result, keep soft blur only
+   */
   function applySoftBlur(element, src, itemId) {
     diagBlurStateLog('applySoftBlur.enter', element, src, 'itemId=' + (itemId || 'none'));
     // Check persistence: if user revealed this, don't blur
@@ -4942,6 +4972,8 @@ export function generateModerationScript(config: InjectionConfig): string {
             element.style.removeProperty('-webkit-filter');
             element.style.removeProperty('backdrop-filter');
             element.style.removeProperty('-webkit-backdrop-filter');
+            element.style.removeProperty('background');
+            element.style.removeProperty('opacity');
             element.dataset.mwPreblurClear = 'true';
           } catch (e) {}
         }
@@ -4993,14 +5025,17 @@ export function generateModerationScript(config: InjectionConfig): string {
         element.style.removeProperty('-webkit-filter');
         element.style.removeProperty('backdrop-filter');
         element.style.removeProperty('-webkit-backdrop-filter');
+        element.style.removeProperty('background');
+        element.style.removeProperty('opacity');
         diagShortsBlurStackLog('hard_after_clear', element, src, 'itemId=' + (itemId || 'N/A'));
       }
-      // Force blur with !important for iOS WebKit
-      element.style.setProperty('filter', 'blur(' + blurPx + 'px)', 'important');
-      element.style.setProperty('-webkit-filter', 'blur(' + blurPx + 'px)', 'important');
-      element.style.setProperty('backdrop-filter', 'blur(' + blurPx + 'px)', 'important');
-      element.style.setProperty('-webkit-backdrop-filter', 'blur(' + blurPx + 'px)', 'important');
-      element.style.transition = 'filter 0.3s ease';
+      // Frosted-glass hard blur treatment.
+      element.style.setProperty('filter', 'blur(' + blurPx + 'px) brightness(0.8)', 'important');
+      element.style.setProperty('-webkit-filter', 'blur(' + blurPx + 'px) brightness(0.8)', 'important');
+      element.style.setProperty('backdrop-filter', HARD_GLASS_BACKDROP_FILTER, 'important');
+      element.style.setProperty('-webkit-backdrop-filter', HARD_GLASS_BACKDROP_FILTER, 'important');
+      element.style.setProperty('background', HARD_GLASS_BACKGROUND, 'important');
+      element.style.setProperty('transition', REVEAL_TRANSITION_CSS, 'important');
       element.dataset.mwModerated = 'blurred';
       element.dataset.mwCategory = category || 'flagged';
       element.dataset.mwSrc = src;
@@ -5098,10 +5133,14 @@ export function generateModerationScript(config: InjectionConfig): string {
         'overlayId=' + overlayId,
         'reason=removeBlur'
       );
+      animateRevealTransition(element);
       if (shortsMode) {
-        clearAllBlurAndOverlay(element, src, 'removeBlur_reveal', 'revealed');
+        setTimeout(function() {
+          const stillRevealed = state.revealed.has(src) || element.dataset.mwRevealed === 'true';
+          if (!stillRevealed) return;
+          clearAllBlurAndOverlay(element, src, 'removeBlur_reveal', 'revealed');
+        }, REVEAL_TRANSITION_MS);
       } else {
-        element.style.filter = 'none';
         element.dataset.mwModerated = 'revealed';
         element.dataset.mwPreblurClear = 'true';
         element.classList.remove('mw-softblur');
@@ -5154,7 +5193,12 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (shortsMode) {
         clearAllBlurAndOverlay(element, srcForClear, 'clearElementBlur_safe', 'safe');
       } else {
-        element.style.filter = 'none';
+        element.style.setProperty('filter', 'none', 'important');
+        element.style.setProperty('-webkit-filter', 'none', 'important');
+        element.style.removeProperty('backdrop-filter');
+        element.style.removeProperty('-webkit-backdrop-filter');
+        element.style.removeProperty('background');
+        element.style.removeProperty('opacity');
         element.dataset.mwModerated = 'safe';
       }
       element.dataset.mwRevealed = 'false';
@@ -5209,12 +5253,15 @@ export function generateModerationScript(config: InjectionConfig): string {
         resolvedTarget.style.removeProperty('-webkit-filter');
         resolvedTarget.style.removeProperty('backdrop-filter');
         resolvedTarget.style.removeProperty('-webkit-backdrop-filter');
+        resolvedTarget.style.removeProperty('background');
+        resolvedTarget.style.removeProperty('opacity');
         diagShortsBlurStackLog('overlay_reresolve_after_clear', resolvedTarget, src, 'reason=' + (reason || 'unknown'));
-        resolvedTarget.style.setProperty('filter', 'blur(' + resolvedBlurPx + 'px)', 'important');
-        resolvedTarget.style.setProperty('-webkit-filter', 'blur(' + resolvedBlurPx + 'px)', 'important');
-        resolvedTarget.style.setProperty('backdrop-filter', 'blur(' + resolvedBlurPx + 'px)', 'important');
-        resolvedTarget.style.setProperty('-webkit-backdrop-filter', 'blur(' + resolvedBlurPx + 'px)', 'important');
-        resolvedTarget.style.transition = 'filter 0.3s ease';
+        resolvedTarget.style.setProperty('filter', 'blur(' + resolvedBlurPx + 'px) brightness(0.8)', 'important');
+        resolvedTarget.style.setProperty('-webkit-filter', 'blur(' + resolvedBlurPx + 'px) brightness(0.8)', 'important');
+        resolvedTarget.style.setProperty('backdrop-filter', HARD_GLASS_BACKDROP_FILTER, 'important');
+        resolvedTarget.style.setProperty('-webkit-backdrop-filter', HARD_GLASS_BACKDROP_FILTER, 'important');
+        resolvedTarget.style.setProperty('background', HARD_GLASS_BACKGROUND, 'important');
+        resolvedTarget.style.setProperty('transition', REVEAL_TRANSITION_CSS, 'important');
         resolvedTarget.dataset.mwModerated = 'blurred';
         resolvedTarget.dataset.mwCategory = category || 'flagged';
         resolvedTarget.dataset.mwSrc = src;
@@ -5425,17 +5472,32 @@ export function generateModerationScript(config: InjectionConfig): string {
     
     const btn = document.createElement('button');
     btn.className = 'mw-reveal-btn mw-reveal-button';
-    btn.textContent = '👁 Reveal';
+    btn.type = 'button';
+    btn.textContent = 'Tap to Reveal';
     btn.style.cssText = [
-      'background: rgba(0, 0, 0, 0.9)',
-      'color: white',
-      'border: 2px solid rgba(255, 255, 255, 0.3)',
-      'padding: 10px 20px',
-      'border-radius: 8px',
+      'display: inline-flex',
+      'align-items: center',
+      'justify-content: center',
+      'min-width: 134px',
+      'min-height: 38px',
+      'padding: 10px 18px',
+      'border-radius: 999px',
+      'border: 1px solid rgba(255, 255, 255, 0.42)',
+      'background: rgba(255, 255, 255, 0.2)',
+      'color: rgba(255, 255, 255, 0.98)',
+      'font-family: "SF Pro Text", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+      'font-size: 13px',
+      'font-weight: 600',
+      'letter-spacing: 0.01em',
+      'line-height: 1',
+      'white-space: nowrap',
+      'box-shadow: 0 8px 20px rgba(0, 0, 0, 0.24)',
+      'backdrop-filter: blur(12px)',
+      '-webkit-backdrop-filter: blur(12px)',
       'cursor: pointer',
-      'font-size: 14px',
-      'font-weight: bold',
+      'z-index: 2',
       'pointer-events: auto',
+      'transition: opacity 0.2s ease, transform 0.2s ease, background-color 0.2s ease',
     ].join(';');
 
     overlay.addEventListener('click', function(e) {
@@ -5508,7 +5570,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         if (clickElement && clickElement.nodeType === 1) {
           applyBlur(clickElement, clickSrc, clickCategory, CONFIG.blurStrength, clickItemId);
         }
-        btn.textContent = '👁 Reveal';
+        btn.textContent = 'Tap to Reveal';
         setRevealOverlayBlurState(overlay, true);
         overlay.style.display = 'flex';
       } else {
@@ -5542,7 +5604,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           'navId=' + NAV_ID,
           'pageEpoch=' + state.pageEpoch
         );
-        btn.textContent = '🔒 Hide';
+        btn.textContent = 'Hide';
         const afterBlurCount = countBlurredNodesForItemKey(clickSrc);
         const removedBlurCount = beforeBlurCount > afterBlurCount ? (beforeBlurCount - afterBlurCount) : 0;
         const remainingBlurNodeIds = getBlurredNodeIdsForItemKey(clickSrc, 24);
@@ -8016,7 +8078,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         display: flex !important;
         align-items: center !important;
         justify-content: center !important;
-        background: rgba(0, 0, 0, 0.25) !important;
+        background: rgba(255, 255, 255, 0.06) !important;
         z-index: 9998 !important;
         pointer-events: none !important;
       }
@@ -8034,15 +8096,24 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       .mw-reveal-button {
         opacity: var(--mw-reveal-button-opacity, 0) !important;
-        transition: opacity 120ms ease !important;
+        transition: opacity 180ms ease, transform 180ms ease !important;
       }
       .mw-reveal-btn,
       .mw-reveal-button {
         z-index: 9999 !important;
         pointer-events: auto !important;
+        border-radius: 999px !important;
+        border: 1px solid rgba(255, 255, 255, 0.4) !important;
+        background: rgba(255, 255, 255, 0.2) !important;
+        color: rgba(255, 255, 255, 0.98) !important;
+        font-family: "SF Pro Text", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
+        font-weight: 600 !important;
+        box-shadow: 0 8px 20px rgba(0, 0, 0, 0.24) !important;
+        backdrop-filter: blur(12px) !important;
+        -webkit-backdrop-filter: blur(12px) !important;
       }
       [data-mw-moderated="blurred"] {
-        transition: filter 0.3s ease !important;
+        transition: filter 0.3s ease-in-out, opacity 0.3s ease-in-out !important;
       }
       .mw-softblur {
         transition: filter 0.2s ease !important;

@@ -348,6 +348,9 @@ export const NativeWebViewBrowser = () => {
   });
   const blurPendingRef = useRef<{ enabled: boolean; reason: string; timestamp: number } | null>(null);
   const blurRetryTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const overlayLiftHandshakeTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const overlayLiftHandshakeUntilRef = useRef(0);
+  const overlayLastSyncedEnabledRef = useRef(false);
   const blurSignalRef = useRef({ unsafeStreak: 0, safeStreak: 0 });
   const [blurSyncVersion, setBlurSyncVersion] = useState(0);
   const riskDecisionListenerRef = useRef<PluginListenerHandle | null>(null);
@@ -398,6 +401,7 @@ export const NativeWebViewBrowser = () => {
   const UNSAFE_STREAK_REQUIRED = 2;
   const SAFE_STREAK_REQUIRED = 2;
   const PENDING_REINJECT_WINDOW_MS = 1500;
+  const OVERLAY_LIFT_HANDSHAKE_MS = 50;
   const SHORTS_OVERLAY_ATOMIC_TIMEOUT_MS = 1200;
   const SHORTS_MATCHING_RETRY_DELAY_MS = 800;
   const SHORTS_NAV_GRACE_MS = 200;
@@ -480,6 +484,47 @@ export const NativeWebViewBrowser = () => {
       timestamp: Date.now(),
     };
     setBlurSyncVersion(v => v + 1);
+  }, []);
+
+  const cancelOverlayLiftHandshakeWindow = useCallback((reason: string) => {
+    const hadTimer = !!overlayLiftHandshakeTimerRef.current;
+    const hadWindow = overlayLiftHandshakeUntilRef.current > 0;
+    if (overlayLiftHandshakeTimerRef.current) {
+      clearTimeout(overlayLiftHandshakeTimerRef.current);
+      overlayLiftHandshakeTimerRef.current = null;
+    }
+    overlayLiftHandshakeUntilRef.current = 0;
+    if (!hadTimer && !hadWindow) return;
+    console.log(
+      '[DIAG][OVERLAY_HANDSHAKE]',
+      'action=cancel_window',
+      'reason=' + reason,
+    );
+  }, []);
+
+  const resetOverlayLiftHandshakeState = useCallback((reason: string) => {
+    cancelOverlayLiftHandshakeWindow(reason + '_window');
+    overlayLastSyncedEnabledRef.current = false;
+    console.log(
+      '[DIAG][OVERLAY_HANDSHAKE]',
+      'action=reset_state',
+      'reason=' + reason,
+    );
+  }, [cancelOverlayLiftHandshakeWindow]);
+
+  const scheduleOverlayLiftHandshakeRetry = useCallback((delayMs: number, reason: string) => {
+    const normalizedDelay = Math.max(1, Math.round(delayMs));
+    if (overlayLiftHandshakeTimerRef.current) return;
+    overlayLiftHandshakeTimerRef.current = setTimeout(() => {
+      overlayLiftHandshakeTimerRef.current = null;
+      setBlurSyncVersion(v => v + 1);
+    }, normalizedDelay);
+    console.log(
+      '[DIAG][OVERLAY_HANDSHAKE]',
+      'action=schedule_retry',
+      'reason=' + reason,
+      'delayMs=' + normalizedDelay,
+    );
   }, []);
 
   const isShortsAtomicActive = useCallback(() => {
@@ -1115,6 +1160,7 @@ export const NativeWebViewBrowser = () => {
     const activeTimerNames: string[] = [];
     if (loadEndInjectTimerRef.current) activeTimerNames.push('loadEndInjectTimer');
     if (blurRetryTimerRef.current) activeTimerNames.push('blurRetryTimer');
+    if (overlayLiftHandshakeTimerRef.current) activeTimerNames.push('overlayLiftHandshakeTimer');
     if (blurPendingRef.current) activeTimerNames.push('blurPendingState');
     const overlayState = blurStateRef.current;
     console.log(
@@ -1443,6 +1489,7 @@ export const NativeWebViewBrowser = () => {
       injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
       blurReadyRef.current = false;
+      resetOverlayLiftHandshakeState('navigation_load_start');
       resetShortsOverlayCoordinator('navigation_load_start');
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       const canDeferLoadStartReset =
@@ -1544,6 +1591,7 @@ export const NativeWebViewBrowser = () => {
       injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
       blurReadyRef.current = false;
+      resetOverlayLiftHandshakeState('url_change');
       resetShortsOverlayCoordinator('url_change');
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       if (shouldSkipHardResetForProfileReveal) {
@@ -1585,6 +1633,7 @@ export const NativeWebViewBrowser = () => {
       injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
       blurReadyRef.current = false;
+      resetOverlayLiftHandshakeState('webview_closed');
       resetShortsOverlayCoordinator('webview_closed');
       blurPendingRef.current = null;
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
@@ -1606,6 +1655,7 @@ export const NativeWebViewBrowser = () => {
       webViewActiveInstanceIdRef.current = activeInstanceId;
       if (previousInstanceId === activeInstanceId) return;
       blurReadyRef.current = false;
+      resetOverlayLiftHandshakeState('active_instance_change');
       resetShortsOverlayCoordinator('active_instance_change');
       blurReadyBurstRef.current = {
         navId: 0,
@@ -2236,6 +2286,37 @@ export const NativeWebViewBrowser = () => {
       }
     }
 
+    if (pending.enabled) {
+      cancelOverlayLiftHandshakeWindow('state_enable_or_hold_release');
+    } else {
+      const now = Date.now();
+      const needsLiftHandshake = overlayLastSyncedEnabledRef.current;
+      if (needsLiftHandshake && overlayLiftHandshakeUntilRef.current === 0) {
+        overlayLiftHandshakeUntilRef.current = now + OVERLAY_LIFT_HANDSHAKE_MS;
+        scheduleOverlayLiftHandshakeRetry(OVERLAY_LIFT_HANDSHAKE_MS, 'disable_prepare');
+        console.log(
+          '[DIAG][OVERLAY_HANDSHAKE]',
+          'action=hold_before_disable',
+          'reason=' + pending.reason,
+          'windowMs=' + OVERLAY_LIFT_HANDSHAKE_MS,
+        );
+        void requestBlurHandshake('overlay_lift_prepare:' + pending.reason).catch(() => undefined);
+        return;
+      }
+      if (overlayLiftHandshakeUntilRef.current > now) {
+        const remainingMs = Math.max(1, overlayLiftHandshakeUntilRef.current - now);
+        scheduleOverlayLiftHandshakeRetry(remainingMs, 'disable_wait');
+        console.log(
+          '[DIAG][OVERLAY_HANDSHAKE]',
+          'action=hold_in_progress',
+          'reason=' + pending.reason,
+          'remainingMs=' + remainingMs,
+        );
+        return;
+      }
+      cancelOverlayLiftHandshakeWindow('disable_ready_commit');
+    }
+
     const stateMessage = createBlurOverlayStateMessage(pending.enabled, pending.reason);
     const escapedMessage = escapeForJs(JSON.stringify(stateMessage));
 
@@ -2253,6 +2334,7 @@ export const NativeWebViewBrowser = () => {
 
     await executeScript(script);
     blurPendingRef.current = null;
+    overlayLastSyncedEnabledRef.current = pending.enabled;
     return;
   }, [
     ENABLE_DOM_BLUR,
@@ -2260,6 +2342,10 @@ export const NativeWebViewBrowser = () => {
     webViewState.isOpen,
     executeScript,
     shouldHoldShortsOverlaySync,
+    OVERLAY_LIFT_HANDSHAKE_MS,
+    cancelOverlayLiftHandshakeWindow,
+    scheduleOverlayLiftHandshakeRetry,
+    requestBlurHandshake,
   ]);
 
   const syncOverlayState = useCallback(async (reason: string) => {
@@ -2318,6 +2404,7 @@ export const NativeWebViewBrowser = () => {
 
     if (ENABLE_DOM_BLUR) {
       blurReadyRef.current = false;
+      resetOverlayLiftHandshakeState('settings_reinject');
       resetShortsOverlayCoordinator('settings_reinject');
     }
 
@@ -2364,6 +2451,7 @@ export const NativeWebViewBrowser = () => {
     requestBlurHandshake,
     clearLoadEndInjectTimer,
     resetShortsOverlayCoordinator,
+    resetOverlayLiftHandshakeState,
   ]);
 
   useEffect(() => {
@@ -2416,12 +2504,14 @@ export const NativeWebViewBrowser = () => {
       if (blurRetryTimerRef.current) {
         clearTimeout(blurRetryTimerRef.current);
       }
+      resetOverlayLiftHandshakeState('unmount_cleanup');
     };
   }, [
     clearLoadEndInjectTimer,
     clearPendingReinjectTimer,
     clearShortsOverlayAtomicTimeout,
     clearShortsMatchingRetryTimer,
+    resetOverlayLiftHandshakeState,
   ]);
 
   // ==================== MODERATION MESSAGE HANDLING ====================
@@ -4482,12 +4572,13 @@ export const NativeWebViewBrowser = () => {
       // Reset injection flag to re-inject moderation script
       injectionDoneRef.current = false;
       blurReadyRef.current = false;
+      resetOverlayLiftHandshakeState('manual_reload');
       resetShortsOverlayCoordinator('manual_reload');
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       setCentralBlurState(false, 'manual_reload');
       return;
     }
-  }, [readerContent, currentView, searchQuery, isNative, webViewState.isOpen, handleReaderMode, handleSearch, webViewReload, setCentralBlurState, resetShortsOverlayCoordinator]);
+  }, [readerContent, currentView, searchQuery, isNative, webViewState.isOpen, handleReaderMode, handleSearch, webViewReload, setCentralBlurState, resetShortsOverlayCoordinator, resetOverlayLiftHandshakeState]);
 
   const handleHome = useCallback(async () => {
     teardownWebViewScheduling('home_reset', webViewState.currentUrl).catch(() => undefined);
@@ -4505,6 +4596,7 @@ export const NativeWebViewBrowser = () => {
     });
     injectionDoneRef.current = false;
     blurReadyRef.current = false;
+    resetOverlayLiftHandshakeState('home_reset');
     resetShortsOverlayCoordinator('home_reset');
     blurPendingRef.current = null;
     blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
@@ -4519,7 +4611,7 @@ export const NativeWebViewBrowser = () => {
     setUrlInput('');
     setFallbackUrl('');
     goHome();
-  }, [isNative, webViewState.isOpen, webViewState.currentUrl, closeWebView, goHome, moderationBridge, setCentralBlurState, teardownWebViewScheduling, exitPendingReinject, resetShortsOverlayCoordinator]);
+  }, [isNative, webViewState.isOpen, webViewState.currentUrl, closeWebView, goHome, moderationBridge, setCentralBlurState, teardownWebViewScheduling, exitPendingReinject, resetShortsOverlayCoordinator, resetOverlayLiftHandshakeState]);
 
   // Manual scan trigger for current page
   const handleScanPage = useCallback(async () => {
