@@ -199,6 +199,40 @@ const FLASH_GUARD_PROBE_SCRIPT = `(() => {
   };
 })();`;
 
+const FLASH_GUARD_CLEANUP_SCRIPT = `(() => {
+  const host = document.getElementById('mw-shadow-veil-host');
+  const api = window.__MW_FLASH_GUARD__;
+  const hadHost = !!host;
+  try {
+    if (api && typeof api.set === 'function') {
+      api.set(false, 'flash_guard_disabled_cleanup');
+    } else if (api && typeof api === 'object') {
+      api.state = 'off';
+      api.lastReason = 'flash_guard_disabled_cleanup';
+    }
+  } catch (e) {}
+  if (host) {
+    try {
+      const veil = host.shadowRoot ? host.shadowRoot.firstChild : null;
+      if (veil && veil.style) {
+        veil.style.pointerEvents = 'none';
+        veil.style.opacity = '0';
+        veil.style.display = 'none';
+      }
+    } catch (e) {}
+    try {
+      host.style.pointerEvents = 'none';
+      host.style.opacity = '0';
+      host.style.display = 'none';
+    } catch (e) {}
+    try { host.remove(); } catch (e) {}
+  }
+  return {
+    hadHost,
+    removed: !!hadHost,
+  };
+})();`;
+
 export type WebViewEvent =
   | 'loadstart'
   | 'loadstop'
@@ -276,6 +310,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
   const executeScript60sWindowStartRef = useRef(0);
   const executeScript60sCountRef = useRef(0);
   const flashDiagLogAtRef = useRef(0);
+  const flashCleanupAtRef = useRef(0);
   const listenerAttachSeqRef = useRef(0);
   const listenerHandlesRef = useRef<PluginListenerHandle[]>([]);
   const listenerOwnerRef = useRef<{ navId: number | null; instanceId: number | null }>({
@@ -550,9 +585,29 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     [isNative, flashDiagLog],
   );
 
+  const cleanupLegacyFlashGuard = useCallback(
+    async (reason: string) => {
+      if (FLASH_GUARD_ENABLED) return;
+      if (!isNative || !isOpenRef.current) return;
+      const now = Date.now();
+      if (now - flashCleanupAtRef.current < 800) return;
+      flashCleanupAtRef.current = now;
+      try {
+        await InAppBrowser.executeScript({ code: FLASH_GUARD_CLEANUP_SCRIPT });
+        flashDiagLog('cleanup stale flash guard', reason);
+      } catch (error) {
+        console.debug('[FlashShield][DIAG] cleanup failed', reason, error);
+      }
+    },
+    [isNative, flashDiagLog],
+  );
+
   const setFlashGuardState = useCallback(
     async (enabled: boolean, reason: string) => {
-      if (!FLASH_GUARD_ENABLED) return;
+      if (!FLASH_GUARD_ENABLED) {
+        void cleanupLegacyFlashGuard('set_state_disabled:' + reason);
+        return;
+      }
       if (!isNative || !isOpenRef.current) {
         flashDiagLog('toggle skipped', reason, 'native=', isNative, 'open=', isOpenRef.current);
         return;
@@ -587,7 +642,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
         console.debug('[FlashShield][DIAG] FlashGuard toggle failed', reason, error);
       }
     },
-    [isNative, installFlashGuard, flashDiagLog, runFlashGuardDiagProof],
+    [isNative, installFlashGuard, flashDiagLog, runFlashGuardDiagProof, cleanupLegacyFlashGuard],
   );
 
   // Set up event listeners
@@ -668,6 +723,8 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
             void probeFlashGuard('url_change_post_install');
           });
           void runFlashGuardDiagProof('url_change_force');
+        } else {
+          void cleanupLegacyFlashGuard('url_change');
         }
       }, 'useNativeWebView.listeners.urlChangeEvent');
 
@@ -687,6 +744,8 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
             await setFlashGuardState(false, 'load_end');
             await probeFlashGuard('load_end_post_toggle');
           })();
+        } else {
+          void cleanupLegacyFlashGuard('browser_page_loaded');
         }
         if (currentUrlRef.current) {
           onLoadEndRef.current?.(currentUrlRef.current);
@@ -805,6 +864,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     installFlashGuard,
     runFlashGuardDiagProof,
     flashDiagLog,
+    cleanupLegacyFlashGuard,
     ensureBrowserPresented,
     setListenersAttachedState,
     readListenerDiagContext,

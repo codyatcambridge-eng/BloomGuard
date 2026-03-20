@@ -3159,6 +3159,9 @@ export const NativeWebViewBrowser = () => {
     const handleIncomingMessage = async (rawPayload: unknown, source: 'capgo' | 'window') => {
       const message = unwrapIncomingMessagePayload(rawPayload);
       if (!message || typeof message !== 'object') return;
+      if (tryHandlePersistentRevealRequest(message, source)) {
+        return;
+      }
 
       const typedMessage = message as Record<string, unknown>;
       const markShortsRelatedLegacyPollContextReady = (
