@@ -312,6 +312,18 @@ interface StableInjectionState {
   scheduledAt: number;
 }
 
+interface ShortsScanStateLock {
+  active: boolean;
+  requestId: string;
+  sovereignId: string;
+  navId: number;
+  pageEpoch: number;
+  source: string;
+  reason: string;
+  lockedAt: number;
+  expiresAt: number;
+}
+
 /**
  * NativeWebViewBrowser - Unified browser component
  * Uses native WebView on mobile, fallback modes on web
@@ -483,6 +495,18 @@ export const NativeWebViewBrowser = () => {
     sentAt: 0,
   });
   const pendingRequestsRef = useRef<Set<string>>(new Set());
+  const shortsScanStateLockRef = useRef<ShortsScanStateLock>({
+    active: false,
+    requestId: '',
+    sovereignId: 'none',
+    navId: 0,
+    pageEpoch: 0,
+    source: 'none',
+    reason: 'idle',
+    lockedAt: 0,
+    expiresAt: 0,
+  });
+  const shortsScanStateLockTimerRef = useRef<NodeJS.Timeout | null>(null);
   const moderationNavGenerationRef = useRef(0);
 
   const UNSAFE_STREAK_REQUIRED = 2;
@@ -580,6 +604,133 @@ export const NativeWebViewBrowser = () => {
     };
     setBlurSyncVersion(v => v + 1);
   }, []);
+
+  const createFreshShortsOverlayPendingState = useCallback((
+    sovereignId: string,
+    startedAt: number,
+  ): ShortsOverlayPendingState => ({
+    sovereignId,
+    hasBlurSignal: false,
+    jsBlurApplied: false,
+    // Explicitly reset reveal state per sovereign to avoid cross-video leakage.
+    jsRevealApplied: false,
+    hasModerationResult: false,
+    fallbackRevealEnsured: false,
+    holdUntilReady: false,
+    holdUntilReadySince: 0,
+    holdUntilReadyLastLogAt: 0,
+    result: null,
+    startedAt,
+  }), []);
+
+  const clearShortsScanStateLockTimer = useCallback(() => {
+    if (!shortsScanStateLockTimerRef.current) return;
+    clearTimeout(shortsScanStateLockTimerRef.current);
+    shortsScanStateLockTimerRef.current = null;
+  }, []);
+
+  const releaseShortsScanStateLock = useCallback((reason: string, requestIdHint?: string): boolean => {
+    const lock = shortsScanStateLockRef.current;
+    if (!lock.active) return false;
+    if (requestIdHint && lock.requestId && requestIdHint !== lock.requestId) {
+      return false;
+    }
+    clearShortsScanStateLockTimer();
+    const ageMs = lock.lockedAt > 0 ? Math.max(0, Date.now() - lock.lockedAt) : 0;
+    console.log(
+      '[DIAG][SHORTS_ATOMIC]',
+      'action=shorts_scan_state_lock_release',
+      'reason=' + (reason || 'unknown'),
+      'requestId=' + (lock.requestId || 'none'),
+      'sovereignId=' + (lock.sovereignId || 'none'),
+      'source=' + (lock.source || 'none'),
+      'ageMs=' + ageMs,
+    );
+    shortsScanStateLockRef.current = {
+      active: false,
+      requestId: '',
+      sovereignId: 'none',
+      navId: 0,
+      pageEpoch: 0,
+      source: 'none',
+      reason: reason || 'released',
+      lockedAt: 0,
+      expiresAt: 0,
+    };
+    return true;
+  }, [clearShortsScanStateLockTimer]);
+
+  const isShortsScanStateLockActive = useCallback((urlHint?: string): boolean => {
+    const lock = shortsScanStateLockRef.current;
+    if (!lock.active) return false;
+    const contextUrl = urlHint || currentUrlRef.current || webViewState.currentUrl || '';
+    if (!isYouTubeShortsUrl(contextUrl)) return false;
+    if (lock.expiresAt > 0 && Date.now() >= lock.expiresAt) {
+      releaseShortsScanStateLock('expired', lock.requestId || undefined);
+      return false;
+    }
+    return true;
+  }, [releaseShortsScanStateLock, webViewState.currentUrl]);
+
+  const armShortsScanStateLock = useCallback((
+    requestId: string,
+    sovereignId: string,
+    source: string,
+    reason: string,
+    pageEpoch: number,
+    urlHint?: string,
+  ) => {
+    const contextUrl = urlHint || currentUrlRef.current || webViewState.currentUrl || '';
+    if (!isYouTubeShortsUrl(contextUrl)) return;
+    if (!requestId) return;
+    clearShortsScanStateLockTimer();
+    const now = Date.now();
+    const timeoutMs = SHORTS_ATOMIC_TIMEOUT_MS;
+    shortsScanStateLockRef.current = {
+      active: true,
+      requestId,
+      sovereignId: sovereignId || 'none',
+      navId: activeNavIdRef.current || 0,
+      pageEpoch: Number.isFinite(pageEpoch) ? Number(pageEpoch) : 0,
+      source: source || 'unknown',
+      reason: reason || 'shorts_scan',
+      lockedAt: now,
+      expiresAt: now + timeoutMs,
+    };
+    console.log(
+      '[DIAG][SHORTS_ATOMIC]',
+      'action=shorts_scan_state_lock_arm',
+      'reason=' + (reason || 'shorts_scan'),
+      'source=' + (source || 'unknown'),
+      'requestId=' + requestId,
+      'sovereignId=' + (sovereignId || 'none'),
+      'navId=' + (activeNavIdRef.current || 0),
+      'pageEpoch=' + (Number.isFinite(pageEpoch) ? Number(pageEpoch) : 'none'),
+      'timeoutMs=' + timeoutMs,
+    );
+    shortsScanStateLockTimerRef.current = setTimeout(() => {
+      const liveLock = shortsScanStateLockRef.current;
+      if (!liveLock.active || liveLock.requestId !== requestId) return;
+      console.warn(
+        '[DIAG][SHORTS_ATOMIC]',
+        'action=shorts_scan_state_lock_timeout',
+        'requestId=' + requestId,
+        'sovereignId=' + (liveLock.sovereignId || 'none'),
+        'source=' + (liveLock.source || 'none'),
+        'reason=' + (liveLock.reason || 'shorts_scan'),
+      );
+      const released = releaseShortsScanStateLock('timeout:' + (reason || 'shorts_scan'), requestId);
+      if (released) {
+        queueCurrentBlurState('shorts_scan_state_lock_timeout_release');
+      }
+    }, timeoutMs);
+  }, [
+    SHORTS_ATOMIC_TIMEOUT_MS,
+    webViewState.currentUrl,
+    clearShortsScanStateLockTimer,
+    releaseShortsScanStateLock,
+    queueCurrentBlurState,
+  ]);
 
   const hydrateShortsPendingStateFromHardRevealLock = useCallback((sovereignId: string, reason: string) => {
     const lock = getShortsHardRevealLockForSovereign(sovereignId);
@@ -940,19 +1091,7 @@ export const NativeWebViewBrowser = () => {
     const preservedStartedAt = shouldPreserveWindow ? Number(preserveStartedAtMs) : now;
     let pending = shortsOverlayPendingRef.current;
     if (!pending || pending.sovereignId !== sovereignId) {
-      pending = {
-        sovereignId,
-        hasBlurSignal: false,
-        jsBlurApplied: false,
-        jsRevealApplied: false,
-        hasModerationResult: false,
-        fallbackRevealEnsured: false,
-        holdUntilReady: false,
-        holdUntilReadySince: 0,
-        holdUntilReadyLastLogAt: 0,
-        result: null,
-        startedAt: preservedStartedAt,
-      };
+      pending = createFreshShortsOverlayPendingState(sovereignId, preservedStartedAt);
       shortsOverlayPendingRef.current = pending;
       armShortsOverlayAtomicTimeout(sovereignId, preservedStartedAt);
     }
@@ -980,6 +1119,7 @@ export const NativeWebViewBrowser = () => {
   }, [
     armShortsOverlayAtomicTimeout,
     clearShortsOverlayAtomicTimeout,
+    createFreshShortsOverlayPendingState,
     getShortsHardRevealLockForSovereign,
     hasEffectiveShortsBlurSignal,
     hydrateShortsPendingStateFromHardRevealLock,
@@ -1023,19 +1163,7 @@ export const NativeWebViewBrowser = () => {
     const now = Date.now();
     let pending = shortsOverlayPendingRef.current;
     if (!pending || pending.sovereignId !== sovereignId) {
-      pending = {
-        sovereignId,
-        hasBlurSignal: false,
-        jsBlurApplied: false,
-        jsRevealApplied: false,
-        hasModerationResult: false,
-        fallbackRevealEnsured: false,
-        holdUntilReady: false,
-        holdUntilReadySince: 0,
-        holdUntilReadyLastLogAt: 0,
-        result: null,
-        startedAt: now,
-      };
+      pending = createFreshShortsOverlayPendingState(sovereignId, now);
       shortsOverlayPendingRef.current = pending;
       armShortsOverlayAtomicTimeout(sovereignId, now);
     }
@@ -1073,6 +1201,7 @@ export const NativeWebViewBrowser = () => {
   }, [
     armShortsOverlayAtomicTimeout,
     clearShortsOverlayAtomicTimeout,
+    createFreshShortsOverlayPendingState,
     getSovereignIdForContext,
     getShortsHardRevealLockForSovereign,
     hasEffectiveShortsBlurSignal,
@@ -1121,19 +1250,7 @@ export const NativeWebViewBrowser = () => {
     }
     let pending = shortsOverlayPendingRef.current;
     if (!pending || pending.sovereignId !== sovereignId) {
-      pending = {
-        sovereignId,
-        hasBlurSignal: false,
-        jsBlurApplied: false,
-        jsRevealApplied: false,
-        hasModerationResult: false,
-        fallbackRevealEnsured: false,
-        holdUntilReady: false,
-        holdUntilReadySince: 0,
-        holdUntilReadyLastLogAt: 0,
-        result: null,
-        startedAt: now,
-      };
+      pending = createFreshShortsOverlayPendingState(sovereignId, now);
       shortsOverlayPendingRef.current = pending;
       armShortsOverlayAtomicTimeout(sovereignId);
     }
@@ -1172,6 +1289,7 @@ export const NativeWebViewBrowser = () => {
   }, [
     armShortsOverlayAtomicTimeout,
     clearShortsOverlayAtomicTimeout,
+    createFreshShortsOverlayPendingState,
     getSovereignIdForContext,
     getShortsHardRevealLockForSovereign,
     hasEffectiveShortsBlurSignal,
@@ -1924,6 +2042,7 @@ export const NativeWebViewBrowser = () => {
       clearBlurReadyNavMatchState('load_start');
       resetOverlayLiftHandshakeState('navigation_load_start');
       resetShortsOverlayCoordinator('navigation_load_start');
+      releaseShortsScanStateLock('navigation_load_start');
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       const canDeferLoadStartReset =
         pendingReinjectRef.current?.active === true &&
@@ -1978,6 +2097,7 @@ export const NativeWebViewBrowser = () => {
       injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
       clearBlurReadyNavMatchState('load_error');
+      releaseShortsScanStateLock('load_error');
       exitPendingReinject('load_error', url);
       setFallbackUrl(url);
       navigate('fallback', '', url);
@@ -2002,6 +2122,7 @@ export const NativeWebViewBrowser = () => {
       const nextSovereignId = nextIsShorts
         ? getSovereignIdForContext(url, activeNavIdRef.current, webViewPageEpochRef.current)
         : '';
+      const hasShortsScanStateLock = nextIsShorts && isShortsScanStateLockActive(url);
       console.log('[Browser] ======= URL CHANGE =======');
       console.log('[Browser] New URL:', url);
       console.log('[DIAG][LOAD] stage=url_change url=' + toDiagUrl(url));
@@ -2090,6 +2211,17 @@ export const NativeWebViewBrowser = () => {
           'prevUrl=' + (previousUrl || 'unknown'),
           'nextUrl=' + (url || 'unknown'),
         );
+      } else if (hasShortsScanStateLock) {
+        const lock = shortsScanStateLockRef.current;
+        console.log(
+          '[DIAG][OVERLAY_HOST_STATE]',
+          'action=skip_hard_reset',
+          'reason=shorts_scan_state_lock',
+          'requestId=' + (lock.requestId || 'none'),
+          'lockSovereignId=' + (lock.sovereignId || 'none'),
+          'prevUrl=' + (previousUrl || 'unknown'),
+          'nextUrl=' + (url || 'unknown'),
+        );
       } else {
         hardResetOverlayHostState('url_change_hard_reset');
         void postBlurCommand('DISABLE_BLUR', 'url_change_hard_reset_instant').then((delivered) => {
@@ -2111,12 +2243,26 @@ export const NativeWebViewBrowser = () => {
       }
       if (nextIsShorts) {
         exitPendingReinject(`shorts_nav_reset_${previousFamily}_to_${nextFamily}`, url);
-        setCentralBlurState(false, 'nav_reset');
+        if (hasShortsScanStateLock) {
+          const lock = shortsScanStateLockRef.current;
+          console.log(
+            '[DIAG][OVERLAY_HOST_STATE]',
+            'action=skip_nav_reset',
+            'reason=shorts_scan_state_lock',
+            'requestId=' + (lock.requestId || 'none'),
+            'lockSovereignId=' + (lock.sovereignId || 'none'),
+            'nextSovereignId=' + (nextSovereignId || 'none'),
+          );
+        } else {
+          setCentralBlurState(false, 'nav_reset');
+        }
       } else if (shouldDeferSafeReset) {
+        releaseShortsScanStateLock('url_change_defer_safe_reset_non_shorts');
         logSafeResetDiag('safe_reset_deferred', deferReason, url);
         enterPendingReinject(deferReason, url);
         queueCurrentBlurState('url_change_safe_reset_deferred');
       } else {
+        releaseShortsScanStateLock('url_change_non_shorts');
         exitPendingReinject(`context_exit_${previousFamily}_to_${nextFamily}`, url);
         setCentralBlurState(false, 'url_change_safe_reset');
       }
@@ -2145,6 +2291,7 @@ export const NativeWebViewBrowser = () => {
       clearBlurReadyNavMatchState('webview_closed');
       resetOverlayLiftHandshakeState('webview_closed');
       resetShortsOverlayCoordinator('webview_closed');
+      releaseShortsScanStateLock('webview_closed');
       shortsHardRevealLocksRef.current.clear();
       pendingForceRevealEnforcementRef.current = null;
       lastForceRevealEnforcementSignalRef.current = {
@@ -3485,6 +3632,7 @@ export const NativeWebViewBrowser = () => {
       clearBlurReadySettleWindowState('unmount_cleanup');
       clearBlurReadyNavMatchState('unmount_cleanup');
       resetOverlayLiftHandshakeState('unmount_cleanup');
+      releaseShortsScanStateLock('unmount_cleanup');
     };
   }, [
     clearLoadEndInjectTimer,
@@ -3495,6 +3643,7 @@ export const NativeWebViewBrowser = () => {
     clearBlurReadySettleWindowState,
     clearBlurReadyNavMatchState,
     resetOverlayLiftHandshakeState,
+    releaseShortsScanStateLock,
   ]);
 
   // ==================== MODERATION MESSAGE HANDLING ====================
@@ -3673,6 +3822,7 @@ export const NativeWebViewBrowser = () => {
       }
 
       pendingRequestsRef.current.delete(requestId);
+      releaseShortsScanStateLock('moderation_epoch_stale', requestId);
       disarmFlashShield('moderation_epoch_stale', 'disarm stale epoch');
       return;
     }
@@ -3695,6 +3845,7 @@ export const NativeWebViewBrowser = () => {
           'url=' + (activeUrl || 'unknown'),
         );
         pendingRequestsRef.current.delete(requestId);
+        releaseShortsScanStateLock('moderation_sovereign_nav_stale', requestId);
         disarmFlashShield('moderation_sovereign_nav_stale', 'disarm stale nav mismatch');
         return;
       }
@@ -3729,6 +3880,7 @@ export const NativeWebViewBrowser = () => {
         // Fail-open by design for stale requests.
       }
       pendingRequestsRef.current.delete(requestId);
+      releaseShortsScanStateLock('moderation_sovereign_stale', requestId);
       disarmFlashShield('moderation_sovereign_stale', 'disarm stale sovereign');
       return;
     }
@@ -3754,6 +3906,17 @@ export const NativeWebViewBrowser = () => {
           'url=' + (activeUrl || 'unknown'),
         );
       }
+    }
+    if (stickyShortsMode) {
+      const lockSovereignId = effectiveRequestSovereignId || activeSovereignId;
+      armShortsScanStateLock(
+        requestId,
+        lockSovereignId,
+        'host_request',
+        'process_moderation_request',
+        requestEpoch ?? activeEpoch,
+        activeUrl,
+      );
     }
     
     const startTime = performance.now();
@@ -4368,8 +4531,12 @@ export const NativeWebViewBrowser = () => {
     }
     
     pendingRequestsRef.current.delete(requestId);
+    if (stickyShortsMode) {
+      releaseShortsScanStateLock('moderation_results', requestId);
+    }
     disarmFlashShield('moderation_results', 'disarm after results');
   }, [
+    armShortsScanStateLock,
     moderationBridge,
     postMessageToWebView,
     debugLog,
@@ -4399,6 +4566,7 @@ export const NativeWebViewBrowser = () => {
     setFlashGuardState,
     flashLog,
     isGraceEpochAcceptedForActiveShortsVideo,
+    releaseShortsScanStateLock,
   ]);
 
   /**
@@ -4476,6 +4644,18 @@ export const NativeWebViewBrowser = () => {
         if (isYouTubeShortsUrl(activeUrl) && isActiveEpochMessage) {
           shortsLegacyFallbackRef.current.lastReqSentAt = Date.now();
           disarmShortsLegacyFallbackProbe('req_sent');
+          const requestId = typeof typedMessage.requestId === 'string'
+            ? typedMessage.requestId
+            : '';
+          const lockSovereignId = messageSovereignId || getSovereignIdForContext(activeUrl);
+          armShortsScanStateLock(
+            requestId,
+            lockSovereignId,
+            source,
+            'mw_req_sent',
+            messageEpoch ?? activeEpoch,
+            activeUrl,
+          );
         } else if (isYouTubeShortsUrl(activeUrl) && !isActiveEpochMessage) {
           console.log(
             '[DIAG][REQ_EPOCH_GATE]',
@@ -4515,6 +4695,13 @@ export const NativeWebViewBrowser = () => {
         if (isYouTubeShortsUrl(activeUrl) && isActiveEpochMessage) {
           shortsLegacyFallbackRef.current.lastReqTimeoutAt = Date.now();
           armShortsLegacyFallbackProbe('req_timeout', SHORTS_LEGACY_FALLBACK_TIMEOUT_PROBE_MS);
+          const requestId = typeof typedMessage.requestId === 'string'
+            ? typedMessage.requestId
+            : '';
+          const released = releaseShortsScanStateLock('mw_req_timeout', requestId || undefined);
+          if (released) {
+            queueCurrentBlurState('shorts_scan_state_lock_req_timeout_release');
+          }
         } else if (isYouTubeShortsUrl(activeUrl) && !isActiveEpochMessage) {
           console.log(
             '[DIAG][REQ_EPOCH_GATE]',
@@ -4936,6 +5123,8 @@ export const NativeWebViewBrowser = () => {
     markShortsOverlayJsState,
     armShortsLegacyFallbackProbe,
     disarmShortsLegacyFallbackProbe,
+    armShortsScanStateLock,
+    releaseShortsScanStateLock,
     unwrapIncomingMessagePayload,
     tryHandlePersistentRevealRequest,
     webViewState.currentUrl,
@@ -4943,6 +5132,7 @@ export const NativeWebViewBrowser = () => {
     isGraceEpochAcceptedForActiveShortsVideo,
     armBlurReadySettleWindow,
     postBlurCommand,
+    queueCurrentBlurState,
     debugLog,
   ]);
 
