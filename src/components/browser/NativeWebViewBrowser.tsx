@@ -281,6 +281,9 @@ interface ShortsOverlayPendingState {
   jsRevealApplied: boolean;
   hasModerationResult: boolean;
   fallbackRevealEnsured: boolean;
+  holdUntilReady: boolean;
+  holdUntilReadySince: number;
+  holdUntilReadyLastLogAt: number;
   result: 'BLUR' | 'CLEAR' | null;
   startedAt: number;
 }
@@ -377,6 +380,38 @@ export const NativeWebViewBrowser = () => {
     url: '',
     at: 0,
   });
+  const blurReadyNavMatchRef = useRef<{
+    navId: number;
+    pageEpoch: number;
+    url: string;
+    reason: string;
+    at: number;
+  }>({
+    navId: 0,
+    pageEpoch: 0,
+    url: '',
+    reason: 'none',
+    at: 0,
+  });
+  const blurReadyPerfAlarmRef = useRef<{ navId: number; pageEpoch: number; at: number }>({
+    navId: 0,
+    pageEpoch: 0,
+    at: 0,
+  });
+  const blurReadySettleWindowRef = useRef<{
+    active: boolean;
+    navId: number;
+    untilMs: number;
+    reason: string;
+    startedAt: number;
+  }>({
+    active: false,
+    navId: 0,
+    untilMs: 0,
+    reason: 'idle',
+    startedAt: 0,
+  });
+  const blurReadySettleWindowTimerRef = useRef<NodeJS.Timeout | null>(null);
   const blurPendingRef = useRef<{ enabled: boolean; reason: string; timestamp: number } | null>(null);
   const blurRetryTimerRef = useRef<NodeJS.Timeout | null>(null);
   const overlayLiftHandshakeTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -430,6 +465,10 @@ export const NativeWebViewBrowser = () => {
     videoId: 'none',
     at: 0,
   });
+  const lastShortsReplaceStateReadyRef = useRef<{ sovereignId: string; at: number }>({
+    sovereignId: '',
+    at: 0,
+  });
   const [shortsLegacyFallbackVersion, setShortsLegacyFallbackVersion] = useState(0);
   const [shortsRelatedLegacyPollVersion, setShortsRelatedLegacyPollVersion] = useState(0);
   const shortsHardRevealLocksRef = useRef<Map<string, ShortsHardRevealLockState>>(new Map());
@@ -443,22 +482,46 @@ export const NativeWebViewBrowser = () => {
     sovereignId: 'none',
     sentAt: 0,
   });
+  const pendingRequestsRef = useRef<Set<string>>(new Set());
+  const moderationNavGenerationRef = useRef(0);
 
   const UNSAFE_STREAK_REQUIRED = 2;
   const SAFE_STREAK_REQUIRED = 2;
   const PENDING_REINJECT_WINDOW_MS = 1500;
   const STABLE_INJECTION_DEBOUNCE_MS = 300;
   const STABLE_INJECTION_SHORTS_DEBOUNCE_MS = 600;
+  const STABLE_INJECTION_URL_CHANGE_DEBOUNCE_MS = 150;
   const BLUR_READY_PING_SUPPRESS_MS = 400;
+  const BLUR_READY_REPLACESTATE_SUPPRESS_MS = 1000;
   const OVERLAY_LIFT_HANDSHAKE_MS = 50;
-  const SHORTS_OVERLAY_ATOMIC_TIMEOUT_MS = 1200;
+  const SHORTS_ATOMIC_TIMEOUT_MS = 2500;
   const SHORTS_MATCHING_RETRY_DELAY_MS = 800;
-  const SHORTS_NAV_GRACE_MS = 200;
+  const SHORTS_NAV_GRACE_MS = 0;
+  const BLUR_READY_SETTLE_WINDOW_MS = 200;
   const isDebugMode = localSettings.debug_mode === true;
   const debugLog = useCallback((...args: unknown[]) => {
     if (!isDebugMode) return;
     console.log(...args);
   }, [isDebugMode]);
+  const clearBlurReadyNavMatchState = useCallback((reason: string) => {
+    const previous = blurReadyNavMatchRef.current;
+    blurReadyNavMatchRef.current = {
+      navId: 0,
+      pageEpoch: 0,
+      url: '',
+      reason: reason || 'reset',
+      at: 0,
+    };
+    if (!previous.at) return;
+    debugLog(
+      '[DIAG][BLUR_READY_GATE]',
+      'action=nav_match_reset',
+      'reason=' + (reason || 'reset'),
+      'prevNavId=' + previous.navId,
+      'prevPageEpoch=' + previous.pageEpoch,
+      'prevAgeMs=' + Math.max(0, Date.now() - previous.at),
+    );
+  }, [debugLog]);
 
   const getSovereignIdForContext = useCallback((
     urlHint?: string,
@@ -535,6 +598,9 @@ export const NativeWebViewBrowser = () => {
         jsRevealApplied: true,
         hasModerationResult: true,
         fallbackRevealEnsured: false,
+        holdUntilReady: false,
+        holdUntilReadySince: 0,
+        holdUntilReadyLastLogAt: 0,
         result: 'CLEAR',
         startedAt: lock.lockedAt || Date.now(),
       };
@@ -825,7 +891,7 @@ export const NativeWebViewBrowser = () => {
       startedAtMs > 0
     ) ? Number(startedAtMs) : Date.now();
     const elapsedMs = Math.max(0, Date.now() - normalizedStartAt);
-    const delayMs = Math.max(0, SHORTS_OVERLAY_ATOMIC_TIMEOUT_MS - elapsedMs);
+    const delayMs = Math.max(0, SHORTS_ATOMIC_TIMEOUT_MS - elapsedMs);
     shortsOverlayTimeoutRef.current = setTimeout(() => {
       const pending = shortsOverlayPendingRef.current;
       if (!pending || pending.sovereignId !== sovereignId) return;
@@ -839,12 +905,12 @@ export const NativeWebViewBrowser = () => {
         'effectiveBlurSignal=' + hasEffectiveShortsBlurSignal(pending),
         'hasModerationResult=' + pending.hasModerationResult,
         'result=' + (pending.result || 'none'),
-        'timeoutMs=' + SHORTS_OVERLAY_ATOMIC_TIMEOUT_MS,
+        'timeoutMs=' + SHORTS_ATOMIC_TIMEOUT_MS,
         'elapsedMs=' + (Date.now() - pending.startedAt),
       );
       queueCurrentBlurState('shorts_atomic_timeout_release');
     }, delayMs);
-  }, [SHORTS_OVERLAY_ATOMIC_TIMEOUT_MS, clearShortsOverlayAtomicTimeout, hasEffectiveShortsBlurSignal, queueCurrentBlurState]);
+  }, [SHORTS_ATOMIC_TIMEOUT_MS, clearShortsOverlayAtomicTimeout, hasEffectiveShortsBlurSignal, queueCurrentBlurState]);
 
   const markShortsOverlayBlurSignal = useCallback((
     sovereignId: string,
@@ -881,6 +947,9 @@ export const NativeWebViewBrowser = () => {
         jsRevealApplied: false,
         hasModerationResult: false,
         fallbackRevealEnsured: false,
+        holdUntilReady: false,
+        holdUntilReadySince: 0,
+        holdUntilReadyLastLogAt: 0,
         result: null,
         startedAt: preservedStartedAt,
       };
@@ -961,6 +1030,9 @@ export const NativeWebViewBrowser = () => {
         jsRevealApplied: false,
         hasModerationResult: false,
         fallbackRevealEnsured: false,
+        holdUntilReady: false,
+        holdUntilReadySince: 0,
+        holdUntilReadyLastLogAt: 0,
         result: null,
         startedAt: now,
       };
@@ -1056,6 +1128,9 @@ export const NativeWebViewBrowser = () => {
         jsRevealApplied: false,
         hasModerationResult: false,
         fallbackRevealEnsured: false,
+        holdUntilReady: false,
+        holdUntilReadySince: 0,
+        holdUntilReadyLastLogAt: 0,
         result: null,
         startedAt: now,
       };
@@ -1064,6 +1139,9 @@ export const NativeWebViewBrowser = () => {
     }
     pending.hasModerationResult = true;
     pending.result = effectiveResult;
+    pending.holdUntilReady = false;
+    pending.holdUntilReadySince = 0;
+    pending.holdUntilReadyLastLogAt = 0;
     console.log(
       '[DIAG][SHORTS_ATOMIC]',
       'action=mark_moderation_result',
@@ -1819,6 +1897,23 @@ export const NativeWebViewBrowser = () => {
       console.log('[Browser] ======= LOAD START =======');
       console.log('[Browser] URL:', url);
       markNavigation('onLoadStart', url);
+      moderationNavGenerationRef.current += 1;
+      clearStableInjectionTimer('load_start_hard_kill');
+      stableInjectionPendingRef.current = null;
+      const killedLoadStartRequests = pendingRequestsRef.current.size;
+      if (killedLoadStartRequests > 0) {
+        pendingRequestsRef.current.clear();
+        console.warn(
+          '[DIAG][SHORTS_ATOMIC]',
+          'action=hard_kill_pending_requests',
+          'reason=load_start',
+          'killed=' + killedLoadStartRequests,
+          'navId=' + activeNavIdRef.current,
+          'generation=' + moderationNavGenerationRef.current,
+          'url=' + (url || 'unknown'),
+        );
+      }
+      armBlurReadySettleWindow('load_start', url);
       teardownWebViewScheduling('navigation_start', url).catch(() => undefined);
       logHostLayerDiagnostics('load_start');
       setIsLoading(true);
@@ -1826,6 +1921,7 @@ export const NativeWebViewBrowser = () => {
       injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
       blurReadyRef.current = false;
+      clearBlurReadyNavMatchState('load_start');
       resetOverlayLiftHandshakeState('navigation_load_start');
       resetShortsOverlayCoordinator('navigation_load_start');
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
@@ -1874,12 +1970,14 @@ export const NativeWebViewBrowser = () => {
       console.error('[Browser] ======= LOAD ERROR =======');
       console.error('[Browser] URL:', url);
       console.error('[Browser] Error:', error);
+      clearBlurReadySettleWindowState('load_error');
       logHostLayerDiagnostics('load_error');
       setIsLoading(false);
       setFlashGuardState?.(true, 'load_error');
       clearLoadEndInjectTimer();
       injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
+      clearBlurReadyNavMatchState('load_error');
       exitPendingReinject('load_error', url);
       setFallbackUrl(url);
       navigate('fallback', '', url);
@@ -1908,6 +2006,69 @@ export const NativeWebViewBrowser = () => {
       console.log('[Browser] New URL:', url);
       console.log('[DIAG][LOAD] stage=url_change url=' + toDiagUrl(url));
       markNavigation('onUrlChange', url);
+      moderationNavGenerationRef.current += 1;
+      clearStableInjectionTimer('url_change_hard_kill');
+      stableInjectionPendingRef.current = null;
+      const killedUrlChangeRequests = pendingRequestsRef.current.size;
+      if (killedUrlChangeRequests > 0) {
+        pendingRequestsRef.current.clear();
+        console.warn(
+          '[DIAG][SHORTS_ATOMIC]',
+          'action=hard_kill_pending_requests',
+          'reason=url_change',
+          'killed=' + killedUrlChangeRequests,
+          'navId=' + activeNavIdRef.current,
+          'generation=' + moderationNavGenerationRef.current,
+          'url=' + (url || 'unknown'),
+        );
+      }
+      if (isNative && webViewState.isOpen && executeScript) {
+        const syncReason = escapeForJs('url_change_atomic_sync');
+        const syncNavId = activeNavIdRef.current || 0;
+        const syncPageEpoch = webViewPageEpochRef.current || 0;
+        const syncActiveInstanceId = (
+          typeof webViewActiveInstanceIdRef.current === 'number' &&
+          Number.isFinite(webViewActiveInstanceIdRef.current)
+        ) ? webViewActiveInstanceIdRef.current : null;
+        void executeScript(`
+          (function() {
+            try {
+              window.__MW_ACTIVE_INSTANCE_ID__ = ${syncActiveInstanceId === null ? 'null' : String(syncActiveInstanceId)};
+              window.__MW_HOST_NAV_ID__ = ${syncNavId};
+              window.__MW_HOST_PAGE_EPOCH__ = ${syncPageEpoch};
+              if (
+                window.__MW_ACTIVE_CONTEXT_API__ &&
+                typeof window.__MW_ACTIVE_CONTEXT_API__.applyHostContextSync === 'function'
+              ) {
+                window.__MW_ACTIVE_CONTEXT_API__.applyHostContextSync('${syncReason}');
+              }
+              return 'OK';
+            } catch (e) {
+              return 'ERR';
+            }
+          })();
+        `).then((syncResult) => {
+          if (String(syncResult || '') === 'ERR') {
+            console.warn(
+              '[DIAG][SHORTS_ATOMIC]',
+              'action=fast_context_sync_failed',
+              'reason=url_change',
+              'navId=' + syncNavId,
+              'pageEpoch=' + syncPageEpoch,
+              'url=' + (url || 'unknown'),
+            );
+          }
+        }).catch((error) => {
+          console.warn(
+            '[DIAG][SHORTS_ATOMIC]',
+            'action=fast_context_sync_error',
+            'reason=url_change',
+            'navId=' + syncNavId,
+            'pageEpoch=' + syncPageEpoch,
+            'message=' + (error instanceof Error ? error.message : String(error)),
+          );
+        });
+      }
       logLifecycleSnapshot('url_change', url, 'onUrlChange');
       logHostLayerDiagnostics('url_change');
       setUrlInput(url);
@@ -1917,6 +2078,7 @@ export const NativeWebViewBrowser = () => {
       injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
       blurReadyRef.current = false;
+      clearBlurReadyNavMatchState('url_change');
       resetOverlayLiftHandshakeState('url_change');
       resetShortsOverlayCoordinator('url_change');
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
@@ -1930,6 +2092,16 @@ export const NativeWebViewBrowser = () => {
         );
       } else {
         hardResetOverlayHostState('url_change_hard_reset');
+        void postBlurCommand('DISABLE_BLUR', 'url_change_hard_reset_instant').then((delivered) => {
+          if (delivered) return;
+          console.log(
+            '[DIAG][OVERLAY_HOST_STATE]',
+            'action=instant_reset_command_skipped',
+            'reason=url_change_hard_reset_instant',
+            'navId=' + activeNavIdRef.current,
+            'url=' + (url || 'unknown'),
+          );
+        });
         if (
           nextIsShorts &&
           hydrateShortsPendingStateFromHardRevealLock(nextSovereignId, 'url_change_hard_reset')
@@ -1948,12 +2120,16 @@ export const NativeWebViewBrowser = () => {
         exitPendingReinject(`context_exit_${previousFamily}_to_${nextFamily}`, url);
         setCentralBlurState(false, 'url_change_safe_reset');
       }
+      armBlurReadySettleWindow('url_change', url);
       scheduleStableInjection('onUrlChange', url);
     },
     onNavigationRequest: handleNavigationRequest,
     onClose: () => {
       console.log('[Browser] ======= WEBVIEW CLOSED =======');
+      moderationNavGenerationRef.current += 1;
+      pendingRequestsRef.current.clear();
       teardownWebViewScheduling('webview_closed', webViewState.currentUrl).catch(() => undefined);
+      clearBlurReadySettleWindowState('webview_closed');
       clearLoadEndInjectTimer();
       exitPendingReinject('webview_closed', webViewState.currentUrl || currentUrlRef.current || '');
       moderationBridge.clearCache({
@@ -1966,6 +2142,7 @@ export const NativeWebViewBrowser = () => {
       injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
       blurReadyRef.current = false;
+      clearBlurReadyNavMatchState('webview_closed');
       resetOverlayLiftHandshakeState('webview_closed');
       resetShortsOverlayCoordinator('webview_closed');
       shortsHardRevealLocksRef.current.clear();
@@ -1994,7 +2171,9 @@ export const NativeWebViewBrowser = () => {
       const previousInstanceId = webViewActiveInstanceIdRef.current;
       webViewActiveInstanceIdRef.current = activeInstanceId;
       if (previousInstanceId === activeInstanceId) return;
+      clearBlurReadySettleWindowState('active_instance_change');
       blurReadyRef.current = false;
+      clearBlurReadyNavMatchState('active_instance_change');
       resetOverlayLiftHandshakeState('active_instance_change');
       resetShortsOverlayCoordinator('active_instance_change');
       blurReadyBurstRef.current = {
@@ -2568,20 +2747,133 @@ export const NativeWebViewBrowser = () => {
     };
   }, [settingsLoaded, isNative, webViewState.isOpen, debugLog, isDebugMode, isRuntimeModerationEnabled, effectiveShieldEnabled, localSettings.blur_dial, localSettings.blocking_mode]);
 
-  const requestBlurHandshake = useCallback(async (source: string) => {
-    if (!ENABLE_DOM_BLUR) return;
-    if (!isNative || !webViewState.isOpen || !executeScript) return;
-    await executeScript(`
+  const postBlurCommand = useCallback(async (
+    command: 'ENABLE_BLUR' | 'DISABLE_BLUR' | 'PING',
+    reason: string,
+  ): Promise<boolean> => {
+    if (!ENABLE_DOM_BLUR) return false;
+    if (!isNative || !webViewState.isOpen || !executeScript) return false;
+    const commandLiteral = command;
+    const reasonLiteral = escapeForJs(reason || 'host');
+    const result = await executeScript(`
       (function() {
         try {
-          window.postMessage({ type: 'MW_BLUR_COMMAND', command: 'PING', reason: '${escapeForJs(source)}', timestamp: Date.now() }, '*');
+          window.postMessage({
+            type: 'MW_BLUR_COMMAND',
+            command: '${commandLiteral}',
+            reason: '${reasonLiteral}',
+            timestamp: Date.now(),
+          }, '*');
           return 'OK';
         } catch (e) {
           return 'ERR';
         }
       })();
     `);
+    return String(result || '') !== 'ERR';
   }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, executeScript]);
+
+  const clearBlurReadySettleWindowState = useCallback((reason: string) => {
+    const settleState = blurReadySettleWindowRef.current;
+    const wasActive = settleState.active;
+    const elapsedMs = settleState.startedAt > 0
+      ? Math.max(0, Date.now() - settleState.startedAt)
+      : 0;
+    if (blurReadySettleWindowTimerRef.current) {
+      clearTimeout(blurReadySettleWindowTimerRef.current);
+      blurReadySettleWindowTimerRef.current = null;
+    }
+    settleState.active = false;
+    settleState.navId = 0;
+    settleState.untilMs = 0;
+    settleState.reason = reason || 'cleared';
+    settleState.startedAt = 0;
+    if (!wasActive) return;
+    console.log(
+      '[DIAG][SETTLE_WINDOW_HOST]',
+      'action=clear',
+      'reason=' + (reason || 'unknown'),
+      'elapsedMs=' + elapsedMs,
+    );
+  }, []);
+
+  const armBlurReadySettleWindow = useCallback((reason: string, urlHint?: string) => {
+    if (!ENABLE_DOM_BLUR) return;
+    const targetUrl = urlHint || currentUrlRef.current || webViewState.currentUrl || '';
+    if (getUrlFamily(targetUrl) !== 'youtube_shorts') {
+      const hadActiveSettleWindow = blurReadySettleWindowRef.current.active;
+      clearBlurReadySettleWindowState('skip_non_shorts:' + reason);
+      if (hadActiveSettleWindow) {
+        const restoreEnabled = blurStateRef.current.enabled;
+        const restoreReason = 'settle_window_skip_non_shorts_restore:' + (reason || 'url_change');
+        const restoreCommand = restoreEnabled ? 'ENABLE_BLUR' : 'DISABLE_BLUR';
+        void postBlurCommand(restoreCommand, restoreReason);
+        queueCurrentBlurState(restoreReason);
+      }
+      return;
+    }
+
+    clearBlurReadySettleWindowState('rearm:' + reason);
+
+    const now = Date.now();
+    const navId = activeNavIdRef.current || 0;
+    blurReadySettleWindowRef.current = {
+      active: true,
+      navId,
+      untilMs: now + BLUR_READY_SETTLE_WINDOW_MS,
+      reason: reason || 'url_change',
+      startedAt: now,
+    };
+    console.log(
+      '[DIAG][SETTLE_WINDOW_HOST]',
+      'action=arm',
+      'reason=' + (reason || 'url_change'),
+      'navId=' + navId,
+      'windowMs=' + BLUR_READY_SETTLE_WINDOW_MS,
+      'url=' + (targetUrl || 'unknown'),
+    );
+    void postBlurCommand('ENABLE_BLUR', 'settle_window_force:' + (reason || 'url_change')).then((delivered) => {
+      if (delivered) return;
+      console.log(
+        '[DIAG][SETTLE_WINDOW_HOST]',
+        'action=force_enable_skipped',
+        'reason=' + (reason || 'url_change'),
+        'navId=' + navId,
+      );
+    });
+
+    blurReadySettleWindowTimerRef.current = setTimeout(() => {
+      const settleState = blurReadySettleWindowRef.current;
+      if (!settleState.active || settleState.navId !== navId) return;
+      const elapsedMs = settleState.startedAt > 0
+        ? Math.max(0, Date.now() - settleState.startedAt)
+        : 0;
+      console.log(
+        '[DIAG][SETTLE_WINDOW_HOST]',
+        'action=timeout_release',
+        'reason=' + (settleState.reason || reason || 'url_change'),
+        'navId=' + navId,
+        'elapsedMs=' + elapsedMs,
+      );
+      clearBlurReadySettleWindowState('timeout_release:' + (reason || 'url_change'));
+      const restoreEnabled = blurStateRef.current.enabled;
+      const restoreReason = 'settle_window_timeout_restore:' + (reason || 'url_change');
+      const restoreCommand = restoreEnabled ? 'ENABLE_BLUR' : 'DISABLE_BLUR';
+      void postBlurCommand(restoreCommand, restoreReason);
+      queueCurrentBlurState(restoreReason);
+    }, BLUR_READY_SETTLE_WINDOW_MS);
+  }, [
+    ENABLE_DOM_BLUR,
+    BLUR_READY_SETTLE_WINDOW_MS,
+    webViewState.currentUrl,
+    postBlurCommand,
+    queueCurrentBlurState,
+    clearBlurReadySettleWindowState,
+  ]);
+
+  const requestBlurHandshake = useCallback(async (source: string) => {
+    await postBlurCommand('PING', source);
+  }, [postBlurCommand]);
 
   const flushPendingForceRevealEnforcementSignal = useCallback(async (source: string) => {
     const pendingSignal = pendingForceRevealEnforcementRef.current;
@@ -2676,12 +2968,24 @@ export const NativeWebViewBrowser = () => {
     ].join('|');
   }, [webViewState.currentUrl]);
 
-  const getStableInjectionDebounceMs = useCallback((urlHint?: string) => {
+  const getStableInjectionDebounceMs = useCallback((urlHint?: string, reasonHint?: string) => {
+    const normalizedReason = String(reasonHint || '');
+    if (
+      normalizedReason === 'onUrlChange' ||
+      normalizedReason.startsWith('context_shift:onUrlChange')
+    ) {
+      return STABLE_INJECTION_URL_CHANGE_DEBOUNCE_MS;
+    }
     const resolvedUrl = urlHint || webViewState.currentUrl || currentUrlRef.current || '';
     return getUrlFamily(resolvedUrl) === 'youtube_shorts'
       ? STABLE_INJECTION_SHORTS_DEBOUNCE_MS
       : STABLE_INJECTION_DEBOUNCE_MS;
-  }, [STABLE_INJECTION_SHORTS_DEBOUNCE_MS, STABLE_INJECTION_DEBOUNCE_MS, webViewState.currentUrl]);
+  }, [
+    STABLE_INJECTION_SHORTS_DEBOUNCE_MS,
+    STABLE_INJECTION_DEBOUNCE_MS,
+    STABLE_INJECTION_URL_CHANGE_DEBOUNCE_MS,
+    webViewState.currentUrl,
+  ]);
 
   const scheduleStableInjection = useCallback((reason: string, urlHint?: string) => {
     if (!ENABLE_SIGNAL_PIPELINE) return;
@@ -2712,7 +3016,7 @@ export const NativeWebViewBrowser = () => {
       stableInjectionPendingRef.current = nextState;
     }
     clearStableInjectionTimer('reschedule');
-    const debounceMs = getStableInjectionDebounceMs(targetUrl);
+    const debounceMs = getStableInjectionDebounceMs(targetUrl, reason);
     stableInjectionTimerRef.current = setTimeout(() => {
       stableInjectionTimerRef.current = null;
       const pendingState = stableInjectionPendingRef.current;
@@ -2735,7 +3039,7 @@ export const NativeWebViewBrowser = () => {
       }
       const now = Date.now();
       const last = lastStableInjectionRef.current;
-      const activeDebounceMs = getStableInjectionDebounceMs(activeUrl);
+      const activeDebounceMs = getStableInjectionDebounceMs(activeUrl, pendingState.reasons[0] || reason);
       if (last.key === activeKey && (now - last.at) < activeDebounceMs) {
         console.log(
           '[DIAG][INJECT_STABLE]',
@@ -2828,9 +3132,9 @@ export const NativeWebViewBrowser = () => {
     if (pending.sovereignId !== activeSovereignId) return false;
     const readyToCommit = hasEffectiveShortsBlurSignal(pending) && pending.hasModerationResult;
     if (readyToCommit) return false;
-    const timedOut = (Date.now() - pending.startedAt) >= SHORTS_OVERLAY_ATOMIC_TIMEOUT_MS;
+    const timedOut = (Date.now() - pending.startedAt) >= SHORTS_ATOMIC_TIMEOUT_MS;
     return !timedOut;
-  }, [SHORTS_OVERLAY_ATOMIC_TIMEOUT_MS, webViewState.currentUrl, getSovereignIdForContext, hasEffectiveShortsBlurSignal]);
+  }, [SHORTS_ATOMIC_TIMEOUT_MS, webViewState.currentUrl, getSovereignIdForContext, hasEffectiveShortsBlurSignal]);
 
   const flushBlurStateToWebView = useCallback(async () => {
     if (!isNative || !webViewState.isOpen || !executeScript) return;
@@ -2880,30 +3184,93 @@ export const NativeWebViewBrowser = () => {
     }
     if (!holdShortsOverlaySync) {
       if (activeUrlFamily === 'youtube_shorts') {
+        const now = Date.now();
         const pendingShorts = shortsOverlayPendingRef.current;
         const activeSovereignId = getSovereignIdForContext(activeUrl);
+        const activeNavId = activeNavIdRef.current || 0;
+        const activeEpoch = webViewPageEpochRef.current || 0;
+        const navMatchState = blurReadyNavMatchRef.current;
+        const navMatchConfirmed = (
+          navMatchState.at > 0 &&
+          navMatchState.navId === activeNavId &&
+          navMatchState.pageEpoch === activeEpoch
+        );
+        const settleState = blurReadySettleWindowRef.current;
+        const hasActiveSettleWindow = settleState.active && settleState.navId === activeNavId;
+        const navMatchAgeMs = navMatchConfirmed ? Math.max(0, now - navMatchState.at) : -1;
+        const settleRemainingMs = hasActiveSettleWindow
+          ? Math.max(0, settleState.untilMs - now)
+          : (
+              navMatchConfirmed
+                ? Math.max(0, BLUR_READY_SETTLE_WINDOW_MS - navMatchAgeMs)
+                : BLUR_READY_SETTLE_WINDOW_MS
+            );
+        const settleElapsed = navMatchConfirmed && settleRemainingMs <= 0;
+        const holdUntilReady = !navMatchConfirmed || !settleElapsed;
         const timedOutWithoutResult = !!pendingShorts &&
           pendingShorts.sovereignId === activeSovereignId &&
           hasEffectiveShortsBlurSignal(pendingShorts) &&
           !pendingShorts.hasModerationResult &&
-          (Date.now() - pendingShorts.startedAt) >= SHORTS_OVERLAY_ATOMIC_TIMEOUT_MS;
+          (now - pendingShorts.startedAt) >= SHORTS_ATOMIC_TIMEOUT_MS;
         if (timedOutWithoutResult && !pendingShorts.fallbackRevealEnsured) {
-          pendingShorts.fallbackRevealEnsured = true;
-          const fallbackVideoId = parseSovereignId(pendingShorts.sovereignId).videoId;
-          console.warn(
-            '[DIAG][SHORTS_ATOMIC]',
-            'action=timeout_safe_failure_reveal_ui',
-            'sovereignId=' + pendingShorts.sovereignId,
-            'videoId=' + fallbackVideoId,
-            'elapsedMs=' + (Date.now() - pendingShorts.startedAt),
-          );
-          void ensureShortsRevealUi(
-            'shorts_atomic_timeout_safe_failure',
-            'timeout_' + pendingShorts.startedAt.toString(36),
-            pendingShorts.sovereignId,
-            fallbackVideoId,
-            0,
-          );
+          if (holdUntilReady) {
+            pendingShorts.holdUntilReady = true;
+            if (pendingShorts.holdUntilReadySince <= 0) {
+              pendingShorts.holdUntilReadySince = now;
+            }
+            if ((now - pendingShorts.holdUntilReadyLastLogAt) >= 400) {
+              pendingShorts.holdUntilReadyLastLogAt = now;
+              console.log(
+                '[DIAG][SHORTS_ATOMIC]',
+                'action=hold_until_ready',
+                'holdReason=' + (!navMatchConfirmed ? 'await_nav_match' : 'await_settle_window'),
+                'sovereignId=' + pendingShorts.sovereignId,
+                'navId=' + activeNavId,
+                'pageEpoch=' + activeEpoch,
+                'readyNavId=' + (navMatchState.navId || 0),
+                'readyPageEpoch=' + (navMatchState.pageEpoch || 0),
+                'readyAgeMs=' + (navMatchAgeMs >= 0 ? navMatchAgeMs : 'none'),
+                'settleActive=' + hasActiveSettleWindow,
+                'settleRemainingMs=' + settleRemainingMs,
+                'elapsedMs=' + (now - pendingShorts.startedAt),
+              );
+            }
+          } else {
+            if (pendingShorts.holdUntilReady) {
+              console.log(
+                '[DIAG][SHORTS_ATOMIC]',
+                'action=release_hold_until_ready',
+                'sovereignId=' + pendingShorts.sovereignId,
+                'navId=' + activeNavId,
+                'pageEpoch=' + activeEpoch,
+                'holdMs=' + Math.max(0, now - pendingShorts.holdUntilReadySince),
+                'readyAgeMs=' + (navMatchAgeMs >= 0 ? navMatchAgeMs : 'none'),
+                'settleRemainingMs=' + settleRemainingMs,
+                'settleActive=' + hasActiveSettleWindow,
+              );
+            }
+            pendingShorts.holdUntilReady = false;
+            pendingShorts.holdUntilReadySince = 0;
+            pendingShorts.holdUntilReadyLastLogAt = 0;
+            pendingShorts.fallbackRevealEnsured = true;
+            const fallbackVideoId = parseSovereignId(pendingShorts.sovereignId).videoId;
+            console.warn(
+              '[DIAG][SHORTS_ATOMIC]',
+              'action=timeout_safe_failure_reveal_ui',
+              'sovereignId=' + pendingShorts.sovereignId,
+              'videoId=' + fallbackVideoId,
+              'elapsedMs=' + (now - pendingShorts.startedAt),
+              'readyAgeMs=' + (navMatchAgeMs >= 0 ? navMatchAgeMs : 'none'),
+              'settleRemainingMs=' + settleRemainingMs,
+            );
+            void ensureShortsRevealUi(
+              'shorts_atomic_timeout_safe_failure',
+              'timeout_' + pendingShorts.startedAt.toString(36),
+              pendingShorts.sovereignId,
+              fallbackVideoId,
+              0,
+            );
+          }
         }
       }
     }
@@ -2966,7 +3333,8 @@ export const NativeWebViewBrowser = () => {
     executeScript,
     shouldHoldShortsOverlaySync,
     hasEffectiveShortsBlurSignal,
-    SHORTS_OVERLAY_ATOMIC_TIMEOUT_MS,
+    SHORTS_ATOMIC_TIMEOUT_MS,
+    BLUR_READY_SETTLE_WINDOW_MS,
     OVERLAY_LIFT_HANDSHAKE_MS,
     cancelOverlayLiftHandshakeWindow,
     scheduleOverlayLiftHandshakeRetry,
@@ -3031,7 +3399,9 @@ export const NativeWebViewBrowser = () => {
     );
 
     if (ENABLE_DOM_BLUR) {
+      clearBlurReadySettleWindowState('settings_reinject');
       blurReadyRef.current = false;
+      clearBlurReadyNavMatchState('settings_reinject');
       resetOverlayLiftHandshakeState('settings_reinject');
       resetShortsOverlayCoordinator('settings_reinject');
     }
@@ -3053,6 +3423,8 @@ export const NativeWebViewBrowser = () => {
     webViewState.currentUrl,
     executeScript,
     webViewListenersAttached,
+    clearBlurReadySettleWindowState,
+    clearBlurReadyNavMatchState,
     resetShortsOverlayCoordinator,
     resetOverlayLiftHandshakeState,
     scheduleStableInjection,
@@ -3110,6 +3482,8 @@ export const NativeWebViewBrowser = () => {
       if (blurRetryTimerRef.current) {
         clearTimeout(blurRetryTimerRef.current);
       }
+      clearBlurReadySettleWindowState('unmount_cleanup');
+      clearBlurReadyNavMatchState('unmount_cleanup');
       resetOverlayLiftHandshakeState('unmount_cleanup');
     };
   }, [
@@ -3118,6 +3492,8 @@ export const NativeWebViewBrowser = () => {
     clearStableInjectionTimer,
     clearShortsOverlayAtomicTimeout,
     clearShortsMatchingRetryTimer,
+    clearBlurReadySettleWindowState,
+    clearBlurReadyNavMatchState,
     resetOverlayLiftHandshakeState,
   ]);
 
@@ -3130,8 +3506,6 @@ export const NativeWebViewBrowser = () => {
   // Host -> WebView: executeScript to call window.postMessage inside the page
   // ==================== 
 
-  const pendingRequestsRef = useRef<Set<string>>(new Set());
-  
   /**
    * Process a moderation request from the WebView
    * Uses the new postMessage protocol with requestId/itemId tracking
@@ -3143,7 +3517,7 @@ export const NativeWebViewBrowser = () => {
     const activeEpoch = webViewPageEpochRef.current;
     const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
     const activeSovereignId = getSovereignIdForContext(activeUrl, activeNavIdRef.current, activeEpoch);
-    let effectiveRequestSovereignId = requestSovereignId;
+    const effectiveRequestSovereignId = requestSovereignId;
     const stickyShortsMode = isYouTubeShortsUrl(activeUrl);
     const livePlayerView = isLivePlayerView(activeUrl);
     const isShortsAtomic = stickyShortsMode;
@@ -3155,6 +3529,8 @@ export const NativeWebViewBrowser = () => {
       activeUrl,
       requestSovereignId,
     );
+    const requestNavIdAtStart = activeNavIdRef.current || 0;
+    const requestGenerationAtStart = moderationNavGenerationRef.current;
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
     const disarmFlashShield = (reason: string, diagLabel?: string) => {
       if (isShortsAtomic) return;
@@ -3186,6 +3562,39 @@ export const NativeWebViewBrowser = () => {
       return;
     }
     pendingRequestsRef.current.add(requestId);
+
+    const isRequestContextStale = () => {
+      const liveNavId = activeNavIdRef.current || 0;
+      const liveGeneration = moderationNavGenerationRef.current;
+      return (
+        !pendingRequestsRef.current.has(requestId) ||
+        liveNavId !== requestNavIdAtStart ||
+        liveGeneration !== requestGenerationAtStart
+      );
+    };
+    const hardKillStaleRequest = (stage: string): boolean => {
+      if (!isRequestContextStale()) return false;
+      const liveNavId = activeNavIdRef.current || 0;
+      const liveGeneration = moderationNavGenerationRef.current;
+      const wasPending = pendingRequestsRef.current.delete(requestId);
+      console.warn(
+        '[DIAG][SHORTS_ATOMIC]',
+        'action=hard_kill_stale_request',
+        'stage=' + stage,
+        'requestId=' + requestId,
+        'requestNavId=' + requestNavIdAtStart,
+        'activeNavId=' + liveNavId,
+        'requestGeneration=' + requestGenerationAtStart,
+        'activeGeneration=' + liveGeneration,
+        'wasPending=' + (wasPending ? 'true' : 'false'),
+        'url=' + (webViewState.currentUrl || currentUrlRef.current || 'unknown'),
+      );
+      disarmFlashShield('moderation_hard_kill_stale', 'disarm hard-killed stale request');
+      return true;
+    };
+    if (hardKillStaleRequest('after_add')) {
+      return;
+    }
 
     if (requestEpoch !== null && !requestEpochAccepted && !relaxedYouTubeEpochMode) {
       const rejectReason = stickyShortsMode
@@ -3271,15 +3680,10 @@ export const NativeWebViewBrowser = () => {
       const requestSovereign = parseSovereignId(requestSovereignId);
       const activeSovereign = parseSovereignId(activeSovereignId);
       const navIdChanged = requestSovereign.navId !== activeSovereign.navId;
-      const sameVideoId = (
-        requestSovereign.videoId !== 'none' &&
-        requestSovereign.videoId === activeSovereign.videoId
-      );
-      if (navIdChanged && sameVideoId) {
-        effectiveRequestSovereignId = activeSovereignId;
-        console.info(
+      if (navIdChanged) {
+        console.warn(
           '[DIAG][SHORTS_ATOMIC]',
-          'action=accept_stale_sovereign_video_match',
+          'action=hard_kill_stale_request_nav_mismatch',
           'requestId=' + requestId,
           'requestSovereignId=' + requestSovereignId,
           'activeSovereignId=' + activeSovereignId,
@@ -3290,41 +3694,43 @@ export const NativeWebViewBrowser = () => {
           'pageEpoch=' + activeEpoch,
           'url=' + (activeUrl || 'unknown'),
         );
-      } else {
-        console.warn(
-          '[DIAG][SHORTS_ATOMIC]',
-          'action=reject_stale_sovereign',
-          'requestId=' + requestId,
-          'requestSovereignId=' + requestSovereignId,
-          'activeSovereignId=' + activeSovereignId,
-          'navId=' + activeNavIdRef.current,
-          'pageEpoch=' + activeEpoch,
-          'url=' + (activeUrl || 'unknown'),
-        );
-        const staleResults = items.map(item => ({
-          itemId: item.itemId,
-          src: item.src,
-          shouldBlur: false,
-          category: 'safe_sovereign_stale',
-          confidence: 0,
-          severity: 'safe' as ModerationSeverity,
-        }));
-        try {
-          const staleMessage = createResultMessage(
-            requestId,
-            staleResults,
-            nonce,
-            requestEpoch ?? undefined,
-            requestSovereignId,
-          );
-          await postMessageToWebView(staleMessage as unknown as Record<string, unknown>);
-        } catch {
-          // Fail-open by design for stale requests.
-        }
         pendingRequestsRef.current.delete(requestId);
-        disarmFlashShield('moderation_sovereign_stale', 'disarm stale sovereign');
+        disarmFlashShield('moderation_sovereign_nav_stale', 'disarm stale nav mismatch');
         return;
       }
+      console.warn(
+        '[DIAG][SHORTS_ATOMIC]',
+        'action=reject_stale_sovereign',
+        'requestId=' + requestId,
+        'requestSovereignId=' + requestSovereignId,
+        'activeSovereignId=' + activeSovereignId,
+        'navId=' + activeNavIdRef.current,
+        'pageEpoch=' + activeEpoch,
+        'url=' + (activeUrl || 'unknown'),
+      );
+      const staleResults = items.map(item => ({
+        itemId: item.itemId,
+        src: item.src,
+        shouldBlur: false,
+        category: 'safe_sovereign_stale',
+        confidence: 0,
+        severity: 'safe' as ModerationSeverity,
+      }));
+      try {
+        const staleMessage = createResultMessage(
+          requestId,
+          staleResults,
+          nonce,
+          requestEpoch ?? undefined,
+          requestSovereignId,
+        );
+        await postMessageToWebView(staleMessage as unknown as Record<string, unknown>);
+      } catch {
+        // Fail-open by design for stale requests.
+      }
+      pendingRequestsRef.current.delete(requestId);
+      disarmFlashShield('moderation_sovereign_stale', 'disarm stale sovereign');
+      return;
     }
     if (requestEpoch !== null && !requestEpochAccepted && relaxedYouTubeEpochMode) {
       console.log(
@@ -3426,6 +3832,9 @@ export const NativeWebViewBrowser = () => {
     
     // Process each item using the moderation bridge
     for (const item of items) {
+      if (hardKillStaleRequest('scan_loop_pre_item:' + String(item.itemId || 'none'))) {
+        return;
+      }
       const itemSourceType = typeof item.sourceType === 'string' ? item.sourceType : 'unknown';
       const trustAsCurrentVideoFrame = itemSourceType === 'video-frame';
       const srcMatchesCurrentVideo = (
@@ -3501,6 +3910,9 @@ export const NativeWebViewBrowser = () => {
           pageEpoch: requestEpoch ?? activeEpoch,
           sourceType: itemSourceType,
         });
+        if (hardKillStaleRequest('scan_loop_post_item:' + String(item.itemId || 'none'))) {
+          return;
+        }
         
         if (scanResult) {
           const categoryConfidence = Object.entries(scanResult.predictions || {}).reduce((matched, [label, value]) => {
@@ -3552,6 +3964,9 @@ export const NativeWebViewBrowser = () => {
           severity: shouldBlurOnFailure ? 'hard' : 'safe',
         });
       }
+    }
+    if (hardKillStaleRequest('after_scan_loop')) {
+      return;
     }
     
     const elapsedMs = performance.now() - startTime;
@@ -3875,6 +4290,9 @@ export const NativeWebViewBrowser = () => {
         `[MW-Host][ScanSummary] url=${shortUrl} req=${requestId} total=${results.length} eligible=${denominator} tinyExcluded=${tinyExcludedCount} hardHits=${hardSensitivityHits.length} softHits=${softSensitivityHits.length} safeHits=${Math.max(denominator - hardSensitivityHits.length - softSensitivityHits.length, 0)} hardMax=${hardUnsafeMaxConf.toFixed(3)} hardThr=${hardSensitivityThreshold.toFixed(3)} softMax=${softUnsafeMaxConf.toFixed(3)} softRatio=${softRatio.toFixed(3)} videoFrameSafe=${hasVideoFrameSafeResult ? 1 : 0} videoFrameUnsafe=${hasVideoFrameUnsafeResult ? 1 : 0} videoFrameOverride=${videoFrameSafeOverrideActive ? 1 : 0} mismatchSafety=${holdForMismatchedThumbnails ? 1 : 0} livePlayer=${livePlayerView ? 1 : 0} mode=${blurMode} decision=${overlayDecision ? 'ON' : 'OFF'} reason=${decisionReason}`
       );
     }
+    if (hardKillStaleRequest('post_decision_pre_apply')) {
+      return;
+    }
 
     const resultSovereignId = stickyShortsMode
       ? (effectiveRequestSovereignId || activeSovereignId)
@@ -3924,6 +4342,9 @@ export const NativeWebViewBrowser = () => {
       'domOverlay=' + (ENABLE_DOM_BLUR ? 'on' : 'off'),
       'epoch=' + (requestEpoch ?? activeEpoch),
     );
+    if (hardKillStaleRequest('pre_post_results')) {
+      return;
+    }
     
     // Post results back to the WebView with nonce for security
     console.log('[MW-Host] posting results back', requestId, 'count=' + results.length, 'nonce=' + nonce.substring(0, 10));
@@ -4175,55 +4596,165 @@ export const NativeWebViewBrowser = () => {
           typeof typedMessage.timestamp === 'number' && Number.isFinite(typedMessage.timestamp)
         ) ? Number(typedMessage.timestamp) : null;
         const readySignalAgeMs = readyTimestamp === null ? null : (now - readyTimestamp);
-        const withinShortsNavGrace =
-          activeUrlFamily === 'youtube_shorts' &&
-          readyHostNavId !== null &&
-          readyHostNavId === (activeNavId - 1) &&
-          readySignalAgeMs !== null &&
-          readySignalAgeMs >= 0 &&
-          readySignalAgeMs <= SHORTS_NAV_GRACE_MS;
-        const staleEpoch = readyEpoch !== null && readyEpoch !== activeEpoch;
-        const staleNav =
-          readyHostNavId !== null &&
-          readyHostNavId !== activeNavId &&
-          !withinShortsNavGrace;
-        if (withinShortsNavGrace) {
-          console.log(
-            '[DIAG][BLUR_READY_GATE]',
-            'action=shorts_nav_grace_accept',
-            'reason=' + readyReason,
-            'messageHostNavId=' + (readyHostNavId ?? 'none'),
-            'activeNavId=' + activeNavId,
-            'signalAgeMs=' + (readySignalAgeMs ?? 'none'),
-            'graceMs=' + SHORTS_NAV_GRACE_MS,
-            'url=' + readyUrl,
+        if (readySignalAgeMs !== null && readySignalAgeMs > 500) {
+          const lastAlarm = blurReadyPerfAlarmRef.current;
+          const shouldLogPerfAlarm = (
+            lastAlarm.navId !== activeNavId ||
+            lastAlarm.pageEpoch !== activeEpoch ||
+            (now - lastAlarm.at) >= 1200
           );
+          if (shouldLogPerfAlarm) {
+            blurReadyPerfAlarmRef.current = {
+              navId: activeNavId,
+              pageEpoch: activeEpoch,
+              at: now,
+            };
+            console.warn(
+              '[PERF_ALARM]',
+              'metric=MW_BLUR_READY_LATENCY',
+              'latencyMs=' + readySignalAgeMs,
+              'thresholdMs=500',
+              'reason=' + readyReason,
+              'activeNavId=' + activeNavId,
+              'messageHostNavId=' + (readyHostNavId ?? 'none'),
+              'activePageEpoch=' + activeEpoch,
+              'messagePageEpoch=' + (readyEpoch ?? 'none'),
+              'url=' + readyUrl,
+            );
+          }
         }
+        const staleEpoch = readyEpoch !== null && readyEpoch !== activeEpoch;
+        const navIdMatch = readyHostNavId === activeNavId;
+        const staleNav = !navIdMatch;
         if (staleEpoch || staleNav) {
-          console.log(
+          const hardDropReason = staleEpoch ? 'epoch_mismatch' : 'nav_mismatch';
+          debugLog(
             '[DIAG][BLUR_READY_GATE]',
-            'action=blocked_stale',
+            'action=HARD_DROP',
             'reason=' + readyReason,
+            'hardDropReason=' + hardDropReason,
             'messageEpoch=' + (readyEpoch ?? 'none'),
             'activeEpoch=' + activeEpoch,
             'messageHostNavId=' + (readyHostNavId ?? 'none'),
             'activeNavId=' + activeNavId,
             'messageTimestamp=' + (readyTimestamp ?? 'none'),
             'signalAgeMs=' + (readySignalAgeMs ?? 'none'),
-            'withinShortsNavGrace=' + withinShortsNavGrace,
-            'shortsGraceMs=' + SHORTS_NAV_GRACE_MS,
+            'graceMs=' + SHORTS_NAV_GRACE_MS,
             'staleEpoch=' + staleEpoch,
             'staleNav=' + staleNav,
             'url=' + readyUrl,
           );
+          console.warn(
+            '[DIAG][SHORTS_ATOMIC]',
+            'action=hard_kill_stale_blur_ready',
+            'reason=' + readyReason,
+            'hardDropReason=' + hardDropReason,
+            'messageEpoch=' + (readyEpoch ?? 'none'),
+            'activeEpoch=' + activeEpoch,
+            'messageHostNavId=' + (readyHostNavId ?? 'none'),
+            'activeNavId=' + activeNavId,
+            'sovereignId=' + (readySovereignId || 'none'),
+            'url=' + readyUrl,
+          );
+          if (activeUrlFamily === 'youtube_shorts') {
+            clearBlurReadyNavMatchState('stale_blur_ready:' + hardDropReason + ':' + readyReason);
+            void requestBlurHandshake('stale_blur_ready_drop:' + hardDropReason + ':' + readyReason)
+              .catch(() => undefined);
+          }
           return;
         }
+        if (activeUrlFamily === 'youtube_shorts') {
+          const lastNavMatch = blurReadyNavMatchRef.current;
+          const hasNavMatchForActiveFrame = (
+            lastNavMatch.navId === activeNavId &&
+            lastNavMatch.pageEpoch === activeEpoch &&
+            lastNavMatch.at > 0
+          );
+          if (!hasNavMatchForActiveFrame) {
+            blurReadyNavMatchRef.current = {
+              navId: activeNavId,
+              pageEpoch: activeEpoch,
+              url: readyUrl,
+              reason: readyReason,
+              at: now,
+            };
+            console.log(
+              '[DIAG][BLUR_READY_GATE]',
+              'action=confirm_nav_match',
+              'reason=' + readyReason,
+              'navId=' + activeNavId,
+              'pageEpoch=' + activeEpoch,
+              'signalAgeMs=' + (readySignalAgeMs ?? 'none'),
+              'url=' + readyUrl,
+            );
+          }
+        }
+        const settleState = blurReadySettleWindowRef.current;
+        const settleNavExactMatch = (
+          settleState.active &&
+          readyHostNavId !== null &&
+          settleState.navId === readyHostNavId &&
+          readyHostNavId === activeNavId
+        );
+        if (settleNavExactMatch) {
+          const settleElapsedMs = settleState.startedAt > 0
+            ? Math.max(0, now - settleState.startedAt)
+            : 0;
+          clearBlurReadySettleWindowState('first_valid_nav_match:' + readyReason);
+          console.log(
+            '[DIAG][SETTLE_WINDOW_HOST]',
+            'action=first_valid_nav_match',
+            'reason=' + readyReason,
+            'navId=' + activeNavId,
+            'elapsedMs=' + settleElapsedMs,
+            'url=' + readyUrl,
+          );
+          queueCurrentBlurState('settle_window_first_valid_nav_match:' + readyReason);
+        }
+        const isHistoryReadyReason = readyReason === 'replaceState' || readyReason === 'popstate';
+        if (activeUrlFamily === 'youtube_shorts' && isHistoryReadyReason) {
+          const liveSettleState = blurReadySettleWindowRef.current;
+          const settleAlreadyTrackingActiveNav = (
+            liveSettleState.active &&
+            liveSettleState.navId === activeNavId
+          );
+          if (!settleAlreadyTrackingActiveNav) {
+            armBlurReadySettleWindow('url_change:' + readyReason, readyUrl);
+            debugLog(
+              '[DIAG][SETTLE_WINDOW_HOST]',
+              'action=arm_from_history_ready',
+              'reason=' + readyReason,
+              'navId=' + activeNavId,
+              'url=' + readyUrl,
+            );
+          }
+        }
         if (activeUrlFamily === 'youtube_shorts' && readySovereignId) {
+          const lastReplaceStateReady = lastShortsReplaceStateReadyRef.current;
+          const isPingOrReinjectReady = readyReason === 'ping' || readyReason === 'reinject';
+          const suppressPingPongAfterReplaceState = (
+            isPingOrReinjectReady &&
+            lastReplaceStateReady.sovereignId === readySovereignId &&
+            (now - lastReplaceStateReady.at) >= 0 &&
+            (now - lastReplaceStateReady.at) <= BLUR_READY_REPLACESTATE_SUPPRESS_MS
+          );
+          if (suppressPingPongAfterReplaceState) {
+            console.log(
+              '[DIAG][BLUR_READY_GATE]',
+              'action=drop_ping_pong_after_replace_state',
+              'reason=' + readyReason,
+              'sovereignId=' + readySovereignId,
+              'lastReplaceStateAgeMs=' + (now - lastReplaceStateReady.at),
+              'windowMs=' + BLUR_READY_REPLACESTATE_SUPPRESS_MS,
+              'url=' + readyUrl,
+            );
+            return;
+          }
           const lastShortsBlurSignal = lastShortsBlurSignalRef.current;
           const sameSovereignReplaceState = (
             readyReason === 'replaceState' &&
             lastShortsBlurSignal.sovereignId === readySovereignId &&
-            (now - lastShortsBlurSignal.at) < SHORTS_OVERLAY_ATOMIC_TIMEOUT_MS
+            (now - lastShortsBlurSignal.at) < SHORTS_ATOMIC_TIMEOUT_MS
           );
           if (sameSovereignReplaceState) {
             console.log(
@@ -4239,6 +4770,12 @@ export const NativeWebViewBrowser = () => {
             readyReason,
             sameSovereignReplaceState ? lastShortsBlurSignal.at : undefined,
           );
+          if (readyReason === 'replaceState') {
+            lastShortsReplaceStateReadyRef.current = {
+              sovereignId: readySovereignId,
+              at: now,
+            };
+          }
         }
         if (activeUrlFamily === 'youtube_shorts') {
           const sovereignVideoId = parseSovereignId(readySovereignId).videoId;
@@ -4404,6 +4941,9 @@ export const NativeWebViewBrowser = () => {
     webViewState.currentUrl,
     setCentralBlurState,
     isGraceEpochAcceptedForActiveShortsVideo,
+    armBlurReadySettleWindow,
+    postBlurCommand,
+    debugLog,
   ]);
 
   /**
@@ -5300,14 +5840,16 @@ export const NativeWebViewBrowser = () => {
       await webViewReload();
       // Reset injection flag to re-inject moderation script
       injectionDoneRef.current = false;
+      clearBlurReadySettleWindowState('manual_reload');
       blurReadyRef.current = false;
+      clearBlurReadyNavMatchState('manual_reload');
       resetOverlayLiftHandshakeState('manual_reload');
       resetShortsOverlayCoordinator('manual_reload');
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       setCentralBlurState(false, 'manual_reload');
       return;
     }
-  }, [readerContent, currentView, searchQuery, isNative, webViewState.isOpen, handleReaderMode, handleSearch, webViewReload, setCentralBlurState, resetShortsOverlayCoordinator, resetOverlayLiftHandshakeState]);
+  }, [readerContent, currentView, searchQuery, isNative, webViewState.isOpen, handleReaderMode, handleSearch, webViewReload, clearBlurReadySettleWindowState, clearBlurReadyNavMatchState, setCentralBlurState, resetShortsOverlayCoordinator, resetOverlayLiftHandshakeState]);
 
   const handleHome = useCallback(async () => {
     teardownWebViewScheduling('home_reset', webViewState.currentUrl).catch(() => undefined);
@@ -5324,7 +5866,9 @@ export const NativeWebViewBrowser = () => {
       pageEpoch: webViewPageEpochRef.current,
     });
     injectionDoneRef.current = false;
+    clearBlurReadySettleWindowState('home_reset');
     blurReadyRef.current = false;
+    clearBlurReadyNavMatchState('home_reset');
     resetOverlayLiftHandshakeState('home_reset');
     resetShortsOverlayCoordinator('home_reset');
     blurPendingRef.current = null;
@@ -5340,7 +5884,7 @@ export const NativeWebViewBrowser = () => {
     setUrlInput('');
     setFallbackUrl('');
     goHome();
-  }, [isNative, webViewState.isOpen, webViewState.currentUrl, closeWebView, goHome, moderationBridge, setCentralBlurState, teardownWebViewScheduling, exitPendingReinject, resetShortsOverlayCoordinator, resetOverlayLiftHandshakeState]);
+  }, [isNative, webViewState.isOpen, webViewState.currentUrl, closeWebView, goHome, moderationBridge, clearBlurReadySettleWindowState, clearBlurReadyNavMatchState, setCentralBlurState, teardownWebViewScheduling, exitPendingReinject, resetShortsOverlayCoordinator, resetOverlayLiftHandshakeState]);
 
   // Manual scan trigger for current page
   const handleScanPage = useCallback(async () => {

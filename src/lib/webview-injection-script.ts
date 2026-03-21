@@ -301,6 +301,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   const TRACE_UNSAFE_LABELS = new Set(['porn', 'sexy', 'hentai', 'thirst']);
   const LEGACY_RESULTS_POLL_MS = 250;
   const URL_CHANGE_POLL_MS = 1200;
+  const SETTLE_WINDOW_MS = 200;
   console.log('[MW] Effective config:', JSON.stringify({
     blurDial: CONFIG.sensitivity,
     thresholds: effectiveThresholds,
@@ -635,6 +636,20 @@ export function generateModerationScript(config: InjectionConfig): string {
       : null;
     const shortsVideoId = getCurrentShortsUrlId() || 'none';
     const currentNavId = String(window.__MW_NAV_ID__ || 'none');
+    if (
+      readyHostNavId !== null &&
+      String(readyHostNavId) !== currentNavId
+    ) {
+      logShortsProbe(
+        'mw_blur_ready_drop_nav_mismatch',
+        'reason=' + readyReason +
+        ' navId=' + currentNavId +
+        ' hostNavId=' + readyHostNavId +
+        ' pageEpoch=' + (readyPageEpoch === null ? 'none' : readyPageEpoch) +
+        ' shortsUrlId=' + shortsVideoId
+      );
+      return;
+    }
     const sovereignId = computeSovereignId(readyPageEpoch);
     logShortsProbe(
       'mw_blur_ready_emit',
@@ -1422,6 +1437,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     youtubeScrollTimeout: null,
     youtubeScrollHandler: null,
     youtubeMutationScanTimeout: null,
+    settleWindowTimeout: null,
     revealOverlayRepositionRaf: null,
     revealOverlayLastReason: '',
     revealOverlayScrollHandler: null,
@@ -1448,6 +1464,11 @@ export function generateModerationScript(config: InjectionConfig): string {
     mutationScan: { sec: 0, count: 0 },
   };
   const SHORTS_HEAVY_SCAN_THROTTLE_MS = 1500;
+  const settleWindowState = {
+    untilMs: 0,
+    reason: 'none',
+    suppressLogAt: 0,
+  };
   let shortsHeavyScanLastAt = 0;
   let diagPrevRequests = 0;
   let diagPrevResponses = 0;
@@ -1564,6 +1585,43 @@ export function generateModerationScript(config: InjectionConfig): string {
     clearTimeout(id);
     timerState[key] = null;
     timerLog('stop', key + ':' + reason);
+  }
+
+  function startSettleWindow(reason) {
+    const now = Date.now();
+    settleWindowState.untilMs = now + SETTLE_WINDOW_MS;
+    settleWindowState.reason = reason || 'url_change';
+    settleWindowState.suppressLogAt = 0;
+    clearNamedTimeout('settleWindowTimeout', 'reschedule');
+    timerState.settleWindowTimeout = setTimeout(function() {
+      timerState.settleWindowTimeout = null;
+      settleWindowState.untilMs = 0;
+      settleWindowState.reason = 'none';
+      settleWindowState.suppressLogAt = 0;
+      if (timerState.paused || timerState.teardownDone) return;
+      scanFullPage();
+      if (isYouTube()) {
+        scheduleYouTubeScan('settle_window_release');
+      }
+    }, SETTLE_WINDOW_MS);
+    timerLog('start', 'settleWindowTimeout:' + (reason || 'url_change'));
+  }
+
+  function shouldSuppressBlurEnforcement(triggerReason, src, itemId) {
+    const now = Date.now();
+    if (now >= settleWindowState.untilMs) return false;
+    if (now - settleWindowState.suppressLogAt >= 120) {
+      settleWindowState.suppressLogAt = now;
+      console.log(
+        '[SETTLE_WINDOW] Suppressing enforcement during transition.',
+        'reason=' + (settleWindowState.reason || 'url_change'),
+        'trigger=' + (triggerReason || 'applyBlur'),
+        'remainingMs=' + Math.max(0, settleWindowState.untilMs - now),
+        'itemId=' + (itemId || 'none'),
+        'src=' + String(src || '').substring(0, 120)
+      );
+    }
+    return true;
   }
 
   function allowShortsHeavyScanSweep(reason) {
@@ -1732,6 +1790,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       resetTransientModerationState('host_context_sync_' + (reason || 'unknown'), {
         clearScanState: opts.clearScanState === true,
       });
+    }
+    if (navChanged) {
+      startSettleWindow('host_nav_change');
     }
 
     if (contextChanged) {
@@ -2342,6 +2403,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (timerState.mainScrollTimeout) activeTimerNames.push('mainScrollTimeout');
     if (timerState.youtubeScrollTimeout) activeTimerNames.push('youtubeScrollTimeout');
     if (timerState.youtubeMutationScanTimeout) activeTimerNames.push('youtubeMutationScanTimeout');
+    if (timerState.settleWindowTimeout) activeTimerNames.push('settleWindowTimeout');
     if (timerState.revealOverlayRepositionRaf) activeTimerNames.push('revealOverlayRepositionRaf');
     if (batchTimer) activeTimerNames.push('batchTimer');
     if (mutationScanTimer) activeTimerNames.push('mutationScanTimer');
@@ -5730,6 +5792,9 @@ export function generateModerationScript(config: InjectionConfig): string {
    * Uses !important to override site styles on iOS
    */
   function applyBlur(element, src, category, blurStrengthPx, itemId) {
+    if (shouldSuppressBlurEnforcement('applyBlur', src, itemId)) {
+      return;
+    }
     const shortsMode = isShortsModeActive();
     const activeShortsVideoId = shortsMode ? (getCurrentShortsUrlId() || 'none') : 'none';
     if (shortsMode && hasRevealLockForShortsVideoId(activeShortsVideoId)) {
@@ -7161,34 +7226,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         const missingSovereign = !resultSovereignId;
         const pendingMismatch = !!expectedSovereignId && resultSovereignId !== expectedSovereignId;
         const currentMismatch = !!resultSovereignId && resultSovereignId !== currentSovereignId;
-        const expectedSovereignParts = parseSovereignId(expectedSovereignId);
-        const resultSovereignParts = parseSovereignId(resultSovereignId);
-        const allowNavShiftForSameVideo = (
-          pendingMismatch &&
-          !currentMismatch &&
-          expectedSovereignParts.videoId !== 'none' &&
-          expectedSovereignParts.videoId === resultSovereignParts.videoId
-        );
-        if (allowNavShiftForSameVideo) {
-          logShortsProbe(
-            'result_sovereign_accept_nav_shift',
-            'requestId=' + requestIdLabel +
-            ' expected=' + (expectedSovereignId || 'none') +
-            ' result=' + (resultSovereignId || 'none') +
-            ' current=' + currentSovereignId
-          );
-          const ensuredOnNavShift = ensureTapToRevealOverlay('result_sovereign_nav_shift_accept');
-          if (!ensuredOnNavShift) {
-            const navShiftSovereign = resultSovereignId || expectedSovereignId || currentSovereignId;
-            const navShiftVideoId = parseSovereignId(navShiftSovereign).videoId;
-            startShortsRevealWatch('result_sovereign_nav_shift_accept', {
-              force: false,
-              key: navShiftSovereign || currentSovereignId,
-              videoId: navShiftVideoId || getCurrentShortsUrlId() || 'none',
-            });
-          }
-        }
-        if (missingSovereign || (pendingMismatch && !allowNavShiftForSameVideo) || currentMismatch) {
+        if (missingSovereign || pendingMismatch || currentMismatch) {
           logShortsProbe(
             'result_sovereign_reject',
             'requestId=' + requestIdLabel +
@@ -9050,6 +9088,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (timerState.mainScrollTimeout) count++;
     if (timerState.youtubeScrollTimeout) count++;
     if (timerState.youtubeMutationScanTimeout) count++;
+    if (timerState.settleWindowTimeout) count++;
     if (timerState.revealOverlayRepositionRaf) count++;
     if (adaptiveShortsWatchState.pendingRescanTimer) count++;
     if (adaptiveShortsWatchState.observer) count++;
@@ -9527,6 +9566,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         forceLog: true,
         extra: 'previousUrl=' + previousUrl,
       });
+      startSettleWindow('url_change');
       lastUrl = nextUrl;
       const holdEpoch = isYouTubeShortsUrl(previousUrl) && isYouTubeShortsUrl(nextUrl);
       const hostContextSync = syncActiveContextFromHost('url_change_detected', {
@@ -9625,6 +9665,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     clearNamedTimeout('mainScrollTimeout', reason);
     clearNamedTimeout('youtubeScrollTimeout', reason);
     clearNamedTimeout('youtubeMutationScanTimeout', reason);
+    clearNamedTimeout('settleWindowTimeout', reason);
     cancelShortsRevealOverlayReposition(reason || 'stopManagedTimers');
     if (batchTimer) {
       clearTimeout(batchTimer);
