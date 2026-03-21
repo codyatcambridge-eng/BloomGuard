@@ -1108,8 +1108,18 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
   // Execute JavaScript in the WebView
   const executeScript = useCallback(async (script: string): Promise<string | null> => {
     if (!isNative) return null;
+    const queuedInstanceId = activeInstanceIdRef.current;
+    if (!isOpenRef.current || queuedInstanceId == null) {
+      return null;
+    }
 
     const run = async (): Promise<string | null> => {
+      if (!isOpenRef.current || activeInstanceIdRef.current == null) {
+        return null;
+      }
+      if (activeInstanceIdRef.current !== queuedInstanceId) {
+        return null;
+      }
       try {
         const now = Date.now();
         if (executeScript60sWindowStartRef.current === 0) {
@@ -1128,6 +1138,9 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
           executeScript60sCountRef.current = 0;
         }
 
+        if (!isOpenRef.current || activeInstanceIdRef.current !== queuedInstanceId) {
+          return null;
+        }
         const raw = await InAppBrowser.executeScript({ code: script }) as unknown;
         if (typeof raw === 'string') return raw;
         if (raw && typeof raw === 'object') {

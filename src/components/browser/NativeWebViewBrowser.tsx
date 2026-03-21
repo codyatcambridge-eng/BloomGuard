@@ -457,6 +457,15 @@ export const NativeWebViewBrowser = () => {
   const legacyPollSelfDisabledContextRef = useRef<string | null>(null);
   const shortsRelatedLegacyPollContextRef = useRef<string | null>(null);
   const shortsOverlayPendingRef = useRef<ShortsOverlayPendingState | null>(null);
+  const shortsRevealUiSyncStateRef = useRef<{
+    sovereignId: string;
+    result: 'BLUR' | 'CLEAR' | 'none';
+    at: number;
+  }>({
+    sovereignId: 'none',
+    result: 'none',
+    at: 0,
+  });
   const shortsOverlayTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const shortsMatchingRetryRef = useRef<{
     needsMatchingScan: boolean;
@@ -484,6 +493,7 @@ export const NativeWebViewBrowser = () => {
   const [shortsLegacyFallbackVersion, setShortsLegacyFallbackVersion] = useState(0);
   const [shortsRelatedLegacyPollVersion, setShortsRelatedLegacyPollVersion] = useState(0);
   const shortsHardRevealLocksRef = useRef<Map<string, ShortsHardRevealLockState>>(new Map());
+  const syncShortsRevealRequestToWebViewRef = useRef<(sovereignId: string, reason: string) => void>(() => undefined);
   const pendingForceRevealEnforcementRef = useRef<PendingForceRevealEnforcementSignal | null>(null);
   const lastForceRevealEnforcementSignalRef = useRef<{
     videoId: string;
@@ -508,6 +518,10 @@ export const NativeWebViewBrowser = () => {
   });
   const shortsScanStateLockTimerRef = useRef<NodeJS.Timeout | null>(null);
   const moderationNavGenerationRef = useRef(0);
+  const blurLayoutKickRef = useRef<{ key: string; at: number }>({
+    key: '',
+    at: 0,
+  });
 
   const UNSAFE_STREAK_REQUIRED = 2;
   const SAFE_STREAK_REQUIRED = 2;
@@ -663,14 +677,14 @@ export const NativeWebViewBrowser = () => {
   const isShortsScanStateLockActive = useCallback((urlHint?: string): boolean => {
     const lock = shortsScanStateLockRef.current;
     if (!lock.active) return false;
-    const contextUrl = urlHint || currentUrlRef.current || webViewState.currentUrl || '';
+    const contextUrl = urlHint || currentUrlRef.current || '';
     if (!isYouTubeShortsUrl(contextUrl)) return false;
     if (lock.expiresAt > 0 && Date.now() >= lock.expiresAt) {
       releaseShortsScanStateLock('expired', lock.requestId || undefined);
       return false;
     }
     return true;
-  }, [releaseShortsScanStateLock, webViewState.currentUrl]);
+  }, [releaseShortsScanStateLock]);
 
   const armShortsScanStateLock = useCallback((
     requestId: string,
@@ -680,7 +694,7 @@ export const NativeWebViewBrowser = () => {
     pageEpoch: number,
     urlHint?: string,
   ) => {
-    const contextUrl = urlHint || currentUrlRef.current || webViewState.currentUrl || '';
+    const contextUrl = urlHint || currentUrlRef.current || '';
     if (!isYouTubeShortsUrl(contextUrl)) return;
     if (!requestId) return;
     clearShortsScanStateLockTimer();
@@ -726,7 +740,6 @@ export const NativeWebViewBrowser = () => {
     }, timeoutMs);
   }, [
     SHORTS_ATOMIC_TIMEOUT_MS,
-    webViewState.currentUrl,
     clearShortsScanStateLockTimer,
     releaseShortsScanStateLock,
     queueCurrentBlurState,
@@ -888,6 +901,30 @@ export const NativeWebViewBrowser = () => {
   }, []);
 
   const setCentralBlurState = useCallback((enabled: boolean, reason: string) => {
+    if (!enabled) {
+      const lock = shortsScanStateLockRef.current;
+      if (lock.active) {
+        if (lock.expiresAt > 0 && Date.now() >= lock.expiresAt) {
+          const released = releaseShortsScanStateLock('timeout:set_central_blur_disable_guard', lock.requestId || undefined);
+          if (released) {
+            queueCurrentBlurState('shorts_scan_state_lock_timeout_release');
+          }
+        } else {
+          const ageMs = lock.lockedAt > 0 ? Math.max(0, Date.now() - lock.lockedAt) : 0;
+          console.log(
+            '[DIAG][SHORTS_ATOMIC]',
+            'action=ignore_central_blur_disable_locked',
+            'reason=' + (reason || 'unknown'),
+            'requestId=' + (lock.requestId || 'none'),
+            'lockReason=' + (lock.reason || 'none'),
+            'lockSource=' + (lock.source || 'none'),
+            'lockSovereignId=' + (lock.sovereignId || 'none'),
+            'ageMs=' + ageMs,
+          );
+          return;
+        }
+      }
+    }
     if (enabled && isShortsAtomicActive()) {
       console.log(
         '[DIAG][SHORTS_ATOMIC]',
@@ -913,7 +950,7 @@ export const NativeWebViewBrowser = () => {
       'prevReason=' + prev.reason,
     );
     queueCurrentBlurState(reason);
-  }, [queueCurrentBlurState, isShortsAtomicActive]);
+  }, [queueCurrentBlurState, isShortsAtomicActive, releaseShortsScanStateLock]);
 
   const hardResetOverlayHostState = useCallback((reason: string) => {
     const prev = blurStateRef.current;
@@ -981,6 +1018,10 @@ export const NativeWebViewBrowser = () => {
       'lockHydrated=' + hydratedRevealLock,
     );
     setCentralBlurState(false, hydratedRevealLock ? 'user_reveal_request_hard_lock' : 'user_reveal_request');
+    syncShortsRevealRequestToWebViewRef.current(
+      resolvedSovereignId,
+      'mw_user_reveal_request:' + source,
+    );
     return true;
   }, [
     getSovereignIdForContext,
@@ -1006,13 +1047,19 @@ export const NativeWebViewBrowser = () => {
   const hasEffectiveShortsBlurSignal = useCallback((pending: ShortsOverlayPendingState | null): boolean => {
     if (!pending) return false;
     if (getShortsHardRevealLockForSovereign(pending.sovereignId)) return false;
+    if (pending.hasBlurSignal) return true;
     if (pending.jsRevealApplied && !pending.jsBlurApplied) return false;
-    return pending.hasBlurSignal || pending.jsBlurApplied;
+    return pending.jsBlurApplied;
   }, [getShortsHardRevealLockForSovereign]);
 
   const resetShortsOverlayCoordinator = useCallback((reason: string) => {
     clearShortsOverlayAtomicTimeout();
     clearShortsMatchingRetryTimer();
+    shortsRevealUiSyncStateRef.current = {
+      sovereignId: 'none',
+      result: 'none',
+      at: 0,
+    };
     const retryState = shortsMatchingRetryRef.current;
     retryState.needsMatchingScan = false;
     retryState.pendingSovereignId = '';
@@ -1167,8 +1214,13 @@ export const NativeWebViewBrowser = () => {
       shortsOverlayPendingRef.current = pending;
       armShortsOverlayAtomicTimeout(sovereignId, now);
     }
+    const shouldPreserveBlurSignal = (
+      pending.hasBlurSignal &&
+      jsRevealApplied &&
+      !jsBlurApplied
+    );
     pending.jsBlurApplied = jsBlurApplied;
-    pending.jsRevealApplied = jsRevealApplied;
+    pending.jsRevealApplied = shouldPreserveBlurSignal ? false : jsRevealApplied;
     if (jsBlurApplied && !jsRevealApplied) {
       pending.hasBlurSignal = true;
       lastShortsBlurSignalRef.current = {
@@ -1176,8 +1228,19 @@ export const NativeWebViewBrowser = () => {
         at: pending.startedAt,
       };
     }
-    if (jsRevealApplied) {
+    if (!shouldPreserveBlurSignal && jsRevealApplied) {
       pending.hasBlurSignal = false;
+    }
+    if (shouldPreserveBlurSignal) {
+      console.log(
+        '[DIAG][SHORTS_ATOMIC]',
+        'action=preserve_has_blur_signal',
+        'reason=' + signalReason,
+        'sovereignId=' + sovereignId,
+        'jsBlurApplied=' + jsBlurApplied,
+        'jsRevealApplied=' + jsRevealApplied,
+        'result=' + (pending.result || 'none'),
+      );
     }
     const effectiveBlurSignal = hasEffectiveShortsBlurSignal(pending);
     console.log(
@@ -2042,7 +2105,6 @@ export const NativeWebViewBrowser = () => {
       clearBlurReadyNavMatchState('load_start');
       resetOverlayLiftHandshakeState('navigation_load_start');
       resetShortsOverlayCoordinator('navigation_load_start');
-      releaseShortsScanStateLock('navigation_load_start');
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       const canDeferLoadStartReset =
         pendingReinjectRef.current?.active === true &&
@@ -2097,7 +2159,6 @@ export const NativeWebViewBrowser = () => {
       injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
       clearBlurReadyNavMatchState('load_error');
-      releaseShortsScanStateLock('load_error');
       exitPendingReinject('load_error', url);
       setFallbackUrl(url);
       navigate('fallback', '', url);
@@ -2122,6 +2183,22 @@ export const NativeWebViewBrowser = () => {
       const nextSovereignId = nextIsShorts
         ? getSovereignIdForContext(url, activeNavIdRef.current, webViewPageEpochRef.current)
         : '';
+      if (nextIsShorts && !isShortsScanStateLockActive(url)) {
+        const pendingNavRequestId = [
+          'pending_nav',
+          String(activeNavIdRef.current || 0),
+          String(webViewPageEpochRef.current || 0),
+          String(Date.now()),
+        ].join(':');
+        armShortsScanStateLock(
+          pendingNavRequestId,
+          nextSovereignId || getSovereignIdForContext(url),
+          'host_navigation',
+          'pending_nav',
+          webViewPageEpochRef.current || 0,
+          url,
+        );
+      }
       const hasShortsScanStateLock = nextIsShorts && isShortsScanStateLockActive(url);
       console.log('[Browser] ======= URL CHANGE =======');
       console.log('[Browser] New URL:', url);
@@ -2257,12 +2334,10 @@ export const NativeWebViewBrowser = () => {
           setCentralBlurState(false, 'nav_reset');
         }
       } else if (shouldDeferSafeReset) {
-        releaseShortsScanStateLock('url_change_defer_safe_reset_non_shorts');
         logSafeResetDiag('safe_reset_deferred', deferReason, url);
         enterPendingReinject(deferReason, url);
         queueCurrentBlurState('url_change_safe_reset_deferred');
       } else {
-        releaseShortsScanStateLock('url_change_non_shorts');
         exitPendingReinject(`context_exit_${previousFamily}_to_${nextFamily}`, url);
         setCentralBlurState(false, 'url_change_safe_reset');
       }
@@ -2291,7 +2366,11 @@ export const NativeWebViewBrowser = () => {
       clearBlurReadyNavMatchState('webview_closed');
       resetOverlayLiftHandshakeState('webview_closed');
       resetShortsOverlayCoordinator('webview_closed');
-      releaseShortsScanStateLock('webview_closed');
+      shortsRevealUiSyncStateRef.current = {
+        sovereignId: 'none',
+        result: 'none',
+        at: 0,
+      };
       shortsHardRevealLocksRef.current.clear();
       pendingForceRevealEnforcementRef.current = null;
       lastForceRevealEnforcementSignalRef.current = {
@@ -2423,6 +2502,75 @@ export const NativeWebViewBrowser = () => {
       (function() {
         try {
           var ensured = false;
+          var TOP_REVEAL_LAYER_ID = 'mw-reveal-top-layer';
+          var TOP_REVEAL_LAYER_Z = '999999999';
+          var ensureTopRevealLayer = function() {
+            var topLayer = document.getElementById(TOP_REVEAL_LAYER_ID);
+            if (!topLayer) {
+              topLayer = document.createElement('div');
+              topLayer.id = TOP_REVEAL_LAYER_ID;
+              var parentNode = document.documentElement || document.body || document.documentElement;
+              if (parentNode && parentNode.appendChild) {
+                parentNode.appendChild(topLayer);
+              }
+            }
+            if (topLayer && topLayer.style) {
+              topLayer.style.cssText = [
+                'position: fixed',
+                'inset: 0',
+                'display: block',
+                'z-index: ' + TOP_REVEAL_LAYER_Z,
+                'pointer-events: none',
+              ].join(';');
+              topLayer.style.setProperty('z-index', TOP_REVEAL_LAYER_Z, 'important');
+              topLayer.style.setProperty('pointer-events', 'none', 'important');
+            }
+            return topLayer;
+          };
+          var forceButtonLayer = function() {
+            ensureTopRevealLayer();
+            var overlays = document.querySelectorAll('.mw-reveal-overlay, #mw-reveal-overlay');
+            for (var i = 0; i < overlays.length; i += 1) {
+              var overlay = overlays[i];
+              if (!overlay || !overlay.isConnected) continue;
+              var btn = typeof overlay.querySelector === 'function'
+                ? overlay.querySelector('.mw-reveal-btn, .mw-reveal-button')
+                : null;
+              if (!(btn && btn.nodeType === 1)) continue;
+              var existingLayer = (
+                btn.parentElement &&
+                btn.parentElement.classList &&
+                btn.parentElement.classList.contains('mw-reveal-btn-layer')
+              ) ? btn.parentElement : null;
+              var layer = existingLayer;
+              if (!layer) {
+                layer = document.createElement('div');
+                layer.className = 'mw-reveal-btn-layer';
+                if (btn.parentElement) {
+                  btn.parentElement.insertBefore(layer, btn);
+                }
+                layer.appendChild(btn);
+              }
+              layer.style.cssText = [
+                'position: fixed',
+                'inset: 0',
+                'display: flex',
+                'align-items: center',
+                'justify-content: center',
+                'z-index: ' + TOP_REVEAL_LAYER_Z,
+                'pointer-events: none',
+              ].join(';');
+              overlay.style.zIndex = TOP_REVEAL_LAYER_Z;
+              overlay.style.pointerEvents = 'none';
+              btn.style.position = 'relative';
+              btn.style.zIndex = TOP_REVEAL_LAYER_Z;
+              btn.style.pointerEvents = 'auto';
+              btn.style.display = 'inline-flex';
+              btn.style.opacity = '0.9';
+              btn.style.border = '2px solid rgba(255, 255, 255, 0.98)';
+              btn.style.boxShadow = '0 10px 26px rgba(0, 0, 0, 0.42)';
+            }
+          };
           if (typeof window.__MW_START_REVEAL_WATCH__ === 'function') {
             try {
               window.__MW_START_REVEAL_WATCH__('${safeReason}', {
@@ -2446,6 +2594,7 @@ export const NativeWebViewBrowser = () => {
               window.__MW_APPLY_REVEAL_UI_LOCK__('timeout_safe_failure:${safeReason}', 2000, '${safeVideoId}');
             } catch (lockErr) {}
           }
+          forceButtonLayer();
           return ensured;
         } catch (e) {
           return false;
@@ -2467,6 +2616,117 @@ export const NativeWebViewBrowser = () => {
       'raw=' + ensureResultLabel,
     );
   }, [isNative, webViewState.isOpen, executeScript]);
+
+  const hideShortsRevealUi = useCallback(async (
+    reason: string,
+    sovereignId: string,
+    videoId: string,
+  ) => {
+    if (!isNative || !webViewState.isOpen || !executeScript) return;
+    const safeReason = escapeForJs(reason || 'shorts_atomic_force_clear');
+    const safeVideoId = escapeForJs(videoId || 'none');
+    const hideResult = await executeScript(`
+      (function() {
+        try {
+          var targetVideoId = '${safeVideoId}';
+          var hiddenCount = 0;
+          var overlays = document.querySelectorAll('.mw-reveal-overlay, #mw-reveal-overlay');
+          for (var i = 0; i < overlays.length; i += 1) {
+            var overlay = overlays[i];
+            if (!overlay || !overlay.isConnected) continue;
+            var overlayVideoId = String(
+              (overlay.dataset && overlay.dataset.mwShortsVideoId) ||
+              (overlay.getAttribute && overlay.getAttribute('data-mw-shorts-video-id')) ||
+              'none'
+            );
+            var matchesVideo = targetVideoId === 'none' || overlayVideoId === 'none' || overlayVideoId === targetVideoId;
+            if (!matchesVideo) continue;
+            if (overlay.dataset) overlay.dataset.blurred = 'false';
+            overlay.style.display = 'none';
+            overlay.style.pointerEvents = 'none';
+            var layer = typeof overlay.querySelector === 'function'
+              ? overlay.querySelector('.mw-reveal-btn-layer')
+              : null;
+            if (layer && layer.nodeType === 1) {
+              layer.style.display = 'none';
+              layer.style.pointerEvents = 'none';
+            }
+            var btn = typeof overlay.querySelector === 'function'
+              ? overlay.querySelector('.mw-reveal-btn, .mw-reveal-button')
+              : null;
+            if (btn && btn.nodeType === 1) {
+              btn.style.display = 'none';
+              btn.style.pointerEvents = 'none';
+            }
+            hiddenCount += 1;
+          }
+          if (typeof window.__MW_STOP_REVEAL_WATCH__ === 'function') {
+            try { window.__MW_STOP_REVEAL_WATCH__('${safeReason}'); } catch (stopErr) {}
+          }
+          return hiddenCount;
+        } catch (e) {
+          return 'ERR:' + String(e);
+        }
+      })();
+    `);
+    console.log(
+      '[DIAG][SHORTS_ATOMIC]',
+      'action=force_hide_reveal_ui',
+      'reason=' + reason,
+      'sovereignId=' + sovereignId,
+      'videoId=' + videoId,
+      'result=' + String(hideResult || '0'),
+    );
+  }, [isNative, webViewState.isOpen, executeScript]);
+
+  const syncShortsRevealRequestToWebView = useCallback(async (
+    sovereignId: string,
+    reason: string,
+  ) => {
+    if (!isNative || !webViewState.isOpen) return false;
+    const resolvedSovereignId = sovereignId || 'none';
+    const payload = {
+      type: 'MW_REVEAL_REQUEST',
+      sovereignId: resolvedSovereignId,
+      reason: reason || 'host_reveal_sync',
+      timestamp: Date.now(),
+    };
+    let posted = false;
+    try {
+      posted = await postMessageToWebView(payload as Record<string, unknown>);
+    } catch {
+      posted = false;
+    }
+    if (!posted && executeScript) {
+      const escapedPayload = escapeForJs(JSON.stringify(payload));
+      const fallbackResult = await executeScript(`
+        (function() {
+          try {
+            var msg = JSON.parse('${escapedPayload}');
+            window.postMessage(msg, '*');
+            return 'OK';
+          } catch (e) {
+            return 'ERR';
+          }
+        })();
+      `);
+      posted = String(fallbackResult || '') !== 'ERR';
+    }
+    console.log(
+      '[DIAG][REVEAL_LOCK]',
+      'action=sync_mw_reveal_request',
+      'sovereignId=' + resolvedSovereignId,
+      'reason=' + (reason || 'host_reveal_sync'),
+      'posted=' + posted,
+    );
+    return posted;
+  }, [isNative, webViewState.isOpen, postMessageToWebView, executeScript]);
+
+  useEffect(() => {
+    syncShortsRevealRequestToWebViewRef.current = (sovereignId: string, reason: string) => {
+      void syncShortsRevealRequestToWebView(sovereignId, reason);
+    };
+  }, [syncShortsRevealRequestToWebView]);
 
   const scheduleShortsMatchingRetryScan = useCallback((
     requestId: string,
@@ -3294,6 +3554,81 @@ export const NativeWebViewBrowser = () => {
     const overlayLiftHandshakeMs = activeUrlFamily === 'youtube_shorts'
       ? 0
       : OVERLAY_LIFT_HANDSHAKE_MS;
+    if (activeUrlFamily === 'youtube_shorts') {
+      const activeSovereignId = getSovereignIdForContext(activeUrl);
+      const pendingShorts = shortsOverlayPendingRef.current;
+      if (
+        pendingShorts &&
+        pendingShorts.sovereignId === activeSovereignId &&
+        pendingShorts.hasModerationResult &&
+        pendingShorts.result
+      ) {
+        const now = Date.now();
+        const syncState = shortsRevealUiSyncStateRef.current;
+        const resultChanged = (
+          syncState.sovereignId !== pendingShorts.sovereignId ||
+          syncState.result !== pendingShorts.result
+        );
+        const blurReensureDue = (
+          pendingShorts.result === 'BLUR' &&
+          (now - syncState.at) >= 1200
+        );
+        if (resultChanged || blurReensureDue) {
+          shortsRevealUiSyncStateRef.current = {
+            sovereignId: pendingShorts.sovereignId,
+            result: pendingShorts.result,
+            at: now,
+          };
+          const pendingVideoId = parseSovereignId(pendingShorts.sovereignId).videoId;
+          if (pendingShorts.result === 'BLUR') {
+            const blurLayoutKey = pendingShorts.sovereignId + '|' + pendingShorts.startedAt + '|BLUR';
+            if (blurLayoutKickRef.current.key !== blurLayoutKey) {
+              blurLayoutKickRef.current = {
+                key: blurLayoutKey,
+                at: now,
+              };
+              setBlurSyncVersion(v => v + 1);
+              void executeScript(`
+                (function() {
+                  try {
+                    var host = document.getElementById('mw-reveal-top-layer') || document.getElementById('mw-reveal-portal');
+                    if (!host) return 'NO_LAYER';
+                    host.style.setProperty('will-change', 'transform', 'important');
+                    host.style.setProperty('transform', 'translateZ(0)', 'important');
+                    void host.offsetHeight;
+                    host.style.removeProperty('transform');
+                    host.style.removeProperty('will-change');
+                    return 'OK';
+                  } catch (e) {
+                    return 'ERR';
+                  }
+                })();
+              `).catch(() => undefined);
+              console.log(
+                '[DIAG][SHORTS_ATOMIC]',
+                'action=blur_layout_kick',
+                'reason=flush_blur_result',
+                'sovereignId=' + pendingShorts.sovereignId,
+                'startedAt=' + pendingShorts.startedAt,
+              );
+            }
+            void ensureShortsRevealUi(
+              'shorts_atomic_result_blur',
+              'result_' + pendingShorts.startedAt.toString(36),
+              pendingShorts.sovereignId,
+              pendingVideoId || 'none',
+              0,
+            );
+          } else {
+            void hideShortsRevealUi(
+              'shorts_atomic_result_clear',
+              pendingShorts.sovereignId,
+              pendingVideoId || 'none',
+            );
+          }
+        }
+      }
+    }
     const holdShortsOverlaySync = shouldHoldShortsOverlaySync();
     if (holdShortsOverlaySync && pending.enabled) {
       const pendingShorts = shortsOverlayPendingRef.current;
@@ -3489,6 +3824,7 @@ export const NativeWebViewBrowser = () => {
     flushPendingForceRevealEnforcementSignal,
     getSovereignIdForContext,
     ensureShortsRevealUi,
+    hideShortsRevealUi,
   ]);
 
   const syncOverlayState = useCallback(async (reason: string) => {
@@ -3632,7 +3968,6 @@ export const NativeWebViewBrowser = () => {
       clearBlurReadySettleWindowState('unmount_cleanup');
       clearBlurReadyNavMatchState('unmount_cleanup');
       resetOverlayLiftHandshakeState('unmount_cleanup');
-      releaseShortsScanStateLock('unmount_cleanup');
     };
   }, [
     clearLoadEndInjectTimer,
@@ -3643,7 +3978,6 @@ export const NativeWebViewBrowser = () => {
     clearBlurReadySettleWindowState,
     clearBlurReadyNavMatchState,
     resetOverlayLiftHandshakeState,
-    releaseShortsScanStateLock,
   ]);
 
   // ==================== MODERATION MESSAGE HANDLING ====================
@@ -3822,7 +4156,6 @@ export const NativeWebViewBrowser = () => {
       }
 
       pendingRequestsRef.current.delete(requestId);
-      releaseShortsScanStateLock('moderation_epoch_stale', requestId);
       disarmFlashShield('moderation_epoch_stale', 'disarm stale epoch');
       return;
     }
@@ -3845,7 +4178,6 @@ export const NativeWebViewBrowser = () => {
           'url=' + (activeUrl || 'unknown'),
         );
         pendingRequestsRef.current.delete(requestId);
-        releaseShortsScanStateLock('moderation_sovereign_nav_stale', requestId);
         disarmFlashShield('moderation_sovereign_nav_stale', 'disarm stale nav mismatch');
         return;
       }
@@ -3880,7 +4212,6 @@ export const NativeWebViewBrowser = () => {
         // Fail-open by design for stale requests.
       }
       pendingRequestsRef.current.delete(requestId);
-      releaseShortsScanStateLock('moderation_sovereign_stale', requestId);
       disarmFlashShield('moderation_sovereign_stale', 'disarm stale sovereign');
       return;
     }
@@ -4467,6 +4798,10 @@ export const NativeWebViewBrowser = () => {
         decisionReason,
         softSensitivityHits.length,
       );
+      const released = releaseShortsScanStateLock('mark_moderation_result', requestId);
+      if (released) {
+        queueCurrentBlurState('shorts_scan_state_lock_mark_moderation_result_release');
+      }
     }
 
     // No host-level fullscreen blur/hysteresis in Shorts atomic mode.
@@ -4529,11 +4864,8 @@ export const NativeWebViewBrowser = () => {
     } catch (error) {
       console.log('[MW-Host] Failed to post results via postMessage:', error);
     }
-    
+
     pendingRequestsRef.current.delete(requestId);
-    if (stickyShortsMode) {
-      releaseShortsScanStateLock('moderation_results', requestId);
-    }
     disarmFlashShield('moderation_results', 'disarm after results');
   }, [
     armShortsScanStateLock,
@@ -4566,6 +4898,7 @@ export const NativeWebViewBrowser = () => {
     setFlashGuardState,
     flashLog,
     isGraceEpochAcceptedForActiveShortsVideo,
+    queueCurrentBlurState,
     releaseShortsScanStateLock,
   ]);
 
