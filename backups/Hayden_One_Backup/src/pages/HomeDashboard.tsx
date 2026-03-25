@@ -1,0 +1,63 @@
+import { useCallback, useState } from 'react';
+import { Coffee } from 'lucide-react';
+import { useUtilityPass } from '@/hooks/useUtilityPass';
+import { UtilityPassModal } from '@/components/utility-pass';
+import { DEFAULT_USER_PROGRESS } from '@/models/UserProgress';
+import { UtilityPassReason, UtilityPassDuration } from '@/logic/utilityPass';
+
+const HomeDashboard = () => {
+  const { isActive, remainingFormatted, startPass, endPassEarly } = useUtilityPass();
+  const [showUtilityPassModal, setShowUtilityPassModal] = useState(false);
+
+  const handleUtilityPassComplete = useCallback((reason: UtilityPassReason, duration: UtilityPassDuration, gateLevel: number) => {
+    startPass(reason, duration, gateLevel);
+    setShowUtilityPassModal(false);
+  }, [startPass]);
+
+  return (
+    <div className="min-h-screen pb-24 warroom-bg relative overflow-hidden flex items-center justify-center">
+      <main className="relative z-10 w-full max-w-md px-5">
+        <header className="text-center mb-8">
+          <h1 className="font-display text-3xl tracking-wider text-gold">Bloom Guard</h1>
+          <p className="mt-2 text-silver">Welcome back!</p>
+          {isActive && (
+            <p className="mt-2 text-xs text-silver/70">
+              Break active: {remainingFormatted}
+              <button
+                onClick={endPassEarly}
+                className="ml-2 underline text-silver hover:text-foreground"
+              >
+                End early
+              </button>
+            </p>
+          )}
+        </header>
+
+        <button
+          onClick={() => setShowUtilityPassModal(true)}
+          disabled={isActive}
+          className={`w-full py-4 px-4 rounded-xl border transition-all duration-200 flex items-center justify-center gap-3 ${
+            isActive
+              ? 'border-silver/20 bg-cathedral-deep/30 text-silver/50 cursor-not-allowed'
+              : 'border-silver/30 bg-cathedral-deep/50 text-silver hover:border-techBlue/50 hover:text-techBlue'
+          }`}
+        >
+          <Coffee className="w-4 h-4" />
+          <span className="font-display text-sm tracking-wider">
+            {isActive ? 'Break in progress...' : 'Need a break?'}
+          </span>
+        </button>
+      </main>
+
+      <UtilityPassModal
+        isOpen={showUtilityPassModal}
+        onClose={() => setShowUtilityPassModal(false)}
+        onComplete={handleUtilityPassComplete}
+        onResisted={undefined}
+        progress={DEFAULT_USER_PROGRESS}
+      />
+    </div>
+  );
+};
+
+export default HomeDashboard;

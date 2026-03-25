@@ -1,0 +1,603 @@
+@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Peace Eyes: Charcoal + Cloud + Sage */
+    --background: 225 7% 11%;
+    --foreground: 0 0% 88%;
+
+    --card: 225 7% 13%;
+    --card-foreground: 0 0% 88%;
+
+    --popover: 225 7% 12%;
+    --popover-foreground: 0 0% 88%;
+
+    --primary: 130 14% 52%;
+    --primary-foreground: 225 7% 11%;
+
+    --secondary: 225 7% 16%;
+    --secondary-foreground: 0 0% 88%;
+
+    --muted: 225 6% 19%;
+    --muted-foreground: 0 0% 70%;
+
+    --accent: 130 14% 52%;
+    --accent-foreground: 225 7% 11%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 225 7% 24%;
+    --input: 225 7% 16%;
+    --ring: 130 14% 52%;
+
+    --radius: 0.375rem;
+
+    /* Charcoal Foundation */
+    --cathedral-deep: 225 7% 12%;
+    --cathedral-midnight: 225 7% 11%;
+    --cathedral-steel: 225 6% 26%;
+    --cathedral-stone: 225 5% 16%;
+    
+    /* Sage Accent Family */
+    --tech-blue: 130 14% 52%;
+    --tech-blue-dim: 130 12% 40%;
+    --tech-blue-bright: 130 18% 62%;
+    
+    /* Primary Action (Sage) */
+    --gold: 130 14% 52%;
+    --gold-dim: 130 12% 42%;
+    --gold-bright: 130 18% 60%;
+    
+    /* Active/Success States (Sage) */
+    --aqua-glow: 130 14% 52%;
+    --aqua-dim: 130 12% 40%;
+    --aqua-bright: 130 18% 60%;
+    
+    /* Cloud Gray */
+    --silver: 0 0% 88%;
+    --silver-dim: 0 0% 68%;
+    --silver-bright: 0 0% 94%;
+
+    /* Flame Orange for Strength */
+    --flame: 25 100% 55%;
+    --flame-dim: 25 80% 45%;
+    
+    /* Calm charcoal gradients */
+    --gradient-cathedral: linear-gradient(180deg, hsl(225 7% 14%) 0%, hsl(225 7% 11%) 50%, hsl(225 7% 9%) 100%);
+    --gradient-marble: radial-gradient(ellipse at 30% 20%, hsl(225 7% 16%) 0%, hsl(225 7% 11%) 50%, hsl(225 7% 9%) 100%);
+    --gradient-gold: linear-gradient(135deg, hsl(130 18% 60%) 0%, hsl(130 12% 42%) 100%);
+    --gradient-gold-shine: linear-gradient(135deg, hsl(130 22% 66%) 0%, hsl(130 14% 52%) 50%, hsl(130 12% 42%) 100%);
+    --gradient-silver: linear-gradient(135deg, hsl(0 0% 92%) 0%, hsl(0 0% 70%) 100%);
+    --gradient-tech: linear-gradient(180deg, hsl(130 14% 52% / 0.14) 0%, transparent 100%);
+    
+    /* Soft charcoal shadows */
+    --shadow-glow: 0 0 30px hsl(130 14% 52% / 0.26);
+    --shadow-card: 0 4px 30px hsl(225 10% 4% / 0.8);
+    --shadow-gold: 0 0 25px hsl(130 14% 52% / 0.34);
+    --shadow-silver: inset 0 1px 0 hsl(0 0% 92% / 0.09), 0 4px 20px hsl(225 10% 4% / 0.6);
+    --shadow-inner: inset 0 2px 8px hsl(225 10% 4% / 0.5);
+  }
+
+  .dark {
+    --background: 225 7% 11%;
+    --foreground: 0 0% 88%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-family: 'Inter', sans-serif;
+    background: linear-gradient(180deg, #1a1b1e 0%, #1d1f23 50%, #1a1b1e 100%);
+    background-attachment: fixed;
+    font-size: 18px;
+  }
+
+  button,
+  [role='button'] {
+    font-size: 20px;
+  }
+
+  .mw-large-text body,
+  body.mw-large-text {
+    font-size: 24px;
+  }
+
+  .mw-large-text button,
+  .mw-large-text [role='button'],
+  body.mw-large-text button,
+  body.mw-large-text [role='button'] {
+    font-size: 24px;
+  }
+
+  .mw-large-text .mw-break-button,
+  .mw-large-text .mw-controls-button,
+  body.mw-large-text .mw-break-button,
+  body.mw-large-text .mw-controls-button {
+    font-size: 32px;
+    line-height: 1.1;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: 'Cinzel', serif;
+    @apply font-semibold tracking-wide;
+  }
+}
+
+@layer components {
+  /* Cathedral Card - Main container style */
+  .cathedral-card {
+    @apply relative rounded-lg p-4;
+    background: linear-gradient(145deg, hsl(220 45% 10%) 0%, hsl(220 50% 7%) 100%);
+    border: 1px solid hsl(45 60% 40% / 0.3);
+    box-shadow: 
+      inset 0 1px 0 hsl(45 60% 50% / 0.1),
+      inset 0 -1px 0 hsl(220 50% 3% / 0.5),
+      0 4px 20px hsl(220 100% 3% / 0.6);
+  }
+
+  .cathedral-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, hsl(45 60% 50% / 0.3), transparent);
+  }
+
+  /* Silver Tablet - Secondary container */
+  .silver-tablet {
+    @apply relative rounded-lg p-4;
+    background: linear-gradient(145deg, hsl(220 20% 18%) 0%, hsl(220 25% 12%) 100%);
+    border: 1px solid hsl(220 15% 40% / 0.3);
+    box-shadow: 
+      inset 0 1px 0 hsl(220 10% 50% / 0.15),
+      inset 0 -1px 0 hsl(220 20% 8% / 0.3),
+      0 4px 20px hsl(220 100% 3% / 0.5);
+  }
+
+  /* Gold Border Frame */
+  .gold-frame {
+    border: 1px solid hsl(45 60% 45% / 0.4);
+    box-shadow: 
+      inset 0 0 0 1px hsl(45 60% 50% / 0.1),
+      0 0 15px hsl(45 100% 50% / 0.15);
+  }
+
+  /* Tech Glow Effect */
+  .tech-glow {
+    position: relative;
+  }
+
+  .tech-glow::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(180deg, hsl(200 100% 50% / 0.05) 0%, transparent 50%);
+    pointer-events: none;
+  }
+
+  /* Primary Gold Button */
+  .gold-button {
+    @apply relative px-6 py-3 font-display text-sm tracking-wider;
+    background: linear-gradient(135deg, hsl(45 100% 55%) 0%, hsl(45 80% 42%) 100%);
+    color: hsl(220 60% 8%);
+    border: 1px solid hsl(45 80% 60% / 0.5);
+    box-shadow: 
+      0 0 20px hsl(45 100% 50% / 0.3),
+      inset 0 1px 0 hsl(45 100% 70% / 0.3);
+    transition: all 0.2s ease;
+  }
+
+  .gold-button:hover {
+    box-shadow: 
+      0 0 30px hsl(45 100% 50% / 0.5),
+      inset 0 1px 0 hsl(45 100% 70% / 0.4);
+    transform: translateY(-1px);
+  }
+
+  .gold-button:active {
+    transform: translateY(0);
+    box-shadow: 
+      0 0 15px hsl(45 100% 50% / 0.3),
+      inset 0 2px 4px hsl(45 60% 30% / 0.3);
+  }
+
+  /* Secondary Silver Button */
+  .silver-button {
+    @apply px-5 py-2.5 font-display text-xs tracking-wider;
+    background: linear-gradient(135deg, hsl(220 15% 22%) 0%, hsl(220 20% 16%) 100%);
+    color: hsl(220 10% 70%);
+    border: 1px solid hsl(220 15% 35% / 0.5);
+    transition: all 0.2s ease;
+  }
+
+  .silver-button:hover {
+    background: linear-gradient(135deg, hsl(220 15% 26%) 0%, hsl(220 20% 20%) 100%);
+    border-color: hsl(220 15% 45% / 0.6);
+    color: hsl(220 10% 85%);
+  }
+
+  /* War Room Background */
+  .warroom-bg {
+    background: var(--gradient-marble);
+    position: relative;
+  }
+
+  .warroom-bg::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: 
+      radial-gradient(ellipse 80% 40% at 50% 0%, hsl(45 100% 50% / 0.03) 0%, transparent 50%),
+      radial-gradient(circle at 20% 80%, hsl(220 60% 15% / 0.3) 0%, transparent 40%),
+      radial-gradient(circle at 80% 20%, hsl(220 50% 12% / 0.4) 0%, transparent 35%);
+    pointer-events: none;
+  }
+
+  /* Golden Light Beam */
+  .golden-beam {
+    position: absolute;
+    top: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 2px;
+    height: 100px;
+    background: linear-gradient(180deg, hsl(45 100% 60%) 0%, hsl(45 100% 50% / 0.5) 50%, transparent 100%);
+    box-shadow: 0 0 30px 10px hsl(45 100% 50% / 0.3);
+  }
+
+  /* Stat Colors */
+  .text-gold {
+    color: hsl(45 100% 50%);
+  }
+
+  .text-silver {
+    color: hsl(220 10% 65%);
+  }
+
+  .text-aqua {
+    color: hsl(180 100% 50%);
+  }
+
+  .text-tech-blue {
+    color: hsl(200 100% 55%);
+  }
+
+  .text-flame {
+    color: hsl(25 100% 55%);
+  }
+
+  .bg-gold {
+    background: linear-gradient(135deg, hsl(45 100% 55%) 0%, hsl(45 80% 45%) 100%);
+  }
+
+  .border-gold {
+    border-color: hsl(45 60% 45% / 0.5);
+  }
+
+  .border-silver {
+    border-color: hsl(220 15% 40% / 0.4);
+  }
+
+  /* Progress Bar Styles */
+  .progress-track {
+    @apply relative h-2 rounded-full overflow-hidden;
+    background: hsl(220 40% 12%);
+    border: 1px solid hsl(220 20% 20%);
+  }
+
+  .progress-fill-gold {
+    @apply h-full rounded-full;
+    background: linear-gradient(90deg, hsl(45 80% 45%) 0%, hsl(45 100% 55%) 100%);
+    box-shadow: 0 0 10px hsl(45 100% 50% / 0.5);
+  }
+
+  .progress-fill-blue {
+    @apply h-full rounded-full;
+    background: linear-gradient(90deg, hsl(200 60% 40%) 0%, hsl(200 100% 55%) 100%);
+    box-shadow: 0 0 10px hsl(200 100% 50% / 0.4);
+  }
+
+  /* ==================== RANK THEME CARDS ==================== */
+  
+  /* Stone Theme - Grayscale, minimal */
+  .theme-stone-card {
+    @apply relative rounded-lg;
+    background: linear-gradient(145deg, hsl(220 15% 14%) 0%, hsl(220 20% 10%) 100%);
+    border: 1px solid hsl(220 10% 25% / 0.3);
+  }
+  
+  .theme-stone-button {
+    @apply px-5 py-3 font-display text-sm;
+    background: linear-gradient(135deg, hsl(220 10% 25%) 0%, hsl(220 15% 18%) 100%);
+    color: hsl(220 10% 70%);
+    border: 1px solid hsl(220 10% 35% / 0.4);
+  }
+  
+  .theme-stone-progress {
+    @apply h-full rounded-full;
+    background: linear-gradient(90deg, hsl(220 10% 40%) 0%, hsl(220 10% 55%) 100%);
+  }
+  
+  .theme-stone-badge {
+    @apply inline-flex items-center px-2 py-0.5 text-xs rounded-full;
+    background: hsl(220 10% 20%);
+    color: hsl(220 10% 65%);
+    border: 1px solid hsl(220 10% 30%);
+  }
+  
+  /* Bronze Theme - Subtle warm accent */
+  .theme-bronze-card {
+    @apply relative rounded-lg;
+    background: linear-gradient(145deg, hsl(220 40% 12%) 0%, hsl(220 45% 8%) 100%);
+    border: 1px solid hsl(30 50% 35% / 0.3);
+  }
+  
+  .theme-bronze-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, hsl(30 60% 45% / 0.2), transparent);
+  }
+  
+  .theme-bronze-button {
+    @apply px-5 py-3 font-display text-sm;
+    background: linear-gradient(135deg, hsl(30 50% 35%) 0%, hsl(30 45% 28%) 100%);
+    color: hsl(30 20% 90%);
+    border: 1px solid hsl(30 50% 45% / 0.4);
+    box-shadow: 0 0 10px hsl(30 60% 40% / 0.15);
+  }
+  
+  .theme-bronze-progress {
+    @apply h-full rounded-full;
+    background: linear-gradient(90deg, hsl(30 45% 35%) 0%, hsl(30 55% 50%) 100%);
+    box-shadow: 0 0 8px hsl(30 60% 45% / 0.3);
+  }
+  
+  .theme-bronze-badge {
+    @apply inline-flex items-center px-2.5 py-0.5 text-xs rounded-full;
+    background: hsl(30 40% 25%);
+    color: hsl(30 50% 70%);
+    border: 1px solid hsl(30 50% 40% / 0.4);
+  }
+  
+  /* Iron Theme - Strong visuals, glow on progress */
+  .theme-iron-card {
+    @apply relative rounded-lg;
+    background: linear-gradient(145deg, hsl(220 45% 12%) 0%, hsl(220 50% 8%) 100%);
+    border: 1px solid hsl(200 40% 40% / 0.3);
+  }
+  
+  .theme-iron-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, hsl(200 80% 55% / 0.3), transparent);
+  }
+  
+  .theme-iron-button {
+    @apply px-5 py-3 font-display text-sm;
+    background: linear-gradient(135deg, hsl(200 50% 40%) 0%, hsl(200 45% 30%) 100%);
+    color: hsl(200 20% 95%);
+    border: 1px solid hsl(200 60% 50% / 0.4);
+    box-shadow: 0 0 15px hsl(200 100% 50% / 0.25);
+  }
+  
+  .theme-iron-progress {
+    @apply h-full rounded-full;
+    background: linear-gradient(90deg, hsl(200 50% 40%) 0%, hsl(200 100% 55%) 100%);
+    box-shadow: 0 0 12px hsl(200 100% 50% / 0.4);
+  }
+  
+  .theme-iron-badge {
+    @apply inline-flex items-center px-2.5 py-0.5 text-xs rounded-full;
+    background: hsl(200 40% 25%);
+    color: hsl(200 60% 70%);
+    border: 1px solid hsl(200 50% 45% / 0.4);
+  }
+  
+  /* Gold Theme - Premium cathedral-tech */
+  .theme-gold-card {
+    @apply relative rounded-lg;
+    background: linear-gradient(145deg, hsl(220 45% 11%) 0%, hsl(220 50% 7%) 100%);
+    border: 1px solid hsl(45 60% 40% / 0.35);
+    box-shadow: 
+      inset 0 1px 0 hsl(45 60% 50% / 0.1),
+      0 0 20px hsl(45 100% 50% / 0.1);
+  }
+  
+  .theme-gold-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, hsl(45 80% 55% / 0.4), transparent);
+  }
+  
+  .theme-gold-button {
+    @apply px-6 py-3 font-display text-sm tracking-wider;
+    background: linear-gradient(135deg, hsl(45 100% 55%) 0%, hsl(45 80% 42%) 100%);
+    color: hsl(220 60% 8%);
+    border: 1px solid hsl(45 80% 60% / 0.5);
+    box-shadow: 
+      0 0 20px hsl(45 100% 50% / 0.3),
+      inset 0 1px 0 hsl(45 100% 70% / 0.3);
+  }
+  
+  .theme-gold-progress {
+    @apply h-full rounded-full;
+    background: linear-gradient(90deg, hsl(45 80% 45%) 0%, hsl(45 100% 55%) 100%);
+    box-shadow: 0 0 15px hsl(45 100% 50% / 0.5);
+  }
+  
+  .theme-gold-badge {
+    @apply inline-flex items-center px-2.5 py-0.5 text-xs font-medium rounded-full;
+    background: hsl(45 70% 25%);
+    color: hsl(45 100% 70%);
+    border: 1px solid hsl(45 80% 50% / 0.4);
+    box-shadow: 0 0 8px hsl(45 100% 50% / 0.2);
+  }
+  
+  /* Champ Theme - Highest polish, emblem worthy */
+  .theme-champ-card {
+    @apply relative rounded-xl;
+    background: linear-gradient(145deg, hsl(220 50% 12%) 0%, hsl(220 55% 6%) 100%);
+    border: 1px solid hsl(45 80% 50% / 0.4);
+    box-shadow: 
+      inset 0 1px 0 hsl(45 100% 60% / 0.15),
+      0 0 30px hsl(45 100% 50% / 0.15),
+      0 8px 32px hsl(220 100% 3% / 0.6);
+  }
+  
+  .theme-champ-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, transparent 10%, hsl(45 100% 60% / 0.6), transparent 90%);
+  }
+  
+  .theme-champ-card::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(ellipse 60% 30% at 50% 0%, hsl(45 100% 60% / 0.08) 0%, transparent 70%);
+    pointer-events: none;
+    border-radius: inherit;
+  }
+  
+  .theme-champ-button {
+    @apply px-6 py-3.5 font-display text-sm tracking-widest;
+    background: linear-gradient(135deg, hsl(45 100% 60%) 0%, hsl(45 100% 48%) 100%);
+    color: hsl(220 60% 6%);
+    border: 1px solid hsl(45 100% 65% / 0.6);
+    box-shadow: 
+      0 0 30px hsl(45 100% 50% / 0.4),
+      inset 0 1px 0 hsl(45 100% 80% / 0.4),
+      0 4px 15px hsl(45 100% 40% / 0.3);
+  }
+  
+  .theme-champ-progress {
+    @apply h-full rounded-full;
+    background: linear-gradient(90deg, hsl(45 90% 50%) 0%, hsl(45 100% 60%) 50%, hsl(45 100% 55%) 100%);
+    box-shadow: 
+      0 0 20px hsl(45 100% 50% / 0.6),
+      inset 0 1px 0 hsl(45 100% 80% / 0.3);
+  }
+  
+  .theme-champ-badge {
+    @apply inline-flex items-center px-3 py-1 text-xs font-medium rounded-full;
+    background: linear-gradient(135deg, hsl(45 80% 30%) 0%, hsl(45 60% 22%) 100%);
+    color: hsl(45 100% 75%);
+    border: 1px solid hsl(45 100% 55% / 0.5);
+    box-shadow: 0 0 12px hsl(45 100% 50% / 0.3);
+  }
+
+  /* Bronze accent color class */
+  .text-accent-bronze {
+    color: hsl(30 55% 55%);
+  }
+}
+
+@layer utilities {
+  /* Animations */
+  .animate-pulse-gold {
+    animation: pulse-gold 3s ease-in-out infinite;
+  }
+
+  @keyframes pulse-gold {
+    0%, 100% {
+      box-shadow: 0 0 20px hsl(45 100% 50% / 0.3);
+    }
+    50% {
+      box-shadow: 0 0 40px hsl(45 100% 50% / 0.5);
+    }
+  }
+
+  .animate-shimmer {
+    animation: shimmer 4s ease-in-out infinite;
+  }
+
+  @keyframes shimmer {
+    0%, 100% {
+      opacity: 0.7;
+    }
+    50% {
+      opacity: 1;
+    }
+  }
+
+  .animate-sway {
+    animation: sway 6s ease-in-out infinite;
+  }
+
+  @keyframes sway {
+    0%, 100% {
+      transform: rotate(-1deg);
+    }
+    50% {
+      transform: rotate(1deg);
+    }
+  }
+
+  .animate-glow-pulse {
+    animation: glow-pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes glow-pulse {
+    0%, 100% {
+      filter: drop-shadow(0 0 8px hsl(45 100% 50% / 0.4));
+    }
+    50% {
+      filter: drop-shadow(0 0 20px hsl(45 100% 50% / 0.7));
+    }
+  }
+
+  /* Reduced motion support */
+  @media (prefers-reduced-motion: reduce) {
+    .animate-pulse-gold,
+    .animate-shimmer,
+    .animate-sway,
+    .animate-glow-pulse {
+      animation: none;
+    }
+  }
+
+  /* Degraded Mode - UI-layer only visual effects */
+  .degraded-mode {
+    filter: grayscale(0.4) brightness(0.95);
+    transition: filter 0.5s ease-in-out;
+  }
+  
+  .degraded-mode img,
+  .degraded-mode video,
+  .degraded-mode .media-content {
+    filter: grayscale(0.6) brightness(0.85);
+  }
+  
+  /* Preserve critical UI elements from degraded mode */
+  .degraded-mode .no-degrade {
+    filter: none;
+  }
+}
