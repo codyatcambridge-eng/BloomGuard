@@ -151,7 +151,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   const pageEpoch = Number.isFinite(config.pageEpoch) ? Number(config.pageEpoch) : Date.now();
   const requestedBlurStrength = Number.isFinite(config.blurStrength) ? config.blurStrength : 0;
   const clampedBlurStrength = Math.min(Math.max(0, requestedBlurStrength), 20);
-  
+
   return `
   (function() {
     'use strict';
@@ -371,10 +371,11 @@ export function generateModerationScript(config: InjectionConfig): string {
   const REVEAL_PORTAL_ID = 'mw-reveal-portal';
   const LAYER_GLOBAL_BLUR_Z = 2147483646;
   const LAYER_REVEAL_PORTAL_Z = 2147483647;
+  const REVEAL_OVERLAY_HIDE_GRACE_MS = 650;
   const DOM_OVERLAY_ENABLED = true;
   const HARD_GLASS_BACKDROP_FILTER = 'blur(20px) brightness(0.8)';
   const HARD_GLASS_BACKGROUND = 'rgba(255, 255, 255, 0.1)';
-  const REVEAL_TRANSITION_CSS = 'filter 0.3s ease-in-out, opacity 0.3s ease-in-out';
+  const REVEAL_TRANSITION_CSS = 'filter 180ms ease, opacity 180ms ease';
   const REVEAL_TRANSITION_MS = 300;
 
   const overlayState = window.__MW_BLUR_STATE__ || {
@@ -1266,6 +1267,26 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!hasRevealPersistence(src, element)) return false;
     const keys = getRevealPersistenceKeys(src, element);
     setElementRevealMarker(element, true, keys[0] || '');
+    return true;
+  }
+
+  function shouldDeferRevealOverlayHideWithGrace(overlay, reason) {
+    if (!overlay || overlay.nodeType !== 1) return false;
+    if (overlay.dataset && overlay.dataset.blurred === 'false') return false;
+    const lastPlacedAt = Number(overlay.__mwLastPlacedAt || 0);
+    if (!Number.isFinite(lastPlacedAt) || lastPlacedAt <= 0) return false;
+    const ageMs = Date.now() - lastPlacedAt;
+    if (ageMs > REVEAL_OVERLAY_HIDE_GRACE_MS) return false;
+    overlay.style.display = 'flex';
+    scheduleShortsRevealOverlayReposition('grace_defer_hide:' + (reason || 'unknown'));
+    if (DIAG_YT_BLUR) {
+      console.log(
+        '[DIAG][REVEAL_POS] grace_defer_hide',
+        'overlayId=' + String((overlay.dataset && overlay.dataset.mwOverlayId) || 'unknown'),
+        'reason=' + (reason || 'unknown'),
+        'ageMs=' + Math.round(ageMs)
+      );
+    }
     return true;
   }
 
@@ -4896,7 +4917,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     for (let i = 0; i < blurredNodes.length; i += 1) {
       const candidate = blurredNodes[i];
       if (!candidate || candidate.nodeType !== 1 || !candidate.isConnected) continue;
-      if (candidate.dataset && candidate.dataset.mwSrc === src) return candidate;
+      const candidateSrc = String((candidate.dataset && candidate.dataset.mwSrc) || '');
+      if (!candidateSrc) continue;
+      if (candidateSrc === src) return candidate;
+      if (normalizedSrc && normalizeUrl(candidateSrc) === normalizedSrc) return candidate;
     }
 
     if (activeContainer && activeContainer.isConnected) {
@@ -4948,6 +4972,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (shouldDeferRevealOverlayHide(overlay, 'missing_anchor:' + (reason || 'unknown'))) {
         return true;
       }
+      if (shouldDeferRevealOverlayHideWithGrace(overlay, 'missing_anchor:' + (reason || 'unknown'))) {
+        return true;
+      }
       overlay.style.display = 'none';
       if (DIAG_YT_BLUR) {
         console.log(
@@ -4969,6 +4996,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (shouldDeferRevealOverlayHide(overlay, 'missing_rect:' + (reason || 'unknown'))) {
         return true;
       }
+      if (shouldDeferRevealOverlayHideWithGrace(overlay, 'missing_rect:' + (reason || 'unknown'))) {
+        return true;
+      }
       overlay.style.display = 'none';
       return false;
     }
@@ -4986,6 +5016,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (shouldDeferRevealOverlayHide(overlay, 'anchor_not_visible:' + (reason || 'unknown'))) {
         return true;
       }
+      if (shouldDeferRevealOverlayHideWithGrace(overlay, 'anchor_not_visible:' + (reason || 'unknown'))) {
+        return true;
+      }
       overlay.style.display = 'none';
       if (DIAG_YT_BLUR) {
         console.log(
@@ -4999,6 +5032,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       return false;
     }
     overlay.style.display = 'flex';
+    overlay.__mwLastPlacedAt = Date.now();
     const centerX = Math.max(24, Math.min(viewportWidth - 24, Math.round(visibleRect.left + (visibleRect.width / 2))));
     const centerY = Math.max(28, Math.min(viewportHeight - 28, Math.round(visibleRect.top + (visibleRect.height / 2))));
     if (badge && badge.nodeType === 1) {
@@ -9154,71 +9188,71 @@ export function generateModerationScript(config: InjectionConfig): string {
     const style = document.createElement('style');
     style.id = 'mw-moderation-styles';
     style.textContent = \`
-      .mw-reveal-overlay {
-        position: absolute !important;
-        inset: 0 !important;
-        display: flex !important;
-        align-items: center !important;
-        justify-content: center !important;
-        background: rgba(255, 255, 255, 0.06) !important;
-        z-index: 9998 !important;
-        pointer-events: auto !important;
-      }
-      .mw-shorts-blur-container {
-        --mw-reveal-button-opacity: 0;
-      }
-      .mw-shorts-blur-container[data-mw-timeout-safe-failure="true"] {
-        z-index: 2147483647 !important;
-      }
-      .mw-shorts-blur-container[data-mw-timeout-safe-failure="true"] .mw-reveal-btn,
-      .mw-shorts-blur-container[data-mw-timeout-safe-failure="true"] .mw-reveal-button {
-        z-index: 2147483647 !important;
-      }
-      .mw-shorts-blur-container[data-blurred="true"] {
-        --mw-reveal-button-opacity: 1;
-        pointer-events: auto !important;
-      }
-      .mw-shorts-blur-container[data-blurred="true"] .mw-reveal-button {
-        display: flex !important;
-      }
-      .mw-shorts-blur-container[data-blurred="false"] .mw-reveal-button {
-        display: none !important;
-      }
-      .mw-shorts-blur-container[data-blurred="false"] {
-        pointer-events: none !important;
-      }
-      .mw-reveal-button {
-        opacity: var(--mw-reveal-button-opacity, 0) !important;
-        transition: opacity 180ms ease, transform 180ms ease !important;
-      }
-      .mw-reveal-btn,
-      .mw-reveal-button {
-        z-index: 9999 !important;
-        pointer-events: auto !important;
-        border-radius: 999px !important;
-        border: 1px solid rgba(255, 255, 255, 0.4) !important;
-        background: rgba(255, 255, 255, 0.2) !important;
-        color: rgba(255, 255, 255, 0.98) !important;
-        font-family: "SF Pro Text", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
-        font-weight: 600 !important;
-        box-shadow: 0 8px 20px rgba(0, 0, 0, 0.24) !important;
-        backdrop-filter: blur(12px) !important;
-        -webkit-backdrop-filter: blur(12px) !important;
-      }
-      [data-mw-moderated="blurred"] {
-        transition: filter 0.3s ease-in-out, opacity 0.3s ease-in-out !important;
-      }
-      .mw-softblur {
-        transition: filter 0.2s ease !important;
-      }
-      .mw-correction-overlay {
-        pointer-events: auto !important;
-      }
-      ytd-thumbnail, ytd-rich-item-renderer, yt-img-shadow, #shorts-player,
-      [class*="DivVideoContainer"], [class*="DivPlayerContainer"], .video-card {
-        position: relative !important;
-      }
-    \`;
+    .mw - reveal - overlay {
+    position: absolute!important;
+    inset: 0!important;
+    display: flex!important;
+    align - items: center!important;
+    justify - content: center!important;
+    background: rgba(255, 255, 255, 0.06)!important;
+    z - index: 9998!important;
+    pointer - events: auto!important;
+  }
+      .mw - shorts - blur - container {
+    --mw - reveal - button - opacity: 0;
+  }
+      .mw - shorts - blur - container[data - mw - timeout - safe - failure="true"] {
+    z - index: 2147483647!important;
+  }
+      .mw - shorts - blur - container[data - mw - timeout - safe - failure="true"] .mw - reveal - btn,
+      .mw - shorts - blur - container[data - mw - timeout - safe - failure="true"] .mw - reveal - button {
+    z - index: 2147483647!important;
+  }
+      .mw - shorts - blur - container[data - blurred="true"] {
+    --mw - reveal - button - opacity: 1;
+    pointer - events: auto!important;
+  }
+      .mw - shorts - blur - container[data - blurred="true"] .mw - reveal - button {
+    display: flex!important;
+  }
+      .mw - shorts - blur - container[data - blurred="false"] .mw - reveal - button {
+    display: none!important;
+  }
+      .mw - shorts - blur - container[data - blurred="false"] {
+    pointer - events: none!important;
+  }
+      .mw - reveal - button {
+    opacity: var(--mw - reveal - button - opacity, 0)!important;
+    transition: opacity 180ms ease, transform 180ms ease!important;
+  }
+      .mw - reveal - btn,
+      .mw - reveal - button {
+    z - index: 9999!important;
+    pointer - events: auto!important;
+    border - radius: 999px!important;
+    border: 1px solid rgba(255, 255, 255, 0.4)!important;
+    background: rgba(255, 255, 255, 0.2)!important;
+    color: rgba(255, 255, 255, 0.98)!important;
+    font - family: "SF Pro Text", "SF Pro Display", -apple - system, BlinkMacSystemFont, "Segoe UI", sans - serif!important;
+    font - weight: 600!important;
+    box - shadow: 0 8px 20px rgba(0, 0, 0, 0.24)!important;
+    backdrop - filter: blur(12px)!important;
+    -webkit - backdrop - filter: blur(12px)!important;
+  }
+  [data - mw - moderated="blurred"] {
+    transition: filter 0.3s ease -in -out, opacity 0.3s ease -in -out!important;
+  }
+      .mw - softblur {
+    transition: filter 0.2s ease!important;
+  }
+      .mw - correction - overlay {
+    pointer - events: auto!important;
+  }
+  ytd - thumbnail, ytd - rich - item - renderer, yt - img - shadow, #shorts - player,
+    [class*= "DivVideoContainer"], [class*= "DivPlayerContainer"], .video - card {
+    position: relative!important;
+  }
+  \`;
     document.head.appendChild(style);
     console.log('[MW] CSS styles injected');
   }
@@ -9228,6 +9262,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     const isActiveHunterReason = normalizedReason.indexOf('active_hunter') === 0;
     const isTimeoutSafeFailureReason = normalizedReason.indexOf('timeout_safe_failure') !== -1;
     try {
+      ensureRevealOverlayPositionListeners();
       if (isShortsModeActive() && !isActiveHunterReason) {
         startShortsRevealWatch(normalizedReason, { force: false });
       }

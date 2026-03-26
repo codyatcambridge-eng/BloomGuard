@@ -528,9 +528,22 @@ open class WKWebViewController: UIViewController, WKScriptMessageHandler {
     public func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         if message.name == "messageHandler" {
             if let messageBody = message.body as? [String: Any] {
-                let messageType = (messageBody["type"] as? String) ?? "unknown"
-                print("[InAppBrowser] messageFromWebview summary type=\(messageType) keys=\(messageBody.keys.count)")
-                self.capBrowserPlugin?.notifyListeners("messageFromWebview", data: messageBody)
+                // Some clients (including Miracle Worker) wrap payloads as { detail: { type: ... } }.
+                // Promote `detail.type` to top-level so the native bridge can classify messages correctly.
+                var payload = messageBody
+                if payload["type"] == nil {
+                    if let detail = payload["detail"] as? [String: Any] {
+                        payload = detail
+                    } else if let detailString = payload["detail"] as? String,
+                              let data = detailString.data(using: .utf8),
+                              let parsed = (try? JSONSerialization.jsonObject(with: data, options: [])) as? [String: Any] {
+                        payload = parsed
+                    }
+                }
+
+                let messageType = (payload["type"] as? String) ?? "unknown"
+                print("[InAppBrowser] messageFromWebview summary type=\(messageType) keys=\(payload.keys.count)")
+                self.capBrowserPlugin?.notifyListeners("messageFromWebview", data: payload)
             } else {
                 print("[InAppBrowser] messageFromWebview non-dictionary payload")
                 self.capBrowserPlugin?.notifyListeners("messageFromWebview", data: ["rawMessage": String(describing: message.body)])

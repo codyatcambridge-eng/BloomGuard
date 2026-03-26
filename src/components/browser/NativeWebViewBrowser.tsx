@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import type { PluginListenerHandle } from '@capacitor/core';
 import LabelListener from '@/components/browser/LabelListener';
 import {
@@ -9,7 +9,7 @@ import {
 } from 'lucide-react';
 import { useNativeWebView } from '@/hooks/useNativeWebView';
 import { useContentProtection } from '@/hooks/useContentProtection';
-import { useLocalSettings } from '@/hooks/useLocalSettings';
+import { useLocalSettings, type BlurDialLevel } from '@/hooks/useLocalSettings';
 import { useDeviceId } from '@/hooks/useDeviceId';
 import { useBrowserNavigation } from '@/hooks/useBrowserNavigation';
 import { useCapacitor } from '@/hooks/useCapacitor';
@@ -339,12 +339,12 @@ export const NativeWebViewBrowser = () => {
   const topLayerLabelRef = useRef('none');
   const [diagTopLayerLabel, setDiagTopLayerLabel] = useState('none');
   const [showDiagLayerBadge, setShowDiagLayerBadge] = useState(false);
-  
+
   const [urlInput, setUrlInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isLoadingReader, setIsLoadingReader] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
-  
+
   // Content states
   const [fallbackUrl, setFallbackUrl] = useState('');
   const [readerContent, setReaderContent] = useState<ReaderContent | null>(null);
@@ -355,16 +355,16 @@ export const NativeWebViewBrowser = () => {
   const [failureError, setFailureError] = useState<string | null>(null);
   const [blockedReason, setBlockedReason] = useState('');
   const [blockedCategory, setBlockedCategory] = useState('');
-  
+
   // Search state
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
-  
+
   // External link warning
   const [externalWarningUrl, setExternalWarningUrl] = useState<string | null>(null);
-  
+
   // Hooks
   const { checkBlockedSite, isChecking } = useContentProtection();
   const {
@@ -534,7 +534,7 @@ export const NativeWebViewBrowser = () => {
   const OVERLAY_LIFT_HANDSHAKE_MS = 50;
   const SHORTS_ATOMIC_TIMEOUT_MS = 2500;
   const SHORTS_MATCHING_RETRY_DELAY_MS = 800;
-  const SHORTS_NAV_GRACE_MS = 0;
+  const SHORTS_NAV_GRACE_MS = 2000;
   const BLUR_READY_SETTLE_WINDOW_MS = 200;
   const isDebugMode = localSettings.debug_mode === true;
   const debugLog = useCallback((...args: unknown[]) => {
@@ -700,11 +700,14 @@ export const NativeWebViewBrowser = () => {
     clearShortsScanStateLockTimer();
     const now = Date.now();
     const timeoutMs = SHORTS_ATOMIC_TIMEOUT_MS;
+    const parsedSovereign = parseSovereignId(sovereignId || '');
+    const parsedNavId = Number(parsedSovereign.navId);
+    const lockNavId = Number.isFinite(parsedNavId) ? parsedNavId : (activeNavIdRef.current || 0);
     shortsScanStateLockRef.current = {
       active: true,
       requestId,
       sovereignId: sovereignId || 'none',
-      navId: activeNavIdRef.current || 0,
+      navId: lockNavId,
       pageEpoch: Number.isFinite(pageEpoch) ? Number(pageEpoch) : 0,
       source: source || 'unknown',
       reason: reason || 'shorts_scan',
@@ -783,12 +786,23 @@ export const NativeWebViewBrowser = () => {
       'videoId=' + lock.videoId,
       'sovereignId=' + sovereignId,
     );
-    pendingForceRevealEnforcementRef.current = {
-      videoId: lock.videoId,
-      sovereignId,
-      reason: reason || lock.reason || 'hard_reveal_lock',
-      requestedAt: Date.now(),
-    };
+    // Avoid re-queuing enforcement repeatedly from noisy JS state callbacks.
+    // If we've sent enforcement very recently for the same sovereign/video, don't queue again.
+    const now = Date.now();
+    const lastSignal = lastForceRevealEnforcementSignalRef.current;
+    const recentlySentSame = (
+      lastSignal.videoId === lock.videoId &&
+      lastSignal.sovereignId === sovereignId &&
+      (now - lastSignal.sentAt) < 1200
+    );
+    if (!recentlySentSame) {
+      pendingForceRevealEnforcementRef.current = {
+        videoId: lock.videoId,
+        sovereignId,
+        reason: reason || lock.reason || 'hard_reveal_lock',
+        requestedAt: now,
+      };
+    }
     console.log(
       '[DIAG][REVEAL_LOCK]',
       'action=queue_force_reveal_enforcement',
@@ -901,9 +915,21 @@ export const NativeWebViewBrowser = () => {
   }, []);
 
   const setCentralBlurState = useCallback((enabled: boolean, reason: string) => {
+    const prev = blurStateRef.current;
     if (!enabled) {
       const lock = shortsScanStateLockRef.current;
       if (lock.active) {
+        // In Shorts atomic mode we often hold a scan-state lock across navigation.
+        // Even while locked, we must allow the host to update the *reason* when the overlay is
+        // already disabled, otherwise `overlayReason` can get stuck as a stale hard-lock reason
+        // across video transitions (drives variable reveal UI).
+        const safeReason = String(reason || '');
+        const allowReasonOnlyUpdate = (
+          prev.enabled === false ||
+          safeReason.startsWith('url_change') ||
+          safeReason.startsWith('settings_reinject') ||
+          safeReason.startsWith('active_instance_change')
+        );
         if (lock.expiresAt > 0 && Date.now() >= lock.expiresAt) {
           const released = releaseShortsScanStateLock('timeout:set_central_blur_disable_guard', lock.requestId || undefined);
           if (released) {
@@ -921,7 +947,9 @@ export const NativeWebViewBrowser = () => {
             'lockSovereignId=' + (lock.sovereignId || 'none'),
             'ageMs=' + ageMs,
           );
-          return;
+          if (!allowReasonOnlyUpdate) {
+            return;
+          }
         }
       }
     }
@@ -934,7 +962,6 @@ export const NativeWebViewBrowser = () => {
       );
       return;
     }
-    const prev = blurStateRef.current;
     if (prev.enabled === enabled && prev.reason === reason) return;
 
     blurStateRef.current = {
@@ -999,6 +1026,13 @@ export const NativeWebViewBrowser = () => {
     const resolvedSovereignId = messageSovereignId !== 'none'
       ? messageSovereignId
       : getSovereignIdForContext(activeUrl, activeNavIdRef.current, webViewPageEpochRef.current);
+
+    // On youtube_shorts_related container pages (e.g. /@user/shorts), the videoId can be "none".
+    // Hard locks keyed to a non-video sovereignId can persist across internal navigation and
+    // create variable overlay / tap-to-reveal behavior. Treat reveal requests as soft in this case.
+    const parsedResolved = parseSovereignId(resolvedSovereignId);
+    const isShortsRelatedContainer = getUrlFamily(activeUrl) === 'youtube_shorts_related' && parsedResolved.videoId === 'none';
+
     const revealLock = setShortsHardRevealLockForSovereign(
       resolvedSovereignId,
       'mw_user_reveal_request:' + source,
@@ -1017,7 +1051,12 @@ export const NativeWebViewBrowser = () => {
       'pageEpoch=' + webViewPageEpochRef.current,
       'lockHydrated=' + hydratedRevealLock,
     );
-    setCentralBlurState(false, hydratedRevealLock ? 'user_reveal_request_hard_lock' : 'user_reveal_request');
+
+    if (isShortsRelatedContainer) {
+      setCentralBlurState(false, 'user_reveal_request');
+    } else {
+      setCentralBlurState(false, hydratedRevealLock ? 'user_reveal_request_hard_lock' : 'user_reveal_request');
+    }
     syncShortsRevealRequestToWebViewRef.current(
       resolvedSovereignId,
       'mw_user_reveal_request:' + source,
@@ -1026,6 +1065,7 @@ export const NativeWebViewBrowser = () => {
   }, [
     getSovereignIdForContext,
     hydrateShortsPendingStateFromHardRevealLock,
+    parseSovereignId,
     setCentralBlurState,
     setShortsHardRevealLockForSovereign,
     unwrapIncomingMessagePayload,
@@ -1180,6 +1220,19 @@ export const NativeWebViewBrowser = () => {
     signalReason: string,
   ) => {
     if (!sovereignId) return;
+    // If JS is reporting state as a direct consequence of host enforcement, treat it as an ACK.
+    // Re-queuing enforcement on these messages creates a Host↔JS feedback loop and message storm,
+    // which makes the Shorts reveal button appear/disappear depending on timing.
+    if (String(signalReason || '').indexOf('force_reveal_enforcement:mutation') !== -1) {
+      console.log(
+        '[DIAG][REVEAL_LOCK]',
+        'action=ack_force_reveal_enforcement_mutation',
+        'sovereignId=' + sovereignId,
+        'jsBlurApplied=' + jsBlurApplied,
+        'jsRevealApplied=' + jsRevealApplied,
+      );
+      return;
+    }
     const activeUrl = currentUrlRef.current || '';
     const activeSovereignId = getSovereignIdForContext(activeUrl);
     if (activeSovereignId && sovereignId !== activeSovereignId) {
@@ -1424,7 +1477,7 @@ export const NativeWebViewBrowser = () => {
       }
     }
   }, []);
-  
+
   // Moderation bridge for AI image scanning
   const moderationBridge = useModerationBridge({
     onSignal: (probs) => {
@@ -1448,7 +1501,7 @@ export const NativeWebViewBrowser = () => {
       }
     },
   });
-  
+
   // Track if moderation script was injected
   const injectionDoneRef = useRef(false);
   const injectionInFlightRef = useRef(false);
@@ -1488,7 +1541,7 @@ export const NativeWebViewBrowser = () => {
       messageFromWebViewHandlerRef.current = null;
     };
   }, []);
-  
+
   const {
     currentView,
     currentUrl,
@@ -1643,7 +1696,7 @@ export const NativeWebViewBrowser = () => {
   // Native WebView handlers
   const handleNavigationRequest = useCallback(async (url: string): Promise<boolean> => {
     const domain = extractDomain(url);
-    
+
     // Check blocklist
     if (localSettings.block_adult_sites) {
       const result = await checkBlockedSite(url, deviceId);
@@ -1661,7 +1714,7 @@ export const NativeWebViewBrowser = () => {
         return false;
       }
     }
-    
+
     // All navigation allowed in native WebView (including social platforms)
     return true;
   }, [localSettings.block_adult_sites, checkBlockedSite, deviceId, navigate, logEvent]);
@@ -2129,7 +2182,7 @@ export const NativeWebViewBrowser = () => {
       setIsLoading(false);
       setFlashGuardState?.(false, 'load_end');
       if (!ENABLE_SIGNAL_PIPELINE) return;
-      
+
       // Inject moderation script after page fully loads
       if (!injectionDoneRef.current) {
         // Small delay to ensure DOM is ready
@@ -2558,7 +2611,7 @@ export const NativeWebViewBrowser = () => {
                 'align-items: center',
                 'justify-content: center',
                 'z-index: ' + TOP_REVEAL_LAYER_Z,
-                'pointer-events: none',
+                'pointer-events: auto',
               ].join(';');
               overlay.style.zIndex = TOP_REVEAL_LAYER_Z;
               overlay.style.pointerEvents = 'none';
@@ -2604,6 +2657,7 @@ export const NativeWebViewBrowser = () => {
     const ensureResultLabel = ensureResult === null || typeof ensureResult === 'undefined'
       ? 'null'
       : String(ensureResult);
+    const ensureResultBool = ensureResultLabel === 'true' || ensureResultLabel === '1';
     console.log(
       '[DIAG][SHORTS_ATOMIC]',
       'action=id_mismatch_reveal_ui',
@@ -2612,7 +2666,7 @@ export const NativeWebViewBrowser = () => {
       'sovereignId=' + sovereignId,
       'videoId=' + videoId,
       'mismatchedCount=' + mismatchedCount,
-      'result=' + String(ensureResult === true),
+      'result=' + String(ensureResultBool),
       'raw=' + ensureResultLabel,
     );
   }, [isNative, webViewState.isOpen, executeScript]);
@@ -3087,15 +3141,15 @@ export const NativeWebViewBrowser = () => {
 
     if (!gate) {
       console.log(
-            '[MW][NativeScan] stop gate=' +
-          JSON.stringify({
-            settingsLoaded,
-            isNative,
-            webViewOpen: webViewState.isOpen,
-            moderationEnabled,
-            shieldActive: effectiveShieldEnabled,
-            blurDialActive: localSettings.blur_dial > 0,
-          }),
+        '[MW][NativeScan] stop gate=' +
+        JSON.stringify({
+          settingsLoaded,
+          isNative,
+          webViewOpen: webViewState.isOpen,
+          moderationEnabled,
+          shieldActive: effectiveShieldEnabled,
+          blurDialActive: localSettings.blur_dial > 0,
+        }),
       );
       riskDecisionListenerRef.current?.remove();
       riskDecisionListenerRef.current = null;
@@ -3108,14 +3162,14 @@ export const NativeWebViewBrowser = () => {
       try {
         console.log(
           '[MW][NativeScan] start gate=' +
-            JSON.stringify({
-              settingsLoaded,
-              isNative,
-              webViewOpen: webViewState.isOpen,
-              moderationEnabled,
-              shieldActive: effectiveShieldEnabled,
-              blurDialActive: localSettings.blur_dial > 0,
-            }),
+          JSON.stringify({
+            settingsLoaded,
+            isNative,
+            webViewOpen: webViewState.isOpen,
+            moderationEnabled,
+            shieldActive: effectiveShieldEnabled,
+            blurDialActive: localSettings.blur_dial > 0,
+          }),
         );
         const startPayload = await startNativeContentFilter({
           preset: 'balanced',
@@ -3139,14 +3193,14 @@ export const NativeWebViewBrowser = () => {
       cancelled = true;
       console.log(
         '[MW][NativeScan] stop gate=' +
-          JSON.stringify({
-            settingsLoaded,
-            isNative,
-            webViewOpen: webViewState.isOpen,
-            moderationEnabled,
-            shieldActive: effectiveShieldEnabled,
-            blurDialActive: localSettings.blur_dial > 0,
-          }),
+        JSON.stringify({
+          settingsLoaded,
+          isNative,
+          webViewOpen: webViewState.isOpen,
+          moderationEnabled,
+          shieldActive: effectiveShieldEnabled,
+          blurDialActive: localSettings.blur_dial > 0,
+        }),
       );
       riskDecisionListenerRef.current?.remove();
       riskDecisionListenerRef.current = null;
@@ -3683,10 +3737,10 @@ export const NativeWebViewBrowser = () => {
         const settleRemainingMs = hasActiveSettleWindow
           ? Math.max(0, settleState.untilMs - now)
           : (
-              navMatchConfirmed
-                ? Math.max(0, BLUR_READY_SETTLE_WINDOW_MS - navMatchAgeMs)
-                : BLUR_READY_SETTLE_WINDOW_MS
-            );
+            navMatchConfirmed
+              ? Math.max(0, BLUR_READY_SETTLE_WINDOW_MS - navMatchAgeMs)
+              : BLUR_READY_SETTLE_WINDOW_MS
+          );
         const settleElapsed = navMatchConfirmed && settleRemainingMs <= 0;
         const holdUntilReady = !navMatchConfirmed || !settleElapsed;
         const timedOutWithoutResult = !!pendingShorts &&
@@ -4038,7 +4092,7 @@ export const NativeWebViewBrowser = () => {
         timeoutId = null;
       }, 8000);
     }
-    
+
     if (pendingRequestsRef.current.has(requestId)) {
       console.log('[MW-Host] Duplicate request ignored:', requestId);
       disarmFlashShield('moderation_duplicate_request', 'disarm duplicate request');
@@ -4084,7 +4138,7 @@ export const NativeWebViewBrowser = () => {
         ? 'request_epoch_mismatch_shorts_strict'
         : stickyShortsRelatedMode
           ? 'request_epoch_mismatch_shorts_related_strict'
-        : 'request_epoch_mismatch_non_youtube';
+          : 'request_epoch_mismatch_non_youtube';
       console.warn(
         '[DIAG][EPOCH_BYPASS]',
         'epoch_bypass_blocked',
@@ -4163,57 +4217,85 @@ export const NativeWebViewBrowser = () => {
       const requestSovereign = parseSovereignId(requestSovereignId);
       const activeSovereign = parseSovereignId(activeSovereignId);
       const navIdChanged = requestSovereign.navId !== activeSovereign.navId;
+      let allowNavChurnAcceptance = false;
       if (navIdChanged) {
+        const requestEpochRaw = Number(requestSovereign.pageEpoch);
+        const activeEpochRaw = Number(activeSovereign.pageEpoch);
+        const epochMatches = (
+          Number.isFinite(requestEpochRaw) &&
+          Number.isFinite(activeEpochRaw) &&
+          requestEpochRaw === activeEpochRaw
+        );
+        const videoMatches = (requestSovereign.videoId || 'none') === (activeSovereign.videoId || 'none');
+        if (videoMatches && epochMatches) {
+          allowNavChurnAcceptance = true;
+          console.log(
+            '[DIAG][SHORTS_ATOMIC]',
+            'action=accept_nav_mismatch_same_video',
+            'requestId=' + requestId,
+            'requestSovereignId=' + requestSovereignId,
+            'activeSovereignId=' + activeSovereignId,
+            'videoId=' + requestSovereign.videoId,
+            'pageEpoch=' + requestSovereign.pageEpoch,
+            'graceMs=' + SHORTS_NAV_GRACE_MS,
+            'url=' + (activeUrl || 'unknown'),
+          );
+        } else {
+          console.warn(
+            '[DIAG][SHORTS_ATOMIC]',
+            'action=hard_kill_stale_request_nav_mismatch',
+            'requestId=' + requestId,
+            'requestSovereignId=' + requestSovereignId,
+            'activeSovereignId=' + activeSovereignId,
+            'requestNavId=' + requestSovereign.navId,
+            'activeNavId=' + activeSovereign.navId,
+            'videoId=' + requestSovereign.videoId,
+            'navId=' + activeNavIdRef.current,
+            'pageEpoch=' + activeEpoch,
+            'url=' + (activeUrl || 'unknown'),
+          );
+          pendingRequestsRef.current.delete(requestId);
+          disarmFlashShield('moderation_sovereign_nav_stale', 'disarm stale nav mismatch');
+          return;
+        }
+      }
+      if (allowNavChurnAcceptance) {
+        // Treat as current Shorts context; allow processing to proceed.
+      } else {
         console.warn(
           '[DIAG][SHORTS_ATOMIC]',
-          'action=hard_kill_stale_request_nav_mismatch',
+          'action=reject_stale_sovereign',
           'requestId=' + requestId,
           'requestSovereignId=' + requestSovereignId,
           'activeSovereignId=' + activeSovereignId,
-          'requestNavId=' + requestSovereign.navId,
-          'activeNavId=' + activeSovereign.navId,
-          'videoId=' + requestSovereign.videoId,
           'navId=' + activeNavIdRef.current,
           'pageEpoch=' + activeEpoch,
           'url=' + (activeUrl || 'unknown'),
         );
+        const staleResults = items.map(item => ({
+          itemId: item.itemId,
+          src: item.src,
+          shouldBlur: false,
+          category: 'safe_sovereign_stale',
+          confidence: 0,
+          severity: 'safe' as ModerationSeverity,
+        }));
+        try {
+          const staleMessage = createResultMessage(
+            requestId,
+            staleResults,
+            nonce,
+            requestEpoch ?? undefined,
+            requestSovereignId,
+          );
+          await postMessageToWebView(staleMessage as unknown as Record<string, unknown>);
+        } catch {
+          // Fail-open by design for stale requests.
+        }
         pendingRequestsRef.current.delete(requestId);
-        disarmFlashShield('moderation_sovereign_nav_stale', 'disarm stale nav mismatch');
+        disarmFlashShield('moderation_sovereign_stale', 'disarm stale sovereign');
         return;
       }
-      console.warn(
-        '[DIAG][SHORTS_ATOMIC]',
-        'action=reject_stale_sovereign',
-        'requestId=' + requestId,
-        'requestSovereignId=' + requestSovereignId,
-        'activeSovereignId=' + activeSovereignId,
-        'navId=' + activeNavIdRef.current,
-        'pageEpoch=' + activeEpoch,
-        'url=' + (activeUrl || 'unknown'),
-      );
-      const staleResults = items.map(item => ({
-        itemId: item.itemId,
-        src: item.src,
-        shouldBlur: false,
-        category: 'safe_sovereign_stale',
-        confidence: 0,
-        severity: 'safe' as ModerationSeverity,
-      }));
-      try {
-        const staleMessage = createResultMessage(
-          requestId,
-          staleResults,
-          nonce,
-          requestEpoch ?? undefined,
-          requestSovereignId,
-        );
-        await postMessageToWebView(staleMessage as unknown as Record<string, unknown>);
-      } catch {
-        // Fail-open by design for stale requests.
-      }
-      pendingRequestsRef.current.delete(requestId);
-      disarmFlashShield('moderation_sovereign_stale', 'disarm stale sovereign');
-      return;
     }
     if (requestEpoch !== null && !requestEpochAccepted && relaxedYouTubeEpochMode) {
       console.log(
@@ -4239,7 +4321,17 @@ export const NativeWebViewBrowser = () => {
       }
     }
     if (stickyShortsMode) {
-      const lockSovereignId = effectiveRequestSovereignId || activeSovereignId;
+      const requestSovereign = parseSovereignId(effectiveRequestSovereignId || '');
+      const activeSovereign = parseSovereignId(activeSovereignId);
+      const shouldPreferActiveSovereign = (
+        requestSovereign.videoId &&
+        activeSovereign.videoId &&
+        requestSovereign.videoId === activeSovereign.videoId &&
+        requestSovereign.pageEpoch === activeSovereign.pageEpoch
+      );
+      const lockSovereignId = shouldPreferActiveSovereign
+        ? activeSovereignId
+        : (effectiveRequestSovereignId || activeSovereignId);
       armShortsScanStateLock(
         requestId,
         lockSovereignId,
@@ -4249,7 +4341,7 @@ export const NativeWebViewBrowser = () => {
         activeUrl,
       );
     }
-    
+
     const startTime = performance.now();
     const scanBatchStartTs = Date.now();
     if (stickyShortsMode) {
@@ -4288,9 +4380,9 @@ export const NativeWebViewBrowser = () => {
     items.forEach(item => {
       console.log('[MW-Host]   -', item.itemId, '[' + item.sourceType + ']:', item.src.substring(0, 60));
     });
-    
+
     console.log('[MW-Host] calling scanBatch', requestId, 'itemCount=' + items.length);
-    
+
     const results: Array<{
       itemId: string;
       src: string;
@@ -4323,7 +4415,7 @@ export const NativeWebViewBrowser = () => {
     const mismatchedThumbnailItemIds: string[] = [];
     const mismatchedThumbnailSourceTypes: string[] = [];
     let ignoredMismatchBySovereignTruthCount = 0;
-    
+
     // Process each item using the moderation bridge
     for (const item of items) {
       if (hardKillStaleRequest('scan_loop_pre_item:' + String(item.itemId || 'none'))) {
@@ -4407,7 +4499,7 @@ export const NativeWebViewBrowser = () => {
         if (hardKillStaleRequest('scan_loop_post_item:' + String(item.itemId || 'none'))) {
           return;
         }
-        
+
         if (scanResult) {
           const categoryConfidence = Object.entries(scanResult.predictions || {}).reduce((matched, [label, value]) => {
             if (matched >= 0) return matched;
@@ -4462,7 +4554,7 @@ export const NativeWebViewBrowser = () => {
     if (hardKillStaleRequest('after_scan_loop')) {
       return;
     }
-    
+
     const elapsedMs = performance.now() - startTime;
     console.log('[MW-Host] scan complete', requestId, 'elapsed=' + elapsedMs.toFixed(0) + 'ms');
     if (stickyShortsMode) {
@@ -4507,33 +4599,33 @@ export const NativeWebViewBrowser = () => {
     const blurMode = localSettings.blur_mode || 'balanced';
     const modePolicy = blurMode === 'strict'
       ? {
-          hardConfFloor: 0.90,
-          hardMultiConfFloor: 0.80,
-          hardMultiMinHits: 2,
-          softConfFloor: 0.65,
-          softRatioFloor: 0.35,
-          softMinHits: 3,
-          allowSoftOverlay: true,
-        }
+        hardConfFloor: 0.90,
+        hardMultiConfFloor: 0.80,
+        hardMultiMinHits: 2,
+        softConfFloor: 0.65,
+        softRatioFloor: 0.35,
+        softMinHits: 3,
+        allowSoftOverlay: true,
+      }
       : blurMode === 'minimal'
         ? {
-            hardConfFloor: 0.95,
-            hardMultiConfFloor: 0.90,
-            hardMultiMinHits: 3,
-            softConfFloor: 0.80,
-            softRatioFloor: 0.75,
-            softMinHits: 6,
-            allowSoftOverlay: false,
-          }
+          hardConfFloor: 0.95,
+          hardMultiConfFloor: 0.90,
+          hardMultiMinHits: 3,
+          softConfFloor: 0.80,
+          softRatioFloor: 0.75,
+          softMinHits: 6,
+          allowSoftOverlay: false,
+        }
         : {
-            hardConfFloor: 0.85,
-            hardMultiConfFloor: 0.78,
-            hardMultiMinHits: 2,
-            softConfFloor: 0.70,
-            softRatioFloor: 0.50,
-            softMinHits: 4,
-            allowSoftOverlay: true,
-          };
+          hardConfFloor: 0.85,
+          hardMultiConfFloor: 0.78,
+          hardMultiMinHits: 2,
+          softConfFloor: 0.70,
+          softRatioFloor: 0.50,
+          softMinHits: 4,
+          allowSoftOverlay: true,
+        };
 
     const hardThresholdBase = typeof localSettings.hard_overlay_confidence_threshold === 'number'
       ? localSettings.hard_overlay_confidence_threshold
@@ -4576,6 +4668,47 @@ export const NativeWebViewBrowser = () => {
     );
     const hasVideoFrameSafeResult = videoFrameSourceResults.some(item => !item.shouldBlur);
     const hasVideoFrameUnsafeResult = videoFrameSourceResults.some(item => item.shouldBlur);
+
+    if (stickyShortsMode && hasVideoFrameUnsafeResult) {
+      const mappedTarget = results.find((entry) => {
+        if (!entry || entry.shouldBlur) return false;
+        if (entry.src && entry.src.startsWith('data:')) return false;
+        if (enforceShortsAtomicVideoMatch && !shortsAtomicEligibleItemIds.has(entry.itemId)) return false;
+        const sourceType = getSourceTypeForResult(entry.itemId);
+        return isThumbnailLikeSourceType(sourceType);
+      });
+      if (mappedTarget) {
+        const videoFrameMaxConf = videoFrameSourceResults
+          .filter(item => item.shouldBlur)
+          .reduce((max, item) => Math.max(max, typeof item.confidence === 'number' ? item.confidence : 0), 0);
+        mappedTarget.shouldBlur = true;
+        mappedTarget.severity = 'hard';
+        mappedTarget.category = 'video_frame_trusted_map';
+        mappedTarget.confidence = Math.max(mappedTarget.confidence || 0, videoFrameMaxConf || 0);
+        mappedTarget.decision_reason = 'video_frame_trusted_map';
+        mappedTarget.ts = Date.now();
+        console.log(
+          '[DIAG][SHORTS_ATOMIC]',
+          'action=video_frame_trusted_map',
+          'requestId=' + requestId,
+          'sovereignId=' + activeSovereignId,
+          'videoId=' + shortsAtomicVideoId,
+          'mappedItemId=' + mappedTarget.itemId,
+          'mappedSourceType=' + getSourceTypeForResult(mappedTarget.itemId),
+          'mappedSrc=' + String(mappedTarget.src || '').substring(0, 160),
+          'videoFrameMaxConf=' + (videoFrameMaxConf || 0).toFixed(3),
+        );
+      } else {
+        console.warn(
+          '[DIAG][SHORTS_ATOMIC]',
+          'action=video_frame_trusted_map_missing_target',
+          'requestId=' + requestId,
+          'sovereignId=' + activeSovereignId,
+          'videoId=' + shortsAtomicVideoId,
+          'eligibleCount=' + overlaySourceResults.length,
+        );
+      }
+    }
     const videoFrameSafeOverrideActive = hasVideoFrameSafeResult && !hasVideoFrameUnsafeResult;
     if (stickyShortsMode && videoFrameSafeOverrideActive) {
       console.log(
@@ -4843,10 +4976,10 @@ export const NativeWebViewBrowser = () => {
     if (hardKillStaleRequest('pre_post_results')) {
       return;
     }
-    
+
     // Post results back to the WebView with nonce for security
     console.log('[MW-Host] posting results back', requestId, 'count=' + results.length, 'nonce=' + nonce.substring(0, 10));
-    
+
     try {
       const resultMessage = createResultMessage(
         requestId,
@@ -5400,15 +5533,15 @@ export const NativeWebViewBrowser = () => {
         const level = Math.max(0, Math.min(4, Math.round(message.level)));
         if (level !== localSettings.blur_dial) {
           console.log('[MW-Host] Received sensitivity update from page:', level, message.reason || 'overlay_toggle');
-          updateSetting('blur_dial', level);
+          updateSetting('blur_dial', level as BlurDialLevel);
         }
         return;
       }
-      
+
       if (typedMessage.type === 'gc-moderation-request' && typedMessage.action === 'scan') {
         console.log('[MW-Host] Received legacy moderation request via postMessage');
         const result = await moderationBridge.handleWebViewMessage(message);
-        
+
         if (result) {
           const rawSrc = String(result.src || '');
           const messageId = 'messageId' in result && typeof result.messageId === 'number' ? result.messageId : 0;
@@ -5661,7 +5794,7 @@ export const NativeWebViewBrowser = () => {
         return false;
       }
       pollInFlight = true;
-      
+
       try {
         if (document.visibilityState !== 'visible') {
           return false;
@@ -5692,7 +5825,7 @@ export const NativeWebViewBrowser = () => {
             });
           })();
         `;
-        
+
         const result = await executeScript(getQueueScript);
         const diagUrl = webViewState.currentUrl || currentUrlRef.current || '';
         const resultTypeLabel = result === undefined ? 'undefined' : typeof result;
@@ -5783,18 +5916,37 @@ export const NativeWebViewBrowser = () => {
           return false;
         }
         lastEmptyPollReason = 'none';
-        
+
         console.log('[MW-Host] Legacy poll: found', items.length, 'items in queue');
-        
+
         // Process each scan request
         for (const item of items) {
           const src = typeof item.src === 'string' ? item.src : '';
-          const thresholds = item.thresholds;
-          
+          const thresholds = (
+            item &&
+            typeof item.thresholds === 'object' &&
+            item.thresholds !== null &&
+            'porn' in (item.thresholds as Record<string, unknown>) &&
+            'sexy' in (item.thresholds as Record<string, unknown>) &&
+            'hentai' in (item.thresholds as Record<string, unknown>)
+          )
+            ? (item.thresholds as { porn: number; sexy: number; hentai: number })
+            : (
+              localSettings.blur_dial >= 4
+                ? { porn: 0.15, sexy: 0.25, hentai: 0.15 }
+                : localSettings.blur_dial === 3
+                  ? { porn: 0.2, sexy: 0.3, hentai: 0.2 }
+                  : localSettings.blur_dial === 2
+                    ? { porn: 0.25, sexy: 0.35, hentai: 0.25 }
+                    : localSettings.blur_dial === 1
+                      ? { porn: 0.3, sexy: 0.45, hentai: 0.3 }
+                      : { porn: 0.3, sexy: 0.45, hentai: 0.3 }
+            );
+
           if (!src) continue;
-          
+
           console.log('[MW-Host] Legacy processing:', src.substring(0, 60));
-          
+
           const scanResult = await moderationBridge.scanImage(src, thresholds, {
             requestId: 'legacy_poll',
             itemId: typeof item.itemId === 'string' ? item.itemId : 'legacy_item',
@@ -5802,10 +5954,10 @@ export const NativeWebViewBrowser = () => {
             pageEpoch: webViewPageEpochRef.current,
             sourceType: typeof item.sourceType === 'string' ? item.sourceType : 'unknown',
           });
-          
+
           if (scanResult) {
             console.log('[MW-Host] Legacy scan result:', scanResult.shouldBlur, scanResult.category);
-            
+
             // Push result back to WebView's results queue
             const escapedSrc = escapeForJs(src);
             const pushResultScript = `
@@ -5821,7 +5973,7 @@ export const NativeWebViewBrowser = () => {
                 return 'OK';
               })();
             `;
-            
+
             try {
               await executeScript(pushResultScript);
               console.log('[MW-Host] Legacy result pushed for:', src.substring(0, 50));
@@ -5984,38 +6136,38 @@ export const NativeWebViewBrowser = () => {
    */
   const isUrlInput = useCallback((input: string): boolean => {
     const trimmed = input.trim().toLowerCase();
-    
+
     // Protocol prefix means it's definitely a URL
     if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
       return true;
     }
-    
+
     // Has spaces without protocol = search query
     if (trimmed.includes(' ')) {
       return false;
     }
-    
+
     // Common TLDs pattern - if it ends with these, it's a URL
     const tldPattern = /\.(com|org|net|edu|gov|io|co|app|dev|me|tv|info|biz|xyz|ai|uk|de|fr|jp|cn|ru|br|in|au|ca|es|it|nl|pl|kr|se|no|fi|dk|ch|at|be|cz|gr|hu|ie|pt|ro|sk|za|nz|sg|hk|tw|my|th|ph|vn|id)(\/.*)?(#.*)?$/i;
     if (tldPattern.test(trimmed)) {
       return true;
     }
-    
+
     // Contains a dot followed by path = likely URL
     if (/\.\w+\//.test(trimmed)) {
       return true;
     }
-    
+
     // IP address pattern
     if (/^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}(:\\d+)?/.test(trimmed)) {
       return true;
     }
-    
+
     // localhost
     if (trimmed.startsWith('localhost')) {
       return true;
     }
-    
+
     // Everything else is a search
     return false;
   }, []);
@@ -6024,21 +6176,21 @@ export const NativeWebViewBrowser = () => {
   const handleSearch = useCallback(async (query: string) => {
     const trimmed = query.trim();
     if (!trimmed) return;
-    
+
     const targetUrl = isUrlInput(trimmed)
       ? (trimmed.startsWith('http') ? trimmed : `https://${trimmed}`)
       : `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`;
     console.log('[DIAG][NAV_REQUEST] source=search target=' + toDiagUrl(targetUrl));
-    
+
     console.log('[Browser] Starting navigation:', targetUrl);
-    
+
     // IMMEDIATELY set view to browse and navigate - fail-open approach
     navigate('browse', targetUrl, targetUrl);
     setUrlInput(targetUrl);
     setIsLoading(true);
-    
+
     await logEvent('search', trimmed, isUrlInput(trimmed) ? 'direct_url' : 'google_redirect');
-    
+
     // Open in native WebView or fallback
     if (isNative) {
       try {
@@ -6063,14 +6215,14 @@ export const NativeWebViewBrowser = () => {
       navigate('fallback', '', targetUrl);
       await logEvent('fallback', targetUrl, 'web-platform');
     }
-    
+
     setIsLoading(false);
   }, [navigate, logEvent, isNative, openWebView, isUrlInput, toDiagUrl]);
 
   // Main navigation handler - immediately navigate to browse view (fail-open)
   const handleNavigate = useCallback(async (targetUrl?: string, e?: React.FormEvent) => {
     e?.preventDefault();
-    
+
     const urlToNavigate = targetUrl || urlInput;
     if (!urlToNavigate.trim()) return;
 
@@ -6149,7 +6301,7 @@ export const NativeWebViewBrowser = () => {
       navigate('fallback', '', normalizedUrl);
       await logEvent('fallback', domain, 'web-platform');
     }
-    
+
     setIsLoading(false);
   }, [urlInput, localSettings.block_adult_sites, checkBlockedSite, deviceId, isNative, openWebView, handleSearch, navigate, logEvent, isUrlInput, toDiagUrl]);
 
@@ -6167,7 +6319,7 @@ export const NativeWebViewBrowser = () => {
     setYoutubeContent(null);
     setSocialContent(null);
     setFailureError(null);
-    
+
     try {
       const { data, error } = await supabase.functions.invoke('proxy-reader', {
         body: { url: fallbackUrl }
@@ -6192,7 +6344,7 @@ export const NativeWebViewBrowser = () => {
       // Handle social platform metadata
       if (data?.isSocialPlatform && data?.data) {
         const platformData = data.data;
-        
+
         if (data.isYouTube || platformData.platform === 'youtube') {
           setYoutubeContent({
             videoId: platformData.videoId || platformData.contentId,
@@ -6206,7 +6358,7 @@ export const NativeWebViewBrowser = () => {
           await logEvent('youtube_preview', domain, `video:${platformData.videoId || platformData.contentId}`);
           return;
         }
-        
+
         setSocialContent({
           platform: platformData.platform as SocialPlatform,
           contentId: platformData.contentId,
@@ -6239,7 +6391,7 @@ export const NativeWebViewBrowser = () => {
       // Handle regular content
       if (data?.success && data?.data) {
         const contentData = data.data;
-        
+
         if (data.readerModeFailed) {
           if (contentData.previewHtml && contentData.previewHtml.length > 100) {
             setReaderContent({
@@ -6254,13 +6406,13 @@ export const NativeWebViewBrowser = () => {
             await logEvent('preview_mode', domain, 'opened');
             return;
           }
-          
+
           setFailureError('No readable content could be extracted from this page.');
           navigate('failure', '', fallbackUrl);
           await logEvent('full_failure', domain, 'no-content');
           return;
         }
-        
+
         if (!contentData.content || contentData.content.trim().length < 50) {
           if (contentData.previewHtml && contentData.previewHtml.length > 100) {
             setReaderContent({
@@ -6275,7 +6427,7 @@ export const NativeWebViewBrowser = () => {
             await logEvent('preview_mode', domain, 'fallback');
             return;
           }
-          
+
           setFailureError('No readable content found on this page.');
           navigate('failure', '', fallbackUrl);
           await logEvent('full_failure', domain, 'short-content');
@@ -6319,7 +6471,7 @@ export const NativeWebViewBrowser = () => {
       navigate('fallback', '', fallbackUrl);
       return;
     }
-    
+
     if (currentView === 'search') {
       goHome();
       setSearchResults([]);
@@ -6336,7 +6488,7 @@ export const NativeWebViewBrowser = () => {
       }
       return;
     }
-    
+
     if (!navGoBack()) {
       goHome();
     }
@@ -6416,9 +6568,9 @@ export const NativeWebViewBrowser = () => {
       setTimeout(() => setIsScanning(false), 500);
       return;
     }
-    
+
     setIsScanning(true);
-    
+
     // Inject a script to re-scan all images
     const rescanScript = `
       if (typeof window.__MW_SCAN_FULL__ === 'function') {
@@ -6431,14 +6583,14 @@ export const NativeWebViewBrowser = () => {
         'Moderation not active';
       }
     `;
-    
+
     try {
       await executeScript(rescanScript);
       console.log('[Browser] Manual scan triggered');
     } catch (error) {
       console.error('[Browser] Manual scan failed:', error);
     }
-    
+
     setTimeout(() => setIsScanning(false), 1500);
   }, [isNative, isRuntimeModerationEnabled, executeScript]);
 
@@ -6481,7 +6633,7 @@ export const NativeWebViewBrowser = () => {
           thumbnailUrl={youtubeContent.thumbnailUrl}
           sourceUrl={youtubeContent.sourceUrl}
           onBack={handleGoBack}
-          onOpenExternal={() => isNative 
+          onOpenExternal={() => isNative
             ? handleOpenInWebView(youtubeContent.sourceUrl)
             : handleOpenExternal(youtubeContent.sourceUrl, 'youtube_external_click')
           }
@@ -6638,7 +6790,7 @@ export const NativeWebViewBrowser = () => {
         modeLabel={getModeLabel()}
         modeColor={getModeColor()}
       />
-      
+
       {/* AI Moderation Status Bar - shown during browse mode */}
       {currentView === 'browse' && isRuntimeModerationEnabled && (
         <AIStatusBar
@@ -6709,7 +6861,7 @@ export const NativeWebViewBrowser = () => {
                   NATIVE WEBVIEW REQUIRED
                 </h2>
                 <p className="text-sm text-muted-foreground mb-6">
-                  Full browser functionality requires the native mobile app. 
+                  Full browser functionality requires the native mobile app.
                   Use Reader Mode to view content on web.
                 </p>
                 <button
