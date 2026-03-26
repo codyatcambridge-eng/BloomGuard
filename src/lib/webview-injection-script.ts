@@ -9261,6 +9261,11 @@ export function generateModerationScript(config: InjectionConfig): string {
     const normalizedReason = String(reason || 'host_force_reveal_ui');
     const isActiveHunterReason = normalizedReason.indexOf('active_hunter') === 0;
     const isTimeoutSafeFailureReason = normalizedReason.indexOf('timeout_safe_failure') !== -1;
+    const forceShortsRevealUi = isShortsModeActive() && (
+      normalizedReason.indexOf('shorts_atomic_result_blur') !== -1 ||
+      normalizedReason.indexOf('shorts_atomic_timeout_safe_failure') !== -1 ||
+      normalizedReason.indexOf('request_timeout_safe_failure') !== -1
+    );
     try {
       ensureRevealOverlayPositionListeners();
       if (isShortsModeActive() && !isActiveHunterReason) {
@@ -9295,7 +9300,7 @@ export function generateModerationScript(config: InjectionConfig): string {
             computedFilter = String((computed && computed.filter) || '').toLowerCase();
             computedBackdrop = String((computed && computed.backdropFilter) || '').toLowerCase();
           } catch (e) {}
-          const targetBlurred = (
+          const targetBlurred = forceShortsRevealUi || (
             immediateTarget.dataset.mwModerated === 'blurred' ||
             immediateTarget.classList.contains('mw-blurred') ||
             inlineFilter.includes('blur(') ||
@@ -9437,8 +9442,15 @@ export function generateModerationScript(config: InjectionConfig): string {
           stopShortsRevealWatch('ensure_success');
         }
         scheduleShortsRevealOverlayReposition('ensure_reveal_ui:' + normalizedReason);
+        if (isShortsModeActive()) {
+          try {
+            setTimeout(() => scheduleShortsRevealOverlayReposition('ensure_reveal_ui_burst_1:' + normalizedReason), 50);
+            setTimeout(() => scheduleShortsRevealOverlayReposition('ensure_reveal_ui_burst_2:' + normalizedReason), 180);
+          } catch (e) {}
+        }
         console.log(
-          '[DIAG][REVEAL_UI] ensure',
+          '[DIAG][REVEAL_UI]',
+          'action=ensured',
           'reason=' + normalizedReason,
           'shown=' + shownCount,
           'created=' + createdCount,

@@ -2644,7 +2644,7 @@ export const NativeWebViewBrowser = () => {
           }
           if (${isTimeoutSafeFailure ? 'true' : 'false'} && typeof window.__MW_APPLY_REVEAL_UI_LOCK__ === 'function') {
             try {
-              window.__MW_APPLY_REVEAL_UI_LOCK__('timeout_safe_failure:${safeReason}', 2000, '${safeVideoId}');
+              window.__MW_APPLY_REVEAL_UI_LOCK__('timeout_safe_failure:${safeReason}', 900, '${safeVideoId}');
             } catch (lockErr) {}
           }
           forceButtonLayer();
@@ -3725,6 +3725,7 @@ export const NativeWebViewBrowser = () => {
         const activeSovereignId = getSovereignIdForContext(activeUrl);
         const activeNavId = activeNavIdRef.current || 0;
         const activeEpoch = webViewPageEpochRef.current || 0;
+        const lastReplaceStateReady = lastShortsReplaceStateReadyRef.current;
         const navMatchState = blurReadyNavMatchRef.current;
         const navMatchConfirmed = (
           navMatchState.at > 0 &&
@@ -3743,11 +3744,24 @@ export const NativeWebViewBrowser = () => {
           );
         const settleElapsed = navMatchConfirmed && settleRemainingMs <= 0;
         const holdUntilReady = !navMatchConfirmed || !settleElapsed;
+
+        const replaceStateAgeMs = (
+          lastReplaceStateReady &&
+          lastReplaceStateReady.sovereignId === activeSovereignId &&
+          lastReplaceStateReady.at > 0
+        ) ? Math.max(0, now - lastReplaceStateReady.at) : -1;
+        const effectiveShortsAtomicTimeoutMs = (
+          replaceStateAgeMs >= 0 && replaceStateAgeMs <= BLUR_READY_REPLACESTATE_SUPPRESS_MS
+        ) ? 4000 : SHORTS_ATOMIC_TIMEOUT_MS;
+
+        const allowTimeoutSafeFailureRevealUi = !!pendingShorts && (
+          pendingShorts.jsBlurApplied || pendingShorts.jsRevealApplied
+        );
         const timedOutWithoutResult = !!pendingShorts &&
           pendingShorts.sovereignId === activeSovereignId &&
           hasEffectiveShortsBlurSignal(pendingShorts) &&
           !pendingShorts.hasModerationResult &&
-          (now - pendingShorts.startedAt) >= SHORTS_ATOMIC_TIMEOUT_MS;
+          (now - pendingShorts.startedAt) >= effectiveShortsAtomicTimeoutMs;
         if (timedOutWithoutResult && !pendingShorts.fallbackRevealEnsured) {
           if (holdUntilReady) {
             pendingShorts.holdUntilReady = true;
@@ -3790,22 +3804,38 @@ export const NativeWebViewBrowser = () => {
             pendingShorts.holdUntilReadyLastLogAt = 0;
             pendingShorts.fallbackRevealEnsured = true;
             const fallbackVideoId = parseSovereignId(pendingShorts.sovereignId).videoId;
-            console.warn(
-              '[DIAG][SHORTS_ATOMIC]',
-              'action=timeout_safe_failure_reveal_ui',
-              'sovereignId=' + pendingShorts.sovereignId,
-              'videoId=' + fallbackVideoId,
-              'elapsedMs=' + (now - pendingShorts.startedAt),
-              'readyAgeMs=' + (navMatchAgeMs >= 0 ? navMatchAgeMs : 'none'),
-              'settleRemainingMs=' + settleRemainingMs,
-            );
-            void ensureShortsRevealUi(
-              'shorts_atomic_timeout_safe_failure',
-              'timeout_' + pendingShorts.startedAt.toString(36),
-              pendingShorts.sovereignId,
-              fallbackVideoId,
-              0,
-            );
+            if (!allowTimeoutSafeFailureRevealUi) {
+              console.warn(
+                '[DIAG][SHORTS_ATOMIC]',
+                'action=timeout_safe_failure_skip_reveal_ui',
+                'sovereignId=' + pendingShorts.sovereignId,
+                'videoId=' + fallbackVideoId,
+                'elapsedMs=' + (now - pendingShorts.startedAt),
+                'readyAgeMs=' + (navMatchAgeMs >= 0 ? navMatchAgeMs : 'none'),
+                'settleRemainingMs=' + settleRemainingMs,
+              );
+            } else {
+              console.warn(
+                '[DIAG][SHORTS_ATOMIC]',
+                'action=timeout_safe_failure_reveal_ui',
+                'sovereignId=' + pendingShorts.sovereignId,
+                'videoId=' + fallbackVideoId,
+                'elapsedMs=' + (now - pendingShorts.startedAt),
+                'readyAgeMs=' + (navMatchAgeMs >= 0 ? navMatchAgeMs : 'none'),
+                'settleRemainingMs=' + settleRemainingMs,
+                'timeoutMs=' + effectiveShortsAtomicTimeoutMs,
+                'replaceStateAgeMs=' + (replaceStateAgeMs >= 0 ? replaceStateAgeMs : 'none'),
+                'jsBlurApplied=' + pendingShorts.jsBlurApplied,
+                'jsRevealApplied=' + pendingShorts.jsRevealApplied,
+              );
+              void ensureShortsRevealUi(
+                'shorts_atomic_timeout_safe_failure',
+                'timeout_' + pendingShorts.startedAt.toString(36),
+                pendingShorts.sovereignId,
+                fallbackVideoId,
+                0,
+              );
+            }
           }
         }
       }
