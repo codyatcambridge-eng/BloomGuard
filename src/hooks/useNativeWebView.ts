@@ -1096,6 +1096,10 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
 
   const postMessageToWebView = useCallback(async (detail: Record<string, unknown>): Promise<boolean> => {
     if (!isNative) return false;
+    if (detail && detail.type === 'MW_JS_REVEAL_STATE') {
+      console.warn('[NativeWebView] blocked echo message type=MW_JS_REVEAL_STATE');
+      return false;
+    }
     try {
       await InAppBrowser.postMessage({ detail });
       return true;
@@ -1143,10 +1147,19 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
         }
         const raw = await InAppBrowser.executeScript({ code: script }) as unknown;
         if (typeof raw === 'string') return raw;
+        if (typeof raw === 'boolean' || typeof raw === 'number') {
+          return String(raw);
+        }
         if (raw && typeof raw === 'object') {
           const obj = raw as { result?: unknown; data?: unknown };
           if (typeof obj.result === 'string') return obj.result;
+          if (typeof obj.result === 'boolean' || typeof obj.result === 'number') {
+            return String(obj.result);
+          }
           if (typeof obj.data === 'string') return obj.data;
+          if (typeof obj.data === 'boolean' || typeof obj.data === 'number') {
+            return String(obj.data);
+          }
 
           const now = Date.now();
           if (now - executeFallbackLogAtRef.current > 5000) {

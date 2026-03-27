@@ -678,17 +678,39 @@ export function generateModerationScript(config: InjectionConfig): string {
   function emitJsOverlayStateSignal(jsBlurApplied, jsRevealApplied, reason, src) {
     if (!isShortsModeActive()) return;
     try {
+      const signalReason = String(reason || 'unknown');
+      const signalSovereignId = computeSovereignId(state.pageEpoch);
+      const signalShortsId = getCurrentShortsUrlId() || 'none';
+      const dedupeKey = [
+        signalSovereignId,
+        jsBlurApplied === true ? '1' : '0',
+        jsRevealApplied === true ? '1' : '0',
+        signalReason,
+        signalShortsId,
+      ].join('|');
+      const now = Date.now();
+      const dedupeWindowMs = signalReason.indexOf('force_reveal_enforcement:mutation') === 0 ? 250 : 100;
+      if (
+        jsRevealStateSignalDedupe.key === dedupeKey &&
+        (now - jsRevealStateSignalDedupe.at) < dedupeWindowMs
+      ) {
+        return;
+      }
+      jsRevealStateSignalDedupe.key = dedupeKey;
+      jsRevealStateSignalDedupe.at = now;
       postToHost({
         type: 'MW_JS_REVEAL_STATE',
         jsBlurApplied: jsBlurApplied === true,
         jsRevealApplied: jsRevealApplied === true,
-        reason: reason || 'unknown',
+        reason: signalReason,
         src: String(src || '').substring(0, 220),
         navId: String(window.__MW_NAV_ID__ || NAV_ID || 'none'),
         pageEpoch: Number.isFinite(state.pageEpoch) ? Number(state.pageEpoch) : null,
-        shortsUrlId: getCurrentShortsUrlId() || 'none',
-        sovereignId: computeSovereignId(state.pageEpoch),
-        timestamp: Date.now(),
+        shortsUrlId: signalShortsId,
+        sovereignId: signalSovereignId,
+        origin: 'mw_js_overlay',
+        eventId: String(now) + ':' + Math.random().toString(36).slice(2, 8),
+        timestamp: now,
       });
     } catch (e) {}
   }
@@ -2159,6 +2181,15 @@ export function generateModerationScript(config: InjectionConfig): string {
   const revealInteractionLockState = {
     until: 0,
     reason: 'none',
+  };
+  const revealApplyInFlightState = {
+    until: 0,
+    sovereignId: 'none',
+    overlayId: 'none',
+  };
+  const jsRevealStateSignalDedupe = {
+    key: '',
+    at: 0,
   };
   const timeoutSafeFailureUiLockState = {
     until: 0,
@@ -5251,6 +5282,29 @@ export function generateModerationScript(config: InjectionConfig): string {
     return Math.max(0, revealInteractionLockState.until - Date.now());
   }
 
+  function beginRevealApplyInFlight(overlayId, sovereignId) {
+    revealApplyInFlightState.until = Date.now() + 900;
+    revealApplyInFlightState.overlayId = String(overlayId || 'none');
+    revealApplyInFlightState.sovereignId = String(sovereignId || 'none');
+  }
+
+  function endRevealApplyInFlight() {
+    revealApplyInFlightState.until = 0;
+    revealApplyInFlightState.overlayId = 'none';
+    revealApplyInFlightState.sovereignId = 'none';
+  }
+
+  function isRevealApplyInFlight(sovereignId) {
+    const now = Date.now();
+    if (revealApplyInFlightState.until <= now) {
+      endRevealApplyInFlight();
+      return false;
+    }
+    const lockedSovereignId = String(revealApplyInFlightState.sovereignId || 'none');
+    const requestedSovereignId = String(sovereignId || 'none');
+    return lockedSovereignId !== 'none' && lockedSovereignId === requestedSovereignId;
+  }
+
   function removeRevealOverlayNodeWithLock(overlay, reason) {
     if (!overlay || overlay.nodeType !== 1) return false;
     const parent = overlay.parentElement;
@@ -6566,6 +6620,15 @@ export function generateModerationScript(config: InjectionConfig): string {
         console.warn('[DIAG][REVEAL_EVT] missing_click_src', 'overlayId=' + overlayId);
         return;
       }
+      const clickSovereignId = computeSovereignId(state.pageEpoch);
+      if (isRevealApplyInFlight(clickSovereignId)) {
+        console.log(
+          '[DIAG][REVEAL_EVT] dedupe_inflight_click',
+          'overlayId=' + overlayId,
+          'sovereignId=' + clickSovereignId
+        );
+        return;
+      }
       const revealAllowed = !hasRevealPersistence(clickSrc, clickElement);
       const revealGateReason = revealAllowed ? 'not_revealed' : 'already_revealed_reblur_path';
       console.log(
@@ -6585,6 +6648,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         setRevealOverlayBlurState(overlay, true);
         overlay.style.display = 'flex';
       } else {
+        beginRevealApplyInFlight(overlayId, clickSovereignId);
         // Reveal and trigger feedback
         const beforeBlurCount = countBlurredNodesForItemKey(clickSrc);
         console.log(
@@ -6619,6 +6683,7 @@ export function generateModerationScript(config: InjectionConfig): string {
             setRevealOverlayBlurState(overlay, true);
             overlay.style.display = 'flex';
             btn.textContent = 'Tap to Reveal';
+            endRevealApplyInFlight();
             return;
           }
           clickElement = resolvedClickElement;
@@ -6643,6 +6708,7 @@ export function generateModerationScript(config: InjectionConfig): string {
             setRevealOverlayBlurState(overlay, true);
             overlay.style.display = 'flex';
             btn.textContent = 'Tap to Reveal';
+            endRevealApplyInFlight();
             return;
           }
           setRevealOverlayBlurState(overlay, false);
@@ -6680,6 +6746,7 @@ export function generateModerationScript(config: InjectionConfig): string {
             ' remainingBlurNodeIds=' + (remainingBlurNodeIds.length ? remainingBlurNodeIds.join('|') : 'none') +
             ' shortsUrlId=' + (getCurrentShortsUrlId() || 'none')
           );
+          endRevealApplyInFlight();
 
           // POST a label request message so the host can open the labeling modal
           var labelElement = clickElement && clickElement.nodeType === 1 ? clickElement : null;
