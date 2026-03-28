@@ -285,6 +285,7 @@ export const useLocalSettings = () => {
       blockingMode: settings.blocking_mode,
       prototypeMode: settings.prototype_mode,
       triggers: triggers || {},
+      enableShortsHealthHeal: true,
       segmentation: {
         enabled: segmentationSignalResolution.enabled,
         grayZoneOnly: settings.segmentationGrayZoneOnly,

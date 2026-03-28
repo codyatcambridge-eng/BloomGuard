@@ -894,6 +894,12 @@ export const NativeWebViewBrowser = () => {
     );
     // Full moderation script: request scanning + host bridge + DOM blur/reveal behavior.
     const mainScript = generateModerationScript(config);
+    console.log(
+      '[MW][HOST_GENERATED_SCRIPT_20260328]',
+      'hasTopLevelMarker=' + String(mainScript.includes('TOP_LEVEL_BUNDLE_LOADED_20260328')),
+      'hasResetMarker=' + String(mainScript.includes('SHORTS_RESET_EXEC_20260328')),
+      'scriptLength=' + String(mainScript.length)
+    );
     try {
       await scriptExecutor(mainScript);
       injectionDoneRef.current = true;
@@ -1767,7 +1773,7 @@ export const NativeWebViewBrowser = () => {
       }
     }
     items.forEach(item => {
-      console.log('[MW-Host]   -', item.itemId, '[' + item.sourceType + ']:', item.src.substring(0, 60));
+      console.log('[MW-Host]   -', item.itemId, '[' + item.sourceType + ']:', (typeof item.src === 'string' && item.src.startsWith('data:image/') ? 'data:image/...<truncated>' : (item.src || '').substring(0, 80)));
     });
     
     console.log('[MW-Host] calling scanBatch', requestId, 'itemCount=' + items.length);

@@ -171,6 +171,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     return 'MW_ALREADY_ACTIVE';
   }
   window.__MW_ACTIVE__ = true;
+  try { postToHost({ type: 'gc-moderation-request', mwDiag: 'TOP_LEVEL_BUNDLE_LOADED_20260328' }); } catch (e) {}
   console.log('[MW-INJECT] version=${buildVersion} commit=${buildCommit}');
   
   console.log('[MW] ========================================');
@@ -871,6 +872,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     revealOverlayLastReason: '',
     revealOverlayScrollHandler: null,
     revealOverlayResizeHandler: null,
+    revealOverlayTouchEndHandler: null,
     debugSummaryInterval: null,
     diagHeartbeatInterval: null,
     shortsHealthHealInterval: null,
@@ -2333,14 +2335,26 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function resetShortsBlurContext(reason) {
+    try { postToHost({ type: 'gc-moderation-request', mwDiag: 'SHORTS_RESET_EXEC_20260328', reason: reason || 'unknown' }); } catch (e) {}
     shortsBlurContextByContainer = new WeakMap();
     shortsBlurContextCount = 0;
     shortsHealthStateByContainer = new WeakMap();
     stopShortsHealthHealInterval('context_reset');
+    console.log(
+      '[DIAG][SHORTS_RESET_EXEC]',
+      'reason=' + (reason || 'unknown'),
+      'shortsUrlId=' + (getCurrentShortsUrlId() || 'none')
+    );
     if (DIAG_YT_BLUR) {
+      const _diagPortal = document.getElementById(REVEAL_PORTAL_ID);
+      const _diagOrphanCount = (_diagPortal && _diagPortal.querySelectorAll)
+        ? _diagPortal.querySelectorAll('.mw-reveal-overlay').length
+        : 0;
+
       diagShortsTimeline(
         'shorts_blur_context_reset',
         'reason=' + (reason || 'unknown') +
+        ' orphanedPortalOverlayCount=' + _diagOrphanCount +
         ' shortsUrlId=' + (getCurrentShortsUrlId() || 'none')
       );
     }
@@ -3503,9 +3517,13 @@ export function generateModerationScript(config: InjectionConfig): string {
     timerState.revealOverlayResizeHandler = function() {
       scheduleShortsRevealOverlayReposition('window_resize');
     };
+    timerState.revealOverlayTouchEndHandler = function() {
+      scheduleShortsRevealOverlayReposition('touchend');
+    };
     window.addEventListener('scroll', timerState.revealOverlayScrollHandler, { passive: true });
     window.addEventListener('resize', timerState.revealOverlayResizeHandler, { passive: true });
     window.addEventListener('orientationchange', timerState.revealOverlayResizeHandler);
+    window.addEventListener('touchend', timerState.revealOverlayTouchEndHandler, { passive: true });
   }
 
   function diagShortsRecycleLog(node, field, prevSrc, nextSrc) {
@@ -3638,6 +3656,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (overlay && overlay.parentElement) {
       const overlayId = overlay.dataset && overlay.dataset.mwOverlayId ? overlay.dataset.mwOverlayId : 'unknown';
       overlay.parentElement.removeChild(overlay);
+      try { postToHost({ type: 'gc-moderation-request', mwDiag: 'SHORTS_REVEAL_REMOVE', shortsUrlId: getCurrentShortsUrlId ? (getCurrentShortsUrlId() || 'none') : 'none', src: typeof src === 'string' ? src.slice(0, 80) : 'none', reason: reason || 'unknown' }); } catch (e) {}
       console.log(
         '[DIAG][REVEAL_UI] overlay_removed',
         'overlayId=' + overlayId,
@@ -3876,6 +3895,13 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       element.dataset.mwPreblurClear = 'true';
       if (isShortsModeActive()) {
+        console.log(
+          '[MW][SHORTS_BLUR_CLEAR_20260328]',
+          'src=' + String(src || '').substring(0, 120),
+          'shortsUrlId=' + (getCurrentShortsUrlId() || 'none'),
+          'reason=' + (reason || 'unknown')
+        );
+        try { postToHost({ type: 'gc-moderation-request', mwDiag: 'SHORTS_BLUR_CLEAR', shortsUrlId: getCurrentShortsUrlId ? (getCurrentShortsUrlId() || 'none') : 'none', src: typeof src === 'string' ? src.slice(0, 80) : 'none', reason: reason || 'unknown' }); } catch (e) {}
         clearShortsBlurContextForNode(element, reason || 'clear_all');
       }
     } catch (e) {}
@@ -4171,6 +4197,12 @@ export function generateModerationScript(config: InjectionConfig): string {
         shortsStableSelectorUsed = element.dataset.mwShortsStableSelector;
       }
       if (shortsMode) {
+        console.log(
+          '[MW][SHORTS_BLUR_APPLY_20260328]',
+          'src=' + String(src || '').substring(0, 120),
+          'shortsUrlId=' + (getCurrentShortsUrlId() || 'none')
+        );
+        try { postToHost({ type: 'gc-moderation-request', mwDiag: 'SHORTS_BLUR_APPLY', shortsUrlId: getCurrentShortsUrlId ? (getCurrentShortsUrlId() || 'none') : 'none', src: typeof src === 'string' ? src.slice(0, 80) : 'none' }); } catch (e) {}
         setShortsBlurContextForNode(
           element,
           src,
@@ -4693,6 +4725,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     console.log('[DIAG][REVEAL_UI] bind_button', 'overlayId=' + overlayId);
     
     overlay.appendChild(btn);
+    overlayParent.appendChild(overlay);
     if (shortsMode) {
       const activeOverlays = overlayParent.querySelectorAll('.mw-reveal-overlay');
       for (let i = 0; i < activeOverlays.length; i += 1) {
@@ -4706,7 +4739,14 @@ export function generateModerationScript(config: InjectionConfig): string {
       scheduleShortsRevealOverlayReposition('overlay_created');
       console.log('[DIAG][REVEAL_UI] portal_update', 'itemKey=' + itemKey);
     }
-    overlayParent.appendChild(overlay);
+    if (shortsMode) {
+      console.log(
+        '[MW][SHORTS_REVEAL_ATTACH_20260328]',
+        'src=' + String(src || '').substring(0, 120),
+        'shortsUrlId=' + (getCurrentShortsUrlId() || 'none')
+      );
+      try { postToHost({ type: 'gc-moderation-request', mwDiag: 'SHORTS_REVEAL_ATTACH', shortsUrlId: getCurrentShortsUrlId ? (getCurrentShortsUrlId() || 'none') : 'none', src: typeof src === 'string' ? src.slice(0, 80) : 'none' }); } catch (e) {}
+    }
     element.dataset.mwHasOverlay = 'true';
     const overlayCountAfter = document.querySelectorAll('.mw-reveal-overlay').length;
     console.log(
@@ -6760,6 +6800,12 @@ export function generateModerationScript(config: InjectionConfig): string {
   
   // YouTube-specific: Set up scroll handler for infinite scroll
   setupYouTubeScrollHandler();
+  if (isShortsModeActive()) {
+    console.log(
+      '[MW][SHORTS_STARTUP_20260328]',
+      'url=' + String(window.location.href || '')
+    );
+  }
   refreshAdaptiveShortsOverlayWatch('init');
 
   function scheduleInitTimeout(label, fn, delayMs) {
@@ -6777,6 +6823,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   if (isYouTube()) {
     scheduleInitTimeout('initialYouTubeScan', scanYouTubeThumbnails, 200);
   }
+  let lastUrl = window.location.href;
   // Also rescan on load to catch late resources without delaying first blur.
   if (document.readyState !== 'complete') {
     const onLoadScan = () => {
@@ -6830,8 +6877,11 @@ export function generateModerationScript(config: InjectionConfig): string {
   ensureRevealOverlayPositionListeners();
 
   // SPA navigation detection
-  let lastUrl = window.location.href;
   const checkUrlChange = () => {
+    console.log(
+      '[MW][CHECK_URL_CHANGE_20260328]',
+      'current=' + String(window.location.href || '')
+    );
     if (window.location.href !== lastUrl) {
       const previousUrl = lastUrl;
       const nextUrl = window.location.href;
