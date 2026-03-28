@@ -222,6 +222,8 @@ export function generateModerationScript(config: InjectionConfig): string {
     ' pageEpoch=' + (Number.isFinite(${pageEpoch}) ? ${pageEpoch} : 'none')
   );
   console.log('[MW-INJECT] version=${buildVersion} commit=${buildCommit}');
+  const SHORTS_MVP_SYNC_TAG = 'shorts-mvp-sync-20260327-01';
+  console.log('[DIAG][SHORTS_SYNC]', 'injectTag=' + SHORTS_MVP_SYNC_TAG);
   
   console.log('[MW] ========================================');
   console.log('[MW] injected - Moderation Script v3.0');
@@ -1002,6 +1004,46 @@ export function generateModerationScript(config: InjectionConfig): string {
           'videoId=' + (requestedVideoId || 'none'),
           'result=' + startResult,
           'reason=' + String(message.reason || 'hard_reveal_lock')
+        );
+      }
+      return true;
+    }
+    if (message.type === 'MW_REVEAL_REQUEST') {
+      const fromSovereign = typeof message.sovereignId === 'string'
+        ? (String(message.sovereignId).split('|')[2] || '')
+        : '';
+      const requestedVideoId = (
+        fromSovereign && fromSovereign !== 'none'
+          ? fromSovereign
+          : (getCurrentShortsUrlId() || 'none')
+      );
+      const requestReason = String(message.reason || 'host_reveal_sync');
+      const lockMs = applyRevealUiLock(
+        'mw_reveal_request:' + requestReason,
+        TIMEOUT_SAFE_FAILURE_UI_LOCK_MS,
+        requestedVideoId,
+      );
+      const ensured = ensureTapToRevealOverlay('mw_reveal_request:' + requestReason);
+      if (!ensured) {
+        try {
+          startShortsRevealWatch('mw_reveal_request_pending:' + requestReason, {
+            key: String(message.sovereignId || 'none'),
+            force: true,
+            videoId: requestedVideoId,
+          });
+        } catch (watchErr) {}
+        try {
+          scanFullPage();
+        } catch (scanErr) {}
+      }
+      if (CONFIG.debug || DIAG_YT_BLUR) {
+        console.log(
+          '[DIAG][REVEAL_LOCK]',
+          'action=mw_reveal_request',
+          'videoId=' + (requestedVideoId || 'none'),
+          'ensured=' + ensured,
+          'lockMs=' + lockMs,
+          'reason=' + requestReason
         );
       }
       return true;
@@ -2089,10 +2131,10 @@ export function generateModerationScript(config: InjectionConfig): string {
   const ADAPTIVE_SHORTS_RESCAN_COOLDOWN_MS = 700;
   const SHORTS_ANCHOR_SYNC_COOLDOWN_MS = 80;
   const SHORTS_REVEAL_WATCH_TIMEOUT_MS = 12000;
-  const FORCE_REVEAL_ENFORCEMENT_WINDOW_MS = 2000;
+  const FORCE_REVEAL_ENFORCEMENT_WINDOW_MS = 4200;
   const FORCE_REVEAL_ENFORCEMENT_INTERVAL_MS = 200;
-  const REVEAL_INTERACTION_LOCK_MS = 300;
-  const TIMEOUT_SAFE_FAILURE_UI_LOCK_MS = 2000;
+  const REVEAL_INTERACTION_LOCK_MS = 1200;
+  const TIMEOUT_SAFE_FAILURE_UI_LOCK_MS = 4200;
   const ADAPTIVE_SHORTS_WATCH_ATTRIBUTE_FILTER = [
     'class',
     'style',
@@ -4808,7 +4850,12 @@ export function generateModerationScript(config: InjectionConfig): string {
   function ensurePrimaryShortsRevealOverlayId(overlay, videoIdHint) {
     if (!overlay || overlay.nodeType !== 1) return;
     if (!isShortsModeActive()) return;
-    overlay.id = 'mw-reveal-overlay';
+    const existingPrimary = document.getElementById('mw-reveal-overlay');
+    if (!existingPrimary || existingPrimary === overlay) {
+      overlay.id = 'mw-reveal-overlay';
+    } else if (overlay.id === 'mw-reveal-overlay') {
+      overlay.removeAttribute('id');
+    }
     const resolvedVideoId = String(videoIdHint || getCurrentShortsUrlId() || resolveRevealOverlayShortsVideoId(overlay) || 'none');
     if (resolvedVideoId !== 'none' && overlay.dataset) {
       overlay.dataset.mwShortsVideoId = resolvedVideoId;
@@ -5232,9 +5279,6 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!node || node.nodeType !== 1) return null;
     const nodeId = getDiagNodeId(node);
     const shortsMode = isShortsModeActive();
-    const shortsVideoId = shortsMode
-      ? getRevealShortsVideoId(src || (node.dataset ? node.dataset.mwSrc || '' : ''))
-      : 'none';
     if (shortsMode) {
       const portal = document.getElementById(REVEAL_PORTAL_ID);
       if (portal && typeof portal.querySelectorAll === 'function') {
@@ -5244,7 +5288,6 @@ export function generateModerationScript(config: InjectionConfig): string {
           if (!overlay || !overlay.isConnected) continue;
           if (overlay.dataset.mwNodeId === nodeId) return overlay;
           if (src && overlay.dataset.mwFor === src) return overlay;
-          if (shortsVideoId !== 'none' && overlay.dataset.mwShortsVideoId === shortsVideoId) return overlay;
         }
       }
     }
@@ -6398,14 +6441,6 @@ export function generateModerationScript(config: InjectionConfig): string {
         if (portal && existingOverlay.parentElement !== portal) {
           portal.appendChild(existingOverlay);
         }
-        if (portal) {
-          const activeOverlays = portal.querySelectorAll('.mw-reveal-overlay');
-          for (let i = 0; i < activeOverlays.length; i += 1) {
-            const active = activeOverlays[i];
-            if (!active || active === existingOverlay) continue;
-            removeRevealOverlayNodeWithLock(active, 'createRevealOverlay_existing_overlay_prune');
-          }
-        }
         positionShortsRevealOverlay(existingOverlay, element, 'existing_overlay');
         scheduleShortsRevealOverlayReposition('existing_overlay');
         console.log('[DIAG][REVEAL_UI] portal_update', 'itemKey=' + getDiagItemKey(src));
@@ -6811,12 +6846,6 @@ export function generateModerationScript(config: InjectionConfig): string {
     overlay.appendChild(btn);
     setRevealOverlayBlurState(overlay, true);
     if (shortsMode) {
-      const activeOverlays = overlayParent.querySelectorAll('.mw-reveal-overlay');
-      for (let i = 0; i < activeOverlays.length; i += 1) {
-        const active = activeOverlays[i];
-        if (!active || active === overlay) continue;
-        removeRevealOverlayNodeWithLock(active, 'createRevealOverlay_new_overlay_prune');
-      }
       positionShortsRevealOverlay(overlay, element, 'overlay_created');
       scheduleShortsRevealOverlayReposition('overlay_created');
       console.log('[DIAG][REVEAL_UI] portal_update', 'itemKey=' + itemKey);
