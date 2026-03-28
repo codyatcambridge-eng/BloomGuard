@@ -1942,7 +1942,8 @@ export const NativeWebViewBrowser = () => {
 
     const hardOverlayDecision =
       hardStrongHits.length >= 1 ||
-      hardLowHits.length >= modePolicy.hardMultiMinHits;
+      hardLowHits.length >= modePolicy.hardMultiMinHits ||
+      (stickyShortsMode && hardResults.length >= 1);
     const softOverlayDecision =
       modePolicy.allowSoftOverlay &&
       softQualifiedHits.length >= softMinHits &&
@@ -1954,6 +1955,8 @@ export const NativeWebViewBrowser = () => {
       decisionReason = 'hard_confidence_hit';
     } else if (hardLowHits.length >= modePolicy.hardMultiMinHits) {
       decisionReason = 'hard_multi_hit';
+    } else if (stickyShortsMode && hardResults.length >= 1) {
+      decisionReason = 'hard_shorts_bridge_hit';
     } else if (softOverlayDecision) {
       overlayDecision = true;
       decisionReason = 'soft_ratio_hit';
