@@ -2340,6 +2340,14 @@ export function generateModerationScript(config: InjectionConfig): string {
     shortsBlurContextCount = 0;
     shortsHealthStateByContainer = new WeakMap();
     stopShortsHealthHealInterval('context_reset');
+    const _resetPortal = document.getElementById(REVEAL_PORTAL_ID);
+    if (_resetPortal && typeof _resetPortal.querySelectorAll === 'function') {
+      const _orphans = _resetPortal.querySelectorAll('.mw-reveal-overlay');
+      for (let _i = 0; _i < _orphans.length; _i += 1) {
+        const _orphan = _orphans[_i];
+        if (_orphan && _orphan.parentElement) { _orphan.parentElement.removeChild(_orphan); }
+      }
+    }
     console.log(
       '[DIAG][SHORTS_RESET_EXEC]',
       'reason=' + (reason || 'unknown'),
@@ -3611,6 +3619,9 @@ export function generateModerationScript(config: InjectionConfig): string {
         for (let i = 0; i < overlays.length; i += 1) {
           const overlay = overlays[i];
           if (!overlay || !overlay.isConnected) continue;
+          const currentShortsId = getCurrentShortsUrlId() || '';
+          const overlayShortsId = overlay.dataset.mwShortsUrlId || '';
+          if (currentShortsId && overlayShortsId && currentShortsId !== overlayShortsId) continue;
           if (overlay.dataset.mwNodeId === nodeId) return overlay;
           if (src && overlay.dataset.mwFor === src) return overlay;
         }
@@ -4556,6 +4567,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     overlay.dataset.mwFor = src;
     overlay.dataset.mwNodeId = getDiagNodeId(element);
     overlay.dataset.mwOverlayId = overlayId;
+    overlay.dataset.mwShortsUrlId = getCurrentShortsUrlId() || '';
     setRevealOverlayAnchorTarget(overlay, element, 'overlay_created');
     overlay.style.cssText = [
       shortsMode ? 'position: fixed' : 'position: absolute',
@@ -5337,7 +5349,23 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       const dims = element ? getElementDimensions(element) : { width: 0, height: 0 };
       
-      if (element && element.isConnected) {
+      const elementSrcOwned = !isShortsModeActive() || !element || !element.isConnected || (() => {
+        const resultSrc = normalizeUrl(src || '') || String(src || '');
+        if (!resultSrc) return true;
+        const candidates = [
+          element.currentSrc,
+          element.src,
+          element.poster,
+          element.dataset && element.dataset.mwOrigSrc,
+          element.dataset && element.dataset.mwSrc,
+        ];
+        for (let _ci = 0; _ci < candidates.length; _ci++) {
+          const _c = candidates[_ci];
+          if (_c && (normalizeUrl(_c) || String(_c)) === resultSrc) return true;
+        }
+        return false;
+      })();
+      if (element && element.isConnected && elementSrcOwned) {
         try {
           element.dataset.mwConfidence = String(toFiniteNumber(confidence) ?? 0);
           element.dataset.mwDecisionReason = String(decisionReason || '');
