@@ -1547,7 +1547,6 @@ export const NativeWebViewBrowser = () => {
     ENABLE_DOM_BLUR,
     isNative,
     webViewState.isOpen,
-    webViewState.currentUrl,
     executeScript,
     webViewListenersAttached,
     injectModerationScript,

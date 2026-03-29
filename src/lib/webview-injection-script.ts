@@ -6957,7 +6957,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       const previousIsShorts = isYouTubeShortsUrl(previousUrl);
       const nextIsShorts = isYouTubeShortsUrl(nextUrl);
-      if (previousIsShorts || nextIsShorts) {
+      if (previousIsShorts && !nextIsShorts) {
         resetShortsBlurContext('url_change');
       }
       if (nextIsShorts) {
