@@ -1224,6 +1224,7 @@ export const NativeWebViewBrowser = () => {
     },
     getListenerDiagContext: getWebViewListenerDiagContext,
   });
+  const executeScriptRef = useRef(executeScript);
 
   const requestShortsReentryRefresh = useCallback(async (
     reason: string,
@@ -1311,6 +1312,10 @@ export const NativeWebViewBrowser = () => {
   useEffect(() => {
     webViewListenersAttachedRef.current = webViewListenersAttached;
   }, [webViewListenersAttached]);
+
+  useEffect(() => {
+    executeScriptRef.current = executeScript;
+  }, [executeScript]);
 
   useEffect(() => {
     console.log(
@@ -2816,7 +2821,8 @@ export const NativeWebViewBrowser = () => {
     };
 
     const pollForRequests = async (): Promise<boolean> => {
-      if (!executeScript) return false;
+      const runScript = executeScriptRef.current;
+      if (!runScript) return false;
       if (pollInFlight) return false;
       if (!webViewListenersAttached) {
         const diagUrl = webViewState.currentUrl || currentUrlRef.current || 'unknown';
@@ -2863,7 +2869,7 @@ export const NativeWebViewBrowser = () => {
           })();
         `;
         
-        const result = await executeScript(getQueueScript);
+        const result = await runScript(getQueueScript);
         const diagUrl = webViewState.currentUrl || currentUrlRef.current || '';
         const resultTypeLabel = result === undefined ? 'undefined' : typeof result;
         const previewValue = result === undefined ? 'undefined' : result === null ? 'null' : String(result);
@@ -2993,7 +2999,7 @@ export const NativeWebViewBrowser = () => {
             `;
             
             try {
-              await executeScript(pushResultScript);
+              await runScript(pushResultScript);
               console.log('[MW-Host] Legacy result pushed for:', src.substring(0, 50));
             } catch (e) {
               console.debug('[MW-Host] Failed to push legacy result:', e);
@@ -3124,7 +3130,6 @@ export const NativeWebViewBrowser = () => {
     webViewState.isOpen,
     webViewListenersAttached,
     isRuntimeModerationEnabled,
-    executeScript,
     moderationBridge,
     localSettings.blur_strength_px,
     webViewState.currentUrl,

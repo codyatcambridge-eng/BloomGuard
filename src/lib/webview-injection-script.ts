@@ -6987,6 +6987,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
   };
 
+  // Track SPA URL transitions for lifecycle diagnostics and epoch handling.
+  let lastUrl = window.location.href;
+
   // Set up observers
   setupMutationObserver(document.body);
   state.viewportObserver = setupViewportObserver();
@@ -7063,7 +7066,6 @@ export function generateModerationScript(config: InjectionConfig): string {
   ensureRevealOverlayPositionListeners();
 
   // SPA navigation detection
-  let lastUrl = window.location.href;
   const checkUrlChange = () => {
     if (window.location.href !== lastUrl) {
       const previousUrl = lastUrl;
