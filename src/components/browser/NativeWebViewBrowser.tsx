@@ -1740,11 +1740,31 @@ export const NativeWebViewBrowser = () => {
     activeUrl: string,
     messageSovereignId?: string,
   ) => {
-    if (messageEpoch === null || messageEpoch === activeEpoch) return true;
+    if (messageEpoch === null) return true;
+    if (!isYouTubeShortsUrl(activeUrl)) {
+      return messageEpoch === activeEpoch;
+    }
+
+    const activeSovereign = parseSovereignId(
+      getSovereignIdForContext(activeUrl, activeNavIdRef.current, activeEpoch),
+    );
+    const messageSovereign = parseSovereignId(messageSovereignId);
+    const activeVideoId = activeSovereign.videoId;
+    const messageVideoId = messageSovereign.videoId;
+    const messageHasValidNav = Number.isFinite(messageSovereign.navId);
+    const activeHasValidNav = Number.isFinite(activeSovereign.navId);
+
+    if (messageEpoch === activeEpoch) {
+      if (activeVideoId !== 'none' && messageVideoId !== 'none' && activeVideoId !== messageVideoId) {
+        return false;
+      }
+      if (messageHasValidNav && activeHasValidNav && messageSovereign.navId !== activeSovereign.navId) {
+        return false;
+      }
+      return true;
+    }
+
     if (messageEpoch !== (activeEpoch - 1)) return false;
-    if (!isYouTubeShortsUrl(activeUrl)) return false;
-    const activeVideoId = getYouTubeShortsId(activeUrl);
-    const messageVideoId = parseSovereignId(messageSovereignId).videoId;
     return (
       activeVideoId !== 'none' &&
       messageVideoId !== 'none' &&

@@ -1553,6 +1553,28 @@ export function generateModerationScript(config: InjectionConfig): string {
     return '';
   }
 
+  function getYouTubeAssetVideoId(rawUrl) {
+    const normalized = normalizeUrl(rawUrl || '') || String(rawUrl || '');
+    if (!normalized) return '';
+    try {
+      const parsed = new URL(normalized, window.location.href);
+      const host = String(parsed.hostname || '').toLowerCase();
+      const isYouTubeFamilyHost =
+        host.indexOf('youtube.com') !== -1 ||
+        host.indexOf('youtu.be') !== -1 ||
+        host.indexOf('ytimg.com') !== -1 ||
+        host.indexOf('googlevideo.com') !== -1;
+      if (!isYouTubeFamilyHost) return '';
+      const queryId = parsed.searchParams.get('v');
+      if (queryId) return String(queryId);
+      const shortsMatch = String(parsed.pathname || '').match(/\\/shorts\\/([^/?#]+)/);
+      if (shortsMatch && shortsMatch[1]) return String(shortsMatch[1]);
+      const viMatch = String(parsed.pathname || '').match(/\\/vi(?:_webp)?\\/([^/]+)/);
+      if (viMatch && viMatch[1]) return String(viMatch[1]);
+    } catch (e) {}
+    return '';
+  }
+
   function getShortsCardOrPlayerContainerFromNode(node) {
     if (!isShortsModeActive()) return null;
     const containerSelector = SHORTS_STABLE_CONTAINER_TAG_SELECTOR;
@@ -5806,6 +5828,21 @@ export function generateModerationScript(config: InjectionConfig): string {
         console.log('[MW] skipped avatar-like element:', url.substring(0, 50));
       }
       return false;
+    }
+
+    if (isShortsModeActive()) {
+      const currentShortsUrlId = getCurrentShortsUrlId();
+      const sourceVideoId = getYouTubeAssetVideoId(url);
+      if (
+        currentShortsUrlId &&
+        sourceVideoId &&
+        sourceVideoId !== currentShortsUrlId &&
+        sourceType !== 'video-frame'
+      ) {
+        state.stats.skipped++;
+        logShortsScanSkip('shorts_non_active_video_asset', null, url, sourceType);
+        return false;
+      }
     }
     
     // Skip already processed
