@@ -875,6 +875,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     youtubeScrollHandler: null,
     youtubeMutationScanTimeout: null,
     revealOverlayRepositionRaf: null,
+    revealOverlayRetryTimeout: null,
     revealOverlayLastReason: '',
     revealOverlayScrollHandler: null,
     revealOverlayResizeHandler: null,
@@ -1515,6 +1516,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (timerState.youtubeScrollTimeout) activeTimerNames.push('youtubeScrollTimeout');
     if (timerState.youtubeMutationScanTimeout) activeTimerNames.push('youtubeMutationScanTimeout');
     if (timerState.revealOverlayRepositionRaf) activeTimerNames.push('revealOverlayRepositionRaf');
+    if (timerState.revealOverlayRetryTimeout) activeTimerNames.push('revealOverlayRetryTimeout');
     if (batchTimer) activeTimerNames.push('batchTimer');
     if (mutationScanTimer) activeTimerNames.push('mutationScanTimer');
     if (adaptiveShortsWatchState.pendingRescanTimer) activeTimerNames.push('adaptiveShortsRescanTimeout');
@@ -2940,7 +2942,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     const moderatedBlurred = !!(targetNode && targetNode.dataset && targetNode.dataset.mwModerated === 'blurred');
     const overlayExpected = !revealed && moderatedBlurred;
     const overlayState = getDiagOverlayState(targetNode);
-    const overlayPresent = !overlayExpected || overlayState.overlayAttached;
+    const overlayPresent = !overlayExpected || (overlayState.overlayAttached && overlayState.overlayVisible);
     const healthy = connected && !revealed && moderatedBlurred && hasComputedBlur && overlayPresent;
 
     let parentNode = null;
@@ -3095,7 +3097,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     );
     const refreshedOverlayExpected = !refreshedRevealed && refreshedModerated;
     const refreshedOverlayState = getDiagOverlayState(refreshedTarget);
-    const refreshedOverlayPresent = !refreshedOverlayExpected || refreshedOverlayState.overlayAttached;
+    const refreshedOverlayPresent = !refreshedOverlayExpected || (refreshedOverlayState.overlayAttached && refreshedOverlayState.overlayVisible);
     const healed = (
       healTriggered &&
       refreshedConnected &&
@@ -3466,6 +3468,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!overlay) return false;
     if (!element || !element.isConnected || typeof element.getBoundingClientRect !== 'function') {
       overlay.style.display = 'none';
+      scheduleShortsRevealOverlayRetry(overlay, 'missing_or_disconnected_anchor');
       if (DIAG_YT_BLUR) {
         console.log(
           '[DIAG][REVEAL_POS] hidden',
@@ -3493,6 +3496,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     const visibleRect = getVisibleViewportRect(rect, viewportWidth, viewportHeight);
     if (visibleRect.width < 16 || visibleRect.height < 16) {
       overlay.style.display = 'none';
+      scheduleShortsRevealOverlayRetry(overlay, 'anchor_not_visible');
       if (DIAG_YT_BLUR) {
         console.log(
           '[DIAG][REVEAL_POS] hidden',
@@ -3505,6 +3509,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       return false;
     }
     overlay.style.display = 'flex';
+    overlay.dataset.mwPosRetryCount = '0';
     const centerX = Math.max(24, Math.min(viewportWidth - 24, Math.round(visibleRect.left + (visibleRect.width / 2))));
     const centerY = Math.max(28, Math.min(viewportHeight - 28, Math.round(visibleRect.top + (visibleRect.height / 2))));
     if (badge && badge.nodeType === 1) {
@@ -3543,6 +3548,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       const anchor = resolveShortsRevealOverlayAnchor(overlay);
       if (!anchor) {
         overlay.style.display = 'none';
+        scheduleShortsRevealOverlayRetry(overlay, 'anchor_resolve_failed');
         continue;
       }
       setRevealOverlayAnchorTarget(overlay, anchor, 'reposition:' + (reason || 'unknown'));
@@ -3567,13 +3573,28 @@ export function generateModerationScript(config: InjectionConfig): string {
     });
   }
 
+  function scheduleShortsRevealOverlayRetry(overlay, reason) {
+    if (!overlay || overlay.nodeType !== 1) return;
+    if (timerState.paused || timerState.teardownDone) return;
+    if (!isShortsModeActive()) return;
+    const retryCountRaw = Number(overlay.dataset.mwPosRetryCount || '0');
+    const retryCount = Number.isFinite(retryCountRaw) ? retryCountRaw : 0;
+    if (retryCount >= 8) return;
+    overlay.dataset.mwPosRetryCount = String(retryCount + 1);
+    if (timerState.revealOverlayRetryTimeout) return;
+    timerState.revealOverlayRetryTimeout = setTimeout(function() {
+      timerState.revealOverlayRetryTimeout = null;
+      scheduleShortsRevealOverlayReposition('retry:' + (reason || 'unknown'));
+    }, 120);
+  }
+
   function cancelShortsRevealOverlayReposition(reason) {
-    if (!timerState.revealOverlayRepositionRaf) return;
-    if (typeof window.cancelAnimationFrame === 'function') {
+    if (timerState.revealOverlayRepositionRaf && typeof window.cancelAnimationFrame === 'function') {
       window.cancelAnimationFrame(timerState.revealOverlayRepositionRaf);
     }
     timerState.revealOverlayRepositionRaf = null;
     timerState.revealOverlayLastReason = '';
+    clearNamedTimeout('revealOverlayRetryTimeout', reason || 'cancel');
     if (DIAG_YT_BLUR) {
       console.log(
         '[DIAG][REVEAL_POS] cancel',
@@ -7114,6 +7135,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     clearNamedTimeout('mainScrollTimeout', reason);
     clearNamedTimeout('youtubeScrollTimeout', reason);
     clearNamedTimeout('youtubeMutationScanTimeout', reason);
+    clearNamedTimeout('revealOverlayRetryTimeout', reason);
     cancelShortsRevealOverlayReposition(reason || 'stopManagedTimers');
     if (batchTimer) {
       clearTimeout(batchTimer);
