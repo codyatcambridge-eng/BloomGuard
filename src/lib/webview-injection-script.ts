@@ -1252,6 +1252,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   let shortsBlurContextByContainer = new WeakMap();
   let shortsBlurContextCount = 0;
   let shortsHealthStateByContainer = new WeakMap();
+  const shortsActiveOwnerTokens = new Set();
   const adaptiveShortsWatchState = {
     observer: null,
     rootNode: null,
@@ -2229,6 +2230,26 @@ export function generateModerationScript(config: InjectionConfig): string {
     return null;
   }
 
+  function getShortsBlurContextForNode(node) {
+    if (!isShortsModeActive()) return null;
+    const container = getShortsBlurContextContainerForNode(node);
+    if (!container || container.nodeType !== 1) return null;
+    return shortsBlurContextByContainer.get(container) || null;
+  }
+
+  function buildShortsOwnerToken(container, src, itemId, shortsUrlId, updatedAt) {
+    return [
+      'shorts_owner',
+      String(NAV_ID || 'none'),
+      String(state.pageEpoch || 0),
+      String(shortsUrlId || 'none'),
+      String(getDiagNodeId(container) || 'none'),
+      String(itemId || 'none').substring(0, 64),
+      String(src || '').substring(0, 128),
+      String(updatedAt || Date.now()),
+    ].join('|');
+  }
+
   function setShortsBlurContextEntry(container, context) {
     if (!container || container.nodeType !== 1) return;
     const hadExisting = !!shortsBlurContextByContainer.get(container);
@@ -2244,6 +2265,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     const existing = shortsBlurContextByContainer.get(container);
     if (!existing) return null;
     shortsBlurContextByContainer.delete(container);
+    if (existing.ownerToken) {
+      shortsActiveOwnerTokens.delete(existing.ownerToken);
+    }
     shortsHealthStateByContainer.delete(container);
     shortsBlurContextCount = Math.max(0, shortsBlurContextCount - 1);
     if (shortsBlurContextCount <= 0) {
@@ -2282,6 +2306,8 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!container || container.nodeType !== 1) return;
     const existing = shortsBlurContextByContainer.get(container);
     const updatedAt = Date.now();
+    const shortsUrlId = getCurrentShortsUrlId();
+    const ownerToken = buildShortsOwnerToken(container, src, itemId, shortsUrlId, updatedAt);
     const context = {
       src: src || '',
       category: category || 'flagged',
@@ -2292,11 +2318,19 @@ export function generateModerationScript(config: InjectionConfig): string {
       targetTagName: String(node && node.tagName ? node.tagName : ''),
       targetNodeId: getDiagNodeId(node),
       updatedAt: updatedAt,
-      shortsUrlId: getCurrentShortsUrlId(),
+      shortsUrlId: shortsUrlId,
+      ownerToken: ownerToken,
       lastReattachAt: (existing && existing.lastReattachAt) || 0,
       lastReattachVideoId: (existing && existing.lastReattachVideoId) || '',
     };
+    if (existing && existing.ownerToken && existing.ownerToken !== ownerToken) {
+      shortsActiveOwnerTokens.delete(existing.ownerToken);
+    }
+    shortsActiveOwnerTokens.add(ownerToken);
     setShortsBlurContextEntry(container, context);
+    if (node && node.nodeType === 1 && node.dataset) {
+      node.dataset.mwShortsOwnerToken = ownerToken;
+    }
     if (DIAG_YT_BLUR) {
       diagShortsTimeline(
         'shorts_blur_context_set',
@@ -2308,6 +2342,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         ' itemId=' + (itemId || 'none') +
         ' targetNodeId=' + getDiagNodeId(node) +
         ' targetTagName=' + String(node && node.tagName ? node.tagName : 'none') +
+        ' ownerToken=' + String(ownerToken).substring(0, 220) +
         ' selectorUsed=' + (selectorUsed || 'none') +
         ' shortsUrlId=' + (context.shortsUrlId || 'none')
       );
@@ -2333,9 +2368,14 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function resetShortsBlurContext(reason) {
+    const ownerTokens = Array.from(shortsActiveOwnerTokens);
+    for (let i = 0; i < ownerTokens.length; i += 1) {
+      clearShortsOwnedBlurAndOverlayByOwnerToken(ownerTokens[i], 'shorts_context_reset:' + (reason || 'unknown'));
+    }
     shortsBlurContextByContainer = new WeakMap();
     shortsBlurContextCount = 0;
     shortsHealthStateByContainer = new WeakMap();
+    shortsActiveOwnerTokens.clear();
     stopShortsHealthHealInterval('context_reset');
     if (DIAG_YT_BLUR) {
       diagShortsTimeline(
@@ -2343,6 +2383,44 @@ export function generateModerationScript(config: InjectionConfig): string {
         'reason=' + (reason || 'unknown') +
         ' shortsUrlId=' + (getCurrentShortsUrlId() || 'none')
       );
+    }
+  }
+
+  function clearShortsOwnedBlurAndOverlayByOwnerToken(ownerToken, reason) {
+    const token = String(ownerToken || '');
+    if (!token) return;
+    const ownedNodes = document.querySelectorAll('[data-mw-shorts-owner-token]');
+    for (let i = 0; i < ownedNodes.length; i += 1) {
+      const node = ownedNodes[i];
+      if (!node || node.nodeType !== 1 || !node.dataset) continue;
+      if (String(node.dataset.mwShortsOwnerToken || '') !== token) continue;
+      const srcForClear = String(node.dataset.mwSrc || '');
+      clearAllBlurAndOverlay(node, srcForClear, reason || 'shorts_owner_clear', 'safe');
+      node.dataset.mwOverlayOwnerToken = '';
+      node.dataset.mwShortsOwnerToken = '';
+    }
+    const portal = document.getElementById(REVEAL_PORTAL_ID);
+    if (portal && typeof portal.querySelectorAll === 'function') {
+      const overlays = portal.querySelectorAll('.mw-reveal-overlay');
+      for (let i = 0; i < overlays.length; i += 1) {
+        const overlay = overlays[i];
+        if (!overlay || overlay.nodeType !== 1 || !overlay.dataset) continue;
+        if (String(overlay.dataset.mwShortsOwnerToken || '') !== token) continue;
+        if (overlay.parentElement) overlay.parentElement.removeChild(overlay);
+      }
+    }
+  }
+
+  function clearShortsOwnedBlurAndOverlayByContext(context, reason) {
+    if (!context) return;
+    const targetNode = context.targetNode && context.targetNode.nodeType === 1 ? context.targetNode : null;
+    if (targetNode && targetNode.isConnected) {
+      const srcForClear = String(context.src || targetNode.dataset.mwSrc || '');
+      clearAllBlurAndOverlay(targetNode, srcForClear, reason || 'shorts_context_drop', 'safe');
+    }
+    if (context.ownerToken) {
+      clearShortsOwnedBlurAndOverlayByOwnerToken(context.ownerToken, reason || 'shorts_context_drop');
+      shortsActiveOwnerTokens.delete(context.ownerToken);
     }
   }
 
@@ -2396,6 +2474,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     const now = Date.now();
     if (context.updatedAt && (now - context.updatedAt) > SHORTS_SWAP_REATTACH_WINDOW_MS) {
+      clearShortsOwnedBlurAndOverlayByContext(context, 'shorts_swap_stale_context');
       deleteShortsBlurContextEntry(container);
       diagShortsSwapMarker(videoNode, reason || 'unknown', true, false, 'stale_context');
       if (DIAG_YT_BLUR) {
@@ -2411,6 +2490,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     const currentShortsUrlId = getCurrentShortsUrlId();
     if (context.shortsUrlId && currentShortsUrlId && context.shortsUrlId !== currentShortsUrlId) {
+      clearShortsOwnedBlurAndOverlayByContext(context, 'shorts_swap_url_changed');
       deleteShortsBlurContextEntry(container);
       diagShortsSwapMarker(videoNode, reason || 'unknown', true, false, 'shorts_url_changed');
       if (DIAG_YT_BLUR) {
@@ -3654,9 +3734,11 @@ export function generateModerationScript(config: InjectionConfig): string {
         );
       }
       node.dataset.mwHasOverlay = 'false';
+      node.dataset.mwOverlayOwnerToken = '';
       return true;
     }
     node.dataset.mwHasOverlay = 'false';
+    node.dataset.mwOverlayOwnerToken = '';
     return false;
   }
 
@@ -3875,6 +3957,8 @@ export function generateModerationScript(config: InjectionConfig): string {
         element.dataset.mwModerated = nextModeratedState;
       }
       element.dataset.mwPreblurClear = 'true';
+      element.dataset.mwOverlayOwnerToken = '';
+      element.dataset.mwShortsOwnerToken = '';
       if (isShortsModeActive()) {
         clearShortsBlurContextForNode(element, reason || 'clear_all');
       }
@@ -4419,6 +4503,17 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       return;
     }
+    let shortsOwnerToken = '';
+    if (shortsMode) {
+      const activeContext = getShortsBlurContextForNode(element);
+      const activeOwnerToken = activeContext && activeContext.ownerToken ? String(activeContext.ownerToken) : '';
+      const elementOwnerToken = String(element.dataset.mwShortsOwnerToken || '');
+      if (!activeOwnerToken || !elementOwnerToken || activeOwnerToken !== elementOwnerToken) {
+        clearAllBlurAndOverlay(element, src || (activeContext && activeContext.src) || '', 'createRevealOverlay_owner_mismatch', 'safe');
+        return;
+      }
+      shortsOwnerToken = activeOwnerToken;
+    }
     if (DIAG_YT_BLUR && element.dataset.mwModerated !== 'blurred') {
       diagFailCaseLog(
         'overlay_without_blurred_state',
@@ -4434,8 +4529,19 @@ export function generateModerationScript(config: InjectionConfig): string {
         removeRevealOverlay(element, src, 'createRevealOverlay_existing_not_blurred');
         return;
       }
+      if (shortsMode) {
+        const existingOwnerToken = String(existingOverlay.dataset.mwShortsOwnerToken || '');
+        if (!shortsOwnerToken || existingOwnerToken !== shortsOwnerToken) {
+          clearAllBlurAndOverlay(element, src, 'createRevealOverlay_existing_owner_mismatch', 'safe');
+          return;
+        }
+      }
       existingOverlay.dataset.mwFor = src;
       existingOverlay.dataset.mwNodeId = getDiagNodeId(element);
+      if (shortsMode && shortsOwnerToken) {
+        existingOverlay.dataset.mwShortsOwnerToken = shortsOwnerToken;
+        element.dataset.mwOverlayOwnerToken = shortsOwnerToken;
+      }
       existingOverlay.style.pointerEvents = 'none';
       existingOverlay.style.display = 'flex';
       if (shortsMode) {
@@ -4523,6 +4629,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     overlay.className = 'mw-reveal-overlay';
     overlay.dataset.mwFor = src;
     overlay.dataset.mwNodeId = getDiagNodeId(element);
+    if (shortsMode && shortsOwnerToken) {
+      overlay.dataset.mwShortsOwnerToken = shortsOwnerToken;
+      element.dataset.mwOverlayOwnerToken = shortsOwnerToken;
+    }
     overlay.dataset.mwOverlayId = overlayId;
     setRevealOverlayAnchorTarget(overlay, element, 'overlay_created');
     overlay.style.cssText = [
