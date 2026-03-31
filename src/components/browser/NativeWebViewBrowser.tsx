@@ -2547,6 +2547,7 @@ export const NativeWebViewBrowser = () => {
         if (shortsReadyContext) {
           const sinceLastReq = Date.now() - shortsLegacyFallbackRef.current.lastReqSentAt;
           if (sinceLastReq > SHORTS_LEGACY_FALLBACK_REQ_GRACE_MS) {
+            void requestShortsReentryRefresh('blur_ready_without_req', readyUrl || activeUrl, false);
             armShortsLegacyFallbackProbe('blur_ready_without_req', SHORTS_LEGACY_FALLBACK_ENTRY_PROBE_MS);
           }
           const readyKey = [
@@ -2675,6 +2676,7 @@ export const NativeWebViewBrowser = () => {
     getNonce,
     queueCurrentBlurState,
     flushBlurStateToWebView,
+    requestShortsReentryRefresh,
     armShortsLegacyFallbackProbe,
     disarmShortsLegacyFallbackProbe,
     isGraceEpochAcceptedForActiveShortsVideo,

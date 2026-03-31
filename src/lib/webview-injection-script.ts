@@ -5187,6 +5187,42 @@ export function generateModerationScript(config: InjectionConfig): string {
     });
 
     state.stats.requestsSent++;
+
+    // Shorts reliability fallback: mirror requests into legacy queue so host probe
+    // can recover when postMessage events are dropped during rapid in-app nav churn.
+    if (isShortsModeActive()) {
+      try {
+        window.__MW_LEGACY_QUEUE_PRODUCER__ = 'shorts_mirror';
+        if (!Array.isArray(window.__GC_SCAN_QUEUE__)) {
+          window.__GC_SCAN_QUEUE__ = [];
+        }
+        const legacyQueue = window.__GC_SCAN_QUEUE__;
+        if (Array.isArray(legacyQueue)) {
+          const cappedItems = items.slice(0, 5).map(item => ({
+            itemId: item.itemId,
+            src: item.src,
+            sourceType: item.sourceType,
+            width: item.width,
+            height: item.height,
+            thresholds: effectiveThresholds,
+            requestId: requestId,
+            pageEpoch: state.pageEpoch,
+            sovereignId: sovereignId,
+            nonce: CONFIG.nonce,
+            timestamp: timestamp,
+          }));
+          for (let i = 0; i < cappedItems.length; i += 1) {
+            legacyQueue.push(cappedItems[i]);
+          }
+          if (legacyQueue.length > 40) {
+            legacyQueue.splice(0, legacyQueue.length - 40);
+          }
+          if (CONFIG.debug) {
+            console.log('[MW][LegacyMirror] queued', cappedItems.length, 'items', 'requestId=' + requestId);
+          }
+        }
+      } catch (e) {}
+    }
     
     console.log('[MW] request sent', requestId, 'items=' + items.length, items.map(i => i.src.substring(0, 40)));
     console.log(
