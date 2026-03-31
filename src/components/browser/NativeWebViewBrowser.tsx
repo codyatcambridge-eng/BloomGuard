@@ -958,6 +958,7 @@ export const NativeWebViewBrowser = () => {
       console.log('[Browser] ======= LOAD START =======');
       console.log('[Browser] URL:', url);
       markNavigation('onLoadStart', url);
+      moderationNavGenerationRef.current += 1;
       teardownWebViewScheduling('navigation_start', url).catch(() => undefined);
       logHostLayerDiagnostics('load_start');
       setIsLoading(true);
@@ -1049,6 +1050,7 @@ export const NativeWebViewBrowser = () => {
       console.log('[Browser] New URL:', url);
       console.log('[DIAG][LOAD] stage=url_change url=' + toDiagUrl(url));
       markNavigation('onUrlChange', url);
+      moderationNavGenerationRef.current += 1;
       logLifecycleSnapshot('url_change', url, 'onUrlChange');
       logHostLayerDiagnostics('url_change');
       setUrlInput(url);
@@ -1610,6 +1612,24 @@ export const NativeWebViewBrowser = () => {
   // ==================== 
 
   const pendingRequestsRef = useRef<Set<string>>(new Set());
+  const moderationNavGenerationRef = useRef(0);
+  const isGraceEpochAcceptedForActiveShortsVideo = useCallback((
+    messageEpoch: number | null,
+    activeEpoch: number,
+    activeUrl: string,
+    messageSovereignId?: string,
+  ) => {
+    if (messageEpoch === null || messageEpoch === activeEpoch) return true;
+    if (messageEpoch !== (activeEpoch - 1)) return false;
+    if (!isYouTubeShortsUrl(activeUrl)) return false;
+    const activeVideoId = getYouTubeShortsId(activeUrl);
+    const messageVideoId = parseSovereignId(messageSovereignId).videoId;
+    return (
+      activeVideoId !== 'none' &&
+      messageVideoId !== 'none' &&
+      activeVideoId === messageVideoId
+    );
+  }, []);
   
   /**
    * Process a moderation request from the WebView
@@ -1625,10 +1645,14 @@ export const NativeWebViewBrowser = () => {
 
     const { requestId, items, thresholds } = request;
     const requestEpoch = Number.isFinite(request.pageEpoch) ? Number(request.pageEpoch) : null;
+    const requestSovereignId = typeof request.sovereignId === 'string' ? request.sovereignId : '';
     const activeEpoch = webViewPageEpochRef.current;
     const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
+    const activeSovereignId = getSovereignIdForContext(activeUrl, activeNavIdRef.current, activeEpoch);
     const stickyShortsMode = isYouTubeShortsUrl(activeUrl);
-    const relaxedYouTubeEpochMode = isYouTubeDomainUrl(activeUrl);
+    const relaxedYouTubeEpochMode = isYouTubeDomainUrl(activeUrl) && !stickyShortsMode;
+    const requestNavIdAtStart = activeNavIdRef.current || 0;
+    const requestGenerationAtStart = moderationNavGenerationRef.current;
     
     if (pendingRequestsRef.current.has(requestId)) {
       console.log('[MW-Host] Duplicate request ignored:', requestId);
@@ -1636,11 +1660,49 @@ export const NativeWebViewBrowser = () => {
     }
     pendingRequestsRef.current.add(requestId);
 
+    const isRequestContextStale = () => {
+      const liveNavId = activeNavIdRef.current || 0;
+      const liveGeneration = moderationNavGenerationRef.current;
+      return (
+        !pendingRequestsRef.current.has(requestId) ||
+        liveNavId !== requestNavIdAtStart ||
+        liveGeneration !== requestGenerationAtStart
+      );
+    };
+    const hardKillStaleRequest = (stage: string): boolean => {
+      if (!isRequestContextStale()) return false;
+      const liveNavId = activeNavIdRef.current || 0;
+      const liveGeneration = moderationNavGenerationRef.current;
+      const wasPending = pendingRequestsRef.current.delete(requestId);
+      console.warn(
+        '[DIAG][SHORTS_ATOMIC]',
+        'action=hard_kill_stale_request',
+        'stage=' + stage,
+        'requestId=' + requestId,
+        'requestNavId=' + requestNavIdAtStart,
+        'activeNavId=' + liveNavId,
+        'requestGeneration=' + requestGenerationAtStart,
+        'activeGeneration=' + liveGeneration,
+        'wasPending=' + (wasPending ? 'true' : 'false'),
+        'url=' + (webViewState.currentUrl || currentUrlRef.current || 'unknown'),
+      );
+      clearTimeout(timeoutId);
+      setFlashGuardState?.(false, 'moderation_hard_kill_stale');
+      flashLog('disarm hard-killed stale request');
+      return true;
+    };
+    if (hardKillStaleRequest('after_add')) {
+      return;
+    }
+
     if (requestEpoch !== null && requestEpoch !== activeEpoch && !relaxedYouTubeEpochMode) {
+      const rejectReason = stickyShortsMode
+        ? 'request_epoch_mismatch_shorts_strict'
+        : 'request_epoch_mismatch_non_youtube';
       console.warn(
         '[DIAG][EPOCH_BYPASS]',
         'epoch_bypass_blocked',
-        'reason=request_epoch_mismatch_non_youtube',
+        'reason=' + rejectReason,
         'navId=' + activeNavIdRef.current,
         'requestPageEpoch=' + requestEpoch,
         'currentPageEpoch=' + activeEpoch,
@@ -1705,6 +1767,60 @@ export const NativeWebViewBrowser = () => {
       clearTimeout(timeoutId);
       setFlashGuardState?.(false, 'moderation_epoch_stale');
       flashLog('disarm stale epoch');
+      return;
+    }
+    if (stickyShortsMode && requestSovereignId && requestSovereignId !== activeSovereignId) {
+      const requestSovereign = parseSovereignId(requestSovereignId);
+      const activeSovereign = parseSovereignId(activeSovereignId);
+      const navIdChanged = requestSovereign.navId !== activeSovereign.navId;
+      if (navIdChanged) {
+        console.warn(
+          '[DIAG][SHORTS_ATOMIC]',
+          'action=hard_kill_stale_request_nav_mismatch',
+          'requestId=' + requestId,
+          'requestSovereignId=' + requestSovereignId,
+          'activeSovereignId=' + activeSovereignId,
+          'requestNavId=' + requestSovereign.navId,
+          'activeNavId=' + activeSovereign.navId,
+          'videoId=' + requestSovereign.videoId,
+          'navId=' + activeNavIdRef.current,
+          'pageEpoch=' + activeEpoch,
+          'url=' + (activeUrl || 'unknown'),
+        );
+        pendingRequestsRef.current.delete(requestId);
+        clearTimeout(timeoutId);
+        setFlashGuardState?.(false, 'moderation_sovereign_nav_stale');
+        flashLog('disarm stale nav mismatch');
+        return;
+      }
+      console.warn(
+        '[DIAG][SHORTS_ATOMIC]',
+        'action=reject_stale_sovereign',
+        'requestId=' + requestId,
+        'requestSovereignId=' + requestSovereignId,
+        'activeSovereignId=' + activeSovereignId,
+        'navId=' + activeNavIdRef.current,
+        'pageEpoch=' + activeEpoch,
+        'url=' + (activeUrl || 'unknown'),
+      );
+      const staleResults = items.map(item => ({
+        itemId: item.itemId,
+        src: item.src,
+        shouldBlur: false,
+        category: 'safe_sovereign_stale',
+        confidence: 0,
+        severity: 'safe' as ModerationSeverity,
+      }));
+      try {
+        const staleMessage = createResultMessage(requestId, staleResults, nonce, requestEpoch ?? undefined);
+        await postMessageToWebView(staleMessage as unknown as Record<string, unknown>);
+      } catch {
+        // Fail-open by design for stale requests.
+      }
+      pendingRequestsRef.current.delete(requestId);
+      clearTimeout(timeoutId);
+      setFlashGuardState?.(false, 'moderation_sovereign_stale');
+      flashLog('disarm stale sovereign');
       return;
     }
     if (requestEpoch !== null && requestEpoch !== activeEpoch && relaxedYouTubeEpochMode) {
@@ -1792,6 +1908,9 @@ export const NativeWebViewBrowser = () => {
     
     // Process each item using the moderation bridge
     for (const item of items) {
+      if (hardKillStaleRequest('scan_loop_pre_item:' + String(item.itemId || 'none'))) {
+        return;
+      }
       try {
         const scanResult = await moderationBridge.scanImage(item.src, thresholds, {
           requestId,
@@ -1838,6 +1957,9 @@ export const NativeWebViewBrowser = () => {
             severity: shouldBlurOnFailure ? 'hard' : 'safe',
           });
           console.log('[MW-Host] scan result', item.itemId, ': error (no result), failClosed=' + shouldBlurOnFailure);
+        }
+        if (hardKillStaleRequest('scan_loop_post_item:' + String(item.itemId || 'none'))) {
+          return;
         }
       } catch (error) {
         const shouldBlurOnFailure = localSettings.fail_closed === true;
@@ -2000,6 +2122,9 @@ export const NativeWebViewBrowser = () => {
       'domOverlay=' + (ENABLE_DOM_BLUR ? 'on' : 'off'),
       'epoch=' + (requestEpoch ?? activeEpoch),
     );
+    if (hardKillStaleRequest('pre_post_results')) {
+      return;
+    }
     
     // Post results back to the WebView with nonce for security
     console.log('[MW-Host] posting results back', requestId, 'count=' + results.length, 'nonce=' + nonce.substring(0, 10));
@@ -2038,6 +2163,7 @@ export const NativeWebViewBrowser = () => {
     localSettings.segmentationMaxInputPx,
     localSettings.segmentationCacheTtlMs,
     currentUrl,
+    getSovereignIdForContext,
     processModerationSafetySignal,
     setCentralBlurState,
     setFlashGuardState,
@@ -2089,9 +2215,31 @@ export const NativeWebViewBrowser = () => {
       }
       if (typedMessage.type === 'MW_REQ_SENT') {
         const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
-        if (isYouTubeShortsUrl(activeUrl)) {
+        const activeEpoch = webViewPageEpochRef.current;
+        const messageEpoch = (
+          typeof typedMessage.pageEpoch === 'number' && Number.isFinite(typedMessage.pageEpoch)
+        ) ? Number(typedMessage.pageEpoch) : null;
+        const messageSovereignId = typeof typedMessage.sovereignId === 'string'
+          ? typedMessage.sovereignId
+          : '';
+        const isActiveEpochMessage = isGraceEpochAcceptedForActiveShortsVideo(
+          messageEpoch,
+          activeEpoch,
+          activeUrl,
+          messageSovereignId,
+        );
+        if (isYouTubeShortsUrl(activeUrl) && isActiveEpochMessage) {
           shortsLegacyFallbackRef.current.lastReqSentAt = Date.now();
           disarmShortsLegacyFallbackProbe('req_sent');
+        } else if (isYouTubeShortsUrl(activeUrl) && !isActiveEpochMessage) {
+          console.log(
+            '[DIAG][REQ_EPOCH_GATE]',
+            'action=ignore_stale_req_sent',
+            'messageEpoch=' + messageEpoch,
+            'activeEpoch=' + activeEpoch,
+            'navId=' + activeNavIdRef.current,
+            'url=' + (activeUrl || 'unknown'),
+          );
         }
         console.log(
           '[MW-Host][REQ] MW_REQ_SENT',
@@ -2106,9 +2254,31 @@ export const NativeWebViewBrowser = () => {
       }
       if (typedMessage.type === 'MW_REQ_TIMEOUT') {
         const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
-        if (isYouTubeShortsUrl(activeUrl)) {
+        const activeEpoch = webViewPageEpochRef.current;
+        const messageEpoch = (
+          typeof typedMessage.pageEpoch === 'number' && Number.isFinite(typedMessage.pageEpoch)
+        ) ? Number(typedMessage.pageEpoch) : null;
+        const messageSovereignId = typeof typedMessage.sovereignId === 'string'
+          ? typedMessage.sovereignId
+          : '';
+        const isActiveEpochMessage = isGraceEpochAcceptedForActiveShortsVideo(
+          messageEpoch,
+          activeEpoch,
+          activeUrl,
+          messageSovereignId,
+        );
+        if (isYouTubeShortsUrl(activeUrl) && isActiveEpochMessage) {
           shortsLegacyFallbackRef.current.lastReqTimeoutAt = Date.now();
           armShortsLegacyFallbackProbe('req_timeout', SHORTS_LEGACY_FALLBACK_TIMEOUT_PROBE_MS);
+        } else if (isYouTubeShortsUrl(activeUrl) && !isActiveEpochMessage) {
+          console.log(
+            '[DIAG][REQ_EPOCH_GATE]',
+            'action=ignore_stale_req_timeout',
+            'messageEpoch=' + messageEpoch,
+            'activeEpoch=' + activeEpoch,
+            'navId=' + activeNavIdRef.current,
+            'url=' + (activeUrl || 'unknown'),
+          );
         }
         console.warn(
           '[MW-Host][REQ] MW_REQ_TIMEOUT',
@@ -2148,9 +2318,28 @@ export const NativeWebViewBrowser = () => {
           return;
         }
         const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
-        if (isYouTubeShortsUrl(activeUrl)) {
+        const activeEpoch = webViewPageEpochRef.current;
+        const messageEpoch = (
+          typeof message.pageEpoch === 'number' && Number.isFinite(message.pageEpoch)
+        ) ? Number(message.pageEpoch) : null;
+        const isActiveEpochMessage = isGraceEpochAcceptedForActiveShortsVideo(
+          messageEpoch,
+          activeEpoch,
+          activeUrl,
+          message.sovereignId,
+        );
+        if (isYouTubeShortsUrl(activeUrl) && isActiveEpochMessage) {
           shortsLegacyFallbackRef.current.lastReqSentAt = Date.now();
           disarmShortsLegacyFallbackProbe('request_received');
+        } else if (isYouTubeShortsUrl(activeUrl) && !isActiveEpochMessage) {
+          console.log(
+            '[DIAG][REQ_EPOCH_GATE]',
+            'action=ignore_stale_request_received',
+            'messageEpoch=' + messageEpoch,
+            'activeEpoch=' + activeEpoch,
+            'navId=' + activeNavIdRef.current,
+            'url=' + (activeUrl || 'unknown'),
+          );
         }
         console.log(
           '[MW-Host] Received moderation request:',
@@ -2219,6 +2408,7 @@ export const NativeWebViewBrowser = () => {
     flushBlurStateToWebView,
     armShortsLegacyFallbackProbe,
     disarmShortsLegacyFallbackProbe,
+    isGraceEpochAcceptedForActiveShortsVideo,
     webViewState.currentUrl,
   ]);
 
