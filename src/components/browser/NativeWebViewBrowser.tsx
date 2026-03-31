@@ -735,9 +735,10 @@ export const NativeWebViewBrowser = () => {
       pendingReinjectRef.current = null;
       pendingReinjectTimerRef.current = null;
       logSafeResetDiag('pending_reinject_exit', reason + '_timeout', targetUrl);
-      setCentralBlurState(false, 'url_change_safe_reset_pending_timeout');
+      // Keep the current blur state on timeout to avoid fail-open races when reinjection is delayed.
+      queueCurrentBlurState('url_change_safe_reset_pending_timeout');
     }, PENDING_REINJECT_WINDOW_MS);
-  }, [clearPendingReinjectTimer, logSafeResetDiag, setCentralBlurState, PENDING_REINJECT_WINDOW_MS]);
+  }, [clearPendingReinjectTimer, logSafeResetDiag, queueCurrentBlurState, PENDING_REINJECT_WINDOW_MS]);
 
   const logLifecycleSnapshot = useCallback((event: string, urlHint?: string, reason?: string) => {
     const currentUrl = urlHint || currentUrlRef.current || 'unknown';
@@ -1181,6 +1182,12 @@ export const NativeWebViewBrowser = () => {
             }
           })();
         `).catch(() => undefined);
+      }
+      if (isYouTubeShortsUrl(url)) {
+        const sinceLastReq = Date.now() - shortsLegacyFallbackRef.current.lastReqSentAt;
+        if (sinceLastReq > SHORTS_LEGACY_FALLBACK_REQ_GRACE_MS || shortsIdChanged) {
+          armShortsLegacyFallbackProbe('shorts_url_change_uncertain', SHORTS_LEGACY_FALLBACK_ENTRY_PROBE_MS);
+        }
       }
       if (shouldDeferSafeReset) {
         logSafeResetDiag('safe_reset_deferred', deferReason, url);
@@ -2536,7 +2543,12 @@ export const NativeWebViewBrowser = () => {
       if (ENABLE_DOM_BLUR && isBlurOverlayReadyMessage(message)) {
         const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
         const readyUrl = String(typedMessage.url || activeUrl || '');
-        if (isYouTubeShortsUrl(activeUrl) || isYouTubeShortsUrl(readyUrl)) {
+        const shortsReadyContext = isYouTubeShortsUrl(activeUrl) || isYouTubeShortsUrl(readyUrl);
+        if (shortsReadyContext) {
+          const sinceLastReq = Date.now() - shortsLegacyFallbackRef.current.lastReqSentAt;
+          if (sinceLastReq > SHORTS_LEGACY_FALLBACK_REQ_GRACE_MS) {
+            armShortsLegacyFallbackProbe('blur_ready_without_req', SHORTS_LEGACY_FALLBACK_ENTRY_PROBE_MS);
+          }
           const readyKey = [
             String(activeNavIdRef.current),
             String(webViewPageEpochRef.current),

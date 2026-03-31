@@ -704,7 +704,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     },
   };
 
-  const SHORTS_REVEAL_HOLD_MS = 15000;
+  // Keep reveal stable for the current Shorts video (keyed by shorts:<videoId>).
+  // No expiry prevents churn-triggered reblur/button flip while staying scoped per video id.
+  const SHORTS_REVEAL_HOLD_MS = 0;
 
   function extractShortsIdFromUrl(url) {
     const normalized = normalizeUrl(url || '') || String(url || '');
@@ -4868,7 +4870,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     
     const btn = document.createElement('button');
     btn.className = 'mw-reveal-btn';
-    btn.textContent = '👁 Reveal';
+    btn.textContent = isRevealedForSource(src, element) ? '🔒 Hide' : '👁 Reveal';
     btn.style.cssText = [
       'background: rgba(0, 0, 0, 0.9)',
       'color: white',
