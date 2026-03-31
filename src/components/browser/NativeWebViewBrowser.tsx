@@ -103,6 +103,7 @@ const SHORTS_LEGACY_FALLBACK_REQ_GRACE_MS = 2500;
 const SHORTS_LEGACY_FALLBACK_MAX_PROBE_MS = 9000;
 const SHORTS_LEGACY_FALLBACK_MAX_POLLS = 6;
 const SHORTS_READY_DEDUPE_WINDOW_MS = 1200;
+const SHORTS_READY_BOOTSTRAP_REASONS = new Set(['init', 'ping', 'reinject']);
 
 const getUrlFamily = (value?: string) => {
   if (!value) return 'unknown';
@@ -2648,11 +2649,6 @@ export const NativeWebViewBrowser = () => {
         const readyUrl = String(typedMessage.url || activeUrl || '');
         const shortsReadyContext = isYouTubeShortsUrl(activeUrl) || isYouTubeShortsUrl(readyUrl);
         if (shortsReadyContext) {
-          const sinceLastReq = Date.now() - shortsLegacyFallbackRef.current.lastReqSentAt;
-          if (sinceLastReq > SHORTS_LEGACY_FALLBACK_REQ_GRACE_MS) {
-            void requestShortsReentryRefresh('blur_ready_without_req', readyUrl || activeUrl, false);
-            armShortsLegacyFallbackProbe('blur_ready_without_req', SHORTS_LEGACY_FALLBACK_ENTRY_PROBE_MS);
-          }
           const readyKey = [
             String(activeNavIdRef.current),
             String(webViewPageEpochRef.current),
@@ -2665,6 +2661,14 @@ export const NativeWebViewBrowser = () => {
             return;
           }
           blurReadyDedupeRef.current = { key: readyKey, at: now };
+
+          const readyReason = String(typedMessage.reason || '').toLowerCase();
+          const skipNoReqRecovery = SHORTS_READY_BOOTSTRAP_REASONS.has(readyReason);
+          const sinceLastReq = Date.now() - shortsLegacyFallbackRef.current.lastReqSentAt;
+          if (!skipNoReqRecovery && sinceLastReq > SHORTS_LEGACY_FALLBACK_REQ_GRACE_MS) {
+            void requestShortsReentryRefresh('blur_ready_without_req', readyUrl || activeUrl, false);
+            armShortsLegacyFallbackProbe('blur_ready_without_req', SHORTS_LEGACY_FALLBACK_ENTRY_PROBE_MS);
+          }
         }
         blurReadyRef.current = true;
         console.log('[MW-Host] Blur overlay READY:', String(typedMessage.reason || 'ready'), String(typedMessage.url || ''));
