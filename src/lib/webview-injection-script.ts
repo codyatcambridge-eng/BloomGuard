@@ -4944,8 +4944,9 @@ export function generateModerationScript(config: InjectionConfig): string {
           'beforeBlurCount=' + beforeBlurCount
         );
         const revealApplied = markRevealedForSource(src, element, 'manual_reveal');
-        removeBlur(element, src, { keepOverlay: isShortsModeActive() });
-        btn.textContent = '🔒 Hide';
+        // Shorts MVP: a single tap should fully reveal and clear the overlay
+        // to avoid a second tap requirement on active shorts.
+        removeBlur(element, src, { keepOverlay: false });
         const afterBlurCount = countBlurredNodesForItemKey(src);
         const removedBlurCount = beforeBlurCount > afterBlurCount ? (beforeBlurCount - afterBlurCount) : 0;
         console.log(
