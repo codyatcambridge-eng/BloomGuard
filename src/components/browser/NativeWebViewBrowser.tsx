@@ -2018,6 +2018,7 @@ export const NativeWebViewBrowser = () => {
     const results: Array<{
       itemId: string;
       src: string;
+      sourceType?: string;
       shouldBlur: boolean;
       category: string;
       confidence: number;
@@ -2048,22 +2049,52 @@ export const NativeWebViewBrowser = () => {
         });
         
         if (scanResult) {
+          const decisionReason = scanResult.decisionReason || scanResult.reason;
+          const isActiveShortsVideoFrame = stickyShortsMode && item.sourceType === 'video-frame';
+          const isUnknownInputNoPixels = decisionReason === 'unknown_input_no_pixels' || scanResult.reason === 'unknown_input';
+          const forceShortsUncertainBlur = isActiveShortsVideoFrame && isUnknownInputNoPixels;
           const categoryConfidence = Object.entries(scanResult.predictions || {}).reduce((matched, [label, value]) => {
             if (matched >= 0) return matched;
             return label.toLowerCase() === scanResult.category.toLowerCase() ? value : -1;
           }, -1);
           const effectiveConfidence = categoryConfidence >= 0 ? categoryConfidence : scanResult.confidence;
+          const diagnosticsNsfwRisk = typeof scanResult.diagnostics?.nsfwRisk === 'number'
+            ? scanResult.diagnostics.nsfwRisk
+            : null;
+          const uncertainConfidence = diagnosticsNsfwRisk !== null
+            ? Math.max(0.2, Math.min(0.6, diagnosticsNsfwRisk))
+            : 0.35;
+          const finalShouldBlur = forceShortsUncertainBlur ? true : scanResult.shouldBlur;
+          const finalCategory = forceShortsUncertainBlur ? 'shorts_uncertain_input' : scanResult.category;
+          const finalSeverity: ModerationSeverity = forceShortsUncertainBlur
+            ? 'soft'
+            : (scanResult.severity || mapModerationCategoryToSeverity(scanResult.category));
+          const finalConfidence = forceShortsUncertainBlur ? uncertainConfidence : effectiveConfidence;
+          const finalDecisionReason = forceShortsUncertainBlur
+            ? 'shorts_uncertain_input_force_blur:' + String(decisionReason || 'unknown')
+            : decisionReason;
+
+          if (forceShortsUncertainBlur) {
+            console.log(
+              '[MW-Host][ShortsUncertain]',
+              'itemId=' + item.itemId,
+              'sourceType=' + String(item.sourceType || 'unknown'),
+              'reason=' + String(decisionReason || 'unknown'),
+              'action=force_blur',
+            );
+          }
           results.push({
             itemId: item.itemId,
             src: item.src,
-            shouldBlur: scanResult.shouldBlur,
-            category: scanResult.category,
-            confidence: effectiveConfidence,
-            severity: scanResult.severity || mapModerationCategoryToSeverity(scanResult.category),
+            sourceType: item.sourceType,
+            shouldBlur: finalShouldBlur,
+            category: finalCategory,
+            confidence: finalConfidence,
+            severity: finalSeverity,
             predictions: scanResult.predictions,
             model_version: scanResult.modelVersion,
             thresholds: scanResult.thresholdsUsed,
-            decision_reason: scanResult.decisionReason || scanResult.reason,
+            decision_reason: finalDecisionReason,
             image_width: typeof scanResult.diagnostics?.imageWidth === 'number' ? scanResult.diagnostics.imageWidth : item.width,
             image_height: typeof scanResult.diagnostics?.imageHeight === 'number' ? scanResult.diagnostics.imageHeight : item.height,
             host: typeof scanResult.diagnostics?.host === 'string' ? scanResult.diagnostics.host : (() => {
@@ -2072,32 +2103,82 @@ export const NativeWebViewBrowser = () => {
             ts: Date.now(),
             diagnostics: scanResult.diagnostics,
           });
-          console.log('[MW-Host] scan result', item.itemId, ':', scanResult.category, 'blur=' + scanResult.shouldBlur, 'conf=' + effectiveConfidence.toFixed(3));
+          console.log('[MW-Host] scan result', item.itemId, ':', finalCategory, 'blur=' + finalShouldBlur, 'conf=' + finalConfidence.toFixed(3));
         } else {
+          const forceShortsUncertainBlur = stickyShortsMode && item.sourceType === 'video-frame';
           const shouldBlurOnFailure = localSettings.fail_closed === true;
+          const finalShouldBlur = forceShortsUncertainBlur ? true : shouldBlurOnFailure;
+          const finalCategory = forceShortsUncertainBlur
+            ? 'shorts_scan_miss_uncertain'
+            : (shouldBlurOnFailure ? 'error_fail_closed' : 'error');
+          const finalConfidence = forceShortsUncertainBlur
+            ? 0.35
+            : (shouldBlurOnFailure ? 1 : 0);
+          const finalSeverity: ModerationSeverity = forceShortsUncertainBlur
+            ? 'soft'
+            : (shouldBlurOnFailure ? 'hard' : 'safe');
+          const finalDecisionReason = forceShortsUncertainBlur
+            ? 'shorts_uncertain_input_force_blur:no_scan_result'
+            : undefined;
+          if (forceShortsUncertainBlur) {
+            console.log(
+              '[MW-Host][ShortsUncertain]',
+              'itemId=' + item.itemId,
+              'sourceType=' + String(item.sourceType || 'unknown'),
+              'reason=no_scan_result',
+              'action=force_blur',
+            );
+          }
           results.push({
             itemId: item.itemId,
             src: item.src,
-            shouldBlur: shouldBlurOnFailure,
-            category: shouldBlurOnFailure ? 'error_fail_closed' : 'error',
-            confidence: shouldBlurOnFailure ? 1 : 0,
-            severity: shouldBlurOnFailure ? 'hard' : 'safe',
+            sourceType: item.sourceType,
+            shouldBlur: finalShouldBlur,
+            category: finalCategory,
+            confidence: finalConfidence,
+            severity: finalSeverity,
+            decision_reason: finalDecisionReason,
           });
-          console.log('[MW-Host] scan result', item.itemId, ': error (no result), failClosed=' + shouldBlurOnFailure);
+          console.log('[MW-Host] scan result', item.itemId, ':', finalCategory, 'blur=' + finalShouldBlur);
         }
         if (hardKillStaleRequest('scan_loop_post_item:' + String(item.itemId || 'none'))) {
           return;
         }
       } catch (error) {
+        const forceShortsUncertainBlur = stickyShortsMode && item.sourceType === 'video-frame';
         const shouldBlurOnFailure = localSettings.fail_closed === true;
+        const finalShouldBlur = forceShortsUncertainBlur ? true : shouldBlurOnFailure;
+        const finalCategory = forceShortsUncertainBlur
+          ? 'shorts_scan_error_uncertain'
+          : (shouldBlurOnFailure ? 'error_fail_closed' : 'error');
+        const finalConfidence = forceShortsUncertainBlur
+          ? 0.35
+          : (shouldBlurOnFailure ? 1 : 0);
+        const finalSeverity: ModerationSeverity = forceShortsUncertainBlur
+          ? 'soft'
+          : (shouldBlurOnFailure ? 'hard' : 'safe');
+        const finalDecisionReason = forceShortsUncertainBlur
+          ? 'shorts_uncertain_input_force_blur:scan_error'
+          : undefined;
         console.log('[MW-Host] scan error', item.itemId, ':', error);
+        if (forceShortsUncertainBlur) {
+          console.log(
+            '[MW-Host][ShortsUncertain]',
+            'itemId=' + item.itemId,
+            'sourceType=' + String(item.sourceType || 'unknown'),
+            'reason=scan_error',
+            'action=force_blur',
+          );
+        }
         results.push({
           itemId: item.itemId,
           src: item.src,
-          shouldBlur: shouldBlurOnFailure,
-          category: shouldBlurOnFailure ? 'error_fail_closed' : 'error',
-          confidence: shouldBlurOnFailure ? 1 : 0,
-          severity: shouldBlurOnFailure ? 'hard' : 'safe',
+          sourceType: item.sourceType,
+          shouldBlur: finalShouldBlur,
+          category: finalCategory,
+          confidence: finalConfidence,
+          severity: finalSeverity,
+          decision_reason: finalDecisionReason,
         });
       }
     }
