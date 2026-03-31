@@ -842,6 +842,13 @@ export function generateModerationScript(config: InjectionConfig): string {
   let batchTimer = null;
   const NAV_ID = window.__MW_NAV_ID__ || ('mw_' + Date.now().toString(36));
   window.__MW_NAV_ID__ = NAV_ID;
+  function getSovereignNavToken() {
+    const hostNavRaw = Number(window.__MW_HOST_NAV_ID__);
+    if (Number.isFinite(hostNavRaw)) {
+      return String(Math.floor(hostNavRaw));
+    }
+    return String(NAV_ID || 'none');
+  }
   const NONCE_PREFIX = String(CONFIG.nonce || '').substring(0, 6);
   postToHost({
     type: 'MW_INJECTED_ACK',
@@ -4925,7 +4932,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     const requestId = generateRequestId();
     const timestamp = Date.now();
     const sovereignId = [
-      String(NAV_ID || 'none'),
+      getSovereignNavToken(),
       String(state.pageEpoch || 0),
       String(getCurrentShortsUrlId() || 'none'),
     ].join('|');
