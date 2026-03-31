@@ -4924,6 +4924,11 @@ export function generateModerationScript(config: InjectionConfig): string {
     
     const requestId = generateRequestId();
     const timestamp = Date.now();
+    const sovereignId = [
+      String(NAV_ID || 'none'),
+      String(state.pageEpoch || 0),
+      String(getCurrentShortsUrlId() || 'none'),
+    ].join('|');
     if (isShortsModeActive()) {
       console.log(
         '[DIAG][SHORTS_SCAN] scanBatch_start',
@@ -4952,6 +4957,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       })),
       thresholds: effectiveThresholds,
       pageEpoch: state.pageEpoch,
+      sovereignId: sovereignId,
       nonce: CONFIG.nonce,
       timestamp: timestamp,
     };
@@ -4964,6 +4970,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     state.pendingRequests.set(requestId, {
       items: items,
       pageEpoch: state.pageEpoch,
+      sovereignId: sovereignId,
       timestamp: timestamp,
       timeoutId: timeoutId,
       state: 'waitingForHost',
@@ -4985,6 +4992,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       requestId: requestId,
       navId: NAV_ID,
       pageEpoch: state.pageEpoch,
+      sovereignId: sovereignId,
       noncePrefix: NONCE_PREFIX,
       itemCount: items.length,
       timestamp: timestamp,
@@ -5053,6 +5061,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       requestId: requestId,
       navId: NAV_ID,
       pageEpoch: state.pageEpoch,
+      sovereignId: String(pendingRequest.sovereignId || ''),
       noncePrefix: NONCE_PREFIX,
       itemCount: pendingRequest.items.length,
       timestamp: Date.now(),

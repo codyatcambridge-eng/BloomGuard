@@ -1716,6 +1716,12 @@ export const NativeWebViewBrowser = () => {
     const activeSovereignId = getSovereignIdForContext(activeUrl, activeNavIdRef.current, activeEpoch);
     const stickyShortsMode = isYouTubeShortsUrl(activeUrl);
     const relaxedYouTubeEpochMode = isYouTubeDomainUrl(activeUrl) && !stickyShortsMode;
+    const isActiveEpochRequest = isGraceEpochAcceptedForActiveShortsVideo(
+      requestEpoch,
+      activeEpoch,
+      activeUrl,
+      requestSovereignId,
+    );
     const requestNavIdAtStart = activeNavIdRef.current || 0;
     const requestGenerationAtStart = moderationNavGenerationRef.current;
     
@@ -1760,7 +1766,7 @@ export const NativeWebViewBrowser = () => {
       return;
     }
 
-    if (requestEpoch !== null && requestEpoch !== activeEpoch && !relaxedYouTubeEpochMode) {
+    if (requestEpoch !== null && !isActiveEpochRequest && !relaxedYouTubeEpochMode) {
       const rejectReason = stickyShortsMode
         ? 'request_epoch_mismatch_shorts_strict'
         : 'request_epoch_mismatch_non_youtube';

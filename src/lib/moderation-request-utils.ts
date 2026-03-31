@@ -86,6 +86,7 @@ export interface ModerationRequestMessage {
   type: 'gc-moderation-request';
   requestId: string;
   pageEpoch?: number;
+  sovereignId?: string;
   items: ModerationRequestItem[];
   thresholds?: {
     porn: number;
