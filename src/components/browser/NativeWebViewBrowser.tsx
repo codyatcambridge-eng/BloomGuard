@@ -467,6 +467,7 @@ export const NativeWebViewBrowser = () => {
   const lastInjectedUrlRef = useRef('');
   const lastInjectionAtRef = useRef(0);
   const duplicateInjectionSkipsRef = useRef(0);
+  const noHookFallbackRecoverKeysRef = useRef<Set<string>>(new Set());
   const didInjectAfterSettingsLoadedRef = useRef(false);
   const loadEndInjectTimerRef = useRef<NodeJS.Timeout | null>(null);
   const pendingReinjectTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -980,6 +981,11 @@ export const NativeWebViewBrowser = () => {
     );
     // Full moderation script: request scanning + host bridge + DOM blur/reveal behavior.
     const mainScript = generateModerationScript(config);
+    const noHookFallbackKey = [
+      String(navId),
+      String(webViewPageEpochRef.current),
+      String(targetUrl || 'unknown'),
+    ].join('|');
     try {
       const injectResult = await scriptExecutor(mainScript);
       const injectResultText = String(injectResult || '');
@@ -1033,6 +1039,63 @@ export const NativeWebViewBrowser = () => {
           'url=' + (targetUrl || 'unknown'),
         );
         return;
+      }
+      if (syncResult === 'NO_HOOK') {
+        const attemptedRecoveries = noHookFallbackRecoverKeysRef.current;
+        if (!attemptedRecoveries.has(noHookFallbackKey)) {
+          attemptedRecoveries.add(noHookFallbackKey);
+          if (attemptedRecoveries.size > 256) {
+            attemptedRecoveries.clear();
+            attemptedRecoveries.add(noHookFallbackKey);
+          }
+          const teardownResult = await scriptExecutor(`
+            (function() {
+              try {
+                if (typeof window.__MW_TEARDOWN__ !== 'function') return 'NO_TEARDOWN';
+                window.__MW_TEARDOWN__('host_no_hook_recover');
+                return 'TEARDOWN_OK';
+              } catch (e) {
+                return 'TEARDOWN_ERR:' + String(e);
+              }
+            })();
+          `);
+          const teardownText = String(teardownResult || 'null');
+          console.warn(
+            '[DIAG][INJECT] no_hook_active_recover',
+            'reason=' + reason,
+            'navId=' + navId,
+            'pageEpoch=' + webViewPageEpochRef.current,
+            'url=' + (targetUrl || 'unknown'),
+            'mode=fallback_no_return',
+            'teardown=' + teardownText,
+          );
+          try {
+            await scriptExecutor(mainScript);
+            injectionDoneRef.current = true;
+            lastInjectedUrlRef.current = targetUrl;
+            lastInjectionAtRef.current = Date.now();
+            console.log(
+              '[DIAG][INJECT] no_hook_active_recover_success',
+              'reason=' + reason,
+              'navId=' + navId,
+              'pageEpoch=' + webViewPageEpochRef.current,
+              'url=' + (targetUrl || 'unknown'),
+              'mode=fallback_no_return',
+            );
+            exitPendingReinject('inject_no_hook_recover_success', targetUrl);
+            return;
+          } catch (reinjectError) {
+            console.warn(
+              '[DIAG][INJECT] no_hook_active_recover_reinject_error',
+              'reason=' + reason,
+              'navId=' + navId,
+              'pageEpoch=' + webViewPageEpochRef.current,
+              'url=' + (targetUrl || 'unknown'),
+              'mode=fallback_no_return',
+              'message=' + (reinjectError instanceof Error ? reinjectError.message : String(reinjectError)),
+            );
+          }
+        }
       }
       injectionDoneRef.current = true;
       lastInjectedUrlRef.current = targetUrl;
