@@ -102,6 +102,7 @@ const SHORTS_LEGACY_FALLBACK_TIMEOUT_PROBE_MS = 8000;
 const SHORTS_LEGACY_FALLBACK_REQ_GRACE_MS = 2500;
 const SHORTS_LEGACY_FALLBACK_MAX_PROBE_MS = 9000;
 const SHORTS_LEGACY_FALLBACK_MAX_POLLS = 6;
+const SHORTS_READY_DEDUPE_WINDOW_MS = 1200;
 
 const getUrlFamily = (value?: string) => {
   if (!value) return 'unknown';
@@ -288,6 +289,7 @@ export const NativeWebViewBrowser = () => {
     timestamp: Date.now(),
   });
   const blurReadyRef = useRef(false);
+  const blurReadyDedupeRef = useRef<{ key: string; at: number }>({ key: '', at: 0 });
   const blurPendingRef = useRef<{ enabled: boolean; reason: string; timestamp: number } | null>(null);
   const blurRetryTimerRef = useRef<NodeJS.Timeout | null>(null);
   const blurSignalRef = useRef({ unsafeStreak: 0, safeStreak: 0 });
@@ -1007,6 +1009,7 @@ export const NativeWebViewBrowser = () => {
       injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
       blurReadyRef.current = false;
+      blurReadyDedupeRef.current = { key: '', at: 0 };
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       const canDeferLoadStartReset =
         pendingReinjectRef.current?.active === true &&
@@ -1081,6 +1084,12 @@ export const NativeWebViewBrowser = () => {
       const previousUrl = currentUrlRef.current || webViewState.currentUrl || '';
       const previousFamily = getCacheFamilyContext(previousUrl);
       const nextFamily = getCacheFamilyContext(url);
+      const previousShortsId = getYouTubeShortsId(previousUrl);
+      const nextShortsId = getYouTubeShortsId(url);
+      const shortsIdChanged =
+        isYouTubeShortsUrl(previousUrl) &&
+        isYouTubeShortsUrl(url) &&
+        previousShortsId !== nextShortsId;
       const deferReason = `youtube_internal_nav_${previousFamily}_to_${nextFamily}`;
       const shouldDeferSafeReset =
         !!previousUrl &&
@@ -1101,7 +1110,21 @@ export const NativeWebViewBrowser = () => {
       injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
       blurReadyRef.current = false;
+      blurReadyDedupeRef.current = { key: '', at: 0 };
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
+      if (shortsIdChanged && executeScript) {
+        const safeReason = escapeForJs('shorts_url_change_hard_reset');
+        void executeScript(`
+          (function() {
+            try {
+              if (typeof window.__MW_SHORTS_REENTRY_REFRESH__ !== 'function') return 'NO_HOOK';
+              return window.__MW_SHORTS_REENTRY_REFRESH__('${safeReason}');
+            } catch (e) {
+              return 'ERR:' + String(e);
+            }
+          })();
+        `).catch(() => undefined);
+      }
       if (shouldDeferSafeReset) {
         logSafeResetDiag('safe_reset_deferred', deferReason, url);
         enterPendingReinject(deferReason, url);
@@ -2098,6 +2121,7 @@ export const NativeWebViewBrowser = () => {
     const hardStrongHits = hardResults.filter(item => item.confidence >= hardConfThreshold);
     const hardLowHits = hardResults.filter(item => item.confidence >= modePolicy.hardMultiConfFloor);
     const hardUnsafeMaxConf = hardResults.reduce((max, item) => Math.max(max, item.confidence), 0);
+    const shortsAnyShouldBlurHit = stickyShortsMode && eligibleResults.some(item => item.shouldBlur);
 
     const softResults = eligibleResults.filter(item => item.shouldBlur && item.severity === 'soft');
     const softQualifiedHits = softResults.filter(item => item.confidence >= softConfidenceFloor);
@@ -2120,6 +2144,9 @@ export const NativeWebViewBrowser = () => {
     } else if (softOverlayDecision) {
       overlayDecision = true;
       decisionReason = 'soft_ratio_hit';
+    } else if (shortsAnyShouldBlurHit) {
+      overlayDecision = true;
+      decisionReason = 'shorts_item_blur_hit';
     }
 
     const shouldDebugScanSummary = isDebugMode || localSettings.prototype_mode || localSettings.show_scan_notifications;
@@ -2136,15 +2163,19 @@ export const NativeWebViewBrowser = () => {
       );
     }
 
-    // Hysteresis is based on hard conditions only.
-    if (hardOverlayDecision) {
-      processModerationSafetySignal(true, `moderation_request_hard:${decisionReason}`);
+    const shouldTreatAsUnsafe = hardOverlayDecision || shortsAnyShouldBlurHit;
+    // Preserve existing hard-only behavior outside Shorts; Shorts treat any shouldBlur hit as unsafe.
+    if (shouldTreatAsUnsafe) {
+      const unsafeReason = hardOverlayDecision
+        ? `moderation_request_hard:${decisionReason}`
+        : 'moderation_request_shorts_item_blur';
+      processModerationSafetySignal(true, unsafeReason);
     } else {
       processModerationSafetySignal(false, 'moderation_request_no_hard');
     }
 
     // Optional strict mode: temporary page-level soft confirmation (no hysteresis stickiness).
-    if (!hardOverlayDecision) {
+    if (!shouldTreatAsUnsafe) {
       if (softOverlayDecision) {
         setCentralBlurState(true, 'moderation_request_soft_policy');
       } else if (blurStateRef.current.reason.startsWith('moderation_request_soft_')) {
@@ -2334,6 +2365,22 @@ export const NativeWebViewBrowser = () => {
       }
 
       if (ENABLE_DOM_BLUR && isBlurOverlayReadyMessage(message)) {
+        const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
+        const readyUrl = String(typedMessage.url || activeUrl || '');
+        if (isYouTubeShortsUrl(activeUrl) || isYouTubeShortsUrl(readyUrl)) {
+          const readyKey = [
+            String(activeNavIdRef.current),
+            String(webViewPageEpochRef.current),
+            getYouTubeShortsId(readyUrl || activeUrl),
+          ].join('|');
+          const now = Date.now();
+          const prevReady = blurReadyDedupeRef.current;
+          if (prevReady.key === readyKey && (now - prevReady.at) < SHORTS_READY_DEDUPE_WINDOW_MS) {
+            console.log('[MW-Host] Blur overlay READY: duplicate_skip', String(typedMessage.reason || 'ready'), readyUrl);
+            return;
+          }
+          blurReadyDedupeRef.current = { key: readyKey, at: now };
+        }
         blurReadyRef.current = true;
         console.log('[MW-Host] Blur overlay READY:', String(typedMessage.reason || 'ready'), String(typedMessage.url || ''));
         queueCurrentBlurState('webview_ready_sync');
