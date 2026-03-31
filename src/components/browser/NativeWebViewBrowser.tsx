@@ -899,27 +899,69 @@ export const NativeWebViewBrowser = () => {
       typeof webViewActiveInstanceIdRef.current === 'number' &&
       Number.isFinite(webViewActiveInstanceIdRef.current)
     ) ? webViewActiveInstanceIdRef.current : null;
+    const escapedReason = escapeForJs(reason || 'unknown');
     const hostContextSyncScript = `
       (function() {
         try {
           window.__MW_ACTIVE_INSTANCE_ID__ = ${activeInstanceId === null ? 'null' : String(activeInstanceId)};
           window.__MW_HOST_NAV_ID__ = ${navId};
           window.__MW_HOST_PAGE_EPOCH__ = ${webViewPageEpochRef.current};
-          return 'OK';
+          var syncResult = 'NO_HOOK';
+          if (typeof window.__MW_SYNC_HOST_CONTEXT__ === 'function') {
+            syncResult = window.__MW_SYNC_HOST_CONTEXT__({
+              navId: ${navId},
+              pageEpoch: ${webViewPageEpochRef.current},
+              reason: '${escapedReason}'
+            });
+          }
+          return JSON.stringify({
+            hostContext: 'OK',
+            syncResult: String(syncResult || 'NO_HOOK'),
+            navId: ${navId},
+            pageEpoch: ${webViewPageEpochRef.current}
+          });
         } catch (e) {
-          return 'ERR';
+          return JSON.stringify({
+            hostContext: 'ERR',
+            error: String(e)
+          });
         }
       })();
     `;
-    await scriptExecutor(hostContextSyncScript);
+    const hostContextSyncResult = await scriptExecutor(hostContextSyncScript);
+    let syncResult = 'NO_HOOK';
+    try {
+      const parsed = JSON.parse(String(hostContextSyncResult || '{}')) as { syncResult?: string };
+      syncResult = String(parsed.syncResult || 'NO_HOOK');
+    } catch {
+      syncResult = String(hostContextSyncResult || 'NO_HOOK');
+    }
+    const syncApplied = syncResult === 'OK_EPOCH_RESYNCED' || syncResult === 'OK_NO_CHANGE';
     console.log(
       '[DIAG][INJECT] host_context_sync',
       'reason=' + reason,
       'navId=' + navId,
       'pageEpoch=' + webViewPageEpochRef.current,
       'activeInstanceId=' + (activeInstanceId ?? 'none'),
+      'syncResult=' + syncResult,
       'url=' + (targetUrl || 'unknown'),
     );
+    if (syncApplied) {
+      injectionDoneRef.current = true;
+      lastInjectedUrlRef.current = targetUrl;
+      lastInjectionAtRef.current = Date.now();
+      console.log(
+        '[DIAG][EPOCH_SYNC][HOST]',
+        'action=sync_applied',
+        'reason=' + reason,
+        'syncResult=' + syncResult,
+        'navId=' + navId,
+        'pageEpoch=' + webViewPageEpochRef.current,
+        'url=' + (targetUrl || 'unknown'),
+      );
+      exitPendingReinject('epoch_sync_success', targetUrl);
+      return;
+    }
     const config = {
       ...getModerationConfig(),
       enabled: isRuntimeModerationEnabled,
@@ -938,7 +980,19 @@ export const NativeWebViewBrowser = () => {
     // Full moderation script: request scanning + host bridge + DOM blur/reveal behavior.
     const mainScript = generateModerationScript(config);
     try {
-      await scriptExecutor(mainScript);
+      const injectResult = await scriptExecutor(mainScript);
+      const injectResultText = String(injectResult || '');
+      const alreadyActive = injectResultText.includes('MW_ALREADY_ACTIVE');
+      if (alreadyActive) {
+        console.warn(
+          '[DIAG][INJECT] skipped_already_active',
+          'reason=' + reason,
+          'navId=' + navId,
+          'pageEpoch=' + webViewPageEpochRef.current,
+          'url=' + (targetUrl || 'unknown'),
+        );
+        return;
+      }
       injectionDoneRef.current = true;
       lastInjectedUrlRef.current = targetUrl;
       lastInjectionAtRef.current = Date.now();
@@ -1002,7 +1056,6 @@ export const NativeWebViewBrowser = () => {
       console.log('[Browser] URL:', url);
       markNavigation('onLoadStart', url);
       moderationNavGenerationRef.current += 1;
-      teardownWebViewScheduling('navigation_start', url).catch(() => undefined);
       logHostLayerDiagnostics('load_start');
       setIsLoading(true);
       clearLoadEndInjectTimer();
@@ -1022,9 +1075,12 @@ export const NativeWebViewBrowser = () => {
         setCentralBlurState(false, 'navigation_load_start');
       }
       setFlashGuardState?.(true, 'navigation_start');
-      // Early inject to attach per-element pre-blur before first paint.
+      // Teardown first, then inject to avoid __MW_ACTIVE__ races.
       if (executeScript) {
-        void injectModerationScript(executeScript, 'onLoadStart', url);
+        void (async () => {
+          await teardownWebViewScheduling('navigation_start', url).catch(() => undefined);
+          await injectModerationScript(executeScript, 'onLoadStart', url);
+        })();
       }
     },
     onLoadEnd: async (url) => {

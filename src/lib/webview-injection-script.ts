@@ -6865,6 +6865,55 @@ export function generateModerationScript(config: InjectionConfig): string {
   // Expose targeted rescan hooks for the host (NativeWebViewBrowser)
   window.__MW_SCAN_FULL__ = scanFullPage;
   window.__MW_SCAN_YT__ = scanYouTubeThumbnails;
+  window.__MW_SYNC_HOST_CONTEXT__ = function(payload) {
+    try {
+      const nextEpochRaw = payload && Number(payload.pageEpoch);
+      const nextEpoch = Number.isFinite(nextEpochRaw) ? Math.max(1, Math.floor(nextEpochRaw)) : null;
+      const reason = payload && payload.reason ? String(payload.reason) : 'host_context_sync';
+      if (!nextEpoch) {
+        return 'ERR_BAD_EPOCH';
+      }
+      const previousEpoch = Number.isFinite(state.pageEpoch) ? Number(state.pageEpoch) : 0;
+      if (previousEpoch === nextEpoch) {
+        console.log(
+          '[DIAG][EPOCH_SYNC]',
+          'action=epoch_sync_nochange',
+          'prevEpoch=' + previousEpoch,
+          'nextEpoch=' + nextEpoch,
+          'reason=' + reason,
+          'navId=' + NAV_ID,
+          'url=' + window.location.href
+        );
+        return 'OK_NO_CHANGE';
+      }
+
+      if (batchTimer) {
+        clearTimeout(batchTimer);
+        batchTimer = null;
+      }
+      batchQueue = [];
+      state.pendingRequests.forEach(req => {
+        if (req && req.timeoutId) clearTimeout(req.timeoutId);
+      });
+      state.pendingRequests.clear();
+      state.pending.forEach((_item, itemId) => clearPendingItem(itemId, 'host_epoch_resync'));
+      state.pendingBySrc.clear();
+
+      state.pageEpoch = nextEpoch;
+      console.log(
+        '[DIAG][EPOCH_SYNC]',
+        'action=epoch_resynced',
+        'prevEpoch=' + previousEpoch,
+        'nextEpoch=' + nextEpoch,
+        'reason=' + reason,
+        'navId=' + NAV_ID,
+        'url=' + window.location.href
+      );
+      return 'OK_EPOCH_RESYNCED';
+    } catch (e) {
+      return 'ERR:' + String(e);
+    }
+  };
   window.__MW_SHORTS_REENTRY_REFRESH__ = function(reason) {
     try {
       return refreshShortsFreshnessOnReentry(reason || 'host_shorts_reentry', { force: true }) ? 'OK' : 'SKIP';
