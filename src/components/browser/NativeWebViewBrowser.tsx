@@ -144,6 +144,47 @@ const isYouTubeFamilyContext = (family: string): boolean => {
   return family === 'youtube_www' || family === 'youtube_mobile' || family === 'youtube_other';
 };
 
+const getYouTubeShortsId = (value?: string): string => {
+  if (!value) return 'none';
+  try {
+    const parsed = new URL(value);
+    const segments = parsed.pathname.split('/').filter(Boolean);
+    const shortsIndex = segments.indexOf('shorts');
+    if (shortsIndex !== -1 && segments[shortsIndex + 1]) {
+      return segments[shortsIndex + 1];
+    }
+    const videoQuery = parsed.searchParams.get('v');
+    if (videoQuery) return videoQuery;
+  } catch {
+    return 'none';
+  }
+  return 'none';
+};
+
+const getSovereignIdForContext = (value?: string, navId?: number, pageEpoch?: number): string => {
+  const safeNavId = Number.isFinite(navId) ? Number(navId) : 0;
+  const safeEpoch = Number.isFinite(pageEpoch) ? Number(pageEpoch) : 0;
+  const shortsId = getYouTubeShortsId(value);
+  return `${safeNavId}|${safeEpoch}|${shortsId}`;
+};
+
+const parseSovereignId = (value?: string): { navId: number | null; pageEpoch: number | null; videoId: string } => {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return { navId: null, pageEpoch: null, videoId: 'none' };
+  }
+  const parts = raw.split('|');
+  const navId = Number.isFinite(Number(parts[0])) ? Number(parts[0]) : null;
+  const pageEpoch = Number.isFinite(Number(parts[1])) ? Number(parts[1]) : null;
+  const fallbackVideo = parts.length >= 3 && parts[2] ? parts[2] : '';
+  const parsedVideo = getYouTubeShortsId(raw);
+  return {
+    navId,
+    pageEpoch,
+    videoId: parsedVideo !== 'none' ? parsedVideo : (fallbackVideo || 'none'),
+  };
+};
+
 interface SearchResult {
   title: string;
   url: string;
