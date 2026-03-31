@@ -985,6 +985,46 @@ export const NativeWebViewBrowser = () => {
       const injectResultText = String(injectResult || '');
       const alreadyActive = injectResultText.includes('MW_ALREADY_ACTIVE');
       if (alreadyActive) {
+        if (syncResult === 'NO_HOOK') {
+          const teardownResult = await scriptExecutor(`
+            (function() {
+              try {
+                if (typeof window.__MW_TEARDOWN__ !== 'function') return 'NO_TEARDOWN';
+                window.__MW_TEARDOWN__('host_no_hook_recover');
+                return 'TEARDOWN_OK';
+              } catch (e) {
+                return 'TEARDOWN_ERR:' + String(e);
+              }
+            })();
+          `);
+          const teardownText = String(teardownResult || 'null');
+          console.warn(
+            '[DIAG][INJECT] no_hook_active_recover',
+            'reason=' + reason,
+            'navId=' + navId,
+            'pageEpoch=' + webViewPageEpochRef.current,
+            'url=' + (targetUrl || 'unknown'),
+            'teardown=' + teardownText,
+          );
+          if (teardownText === 'TEARDOWN_OK') {
+            const reinjectResult = await scriptExecutor(mainScript);
+            const reinjectText = String(reinjectResult || '');
+            if (!reinjectText.includes('MW_ALREADY_ACTIVE')) {
+              injectionDoneRef.current = true;
+              lastInjectedUrlRef.current = targetUrl;
+              lastInjectionAtRef.current = Date.now();
+              console.log(
+                '[DIAG][INJECT] no_hook_active_recover_success',
+                'reason=' + reason,
+                'navId=' + navId,
+                'pageEpoch=' + webViewPageEpochRef.current,
+                'url=' + (targetUrl || 'unknown'),
+              );
+              exitPendingReinject('inject_no_hook_recover_success', targetUrl);
+              return;
+            }
+          }
+        }
         console.warn(
           '[DIAG][INJECT] skipped_already_active',
           'reason=' + reason,
