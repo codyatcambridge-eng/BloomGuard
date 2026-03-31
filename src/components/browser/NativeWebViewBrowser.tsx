@@ -1095,7 +1095,8 @@ export const NativeWebViewBrowser = () => {
         !!previousUrl &&
         isRuntimeModerationEnabled &&
         isYouTubeFamilyContext(previousFamily) &&
-        isYouTubeFamilyContext(nextFamily);
+        isYouTubeFamilyContext(nextFamily) &&
+        !shortsIdChanged;
       console.log('[Browser] ======= URL CHANGE =======');
       console.log('[Browser] New URL:', url);
       console.log('[DIAG][LOAD] stage=url_change url=' + toDiagUrl(url));
