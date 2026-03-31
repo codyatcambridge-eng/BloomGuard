@@ -676,6 +676,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     safeResolvedAt: new Map(), // src -> timestamp (bounded/ttl for legacy suppression)
     blurred: new Set(),
     revealed: new Set(), // Tracks URLs that user has manually revealed
+    revealedMeta: new Map(), // revealKey -> { revealedAt, expiresAt, reason, src, shortsId }
     elements: new Map(), // itemId -> element
     viewportObserver: null, // IntersectionObserver for viewport optimization
     mutationObservers: [],
@@ -702,6 +703,150 @@ export function generateModerationScript(config: InjectionConfig): string {
       staleEpochDiscarded: 0,
     },
   };
+
+  const SHORTS_REVEAL_HOLD_MS = 15000;
+
+  function extractShortsIdFromUrl(url) {
+    const normalized = normalizeUrl(url || '') || String(url || '');
+    if (!normalized) return '';
+    try {
+      const parsed = new URL(normalized, window.location.href);
+      const shortsMatch = String(parsed.pathname || '').match(new RegExp('^/shorts/([^/?#]+)'));
+      if (shortsMatch && shortsMatch[1]) return shortsMatch[1];
+      const queryId = parsed.searchParams.get('v');
+      if (queryId) return queryId;
+    } catch (e) {}
+    return '';
+  }
+
+  function getRevealScopeForSource(src, element) {
+    const normalizedSrc = normalizeUrl(src || '') || String(src || '');
+    const shortsMode = isShortsModeActive();
+    if (!shortsMode) {
+      return {
+        key: 'src:' + normalizedSrc,
+        normalizedSrc: normalizedSrc,
+        shortsId: '',
+        holdMs: 0,
+      };
+    }
+    const shortsId =
+      getYouTubeAssetVideoId(normalizedSrc) ||
+      extractShortsIdFromUrl(normalizedSrc) ||
+      getCurrentShortsUrlId() ||
+      '';
+    if (shortsId) {
+      return {
+        key: 'shorts:' + shortsId,
+        normalizedSrc: normalizedSrc,
+        shortsId: shortsId,
+        holdMs: SHORTS_REVEAL_HOLD_MS,
+      };
+    }
+    return {
+      key: 'src:' + normalizedSrc,
+      normalizedSrc: normalizedSrc,
+      shortsId: '',
+      holdMs: 0,
+    };
+  }
+
+  function getRevealMetaByKey(revealKey) {
+    if (!revealKey) return null;
+    const meta = state.revealedMeta.get(revealKey);
+    if (!meta) return null;
+    if (meta.expiresAt && Date.now() > meta.expiresAt) {
+      state.revealedMeta.delete(revealKey);
+      state.revealed.delete(revealKey);
+      return null;
+    }
+    return meta;
+  }
+
+  function getRevealMetaForSource(src, element) {
+    const scope = getRevealScopeForSource(src, element);
+    const byKey = getRevealMetaByKey(scope.key);
+    if (byKey) return { key: scope.key, meta: byKey, scope: scope };
+    const legacySrcKey = scope.normalizedSrc;
+    const byLegacy = getRevealMetaByKey(legacySrcKey);
+    if (byLegacy) return { key: legacySrcKey, meta: byLegacy, scope: scope };
+    return { key: scope.key, meta: null, scope: scope };
+  }
+
+  function isRevealedForSource(src, element) {
+    const resolved = getRevealMetaForSource(src, element);
+    if (resolved.meta) return true;
+    const scope = resolved.scope;
+    const normalizedSrc = scope.normalizedSrc;
+    if (state.revealed.has(scope.key)) return true;
+    if (normalizedSrc && state.revealed.has(normalizedSrc)) return true;
+    if (element && element.dataset && element.dataset.mwRevealed === 'true') {
+      const elementKey = String(element.dataset.mwRevealKey || '');
+      if (elementKey) {
+        if (getRevealMetaByKey(elementKey)) return true;
+        if (state.revealed.has(elementKey)) return true;
+      } else if (normalizedSrc && state.revealed.has(normalizedSrc)) {
+        return true;
+      }
+      // Stale dataset marker, clear it so expired reveal can re-enter blur flow.
+      element.dataset.mwRevealed = 'false';
+      element.dataset.mwRevealKey = '';
+      element.dataset.mwRevealedAt = '';
+      element.dataset.mwRevealExpiresAt = '';
+    }
+    return false;
+  }
+
+  function markRevealedForSource(src, element, reason) {
+    const scope = getRevealScopeForSource(src, element);
+    const now = Date.now();
+    const expiresAt = scope.holdMs > 0 ? now + scope.holdMs : null;
+    const meta = {
+      revealedAt: now,
+      expiresAt: expiresAt,
+      reason: String(reason || 'manual_reveal'),
+      src: scope.normalizedSrc,
+      shortsId: scope.shortsId || '',
+    };
+    state.revealed.add(scope.key);
+    if (scope.normalizedSrc) {
+      state.revealed.delete(scope.normalizedSrc);
+    }
+    state.revealedMeta.set(scope.key, meta);
+    if (element && element.dataset) {
+      element.dataset.mwRevealed = 'true';
+      element.dataset.mwRevealKey = scope.key;
+      element.dataset.mwRevealedAt = String(now);
+      element.dataset.mwRevealExpiresAt = expiresAt ? String(expiresAt) : '';
+    }
+    return { key: scope.key, meta: meta, holdMs: scope.holdMs };
+  }
+
+  function unmarkRevealedForSource(src, element, reason) {
+    const scope = getRevealScopeForSource(src, element);
+    const revealKey = scope.key;
+    state.revealed.delete(revealKey);
+    if (scope.normalizedSrc) {
+      state.revealed.delete(scope.normalizedSrc);
+      state.revealedMeta.delete(scope.normalizedSrc);
+    }
+    state.revealedMeta.delete(revealKey);
+    if (element && element.dataset) {
+      element.dataset.mwRevealed = 'false';
+      element.dataset.mwRevealKey = '';
+      element.dataset.mwRevealedAt = '';
+      element.dataset.mwRevealExpiresAt = '';
+    }
+    if (DIAG_YT_BLUR) {
+      console.log(
+        '[DIAG][REVEAL_EVT] reveal_cleared',
+        'reason=' + String(reason || 'unknown'),
+        'revealKey=' + revealKey,
+        'src=' + String(scope.normalizedSrc || '').substring(0, 180)
+      );
+    }
+    return revealKey;
+  }
 
   function safeScore(value) {
     const n = toFiniteNumber(value);
@@ -821,15 +966,15 @@ export function generateModerationScript(config: InjectionConfig): string {
     const scores = getShieldScores(target.predictions || {});
     logShieldAction(action, target, scores);
     if (action === 'report') {
-      state.revealed.delete(target.src);
-      element.dataset.mwRevealed = 'false';
+      unmarkRevealedForSource(target.src, element, 'shield_report');
       clearSafeResolved(target.src);
       applyBlur(element, target.src, target.normalizedCategory || target.predictedLabel || 'flagged', CLAMPED_BLUR_STRENGTH, target.itemId);
       return;
     }
     if (action === 'false_positive') {
       markSafeResolved(target.src);
-      removeBlur(element, target.src);
+      unmarkRevealedForSource(target.src, element, 'shield_false_positive');
+      clearElementBlur(element);
       return;
     }
     if (action === 'deep_scan') {
@@ -2499,7 +2644,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!container || container.nodeType !== 1 || !container.isConnected) return false;
     const context = shortsBlurContextByContainer.get(container);
     if (!context || !context.src) return false;
-    if (state.revealed.has(context.src) || videoNode.dataset.mwRevealed === 'true') {
+    if (isRevealedForSource(context.src, videoNode)) {
       diagShortsSwapMarker(videoNode, reason || 'unknown', true, false, 'revealed');
       return false;
     }
@@ -2957,10 +3102,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       nodeFilterLower.indexOf('blur(') !== -1 ||
       nodeBackdropLower.indexOf('blur(') !== -1
     );
-    const revealed = !!(
-      (context.src && state.revealed.has(context.src)) ||
-      (targetNode && targetNode.dataset && targetNode.dataset.mwRevealed === 'true')
-    );
+    const revealed = isRevealedForSource(context.src, targetNode);
     const moderatedBlurred = !!(targetNode && targetNode.dataset && targetNode.dataset.mwModerated === 'blurred');
     const overlayExpected = !revealed && moderatedBlurred;
     const overlayState = getDiagOverlayState(targetNode);
@@ -3108,10 +3250,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       refreshedFilter.indexOf('blur(') !== -1 ||
       refreshedBackdrop.indexOf('blur(') !== -1
     );
-    const refreshedRevealed = !!(
-      (refreshedContext && refreshedContext.src && state.revealed.has(refreshedContext.src)) ||
-      (refreshedTarget && refreshedTarget.dataset && refreshedTarget.dataset.mwRevealed === 'true')
-    );
+    const refreshedRevealed = isRevealedForSource(refreshedContext && refreshedContext.src, refreshedTarget);
     const refreshedModerated = !!(
       refreshedTarget &&
       refreshedTarget.dataset &&
@@ -4019,12 +4158,8 @@ export function generateModerationScript(config: InjectionConfig): string {
   function applySoftBlur(element, src, itemId) {
     diagBlurStateLog('applySoftBlur.enter', element, src, 'itemId=' + (itemId || 'none'));
     // Check persistence: if user revealed this, don't blur
-    if (state.revealed.has(src)) {
+    if (isRevealedForSource(src, element)) {
       diagSoftBlurLog('apply_skip', element, src, 'reason=revealed_set itemId=' + (itemId || 'none'));
-      return;
-    }
-    if (element.dataset.mwRevealed === 'true') {
-      diagSoftBlurLog('apply_skip', element, src, 'reason=element_revealed itemId=' + (itemId || 'none'));
       return;
     }
     if (element.dataset.mwModerated === 'blurred') {
@@ -4218,8 +4353,7 @@ export function generateModerationScript(config: InjectionConfig): string {
    */
   function applyBlur(element, src, category, blurStrengthPx, itemId) {
     // Check persistence
-    if (state.revealed.has(src)) return;
-    if (element.dataset.mwRevealed === 'true') return;
+    if (isRevealedForSource(src, element)) return;
     
     const shortsMode = isShortsModeActive();
     let shortsStableSelectorUsed = '';
@@ -4245,7 +4379,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           element.dataset.mwShortsStableSelector = shortsStableSelectorUsed;
         }
       }
-      if (element.dataset.mwRevealed === 'true') return;
+      if (isRevealedForSource(src, element)) return;
       const alreadyFilter = String(element.style.getPropertyValue('filter') || element.style.filter || '').toLowerCase();
       const alreadyBackdrop = String(element.style.getPropertyValue('backdrop-filter') || '').toLowerCase();
       const alreadyHardBlurred =
@@ -4361,8 +4495,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
   }
 
-  function removeBlur(element, src) {
+  function removeBlur(element, src, options) {
     try {
+      const keepOverlay = !!(options && options.keepOverlay);
       const shortsMode = isShortsModeActive();
       if (shortsMode) {
         const stableResolution = resolveShortsStableBlurTarget(element, src);
@@ -4390,20 +4525,31 @@ export function generateModerationScript(config: InjectionConfig): string {
         'reason=removeBlur'
       );
       if (shortsMode) {
-        clearAllBlurAndOverlay(element, src, 'removeBlur_reveal', 'revealed');
+        if (keepOverlay) {
+          element.style.removeProperty('filter');
+          element.style.removeProperty('-webkit-filter');
+          element.style.removeProperty('backdrop-filter');
+          element.style.removeProperty('-webkit-backdrop-filter');
+          element.classList.remove('mw-softblur');
+          element.classList.remove('mw-blurred');
+          element.dataset.mwModerated = 'revealed';
+          element.dataset.mwPreblurClear = 'true';
+          clearShortsBlurContextForNode(element, 'removeBlur_reveal_keepOverlay');
+        } else {
+          clearAllBlurAndOverlay(element, src, 'removeBlur_reveal', 'revealed');
+        }
       } else {
         element.style.filter = 'none';
         element.dataset.mwModerated = 'revealed';
         element.dataset.mwPreblurClear = 'true';
         element.classList.remove('mw-softblur');
       }
-      element.dataset.mwRevealed = 'true'; // Persistence marker
-      
-      // Add to revealed set for persistence
-      state.revealed.add(src);
+      markRevealedForSource(src, element, 'removeBlur');
       
       if (shortsMode) {
-        removeRevealOverlay(element, src, 'removeBlur_reveal');
+        if (!keepOverlay) {
+          removeRevealOverlay(element, src, 'removeBlur_reveal');
+        }
       } else if (overlay) {
         overlay.style.display = 'none';
       }
@@ -4760,22 +4906,32 @@ export function generateModerationScript(config: InjectionConfig): string {
         'target=' + getDiagTargetDescriptor(e.target)
       );
       logRevealHittestSnapshot(overlay, btn, overlayId, 'button_click', e);
-      const revealAllowed = !state.revealed.has(src);
+      const revealMeta = getRevealMetaForSource(src, element);
+      const revealAllowed = !revealMeta.meta;
       const revealGateReason = revealAllowed ? 'not_revealed' : 'already_revealed_reblur_path';
       console.log(
         '[DIAG][REVEAL_EVT] reveal_allowed=' + revealAllowed,
         'reason=' + revealGateReason,
         'overlayId=' + overlayId,
-        'itemKey=' + itemKey
+        'itemKey=' + itemKey,
+        'revealKey=' + revealMeta.key
       );
       
-      if (state.revealed.has(src)) {
+      if (!revealAllowed) {
         // Re-blur
-        state.revealed.delete(src);
-        element.dataset.mwRevealed = 'false';
+        const sinceRevealMs = revealMeta.meta ? (Date.now() - Number(revealMeta.meta.revealedAt || Date.now())) : null;
+        unmarkRevealedForSource(src, element, 'manual_hide');
         applyBlur(element, src, category, CONFIG.blurStrength, itemId);
         btn.textContent = '👁 Reveal';
         overlay.style.display = 'flex';
+        console.log(
+          '[DIAG][REVEAL_EVT] reblur_applied',
+          'overlayId=' + overlayId,
+          'itemKey=' + itemKey,
+          'revealKey=' + revealMeta.key,
+          'reblur_reason=manual_hide',
+          'sinceRevealMs=' + (sinceRevealMs === null ? 'n/a' : String(sinceRevealMs))
+        );
       } else {
         // Reveal and trigger feedback
         const beforeBlurCount = countBlurredNodesForItemKey(src);
@@ -4785,9 +4941,8 @@ export function generateModerationScript(config: InjectionConfig): string {
           'itemKey=' + itemKey,
           'beforeBlurCount=' + beforeBlurCount
         );
-        state.revealed.add(src);
-        element.dataset.mwRevealed = 'true'; // Persistence
-        removeBlur(element, src);
+        const revealApplied = markRevealedForSource(src, element, 'manual_reveal');
+        removeBlur(element, src, { keepOverlay: isShortsModeActive() });
         btn.textContent = '🔒 Hide';
         const afterBlurCount = countBlurredNodesForItemKey(src);
         const removedBlurCount = beforeBlurCount > afterBlurCount ? (beforeBlurCount - afterBlurCount) : 0;
@@ -4795,7 +4950,9 @@ export function generateModerationScript(config: InjectionConfig): string {
           '[DIAG][REVEAL_EVT] reveal_apply_done',
           'overlayId=' + overlayId,
           'itemKey=' + itemKey,
-          'removedBlurCount=' + removedBlurCount
+          'removedBlurCount=' + removedBlurCount,
+          'revealKey=' + revealApplied.key,
+          'holdMs=' + String(revealApplied.holdMs || 0)
         );
         
         // POST a label request message so the host can open the labeling modal
@@ -5555,7 +5712,7 @@ export function generateModerationScript(config: InjectionConfig): string {
    */
   function findAndBlur(src, category, blurStrengthPx, shouldBlur, originItemId) {
     if (!shouldBlur) return;
-    if (state.revealed.has(src)) return;
+    if (isRevealedForSource(src, null)) return;
     
     try {
       let fanoutCandidates = 0;
@@ -5578,15 +5735,15 @@ export function generateModerationScript(config: InjectionConfig): string {
 
       // Images
       document.querySelectorAll('img').forEach(img => {
-        if ((img.src === src || img.dataset.mwOrigSrc === src) && !state.revealed.has(src)) {
+        if ((img.src === src || img.dataset.mwOrigSrc === src) && !isRevealedForSource(src, img)) {
           trackFanoutNode(img);
-          if (img.dataset.mwModerated === 'blurred' && img.dataset.mwRevealed !== 'true' && isShortsModeActive()) {
+          if (img.dataset.mwModerated === 'blurred' && !isRevealedForSource(src, img) && isShortsModeActive()) {
             if (!findRevealOverlayForElement(img, src) && img.isConnected) {
               createRevealOverlay(img, src, category);
             }
             return;
           }
-          if (img.dataset.mwModerated !== 'blurred' && img.dataset.mwRevealed !== 'true') {
+          if (img.dataset.mwModerated !== 'blurred' && !isRevealedForSource(src, img)) {
             applyBlur(img, src, category, blurStrengthPx);
             fanoutApplied += 1;
           }
@@ -5595,15 +5752,15 @@ export function generateModerationScript(config: InjectionConfig): string {
       
       // Video posters
       document.querySelectorAll('video').forEach(video => {
-        if ((video.poster === src || video.dataset.mwOrigPoster === src) && !state.revealed.has(src)) {
+        if ((video.poster === src || video.dataset.mwOrigPoster === src) && !isRevealedForSource(src, video)) {
           trackFanoutNode(video);
-          if (video.dataset.mwModerated === 'blurred' && video.dataset.mwRevealed !== 'true' && isShortsModeActive()) {
+          if (video.dataset.mwModerated === 'blurred' && !isRevealedForSource(src, video) && isShortsModeActive()) {
             if (!findRevealOverlayForElement(video, src) && video.isConnected) {
               createRevealOverlay(video, src, category);
             }
             return;
           }
-          if (video.dataset.mwModerated !== 'blurred' && video.dataset.mwRevealed !== 'true') {
+          if (video.dataset.mwModerated !== 'blurred' && !isRevealedForSource(src, video)) {
             applyBlur(video, src, category, blurStrengthPx);
             fanoutApplied += 1;
           }
@@ -5612,15 +5769,15 @@ export function generateModerationScript(config: InjectionConfig): string {
       
       // Background images
       document.querySelectorAll('[data-mw-bg-src]').forEach(el => {
-        if (el.dataset.mwBgSrc === src && !state.revealed.has(src)) {
+        if (el.dataset.mwBgSrc === src && !isRevealedForSource(src, el)) {
           trackFanoutNode(el);
-          if (el.dataset.mwModerated === 'blurred' && el.dataset.mwRevealed !== 'true' && isShortsModeActive()) {
+          if (el.dataset.mwModerated === 'blurred' && !isRevealedForSource(src, el) && isShortsModeActive()) {
             if (!findRevealOverlayForElement(el, src) && el.isConnected) {
               createRevealOverlay(el, src, category);
             }
             return;
           }
-          if (el.dataset.mwModerated !== 'blurred' && el.dataset.mwRevealed !== 'true') {
+          if (el.dataset.mwModerated !== 'blurred' && !isRevealedForSource(src, el)) {
             applyBlur(el, src, category, blurStrengthPx);
             fanoutApplied += 1;
           }
@@ -5852,7 +6009,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     
     // Skip if already revealed by user (persistence)
-    if (state.revealed.has(url) || element.dataset.mwRevealed === 'true') {
+    if (isRevealedForSource(url, element)) {
       logShortsScanSkip('revealed_persistence', null, url, sourceType);
       return false;
     }
