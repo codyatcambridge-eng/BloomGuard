@@ -335,6 +335,7 @@ export const NativeWebViewBrowser = () => {
     at: 0,
   });
   const shortsReqSeenEpochRef = useRef<number | null>(null);
+  const shortsScopedReqSeenRef = useRef<{ epoch: number; videoId: string; at: number } | null>(null);
   const shortsAckNoReqRecoverEpochRef = useRef<number | null>(null);
   const shortsAckNoReqRecoverTimerRef = useRef<NodeJS.Timeout | null>(null);
   const legacyPollSelfDisabledContextRef = useRef<string | null>(null);
@@ -1476,6 +1477,19 @@ export const NativeWebViewBrowser = () => {
     );
     return resultToken;
   }, [isNative, webViewState.isOpen, webViewState.currentUrl, executeScript, toDiagUrl]);
+
+  const isShortsScopedReqSatisfiedForEpoch = useCallback((
+    epoch: number,
+    urlHint?: string,
+  ): boolean => {
+    const activeUrl = urlHint || webViewState.currentUrl || currentUrlRef.current || '';
+    if (!isYouTubeShortsUrl(activeUrl)) return false;
+    const activeVideoId = getYouTubeShortsId(activeUrl);
+    if (!activeVideoId || activeVideoId === 'none') return false;
+    const scoped = shortsScopedReqSeenRef.current;
+    if (!scoped) return false;
+    return scoped.epoch === epoch && scoped.videoId === activeVideoId;
+  }, [webViewState.currentUrl]);
 
   useEffect(() => {
     currentUrlRef.current = webViewState.currentUrl || '';
@@ -2749,7 +2763,12 @@ export const NativeWebViewBrowser = () => {
             const latestEpoch = webViewPageEpochRef.current;
             if (!isYouTubeShortsUrl(latestUrl)) return;
             if (latestEpoch !== ackEpoch) return;
-            if (shortsReqSeenEpochRef.current === ackEpoch) return;
+            if (
+              shortsReqSeenEpochRef.current === ackEpoch &&
+              isShortsScopedReqSatisfiedForEpoch(ackEpoch, latestUrl)
+            ) {
+              return;
+            }
             if (shortsAckNoReqRecoverEpochRef.current === ackEpoch) return;
             shortsAckNoReqRecoverEpochRef.current = ackEpoch;
             shortsLegacyFallbackRef.current.lastReqSentAt = 0;
@@ -2759,6 +2778,7 @@ export const NativeWebViewBrowser = () => {
               'reason=ack_without_active_epoch_req',
               'navId=' + activeNavIdRef.current,
               'pageEpoch=' + ackEpoch,
+              'scopedReqSeen=' + isShortsScopedReqSatisfiedForEpoch(ackEpoch, latestUrl),
               'url=' + (latestUrl || 'unknown'),
             );
             const reentryResult = await requestShortsReentryRefresh('first_entry_ack_no_req', latestUrl, true);
@@ -2792,6 +2812,19 @@ export const NativeWebViewBrowser = () => {
           messageSovereignId,
         );
         if (isYouTubeShortsUrl(activeUrl) && isActiveEpochMessage) {
+          const activeVideoId = getYouTubeShortsId(activeUrl);
+          const messageVideoId = parseSovereignId(messageSovereignId).videoId;
+          if (
+            activeVideoId !== 'none' &&
+            messageVideoId !== 'none' &&
+            activeVideoId === messageVideoId
+          ) {
+            shortsScopedReqSeenRef.current = {
+              epoch: activeEpoch,
+              videoId: activeVideoId,
+              at: Date.now(),
+            };
+          }
           shortsReqSeenEpochRef.current = activeEpoch;
           shortsLegacyFallbackRef.current.lastReqSentAt = Date.now();
           disarmShortsLegacyFallbackProbe('req_sent');
@@ -2926,6 +2959,19 @@ export const NativeWebViewBrowser = () => {
           message.sovereignId,
         );
         if (isYouTubeShortsUrl(activeUrl) && isActiveEpochMessage) {
+          const activeVideoId = getYouTubeShortsId(activeUrl);
+          const messageVideoId = parseSovereignId(message.sovereignId).videoId;
+          if (
+            activeVideoId !== 'none' &&
+            messageVideoId !== 'none' &&
+            activeVideoId === messageVideoId
+          ) {
+            shortsScopedReqSeenRef.current = {
+              epoch: activeEpoch,
+              videoId: activeVideoId,
+              at: Date.now(),
+            };
+          }
           shortsReqSeenEpochRef.current = activeEpoch;
           shortsLegacyFallbackRef.current.lastReqSentAt = Date.now();
           disarmShortsLegacyFallbackProbe('request_received');
@@ -3006,6 +3052,7 @@ export const NativeWebViewBrowser = () => {
     flushBlurStateToWebView,
     requestShortsReentryRefresh,
     forceFirstEntryShortsRequest,
+    isShortsScopedReqSatisfiedForEpoch,
     armShortsLegacyFallbackProbe,
     disarmShortsLegacyFallbackProbe,
     isGraceEpochAcceptedForActiveShortsVideo,
