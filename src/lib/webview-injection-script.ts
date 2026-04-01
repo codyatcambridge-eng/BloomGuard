@@ -4712,9 +4712,39 @@ export function generateModerationScript(config: InjectionConfig): string {
       const activeOwnerToken = activeContext && activeContext.ownerToken ? String(activeContext.ownerToken) : '';
       const elementOwnerToken = String(element.dataset.mwShortsOwnerToken || '');
       if (!activeOwnerToken || !elementOwnerToken || activeOwnerToken !== elementOwnerToken) {
+        const mismatchCountRaw = Number(element.dataset.mwOwnerMismatchCount || '0');
+        const mismatchCount = Number.isFinite(mismatchCountRaw) ? mismatchCountRaw : 0;
+        if (mismatchCount < 1) {
+          element.dataset.mwOwnerMismatchCount = '1';
+          if (element.dataset.mwOwnerMismatchRetryScheduled !== 'true') {
+            element.dataset.mwOwnerMismatchRetryScheduled = 'true';
+            setTimeout(function() {
+              if (!element || element.nodeType !== 1 || !element.isConnected) return;
+              if (element.dataset) {
+                element.dataset.mwOwnerMismatchRetryScheduled = 'false';
+              }
+              if (String(element.dataset.mwModerated || '') !== 'blurred') return;
+              createRevealOverlay(element, src, category, itemId, false);
+            }, 120);
+          }
+          if (DIAG_YT_BLUR) {
+            console.log(
+              '[DIAG][REVEAL_OWNER] mismatch_retry_scheduled',
+              'node=' + getDiagNodeId(element),
+              'active=' + String(activeOwnerToken || '').substring(0, 120),
+              'element=' + String(elementOwnerToken || '').substring(0, 120),
+              'src=' + String(src || '').substring(0, 180)
+            );
+          }
+          return;
+        }
+        element.dataset.mwOwnerMismatchCount = '0';
+        element.dataset.mwOwnerMismatchRetryScheduled = 'false';
         clearAllBlurAndOverlay(element, src || (activeContext && activeContext.src) || '', 'createRevealOverlay_owner_mismatch', 'safe');
         return;
       }
+      element.dataset.mwOwnerMismatchCount = '0';
+      element.dataset.mwOwnerMismatchRetryScheduled = 'false';
       shortsOwnerToken = activeOwnerToken;
     }
     if (DIAG_YT_BLUR && element.dataset.mwModerated !== 'blurred') {
