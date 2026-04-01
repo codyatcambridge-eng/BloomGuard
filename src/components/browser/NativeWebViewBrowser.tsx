@@ -1759,6 +1759,17 @@ export const NativeWebViewBrowser = () => {
     }
 
     const urlHint = webViewState.currentUrl || currentUrlRef.current || 'about:blank';
+    if (isBootstrapBlankUrl(urlHint)) {
+      console.log(
+        '[DIAG][CHURN_WINDOW]',
+        'action=reinjectTimer_skip_bootstrap_blank',
+        'reason=bootstrap_blank_active_url',
+        'stack=NativeWebViewBrowser.reinjectTimer',
+        'navId=' + activeNavIdRef.current,
+        'url=' + urlHint,
+      );
+      return;
+    }
 
     debugLog(
       '[MW-DIAG][HOST] pipeline state',
@@ -2575,6 +2586,18 @@ export const NativeWebViewBrowser = () => {
 
       const typedMessage = message as Record<string, unknown>;
       if (typedMessage.type === 'MW_INJECTED_ACK') {
+        const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
+        const ackUrl = String(typedMessage.url || activeUrl || '');
+        if (isBootstrapBlankUrl(ackUrl)) {
+          console.log(
+            '[DIAG][INJECT] ack_ignored_bootstrap_blank',
+            'source=' + source,
+            'navId=' + String(typedMessage.navId ?? 'none'),
+            'pageEpoch=' + String(typedMessage.pageEpoch ?? 'none'),
+            'url=' + String(typedMessage.url ?? 'unknown'),
+          );
+          return;
+        }
         console.log(
           '[MW-Host][ACK] MW_INJECTED_ACK',
           'source=' + source,
@@ -2674,6 +2697,14 @@ export const NativeWebViewBrowser = () => {
       if (ENABLE_DOM_BLUR && isBlurOverlayReadyMessage(message)) {
         const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
         const readyUrl = String(typedMessage.url || activeUrl || '');
+        if (isBootstrapBlankUrl(readyUrl)) {
+          console.log(
+            '[MW-Host] Blur overlay READY: bootstrap_blank_ignore',
+            String(typedMessage.reason || 'ready'),
+            readyUrl,
+          );
+          return;
+        }
         const shortsReadyContext = isYouTubeShortsUrl(activeUrl) || isYouTubeShortsUrl(readyUrl);
         if (shortsReadyContext) {
           const readyKey = [
