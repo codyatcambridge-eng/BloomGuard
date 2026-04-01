@@ -3631,6 +3631,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!overlay) return false;
     if (!element || !element.isConnected || typeof element.getBoundingClientRect !== 'function') {
       overlay.style.display = 'none';
+      setRevealOverlayAnchorTarget(overlay, null, 'position_invalid_anchor');
       scheduleShortsRevealOverlayRetry(overlay, 'missing_or_disconnected_anchor');
       if (DIAG_YT_BLUR) {
         console.log(
@@ -3659,6 +3660,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     const visibleRect = getVisibleViewportRect(rect, viewportWidth, viewportHeight);
     if (visibleRect.width < 16 || visibleRect.height < 16) {
       overlay.style.display = 'none';
+      setRevealOverlayAnchorTarget(overlay, null, 'position_anchor_not_visible');
       scheduleShortsRevealOverlayRetry(overlay, 'anchor_not_visible');
       if (DIAG_YT_BLUR) {
         console.log(
