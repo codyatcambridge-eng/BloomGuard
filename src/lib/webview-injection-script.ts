@@ -5606,7 +5606,10 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       
       clearPendingItem(itemId, 'result');
-      state.scanned.add(src);
+      const shouldCacheScannedSrc = !(rawCategory === 'safe_epoch_stale' || rawCategory === 'safe_sovereign_stale');
+      if (shouldCacheScannedSrc) {
+        state.scanned.add(src);
+      }
       
       // Check if result came fast enough to skip blur (semantic delay saved)
       const wasInSoftBlur = element && element.dataset.mwModerated === 'softblur';
