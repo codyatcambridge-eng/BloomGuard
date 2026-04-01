@@ -2549,19 +2549,25 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function resetShortsBlurContext(reason) {
-    const ownerTokens = Array.from(shortsActiveOwnerTokens);
-    for (let i = 0; i < ownerTokens.length; i += 1) {
-      clearShortsOwnedBlurAndOverlayByOwnerToken(ownerTokens[i], 'shorts_context_reset:' + (reason || 'unknown'));
+    const normalizedReason = String(reason || 'unknown');
+    const shouldPurgeOwnerTokens = !normalizedReason.startsWith('reentry:');
+    if (shouldPurgeOwnerTokens) {
+      const ownerTokens = Array.from(shortsActiveOwnerTokens);
+      for (let i = 0; i < ownerTokens.length; i += 1) {
+        clearShortsOwnedBlurAndOverlayByOwnerToken(ownerTokens[i], 'shorts_context_reset:' + normalizedReason);
+      }
     }
     shortsBlurContextByContainer = new WeakMap();
     shortsBlurContextCount = 0;
     shortsHealthStateByContainer = new WeakMap();
-    shortsActiveOwnerTokens.clear();
+    if (shouldPurgeOwnerTokens) {
+      shortsActiveOwnerTokens.clear();
+    }
     stopShortsHealthHealInterval('context_reset');
     if (DIAG_YT_BLUR) {
       diagShortsTimeline(
         'shorts_blur_context_reset',
-        'reason=' + (reason || 'unknown') +
+        'reason=' + normalizedReason +
         ' shortsUrlId=' + (getCurrentShortsUrlId() || 'none')
       );
     }
