@@ -2237,6 +2237,105 @@ export function generateModerationScript(config: InjectionConfig): string {
     return watchBound;
   }
 
+  function forceFirstEntryModerationRequest(reason) {
+    if (!isShortsModeActive()) return 'SKIP_NOT_SHORTS';
+    if (timerState.paused || timerState.teardownDone) return 'SKIP_INACTIVE';
+
+    const shortsUrlId = getCurrentShortsUrlId() || '';
+    const candidate = getAdaptiveActiveShortsCandidateIdentity();
+    const container = candidate && candidate.container && candidate.container.isConnected
+      ? candidate.container
+      : getActiveShortsPlayerContainer();
+    const mediaNode = candidate && candidate.mediaNode && candidate.mediaNode.isConnected
+      ? candidate.mediaNode
+      : (
+          container && typeof container.querySelector === 'function'
+            ? container.querySelector('video, img')
+            : null
+        );
+    const fallbackNode = mediaNode || container;
+    if (!fallbackNode || fallbackNode.nodeType !== 1) {
+      console.warn(
+        '[DIAG][SHORTS_REENTRY]',
+        'action=first_entry_force_no_target',
+        'reason=' + (reason || 'unknown'),
+        'navId=' + NAV_ID,
+        'pageEpoch=' + state.pageEpoch,
+        'url=' + window.location.href
+      );
+      return 'NO_TARGET';
+    }
+
+    const seen = new Set();
+    let queuedCount = 0;
+    const queueSource = function(rawSrc, node, sourceType) {
+      const normalized = normalizeUrl(rawSrc || '');
+      if (!normalized) return false;
+      const signature = String(sourceType || 'img') + '|' + normalized;
+      if (seen.has(signature)) return false;
+      seen.add(signature);
+      const sourceVideoId = getYouTubeAssetVideoId(normalized);
+      if (
+        shortsUrlId &&
+        sourceVideoId &&
+        sourceVideoId !== shortsUrlId &&
+        sourceType !== 'video-frame'
+      ) {
+        return false;
+      }
+      state.scanned.delete(normalized);
+      clearSafeResolved(normalized);
+      const existingPendingId = state.pendingBySrc.get(normalized);
+      if (existingPendingId) {
+        clearPendingItem(existingPendingId, 'force_first_entry_reset');
+      }
+      const queued = queueForScan(normalized, node, sourceType || 'img');
+      if (queued) {
+        queuedCount += 1;
+      }
+      return queued;
+    };
+
+    const queueNodeSources = function(node) {
+      if (!node || node.nodeType !== 1) return;
+      const source = getDiagSourceFields(node);
+      const tag = String(node.tagName || '').toUpperCase();
+      if (tag === 'VIDEO') {
+        queueSource(source.poster || node.getAttribute('poster') || '', node, 'video-poster');
+        queueSource(source.currentSrc || node.getAttribute('src') || '', node, 'video-frame');
+      } else {
+        queueSource(source.currentSrc || node.getAttribute('src') || '', node, 'img');
+      }
+      queueSource(extractBgImageUrl(node), node, 'bg-image');
+    };
+
+    queueNodeSources(fallbackNode);
+    if (container && typeof container.querySelectorAll === 'function') {
+      const mediaNodes = container.querySelectorAll('video, img');
+      for (let i = 0; i < mediaNodes.length && i < 8; i += 1) {
+        queueNodeSources(mediaNodes[i]);
+      }
+    }
+
+    if (queuedCount === 0 && shortsUrlId) {
+      queueSource('https://i.ytimg.com/vi/' + shortsUrlId + '/hq720.jpg', fallbackNode, 'img');
+      queueSource('https://i.ytimg.com/vi/' + shortsUrlId + '/oardefault.jpg', fallbackNode, 'img');
+    }
+
+    console.warn(
+      '[DIAG][SHORTS_REENTRY]',
+      'action=first_entry_force_seed',
+      'reason=' + (reason || 'unknown'),
+      'navId=' + NAV_ID,
+      'pageEpoch=' + state.pageEpoch,
+      'shortsUrlId=' + (shortsUrlId || 'none'),
+      'queued=' + queuedCount,
+      'url=' + window.location.href
+    );
+    if (queuedCount <= 0) return 'NO_CANDIDATES';
+    return 'QUEUED:' + queuedCount;
+  }
+
   function doesShortsContainerMatchSrc(container, normalizedSrc) {
     if (!container || container.nodeType !== 1) return false;
     if (!normalizedSrc) return true;
@@ -7244,6 +7343,13 @@ export function generateModerationScript(config: InjectionConfig): string {
   window.__MW_SHORTS_REENTRY_REFRESH__ = function(reason) {
     try {
       return refreshShortsFreshnessOnReentry(reason || 'host_shorts_reentry', { force: true }) ? 'OK' : 'SKIP';
+    } catch (e) {
+      return 'ERR';
+    }
+  };
+  window.__MW_FORCE_FIRST_ENTRY_REQUEST__ = function(reason) {
+    try {
+      return forceFirstEntryModerationRequest(reason || 'host_force_first_entry');
     } catch (e) {
       return 'ERR';
     }

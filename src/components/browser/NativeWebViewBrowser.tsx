@@ -1390,10 +1390,10 @@ export const NativeWebViewBrowser = () => {
     reason: string,
     urlHint?: string,
     force?: boolean,
-  ) => {
-    if (!isNative || !webViewState.isOpen || !executeScript) return;
+  ): Promise<string> => {
+    if (!isNative || !webViewState.isOpen || !executeScript) return 'SKIP_HOST';
     const activeUrl = urlHint || webViewState.currentUrl || currentUrlRef.current || '';
-    if (!isYouTubeShortsUrl(activeUrl)) return;
+    if (!isYouTubeShortsUrl(activeUrl)) return 'SKIP_NOT_SHORTS';
     const navId = activeNavIdRef.current || 0;
     const now = Date.now();
     const previous = shortsReentryRefreshRef.current;
@@ -1410,7 +1410,7 @@ export const NativeWebViewBrowser = () => {
         'navId=' + navId,
         'url=' + toDiagUrl(activeUrl),
       );
-      return;
+      return 'SKIP_DUPLICATE';
     }
 
     shortsReentryRefreshRef.current = {
@@ -1430,14 +1430,51 @@ export const NativeWebViewBrowser = () => {
         }
       })();
     `);
+    const resultToken = result === null || typeof result === 'undefined'
+      ? 'null'
+      : String(result);
     console.log(
       '[DIAG][SHORTS_REENTRY][HOST]',
       'action=requested',
       'reason=' + reason,
       'navId=' + navId,
       'url=' + toDiagUrl(activeUrl),
-      'result=' + String(result || 'null'),
+      'result=' + resultToken,
     );
+    return resultToken;
+  }, [isNative, webViewState.isOpen, webViewState.currentUrl, executeScript, toDiagUrl]);
+
+  const forceFirstEntryShortsRequest = useCallback(async (
+    reason: string,
+    urlHint?: string,
+  ): Promise<string> => {
+    if (!isNative || !webViewState.isOpen || !executeScript) return 'SKIP_HOST';
+    const activeUrl = urlHint || webViewState.currentUrl || currentUrlRef.current || '';
+    if (!isYouTubeShortsUrl(activeUrl)) return 'SKIP_NOT_SHORTS';
+    const navId = activeNavIdRef.current || 0;
+    const safeReason = escapeForJs(reason || 'host_force_first_entry');
+    const result = await executeScript(`
+      (function() {
+        try {
+          if (typeof window.__MW_FORCE_FIRST_ENTRY_REQUEST__ !== 'function') return 'NO_HOOK';
+          return window.__MW_FORCE_FIRST_ENTRY_REQUEST__('${safeReason}');
+        } catch (e) {
+          return 'ERR:' + String(e);
+        }
+      })();
+    `);
+    const resultToken = result === null || typeof result === 'undefined'
+      ? 'null'
+      : String(result);
+    console.warn(
+      '[DIAG][SHORTS_REENTRY][HOST]',
+      'action=force_first_entry_request',
+      'reason=' + reason,
+      'navId=' + navId,
+      'url=' + toDiagUrl(activeUrl),
+      'result=' + resultToken,
+    );
+    return resultToken;
   }, [isNative, webViewState.isOpen, webViewState.currentUrl, executeScript, toDiagUrl]);
 
   useEffect(() => {
@@ -2707,6 +2744,7 @@ export const NativeWebViewBrowser = () => {
             shortsAckNoReqRecoverTimerRef.current = null;
           }
           shortsAckNoReqRecoverTimerRef.current = setTimeout(() => {
+            void (async () => {
             const latestUrl = webViewState.currentUrl || currentUrlRef.current || '';
             const latestEpoch = webViewPageEpochRef.current;
             if (!isYouTubeShortsUrl(latestUrl)) return;
@@ -2723,8 +2761,17 @@ export const NativeWebViewBrowser = () => {
               'pageEpoch=' + ackEpoch,
               'url=' + (latestUrl || 'unknown'),
             );
-            void requestShortsReentryRefresh('first_entry_ack_no_req', latestUrl, true);
+            const reentryResult = await requestShortsReentryRefresh('first_entry_ack_no_req', latestUrl, true);
+            if (
+              reentryResult === 'null' ||
+              reentryResult === 'NO_HOOK' ||
+              reentryResult === 'SKIP' ||
+              reentryResult.startsWith('ERR')
+            ) {
+              await forceFirstEntryShortsRequest('ack_no_req_force_seed', latestUrl);
+            }
             armShortsLegacyFallbackProbe('first_entry_ack_no_req', SHORTS_LEGACY_FALLBACK_ENTRY_PROBE_MS);
+            })();
           }, SHORTS_ACK_NO_REQ_RECOVER_DELAY_MS);
         }
         return;
@@ -2958,6 +3005,7 @@ export const NativeWebViewBrowser = () => {
     queueCurrentBlurState,
     flushBlurStateToWebView,
     requestShortsReentryRefresh,
+    forceFirstEntryShortsRequest,
     armShortsLegacyFallbackProbe,
     disarmShortsLegacyFallbackProbe,
     isGraceEpochAcceptedForActiveShortsVideo,
