@@ -103,7 +103,18 @@ const SHORTS_LEGACY_FALLBACK_REQ_GRACE_MS = 2500;
 const SHORTS_LEGACY_FALLBACK_MAX_PROBE_MS = 9000;
 const SHORTS_LEGACY_FALLBACK_MAX_POLLS = 6;
 const SHORTS_READY_DEDUPE_WINDOW_MS = 1200;
-const SHORTS_READY_BOOTSTRAP_REASONS = new Set(['init', 'ping', 'reinject']);
+const SHORTS_READY_BOOTSTRAP_REASONS = new Set([
+  'init',
+  'ping',
+  'reinject',
+  'load',
+  'pageshow',
+  'visibility',
+  'pushstate',
+  'replacestate',
+  'popstate',
+  'hashchange',
+]);
 
 const getUrlFamily = (value?: string) => {
   if (!value) return 'unknown';
