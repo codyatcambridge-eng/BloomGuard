@@ -157,6 +157,11 @@ const isYouTubeFamilyContext = (family: string): boolean => {
   return family === 'youtube_www' || family === 'youtube_mobile' || family === 'youtube_other';
 };
 
+const isBootstrapBlankUrl = (value?: string): boolean => {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized === '' || normalized === 'about:blank' || normalized.startsWith('about:blank');
+};
+
 const getYouTubeShortsId = (value?: string): string => {
   if (!value) return 'none';
   try {
@@ -1170,8 +1175,19 @@ export const NativeWebViewBrowser = () => {
       console.log('[DIAG][LOAD] stage=start url=' + toDiagUrl(url));
       console.log('[Browser] ======= LOAD START =======');
       console.log('[Browser] URL:', url);
-      markNavigation('onLoadStart', url);
-      moderationNavGenerationRef.current += 1;
+      const skipBootstrapLoadStart = isBootstrapBlankUrl(url);
+      if (skipBootstrapLoadStart) {
+        console.log(
+          '[DIAG][LOAD] bootstrap_blank_skip',
+          'stage=onLoadStart',
+          'url=' + toDiagUrl(url),
+          'navId=' + activeNavIdRef.current,
+          'pageEpoch=' + webViewPageEpochRef.current,
+        );
+      } else {
+        markNavigation('onLoadStart', url);
+        moderationNavGenerationRef.current += 1;
+      }
       logHostLayerDiagnostics('load_start');
       setIsLoading(true);
       clearLoadEndInjectTimer();
@@ -1192,7 +1208,7 @@ export const NativeWebViewBrowser = () => {
       }
       setFlashGuardState?.(true, 'navigation_start');
       // Teardown first, then inject to avoid __MW_ACTIVE__ races.
-      if (executeScript) {
+      if (!skipBootstrapLoadStart && executeScript) {
         void (async () => {
           await teardownWebViewScheduling('navigation_start', url).catch(() => undefined);
           await injectModerationScript(executeScript, 'onLoadStart', url);
