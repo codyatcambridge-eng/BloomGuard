@@ -103,6 +103,7 @@ const SHORTS_LEGACY_FALLBACK_REQ_GRACE_MS = 2500;
 const SHORTS_LEGACY_FALLBACK_MAX_PROBE_MS = 9000;
 const SHORTS_LEGACY_FALLBACK_MAX_POLLS = 6;
 const SHORTS_READY_DEDUPE_WINDOW_MS = 1200;
+const SHORTS_ACK_NO_REQ_RECOVER_DELAY_MS = 350;
 const SHORTS_READY_BOOTSTRAP_REASONS = new Set([
   'init',
   'ping',
@@ -333,6 +334,9 @@ export const NativeWebViewBrowser = () => {
     url: '',
     at: 0,
   });
+  const shortsReqSeenEpochRef = useRef<number | null>(null);
+  const shortsAckNoReqRecoverEpochRef = useRef<number | null>(null);
+  const shortsAckNoReqRecoverTimerRef = useRef<NodeJS.Timeout | null>(null);
   const legacyPollSelfDisabledContextRef = useRef<string | null>(null);
   const [shortsLegacyFallbackVersion, setShortsLegacyFallbackVersion] = useState(0);
 
@@ -1889,6 +1893,10 @@ export const NativeWebViewBrowser = () => {
       clearLoadEndInjectTimer();
       clearPendingReinjectTimer();
       pendingReinjectRef.current = null;
+      if (shortsAckNoReqRecoverTimerRef.current) {
+        clearTimeout(shortsAckNoReqRecoverTimerRef.current);
+        shortsAckNoReqRecoverTimerRef.current = null;
+      }
       if (blurRetryTimerRef.current) {
         clearTimeout(blurRetryTimerRef.current);
       }
@@ -2151,6 +2159,12 @@ export const NativeWebViewBrowser = () => {
         clearTimeout(timeoutId);
         setFlashGuardState?.(false, 'moderation_sovereign_nav_stale');
         flashLog('disarm stale nav mismatch');
+        shortsLegacyFallbackRef.current.lastReqSentAt = 0;
+        void requestShortsReentryRefresh('hard_kill_nav_mismatch_recover', activeUrl, true);
+        armShortsLegacyFallbackProbe(
+          'hard_kill_nav_mismatch_recover',
+          SHORTS_LEGACY_FALLBACK_ENTRY_PROBE_MS,
+        );
         return;
       }
       console.warn(
@@ -2687,6 +2701,32 @@ export const NativeWebViewBrowser = () => {
           'pageEpoch=' + String(typedMessage.pageEpoch ?? 'none'),
           'url=' + String(typedMessage.url ?? 'unknown'),
         );
+        if (isYouTubeShortsUrl(ackUrl) && ackEpoch !== null && ackEpoch === activeEpoch) {
+          if (shortsAckNoReqRecoverTimerRef.current) {
+            clearTimeout(shortsAckNoReqRecoverTimerRef.current);
+            shortsAckNoReqRecoverTimerRef.current = null;
+          }
+          shortsAckNoReqRecoverTimerRef.current = setTimeout(() => {
+            const latestUrl = webViewState.currentUrl || currentUrlRef.current || '';
+            const latestEpoch = webViewPageEpochRef.current;
+            if (!isYouTubeShortsUrl(latestUrl)) return;
+            if (latestEpoch !== ackEpoch) return;
+            if (shortsReqSeenEpochRef.current === ackEpoch) return;
+            if (shortsAckNoReqRecoverEpochRef.current === ackEpoch) return;
+            shortsAckNoReqRecoverEpochRef.current = ackEpoch;
+            shortsLegacyFallbackRef.current.lastReqSentAt = 0;
+            console.warn(
+              '[DIAG][SHORTS_REENTRY][HOST]',
+              'action=ack_no_req_recover',
+              'reason=ack_without_active_epoch_req',
+              'navId=' + activeNavIdRef.current,
+              'pageEpoch=' + ackEpoch,
+              'url=' + (latestUrl || 'unknown'),
+            );
+            void requestShortsReentryRefresh('first_entry_ack_no_req', latestUrl, true);
+            armShortsLegacyFallbackProbe('first_entry_ack_no_req', SHORTS_LEGACY_FALLBACK_ENTRY_PROBE_MS);
+          }, SHORTS_ACK_NO_REQ_RECOVER_DELAY_MS);
+        }
         return;
       }
       if (typedMessage.type === 'MW_REQ_SENT') {
@@ -2705,6 +2745,7 @@ export const NativeWebViewBrowser = () => {
           messageSovereignId,
         );
         if (isYouTubeShortsUrl(activeUrl) && isActiveEpochMessage) {
+          shortsReqSeenEpochRef.current = activeEpoch;
           shortsLegacyFallbackRef.current.lastReqSentAt = Date.now();
           disarmShortsLegacyFallbackProbe('req_sent');
         } else if (isYouTubeShortsUrl(activeUrl) && !isActiveEpochMessage) {
@@ -2838,6 +2879,7 @@ export const NativeWebViewBrowser = () => {
           message.sovereignId,
         );
         if (isYouTubeShortsUrl(activeUrl) && isActiveEpochMessage) {
+          shortsReqSeenEpochRef.current = activeEpoch;
           shortsLegacyFallbackRef.current.lastReqSentAt = Date.now();
           disarmShortsLegacyFallbackProbe('request_received');
         } else if (isYouTubeShortsUrl(activeUrl) && !isActiveEpochMessage) {
