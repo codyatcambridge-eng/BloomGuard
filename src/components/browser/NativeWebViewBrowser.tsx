@@ -486,6 +486,9 @@ export const NativeWebViewBrowser = () => {
   const duplicateInjectionSkipsRef = useRef(0);
   const noHookFallbackRecoverKeysRef = useRef<Set<string>>(new Set());
   const didInjectAfterSettingsLoadedRef = useRef(false);
+  const nonBootstrapAckObservedRef = useRef(false);
+  const epochContextCurrentRef = useRef(false);
+  const relaxedEpochBypassHookStableRef = useRef(false);
   const loadEndInjectTimerRef = useRef<NodeJS.Timeout | null>(null);
   const pendingReinjectTimerRef = useRef<NodeJS.Timeout | null>(null);
   const navigationSeqRef = useRef(0);
@@ -966,6 +969,9 @@ export const NativeWebViewBrowser = () => {
       'url=' + (targetUrl || 'unknown'),
     );
     if (syncApplied) {
+      epochContextCurrentRef.current = true;
+      relaxedEpochBypassHookStableRef.current =
+        nonBootstrapAckObservedRef.current && epochContextCurrentRef.current;
       injectionDoneRef.current = true;
       lastInjectedUrlRef.current = targetUrl;
       lastInjectionAtRef.current = Date.now();
@@ -1193,6 +1199,9 @@ export const NativeWebViewBrowser = () => {
       clearLoadEndInjectTimer();
       injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
+      nonBootstrapAckObservedRef.current = false;
+      epochContextCurrentRef.current = false;
+      relaxedEpochBypassHookStableRef.current = false;
       blurReadyRef.current = false;
       blurReadyDedupeRef.current = { key: '', at: 0 };
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
@@ -1264,6 +1273,9 @@ export const NativeWebViewBrowser = () => {
       clearLoadEndInjectTimer();
       injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
+      nonBootstrapAckObservedRef.current = false;
+      epochContextCurrentRef.current = false;
+      relaxedEpochBypassHookStableRef.current = false;
       exitPendingReinject('load_error', url);
       setFallbackUrl(url);
       navigate('fallback', '', url);
@@ -1298,6 +1310,9 @@ export const NativeWebViewBrowser = () => {
       clearLoadEndInjectTimer();
       injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
+      nonBootstrapAckObservedRef.current = false;
+      epochContextCurrentRef.current = false;
+      relaxedEpochBypassHookStableRef.current = false;
       blurReadyRef.current = false;
       blurReadyDedupeRef.current = { key: '', at: 0 };
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
@@ -1344,6 +1359,9 @@ export const NativeWebViewBrowser = () => {
       });
       injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
+      nonBootstrapAckObservedRef.current = false;
+      epochContextCurrentRef.current = false;
+      relaxedEpochBypassHookStableRef.current = false;
       blurReadyRef.current = false;
       blurPendingRef.current = null;
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
@@ -1925,6 +1943,28 @@ export const NativeWebViewBrowser = () => {
       activeVideoId === messageVideoId
     );
   }, []);
+
+  const doesSovereignContextMatchWhenPresent = useCallback((
+    requestSovereignId?: string,
+    activeSovereignId?: string,
+  ): boolean => {
+    if (!requestSovereignId) return true;
+    const requestSovereign = parseSovereignId(requestSovereignId);
+    const activeSovereign = parseSovereignId(activeSovereignId);
+    const requestNavKnown = Number.isFinite(requestSovereign.navId);
+    const activeNavKnown = Number.isFinite(activeSovereign.navId);
+    if (requestNavKnown && activeNavKnown && requestSovereign.navId !== activeSovereign.navId) {
+      return false;
+    }
+    if (
+      requestSovereign.videoId !== 'none' &&
+      activeSovereign.videoId !== 'none' &&
+      requestSovereign.videoId !== activeSovereign.videoId
+    ) {
+      return false;
+    }
+    return true;
+  }, []);
   
   /**
    * Process a moderation request from the WebView
@@ -1951,6 +1991,20 @@ export const NativeWebViewBrowser = () => {
       activeEpoch,
       activeUrl,
       requestSovereignId,
+    );
+    const isWithinRelaxedEpochWindow = (
+      requestEpoch !== null &&
+      (requestEpoch === activeEpoch || requestEpoch === (activeEpoch - 1))
+    );
+    const sovereignMatchesActiveWhenPresent = doesSovereignContextMatchWhenPresent(
+      requestSovereignId,
+      activeSovereignId,
+    );
+    const guardedRelaxedEpochBypassAllowed = (
+      relaxedYouTubeEpochMode &&
+      isWithinRelaxedEpochWindow &&
+      sovereignMatchesActiveWhenPresent &&
+      relaxedEpochBypassHookStableRef.current
     );
     const requestNavIdAtStart = activeNavIdRef.current || 0;
     const requestGenerationAtStart = moderationNavGenerationRef.current;
@@ -1996,10 +2050,12 @@ export const NativeWebViewBrowser = () => {
       return;
     }
 
-    if (requestEpoch !== null && !isActiveEpochRequest && !relaxedYouTubeEpochMode) {
+    if (requestEpoch !== null && !isActiveEpochRequest && !guardedRelaxedEpochBypassAllowed) {
       const rejectReason = stickyShortsMode
         ? 'request_epoch_mismatch_shorts_strict'
-        : 'request_epoch_mismatch_non_youtube';
+        : (relaxedYouTubeEpochMode
+          ? 'request_epoch_mismatch_youtube_guarded_blocked'
+          : 'request_epoch_mismatch_non_youtube');
       console.warn(
         '[DIAG][EPOCH_BYPASS]',
         'epoch_bypass_blocked',
@@ -2007,6 +2063,9 @@ export const NativeWebViewBrowser = () => {
         'navId=' + activeNavIdRef.current,
         'requestPageEpoch=' + requestEpoch,
         'currentPageEpoch=' + activeEpoch,
+        'withinWindow=' + isWithinRelaxedEpochWindow,
+        'sovereignMatch=' + sovereignMatchesActiveWhenPresent,
+        'hookStable=' + relaxedEpochBypassHookStableRef.current,
         'urlFamily=' + getUrlFamily(activeUrl),
         'url=' + (activeUrl || 'unknown'),
       );
@@ -2124,14 +2183,17 @@ export const NativeWebViewBrowser = () => {
       flashLog('disarm stale sovereign');
       return;
     }
-    if (requestEpoch !== null && requestEpoch !== activeEpoch && relaxedYouTubeEpochMode) {
+    if (requestEpoch !== null && requestEpoch !== activeEpoch && guardedRelaxedEpochBypassAllowed) {
       console.log(
         '[DIAG][EPOCH_BYPASS]',
         'epoch_bypass_allowed',
-        'reason=request_epoch_mismatch_youtube_relaxed',
+        'reason=request_epoch_mismatch_youtube_guarded',
         'navId=' + activeNavIdRef.current,
         'requestPageEpoch=' + requestEpoch,
         'currentPageEpoch=' + activeEpoch,
+        'withinWindow=' + isWithinRelaxedEpochWindow,
+        'sovereignMatch=' + sovereignMatchesActiveWhenPresent,
+        'hookStable=' + relaxedEpochBypassHookStableRef.current,
         'urlFamily=' + getUrlFamily(activeUrl),
         'url=' + (activeUrl || 'unknown'),
       );
@@ -2554,6 +2616,7 @@ export const NativeWebViewBrowser = () => {
     localSettings.segmentationCacheTtlMs,
     currentUrl,
     getSovereignIdForContext,
+    doesSovereignContextMatchWhenPresent,
     processModerationSafetySignal,
     setCentralBlurState,
     setFlashGuardState,
@@ -2598,12 +2661,23 @@ export const NativeWebViewBrowser = () => {
           );
           return;
         }
+        nonBootstrapAckObservedRef.current = true;
+        const ackEpoch = (
+          typeof typedMessage.pageEpoch === 'number' && Number.isFinite(typedMessage.pageEpoch)
+        ) ? Number(typedMessage.pageEpoch) : null;
+        const activeEpoch = webViewPageEpochRef.current;
+        if (ackEpoch !== null && ackEpoch === activeEpoch) {
+          epochContextCurrentRef.current = true;
+        }
+        relaxedEpochBypassHookStableRef.current =
+          nonBootstrapAckObservedRef.current && epochContextCurrentRef.current;
         console.log(
           '[MW-Host][ACK] MW_INJECTED_ACK',
           'source=' + source,
           'navId=' + String(typedMessage.navId ?? 'none'),
           'pageEpoch=' + String(typedMessage.pageEpoch ?? 'none'),
           'noncePrefix=' + String(typedMessage.noncePrefix ?? 'none'),
+          'hookStable=' + relaxedEpochBypassHookStableRef.current,
           'url=' + String(typedMessage.url ?? 'unknown'),
         );
         console.log(
