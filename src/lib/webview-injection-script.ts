@@ -2424,7 +2424,10 @@ export function generateModerationScript(config: InjectionConfig): string {
       String(getDiagNodeId(container) || 'none'),
       String(itemId || 'none').substring(0, 64),
       String(src || '').substring(0, 128),
-      String(updatedAt || Date.now()),
+      // Keep token stable across repeated first-entry reapply calls for the same
+      // active shorts item; timestamp-based churn can invalidate reveal ownership
+      // before overlay attach/reposition has a chance to settle.
+      'stable',
     ].join('|');
   }
 
