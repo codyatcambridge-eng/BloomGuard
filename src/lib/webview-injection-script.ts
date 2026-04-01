@@ -3742,7 +3742,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!isShortsModeActive()) return;
     const retryCountRaw = Number(overlay.dataset.mwPosRetryCount || '0');
     const retryCount = Number.isFinite(retryCountRaw) ? retryCountRaw : 0;
-    if (retryCount >= 8) return;
+    if (retryCount >= 24) return;
     overlay.dataset.mwPosRetryCount = String(retryCount + 1);
     if (timerState.revealOverlayRetryTimeout) return;
     timerState.revealOverlayRetryTimeout = setTimeout(function() {
