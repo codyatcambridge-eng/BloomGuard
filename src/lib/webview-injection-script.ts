@@ -1256,6 +1256,26 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
   }
 
+  function clearElementScanDedupeMarkers(element, reason) {
+    if (!element || element.nodeType !== 1 || !element.dataset) return;
+    try {
+      // Clear one-shot scan guards so stale-safe first-handoff responses can be retried.
+      element.dataset.mwScanned = 'false';
+      element.dataset.mwLastScanSrc = '';
+      element.dataset.mwPosterScanned = 'false';
+      element.dataset.mwLastPoster = '';
+      element.dataset.mwLastShortsFrameAttemptKey = '';
+      if (DIAG_YT_BLUR) {
+        console.log(
+          '[DIAG][SHORTS_SCAN] dedupe_markers_cleared',
+          'reason=' + (reason || 'unknown'),
+          'node=' + getDiagNodeId(element),
+          'tag=' + String(element.tagName || 'unknown')
+        );
+      }
+    } catch (e) {}
+  }
+
   function pruneDisconnectedPending(reason) {
     const toClear = [];
     state.pending.forEach(function(pending, itemId) {
@@ -5609,6 +5629,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       const shouldCacheScannedSrc = !(rawCategory === 'safe_epoch_stale' || rawCategory === 'safe_sovereign_stale');
       if (shouldCacheScannedSrc) {
         state.scanned.add(src);
+      } else {
+        clearElementScanDedupeMarkers(element, 'stale_safe_result');
       }
       
       // Check if result came fast enough to skip blur (semantic delay saved)
