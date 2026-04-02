@@ -104,6 +104,7 @@ const SHORTS_LEGACY_FALLBACK_MAX_PROBE_MS = 9000;
 const SHORTS_LEGACY_FALLBACK_MAX_POLLS = 6;
 const SHORTS_READY_DEDUPE_WINDOW_MS = 1200;
 const SHORTS_ACK_NO_REQ_RECOVER_DELAY_MS = 350;
+const SHORTS_FIRST_ENTRY_LATCH_MS = 1500;
 const SHORTS_READY_BOOTSTRAP_REASONS = new Set([
   'init',
   'ping',
@@ -338,6 +339,25 @@ export const NativeWebViewBrowser = () => {
   const shortsScopedReqSeenRef = useRef<{ epoch: number; videoId: string; at: number } | null>(null);
   const shortsAckNoReqRecoverEpochRef = useRef<number | null>(null);
   const shortsAckNoReqRecoverTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const shortsFirstEntryLatchRef = useRef<{
+    armed: boolean;
+    epoch: number;
+    videoId: string;
+    untilMs: number;
+    armedAt: number;
+    reentryRequested: boolean;
+    forceRequested: boolean;
+    reason: string;
+  }>({
+    armed: false,
+    epoch: 0,
+    videoId: 'none',
+    untilMs: 0,
+    armedAt: 0,
+    reentryRequested: false,
+    forceRequested: false,
+    reason: 'idle',
+  });
   const legacyPollSelfDisabledContextRef = useRef<string | null>(null);
   const [shortsLegacyFallbackVersion, setShortsLegacyFallbackVersion] = useState(0);
 
@@ -382,6 +402,127 @@ export const NativeWebViewBrowser = () => {
     );
     setShortsLegacyFallbackVersion(v => v + 1);
   }, []);
+
+  const disarmShortsFirstEntryLatch = useCallback((reason: string) => {
+    const state = shortsFirstEntryLatchRef.current;
+    if (!state.armed) return;
+    const armedForMs = Math.max(0, Date.now() - state.armedAt);
+    console.log(
+      '[MW-Host][ShortsEntryLatch] disarm',
+      'reason=' + reason,
+      'epoch=' + state.epoch,
+      'videoId=' + state.videoId,
+      'armedForMs=' + armedForMs,
+      'reentryRequested=' + state.reentryRequested,
+      'forceRequested=' + state.forceRequested,
+      'navId=' + activeNavIdRef.current,
+    );
+    shortsFirstEntryLatchRef.current = {
+      armed: false,
+      epoch: 0,
+      videoId: 'none',
+      untilMs: 0,
+      armedAt: 0,
+      reentryRequested: false,
+      forceRequested: false,
+      reason,
+    };
+  }, []);
+
+  const armShortsFirstEntryLatch = useCallback((reason: string, urlHint?: string) => {
+    const activeUrl = urlHint || webViewState.currentUrl || currentUrlRef.current || '';
+    if (!isYouTubeShortsUrl(activeUrl)) return false;
+    const videoId = getYouTubeShortsId(activeUrl);
+    if (!videoId || videoId === 'none') return false;
+    const epoch = webViewPageEpochRef.current || 0;
+    if (!Number.isFinite(epoch) || epoch <= 0) return false;
+    const state = shortsFirstEntryLatchRef.current;
+    const now = Date.now();
+    if (
+      state.armed &&
+      state.epoch === epoch &&
+      state.videoId === videoId &&
+      state.untilMs > now
+    ) {
+      return true;
+    }
+    shortsFirstEntryLatchRef.current = {
+      armed: true,
+      epoch,
+      videoId,
+      untilMs: now + SHORTS_FIRST_ENTRY_LATCH_MS,
+      armedAt: now,
+      reentryRequested: false,
+      forceRequested: false,
+      reason,
+    };
+    console.log(
+      '[MW-Host][ShortsEntryLatch] arm',
+      'reason=' + reason,
+      'epoch=' + epoch,
+      'videoId=' + videoId,
+      'untilMs=' + (now + SHORTS_FIRST_ENTRY_LATCH_MS),
+      'navId=' + activeNavIdRef.current,
+      'url=' + (activeUrl || 'unknown'),
+    );
+    return true;
+  }, [webViewState.currentUrl]);
+
+  const getActiveShortsFirstEntryLatch = useCallback((urlHint?: string) => {
+    const activeUrl = urlHint || webViewState.currentUrl || currentUrlRef.current || '';
+    const state = shortsFirstEntryLatchRef.current;
+    if (!state.armed) return null;
+    if (!isYouTubeShortsUrl(activeUrl)) {
+      disarmShortsFirstEntryLatch('left_shorts');
+      return null;
+    }
+    const liveEpoch = webViewPageEpochRef.current || 0;
+    const liveVideoId = getYouTubeShortsId(activeUrl);
+    const now = Date.now();
+    if (
+      state.untilMs <= now ||
+      state.epoch !== liveEpoch ||
+      state.videoId !== liveVideoId
+    ) {
+      disarmShortsFirstEntryLatch('expired_or_context_changed');
+      return null;
+    }
+    return state;
+  }, [webViewState.currentUrl, disarmShortsFirstEntryLatch]);
+
+  const markShortsFirstEntryReentryRequested = useCallback((reason: string, urlHint?: string) => {
+    const state = getActiveShortsFirstEntryLatch(urlHint);
+    if (!state) return false;
+    if (state.reentryRequested) {
+      console.log(
+        '[MW-Host][ShortsEntryLatch] skip_reentry',
+        'reason=' + reason,
+        'epoch=' + state.epoch,
+        'videoId=' + state.videoId,
+        'navId=' + activeNavIdRef.current,
+      );
+      return false;
+    }
+    state.reentryRequested = true;
+    return true;
+  }, [getActiveShortsFirstEntryLatch]);
+
+  const markShortsFirstEntryForceRequested = useCallback((reason: string, urlHint?: string) => {
+    const state = getActiveShortsFirstEntryLatch(urlHint);
+    if (!state) return false;
+    if (state.forceRequested) {
+      console.log(
+        '[MW-Host][ShortsEntryLatch] skip_force',
+        'reason=' + reason,
+        'epoch=' + state.epoch,
+        'videoId=' + state.videoId,
+        'navId=' + activeNavIdRef.current,
+      );
+      return false;
+    }
+    state.forceRequested = true;
+    return true;
+  }, [getActiveShortsFirstEntryLatch]);
 
   const queueCurrentBlurState = useCallback((reason: string) => {
     blurPendingRef.current = {
@@ -1501,24 +1642,45 @@ export const NativeWebViewBrowser = () => {
     const wasInShorts = shortsModeActiveRef.current;
     shortsModeActiveRef.current = inShorts;
     if (inShorts && !wasInShorts) {
+      armShortsFirstEntryLatch('shorts_entry_transition', activeUrl);
       const sinceLastReq = Date.now() - shortsLegacyFallbackRef.current.lastReqSentAt;
       if (sinceLastReq > SHORTS_LEGACY_FALLBACK_REQ_GRACE_MS) {
         armShortsLegacyFallbackProbe('shorts_entry_uncertain', SHORTS_LEGACY_FALLBACK_ENTRY_PROBE_MS);
       }
-      void requestShortsReentryRefresh('shorts_entry_transition', activeUrl, true);
+      if (markShortsFirstEntryReentryRequested('shorts_entry_transition', activeUrl)) {
+        void requestShortsReentryRefresh('shorts_entry_transition', activeUrl, true);
+      }
       return;
     }
     if (!inShorts && wasInShorts) {
       disarmShortsLegacyFallbackProbe('shorts_exit');
+      disarmShortsFirstEntryLatch('shorts_exit');
     }
-  }, [webViewState.currentUrl, armShortsLegacyFallbackProbe, disarmShortsLegacyFallbackProbe, requestShortsReentryRefresh]);
+  }, [
+    webViewState.currentUrl,
+    armShortsLegacyFallbackProbe,
+    disarmShortsLegacyFallbackProbe,
+    armShortsFirstEntryLatch,
+    disarmShortsFirstEntryLatch,
+    markShortsFirstEntryReentryRequested,
+    requestShortsReentryRefresh,
+  ]);
 
   useEffect(() => {
     if (!webViewState.isOpen) return;
     const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
     if (!isYouTubeShortsUrl(activeUrl)) return;
-    void requestShortsReentryRefresh('webview_open_shorts', activeUrl, false);
-  }, [webViewState.isOpen, webViewState.currentUrl, requestShortsReentryRefresh]);
+    armShortsFirstEntryLatch('webview_open_shorts', activeUrl);
+    if (markShortsFirstEntryReentryRequested('webview_open_shorts', activeUrl)) {
+      void requestShortsReentryRefresh('webview_open_shorts', activeUrl, false);
+    }
+  }, [
+    webViewState.isOpen,
+    webViewState.currentUrl,
+    armShortsFirstEntryLatch,
+    markShortsFirstEntryReentryRequested,
+    requestShortsReentryRefresh,
+  ]);
 
   useEffect(() => {
     webViewListenersAttachedRef.current = webViewListenersAttached;
@@ -1948,11 +2110,12 @@ export const NativeWebViewBrowser = () => {
         clearTimeout(shortsAckNoReqRecoverTimerRef.current);
         shortsAckNoReqRecoverTimerRef.current = null;
       }
+      disarmShortsFirstEntryLatch('component_unmount');
       if (blurRetryTimerRef.current) {
         clearTimeout(blurRetryTimerRef.current);
       }
     };
-  }, [clearLoadEndInjectTimer, clearPendingReinjectTimer]);
+  }, [clearLoadEndInjectTimer, clearPendingReinjectTimer, disarmShortsFirstEntryLatch]);
 
   // ==================== MODERATION MESSAGE HANDLING ====================
   // 
@@ -2753,6 +2916,7 @@ export const NativeWebViewBrowser = () => {
           'url=' + String(typedMessage.url ?? 'unknown'),
         );
         if (isYouTubeShortsUrl(ackUrl) && ackEpoch !== null && ackEpoch === activeEpoch) {
+          armShortsFirstEntryLatch('ack_received', ackUrl);
           if (shortsAckNoReqRecoverTimerRef.current) {
             clearTimeout(shortsAckNoReqRecoverTimerRef.current);
             shortsAckNoReqRecoverTimerRef.current = null;
@@ -2781,14 +2945,19 @@ export const NativeWebViewBrowser = () => {
               'scopedReqSeen=' + isShortsScopedReqSatisfiedForEpoch(ackEpoch, latestUrl),
               'url=' + (latestUrl || 'unknown'),
             );
-            const reentryResult = await requestShortsReentryRefresh('first_entry_ack_no_req', latestUrl, true);
+            let reentryResult = 'SKIP_LATCH';
+            if (markShortsFirstEntryReentryRequested('first_entry_ack_no_req', latestUrl)) {
+              reentryResult = await requestShortsReentryRefresh('first_entry_ack_no_req', latestUrl, true);
+            }
             if (
               reentryResult === 'null' ||
               reentryResult === 'NO_HOOK' ||
               reentryResult === 'SKIP' ||
               reentryResult.startsWith('ERR')
             ) {
-              await forceFirstEntryShortsRequest('ack_no_req_force_seed', latestUrl);
+              if (markShortsFirstEntryForceRequested('ack_no_req_force_seed', latestUrl)) {
+                await forceFirstEntryShortsRequest('ack_no_req_force_seed', latestUrl);
+              }
             }
             armShortsLegacyFallbackProbe('first_entry_ack_no_req', SHORTS_LEGACY_FALLBACK_ENTRY_PROBE_MS);
             })();
@@ -2824,6 +2993,7 @@ export const NativeWebViewBrowser = () => {
               videoId: activeVideoId,
               at: Date.now(),
             };
+            disarmShortsFirstEntryLatch('scoped_req_sent');
           }
           shortsReqSeenEpochRef.current = activeEpoch;
           shortsLegacyFallbackRef.current.lastReqSentAt = Date.now();
@@ -2919,7 +3089,9 @@ export const NativeWebViewBrowser = () => {
           const skipNoReqRecovery = SHORTS_READY_BOOTSTRAP_REASONS.has(readyReason);
           const sinceLastReq = Date.now() - shortsLegacyFallbackRef.current.lastReqSentAt;
           if (!skipNoReqRecovery && sinceLastReq > SHORTS_LEGACY_FALLBACK_REQ_GRACE_MS) {
-            void requestShortsReentryRefresh('blur_ready_without_req', readyUrl || activeUrl, false);
+            if (markShortsFirstEntryReentryRequested('blur_ready_without_req', readyUrl || activeUrl)) {
+              void requestShortsReentryRefresh('blur_ready_without_req', readyUrl || activeUrl, false);
+            }
             armShortsLegacyFallbackProbe('blur_ready_without_req', SHORTS_LEGACY_FALLBACK_ENTRY_PROBE_MS);
           }
         }
@@ -2971,6 +3143,7 @@ export const NativeWebViewBrowser = () => {
               videoId: activeVideoId,
               at: Date.now(),
             };
+            disarmShortsFirstEntryLatch('scoped_request_received');
           }
           shortsReqSeenEpochRef.current = activeEpoch;
           shortsLegacyFallbackRef.current.lastReqSentAt = Date.now();
@@ -3055,6 +3228,10 @@ export const NativeWebViewBrowser = () => {
     isShortsScopedReqSatisfiedForEpoch,
     armShortsLegacyFallbackProbe,
     disarmShortsLegacyFallbackProbe,
+    armShortsFirstEntryLatch,
+    disarmShortsFirstEntryLatch,
+    markShortsFirstEntryReentryRequested,
+    markShortsFirstEntryForceRequested,
     isGraceEpochAcceptedForActiveShortsVideo,
     webViewState.currentUrl,
   ]);
