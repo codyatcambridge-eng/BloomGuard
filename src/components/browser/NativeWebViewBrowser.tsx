@@ -1648,7 +1648,20 @@ export const NativeWebViewBrowser = () => {
         armShortsLegacyFallbackProbe('shorts_entry_uncertain', SHORTS_LEGACY_FALLBACK_ENTRY_PROBE_MS);
       }
       if (markShortsFirstEntryReentryRequested('shorts_entry_transition', activeUrl)) {
-        void requestShortsReentryRefresh('shorts_entry_transition', activeUrl, true);
+        void requestShortsReentryRefresh('shorts_entry_transition', activeUrl, true)
+          .then((resultToken) => {
+            if (
+              resultToken === 'null' ||
+              resultToken === 'NO_HOOK' ||
+              resultToken === 'SKIP' ||
+              resultToken.startsWith('ERR')
+            ) {
+              if (markShortsFirstEntryForceRequested('shorts_entry_transition_force_seed', activeUrl)) {
+                void forceFirstEntryShortsRequest('shorts_entry_transition_force_seed', activeUrl);
+              }
+            }
+          })
+          .catch(() => undefined);
       }
       return;
     }
@@ -1663,7 +1676,9 @@ export const NativeWebViewBrowser = () => {
     armShortsFirstEntryLatch,
     disarmShortsFirstEntryLatch,
     markShortsFirstEntryReentryRequested,
+    markShortsFirstEntryForceRequested,
     requestShortsReentryRefresh,
+    forceFirstEntryShortsRequest,
   ]);
 
   useEffect(() => {
@@ -1672,14 +1687,29 @@ export const NativeWebViewBrowser = () => {
     if (!isYouTubeShortsUrl(activeUrl)) return;
     armShortsFirstEntryLatch('webview_open_shorts', activeUrl);
     if (markShortsFirstEntryReentryRequested('webview_open_shorts', activeUrl)) {
-      void requestShortsReentryRefresh('webview_open_shorts', activeUrl, false);
+      void requestShortsReentryRefresh('webview_open_shorts', activeUrl, false)
+        .then((resultToken) => {
+          if (
+            resultToken === 'null' ||
+            resultToken === 'NO_HOOK' ||
+            resultToken === 'SKIP' ||
+            resultToken.startsWith('ERR')
+          ) {
+            if (markShortsFirstEntryForceRequested('webview_open_shorts_force_seed', activeUrl)) {
+              void forceFirstEntryShortsRequest('webview_open_shorts_force_seed', activeUrl);
+            }
+          }
+        })
+        .catch(() => undefined);
     }
   }, [
     webViewState.isOpen,
     webViewState.currentUrl,
     armShortsFirstEntryLatch,
     markShortsFirstEntryReentryRequested,
+    markShortsFirstEntryForceRequested,
     requestShortsReentryRefresh,
+    forceFirstEntryShortsRequest,
   ]);
 
   useEffect(() => {
@@ -2187,6 +2217,18 @@ export const NativeWebViewBrowser = () => {
     }
     return true;
   }, []);
+
+  const isShortsMessageEligibleForFirstEntryState = useCallback((
+    messageEpoch: number | null,
+    activeEpoch: number,
+    activeUrl: string,
+    messageSovereignId?: string,
+  ): boolean => {
+    if (!isYouTubeShortsUrl(activeUrl)) return false;
+    if (messageEpoch === null || messageEpoch !== activeEpoch) return false;
+    const activeSovereignId = getSovereignIdForContext(activeUrl, activeNavIdRef.current, activeEpoch);
+    return doesSovereignContextMatchWhenPresent(messageSovereignId, activeSovereignId);
+  }, [doesSovereignContextMatchWhenPresent]);
   
   /**
    * Process a moderation request from the WebView
@@ -2980,24 +3022,47 @@ export const NativeWebViewBrowser = () => {
           activeUrl,
           messageSovereignId,
         );
+        const isShortsFirstEntryEligible = isShortsMessageEligibleForFirstEntryState(
+          messageEpoch,
+          activeEpoch,
+          activeUrl,
+          messageSovereignId,
+        );
         if (isYouTubeShortsUrl(activeUrl) && isActiveEpochMessage) {
-          const activeVideoId = getYouTubeShortsId(activeUrl);
-          const messageVideoId = parseSovereignId(messageSovereignId).videoId;
-          if (
-            activeVideoId !== 'none' &&
-            messageVideoId !== 'none' &&
-            activeVideoId === messageVideoId
-          ) {
-            shortsScopedReqSeenRef.current = {
-              epoch: activeEpoch,
-              videoId: activeVideoId,
-              at: Date.now(),
-            };
-            disarmShortsFirstEntryLatch('scoped_req_sent');
+          if (isShortsFirstEntryEligible) {
+            const activeVideoId = getYouTubeShortsId(activeUrl);
+            const messageVideoId = parseSovereignId(messageSovereignId).videoId;
+            if (
+              activeVideoId !== 'none' &&
+              messageVideoId !== 'none' &&
+              activeVideoId === messageVideoId
+            ) {
+              shortsScopedReqSeenRef.current = {
+                epoch: activeEpoch,
+                videoId: activeVideoId,
+                at: Date.now(),
+              };
+              disarmShortsFirstEntryLatch('scoped_req_sent');
+            }
+            shortsReqSeenEpochRef.current = activeEpoch;
+            shortsLegacyFallbackRef.current.lastReqSentAt = Date.now();
+            disarmShortsLegacyFallbackProbe('req_sent');
+          } else {
+            const activeSovereignId = getSovereignIdForContext(activeUrl, activeNavIdRef.current, activeEpoch);
+            const parsedMessageSovereign = parseSovereignId(messageSovereignId);
+            const parsedActiveSovereign = parseSovereignId(activeSovereignId);
+            console.log(
+              '[DIAG][SHORTS_FIRST_ENTRY_GATE]',
+              'action=ignore_req_sent_for_latch',
+              'messageEpoch=' + String(messageEpoch ?? 'none'),
+              'activeEpoch=' + String(activeEpoch),
+              'messageNavId=' + String(parsedMessageSovereign.navId ?? 'none'),
+              'activeNavId=' + String(parsedActiveSovereign.navId ?? 'none'),
+              'messageVideoId=' + String(parsedMessageSovereign.videoId || 'none'),
+              'activeVideoId=' + String(parsedActiveSovereign.videoId || 'none'),
+              'url=' + (activeUrl || 'unknown'),
+            );
           }
-          shortsReqSeenEpochRef.current = activeEpoch;
-          shortsLegacyFallbackRef.current.lastReqSentAt = Date.now();
-          disarmShortsLegacyFallbackProbe('req_sent');
         } else if (isYouTubeShortsUrl(activeUrl) && !isActiveEpochMessage) {
           console.log(
             '[DIAG][REQ_EPOCH_GATE]',
@@ -3130,24 +3195,47 @@ export const NativeWebViewBrowser = () => {
           activeUrl,
           message.sovereignId,
         );
+        const isShortsFirstEntryEligible = isShortsMessageEligibleForFirstEntryState(
+          messageEpoch,
+          activeEpoch,
+          activeUrl,
+          message.sovereignId,
+        );
         if (isYouTubeShortsUrl(activeUrl) && isActiveEpochMessage) {
-          const activeVideoId = getYouTubeShortsId(activeUrl);
-          const messageVideoId = parseSovereignId(message.sovereignId).videoId;
-          if (
-            activeVideoId !== 'none' &&
-            messageVideoId !== 'none' &&
-            activeVideoId === messageVideoId
-          ) {
-            shortsScopedReqSeenRef.current = {
-              epoch: activeEpoch,
-              videoId: activeVideoId,
-              at: Date.now(),
-            };
-            disarmShortsFirstEntryLatch('scoped_request_received');
+          if (isShortsFirstEntryEligible) {
+            const activeVideoId = getYouTubeShortsId(activeUrl);
+            const messageVideoId = parseSovereignId(message.sovereignId).videoId;
+            if (
+              activeVideoId !== 'none' &&
+              messageVideoId !== 'none' &&
+              activeVideoId === messageVideoId
+            ) {
+              shortsScopedReqSeenRef.current = {
+                epoch: activeEpoch,
+                videoId: activeVideoId,
+                at: Date.now(),
+              };
+              disarmShortsFirstEntryLatch('scoped_request_received');
+            }
+            shortsReqSeenEpochRef.current = activeEpoch;
+            shortsLegacyFallbackRef.current.lastReqSentAt = Date.now();
+            disarmShortsLegacyFallbackProbe('request_received');
+          } else {
+            const activeSovereignId = getSovereignIdForContext(activeUrl, activeNavIdRef.current, activeEpoch);
+            const parsedMessageSovereign = parseSovereignId(message.sovereignId);
+            const parsedActiveSovereign = parseSovereignId(activeSovereignId);
+            console.log(
+              '[DIAG][SHORTS_FIRST_ENTRY_GATE]',
+              'action=ignore_request_for_latch',
+              'messageEpoch=' + String(messageEpoch ?? 'none'),
+              'activeEpoch=' + String(activeEpoch),
+              'messageNavId=' + String(parsedMessageSovereign.navId ?? 'none'),
+              'activeNavId=' + String(parsedActiveSovereign.navId ?? 'none'),
+              'messageVideoId=' + String(parsedMessageSovereign.videoId || 'none'),
+              'activeVideoId=' + String(parsedActiveSovereign.videoId || 'none'),
+              'url=' + (activeUrl || 'unknown'),
+            );
           }
-          shortsReqSeenEpochRef.current = activeEpoch;
-          shortsLegacyFallbackRef.current.lastReqSentAt = Date.now();
-          disarmShortsLegacyFallbackProbe('request_received');
         } else if (isYouTubeShortsUrl(activeUrl) && !isActiveEpochMessage) {
           console.log(
             '[DIAG][REQ_EPOCH_GATE]',
@@ -3233,6 +3321,7 @@ export const NativeWebViewBrowser = () => {
     markShortsFirstEntryReentryRequested,
     markShortsFirstEntryForceRequested,
     isGraceEpochAcceptedForActiveShortsVideo,
+    isShortsMessageEligibleForFirstEntryState,
     webViewState.currentUrl,
   ]);
 
