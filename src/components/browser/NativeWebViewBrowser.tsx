@@ -466,7 +466,7 @@ export const NativeWebViewBrowser = () => {
       'url=' + (activeUrl || 'unknown'),
     );
     return true;
-  }, [webViewState.currentUrl]);
+  }, []);
 
   const getActiveShortsFirstEntryLatch = useCallback((urlHint?: string) => {
     const activeUrl = urlHint || webViewState.currentUrl || currentUrlRef.current || '';
@@ -488,7 +488,7 @@ export const NativeWebViewBrowser = () => {
       return null;
     }
     return state;
-  }, [webViewState.currentUrl, disarmShortsFirstEntryLatch]);
+  }, [disarmShortsFirstEntryLatch]);
 
   const markShortsFirstEntryReentryRequested = useCallback((reason: string, urlHint?: string) => {
     const state = getActiveShortsFirstEntryLatch(urlHint);
