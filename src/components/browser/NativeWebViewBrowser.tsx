@@ -2416,7 +2416,20 @@ export const NativeWebViewBrowser = () => {
         setFlashGuardState?.(false, 'moderation_sovereign_nav_stale');
         flashLog('disarm stale nav mismatch');
         shortsLegacyFallbackRef.current.lastReqSentAt = 0;
-        void requestShortsReentryRefresh('hard_kill_nav_mismatch_recover', activeUrl, true);
+        void requestShortsReentryRefresh('hard_kill_nav_mismatch_recover', activeUrl, true)
+          .then((resultToken) => {
+            if (
+              resultToken === 'null' ||
+              resultToken === 'NO_HOOK' ||
+              resultToken === 'SKIP' ||
+              resultToken.startsWith('ERR')
+            ) {
+              if (markShortsFirstEntryForceRequested('hard_kill_nav_mismatch_force_seed', activeUrl)) {
+                void forceFirstEntryShortsRequest('hard_kill_nav_mismatch_force_seed', activeUrl);
+              }
+            }
+          })
+          .catch(() => undefined);
         armShortsLegacyFallbackProbe(
           'hard_kill_nav_mismatch_recover',
           SHORTS_LEGACY_FALLBACK_ENTRY_PROBE_MS,
@@ -2992,6 +3005,7 @@ export const NativeWebViewBrowser = () => {
               reentryResult = await requestShortsReentryRefresh('first_entry_ack_no_req', latestUrl, true);
             }
             if (
+              reentryResult === 'SKIP_LATCH' ||
               reentryResult === 'null' ||
               reentryResult === 'NO_HOOK' ||
               reentryResult === 'SKIP' ||
