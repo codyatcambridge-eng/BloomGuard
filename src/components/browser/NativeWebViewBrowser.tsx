@@ -105,6 +105,8 @@ const SHORTS_LEGACY_FALLBACK_MAX_POLLS = 6;
 const SHORTS_READY_DEDUPE_WINDOW_MS = 1200;
 const SHORTS_ACK_NO_REQ_RECOVER_DELAY_MS = 350;
 const SHORTS_FIRST_ENTRY_LATCH_MS = 1500;
+const SHORTS_FIRST_ENTRY_FORCE_RETRY_COOLDOWN_MS = 240;
+const SHORTS_FIRST_ENTRY_FORCE_MAX_ATTEMPTS = 3;
 const SHORTS_READY_BOOTSTRAP_REASONS = new Set([
   'init',
   'ping',
@@ -347,6 +349,8 @@ export const NativeWebViewBrowser = () => {
     armedAt: number;
     reentryRequested: boolean;
     forceRequested: boolean;
+    forceAttemptCount: number;
+    forceLastAt: number;
     reason: string;
   }>({
     armed: false,
@@ -356,6 +360,8 @@ export const NativeWebViewBrowser = () => {
     armedAt: 0,
     reentryRequested: false,
     forceRequested: false,
+    forceAttemptCount: 0,
+    forceLastAt: 0,
     reason: 'idle',
   });
   const legacyPollSelfDisabledContextRef = useRef<string | null>(null);
@@ -415,6 +421,7 @@ export const NativeWebViewBrowser = () => {
       'armedForMs=' + armedForMs,
       'reentryRequested=' + state.reentryRequested,
       'forceRequested=' + state.forceRequested,
+      'forceAttemptCount=' + state.forceAttemptCount,
       'navId=' + activeNavIdRef.current,
     );
     shortsFirstEntryLatchRef.current = {
@@ -425,6 +432,8 @@ export const NativeWebViewBrowser = () => {
       armedAt: 0,
       reentryRequested: false,
       forceRequested: false,
+      forceAttemptCount: 0,
+      forceLastAt: 0,
       reason,
     };
   }, []);
@@ -454,6 +463,8 @@ export const NativeWebViewBrowser = () => {
       armedAt: now,
       reentryRequested: false,
       forceRequested: false,
+      forceAttemptCount: 0,
+      forceLastAt: 0,
       reason,
     };
     console.log(
@@ -507,20 +518,63 @@ export const NativeWebViewBrowser = () => {
     return true;
   }, [getActiveShortsFirstEntryLatch]);
 
-  const markShortsFirstEntryForceRequested = useCallback((reason: string, urlHint?: string) => {
+  const markShortsFirstEntryForceRequested = useCallback((
+    reason: string,
+    urlHint?: string,
+    opts?: { allowRetry?: boolean },
+  ) => {
     const state = getActiveShortsFirstEntryLatch(urlHint);
     if (!state) return false;
-    if (state.forceRequested) {
+    const now = Date.now();
+    const allowRetry = opts?.allowRetry === true;
+    if (state.forceAttemptCount >= SHORTS_FIRST_ENTRY_FORCE_MAX_ATTEMPTS) {
       console.log(
         '[MW-Host][ShortsEntryLatch] skip_force',
         'reason=' + reason,
+        'retry=' + (allowRetry ? '1' : '0'),
+        'mode=max_attempts',
         'epoch=' + state.epoch,
         'videoId=' + state.videoId,
+        'attempts=' + state.forceAttemptCount,
+        'navId=' + activeNavIdRef.current,
+      );
+      return false;
+    }
+    if (!allowRetry && state.forceRequested) {
+      console.log(
+        '[MW-Host][ShortsEntryLatch] skip_force',
+        'reason=' + reason,
+        'retry=0',
+        'mode=already_requested',
+        'epoch=' + state.epoch,
+        'videoId=' + state.videoId,
+        'attempts=' + state.forceAttemptCount,
+        'navId=' + activeNavIdRef.current,
+      );
+      return false;
+    }
+    if (
+      allowRetry &&
+      state.forceAttemptCount > 0 &&
+      (now - state.forceLastAt) < SHORTS_FIRST_ENTRY_FORCE_RETRY_COOLDOWN_MS
+    ) {
+      console.log(
+        '[MW-Host][ShortsEntryLatch] skip_force',
+        'reason=' + reason,
+        'retry=1',
+        'mode=cooldown',
+        'cooldownMs=' + SHORTS_FIRST_ENTRY_FORCE_RETRY_COOLDOWN_MS,
+        'sinceLastMs=' + (now - state.forceLastAt),
+        'epoch=' + state.epoch,
+        'videoId=' + state.videoId,
+        'attempts=' + state.forceAttemptCount,
         'navId=' + activeNavIdRef.current,
       );
       return false;
     }
     state.forceRequested = true;
+    state.forceAttemptCount += 1;
+    state.forceLastAt = now;
     return true;
   }, [getActiveShortsFirstEntryLatch]);
 
@@ -2424,7 +2478,11 @@ export const NativeWebViewBrowser = () => {
               resultToken === 'SKIP' ||
               resultToken.startsWith('ERR')
             ) {
-              if (markShortsFirstEntryForceRequested('hard_kill_nav_mismatch_force_seed', activeUrl)) {
+              if (markShortsFirstEntryForceRequested(
+                'hard_kill_nav_mismatch_force_seed',
+                activeUrl,
+                { allowRetry: true },
+              )) {
                 void forceFirstEntryShortsRequest('hard_kill_nav_mismatch_force_seed', activeUrl);
               }
             }
@@ -3011,7 +3069,11 @@ export const NativeWebViewBrowser = () => {
               reentryResult === 'SKIP' ||
               reentryResult.startsWith('ERR')
             ) {
-              if (markShortsFirstEntryForceRequested('ack_no_req_force_seed', latestUrl)) {
+              if (markShortsFirstEntryForceRequested(
+                'ack_no_req_force_seed',
+                latestUrl,
+                { allowRetry: true },
+              )) {
                 await forceFirstEntryShortsRequest('ack_no_req_force_seed', latestUrl);
               }
             }

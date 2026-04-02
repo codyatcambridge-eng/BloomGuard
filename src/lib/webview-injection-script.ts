@@ -6246,9 +6246,24 @@ export function generateModerationScript(config: InjectionConfig): string {
     state.elements.set(itemId, element);
     element.dataset.mwSourceType = sourceType || 'unknown';
     
-    // Apply soft blur immediately to prevent any flash of unblurred content.
-    // Safe results will remove the blur as soon as moderation completes.
-    applySoftBlur(element, url, itemId);
+    // On Shorts, avoid pre-blur before verdict to prevent false first-entry blur.
+    // We only blur once moderation returns a positive result.
+    const shortsMode = isShortsModeActive();
+    if (shortsMode) {
+      removeSoftBlur(element, url);
+      if (CONFIG.debug) {
+        console.log(
+          '[DIAG][SHORTS_PREBLUR]',
+          'action=skip_preblur',
+          'itemId=' + itemId,
+          'sourceType=' + String(sourceType || 'unknown'),
+          'url=' + String(url).substring(0, 180)
+        );
+      }
+    } else {
+      // Non-Shorts keeps pre-blur to minimize flashes.
+      applySoftBlur(element, url, itemId);
+    }
     const blurTimer = null;
     
     state.pending.set(itemId, {
