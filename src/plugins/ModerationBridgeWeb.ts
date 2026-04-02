@@ -5,12 +5,12 @@ import type {
   ModerationThresholds,
   ModerationSettings,
   ModerationCategory
-} from './ModerationBridge';
+} from './ModerationBridge.shared';
 import { 
   calculateCategory, 
   getThresholdsForSensitivity, 
   shouldBlurCategory 
-} from './ModerationBridge';
+} from './ModerationBridge.shared';
 import { mapModerationCategoryToSeverity } from '@/lib/moderation-request-utils';
 
 /**

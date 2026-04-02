@@ -1,5 +1,5 @@
 import { WebPlugin } from '@capacitor/core';
-import type { ContentFilterPlugin } from './ContentFilter';
+import type { ContentFilterPlugin } from './ContentFilter.types';
 
 export class ContentFilterWeb extends WebPlugin implements ContentFilterPlugin {
   async startScanning(): Promise<Record<string, unknown>> {
