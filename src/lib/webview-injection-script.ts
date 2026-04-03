@@ -2889,6 +2889,173 @@ export function generateModerationScript(config: InjectionConfig): string {
     return reattached;
   }
 
+  const NON_SHORTS_REATTACH_CARD_SELECTOR = [
+    'ytm-rich-item-renderer',
+    'ytm-video-with-context-renderer',
+    'ytm-compact-video-renderer',
+    'ytd-rich-item-renderer',
+    'ytd-video-renderer',
+    'ytd-compact-video-renderer',
+    'ytd-grid-video-renderer',
+    '#content',
+  ].join(',');
+
+  function isNonShortsYouTubeReattachContext() {
+    return isYouTube() && !isShortsModeActive();
+  }
+
+  function diagNonShortsReattach(videoNode, reason) {
+    if (!isNonShortsYouTubeReattachContext()) return;
+    if (!videoNode || videoNode.nodeType !== 1) return;
+    if (String(videoNode.tagName || '').toUpperCase() !== 'VIDEO') return;
+
+    const source = getDiagSourceFields(videoNode);
+    const normalizedPoster = normalizeUrl(source.poster || '') || '';
+    const normalizedCurrent = normalizeUrl(source.currentSrc || '') || '';
+    const videoNodeId = getDiagNodeId(videoNode);
+    const card = (typeof videoNode.closest === 'function')
+      ? videoNode.closest(NON_SHORTS_REATTACH_CARD_SELECTOR)
+      : null;
+    const cardNodeId = card ? getDiagNodeId(card) : 'none';
+
+    console.log(
+      '[DIAG][NON_SHORTS_REATTACH] attempt',
+      'reason=' + (reason || 'unknown'),
+      'nodeId=' + videoNodeId,
+      'cardNodeId=' + cardNodeId,
+      'currentSrc=' + String(source.currentSrc || '').substring(0, 180),
+      'poster=' + String(source.poster || '').substring(0, 180),
+      'url=' + window.location.href
+    );
+
+    let contextNode = null;
+    let contextKind = 'none';
+    if (card && typeof card.querySelector === 'function') {
+      contextNode = card.querySelector('[data-mw-moderated="blurred"][data-mw-src]');
+      if (contextNode) {
+        contextKind = 'card_blurred';
+      }
+    }
+    if (!contextNode && (normalizedPoster || normalizedCurrent)) {
+      const blurredCandidates = document.querySelectorAll('[data-mw-moderated="blurred"][data-mw-src]');
+      for (let i = 0; i < blurredCandidates.length; i += 1) {
+        const candidate = blurredCandidates[i];
+        if (!candidate || candidate.nodeType !== 1) continue;
+        const candidateSrc = normalizeUrl((candidate.dataset && candidate.dataset.mwSrc) || '') || '';
+        if (!candidateSrc) continue;
+        if (
+          (normalizedPoster && candidateSrc === normalizedPoster) ||
+          (normalizedCurrent && candidateSrc === normalizedCurrent)
+        ) {
+          contextNode = candidate;
+          contextKind = 'src_match';
+          break;
+        }
+      }
+    }
+
+    if (contextNode) {
+      console.log(
+        '[DIAG][NON_SHORTS_REATTACH] context_found',
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'contextNodeId=' + getDiagNodeId(contextNode),
+        'contextKind=' + contextKind,
+        'contextSrc=' + String((contextNode.dataset && contextNode.dataset.mwSrc) || '').substring(0, 180)
+      );
+    } else {
+      console.log(
+        '[DIAG][NON_SHORTS_REATTACH] no_context',
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'poster=' + String(normalizedPoster || '').substring(0, 180),
+        'current=' + String(normalizedCurrent || '').substring(0, 180)
+      );
+    }
+
+    const computed = getDiagComputedBlurState(videoNode);
+    const inlineFilter = String(videoNode.style.getPropertyValue('filter') || videoNode.style.filter || '').toLowerCase();
+    const inlineBackdrop = String(videoNode.style.getPropertyValue('backdrop-filter') || '').toLowerCase();
+    const computedFilter = String(computed.filter || '').toLowerCase();
+    const computedBackdrop = String(computed.backdropFilter || '').toLowerCase();
+    const activeVideoBlurred = (
+      String(videoNode.dataset.mwModerated || '') === 'blurred' ||
+      inlineFilter.indexOf('blur(') !== -1 ||
+      inlineBackdrop.indexOf('blur(') !== -1 ||
+      computedFilter.indexOf('blur(') !== -1 ||
+      computedBackdrop.indexOf('blur(') !== -1
+    );
+    if (activeVideoBlurred) {
+      console.log(
+        '[DIAG][NON_SHORTS_REATTACH] blur_reapplied',
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'state=' + String(videoNode.dataset.mwModerated || ''),
+        'computedFilter=' + String(computed.filter || '').substring(0, 120),
+        'computedBackdrop=' + String(computed.backdropFilter || '').substring(0, 120)
+      );
+    }
+
+    const overlayProbeSrc = (
+      String((videoNode.dataset && videoNode.dataset.mwSrc) || '') ||
+      normalizedPoster ||
+      normalizedCurrent ||
+      ''
+    );
+    const videoOverlay = findRevealOverlayForElement(videoNode, overlayProbeSrc);
+    const overlayAnchored = !!(
+      videoOverlay &&
+      videoOverlay.isConnected &&
+      String((videoOverlay.dataset && videoOverlay.dataset.mwNodeId) || '') === videoNodeId
+    );
+    if (overlayAnchored) {
+      console.log(
+        '[DIAG][NON_SHORTS_REATTACH] overlay_reanchored',
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'overlayId=' + String((videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown')
+      );
+    }
+
+    let staleOverlay = null;
+    if (card && typeof card.querySelectorAll === 'function') {
+      const overlays = card.querySelectorAll('.mw-reveal-overlay');
+      for (let i = 0; i < overlays.length; i += 1) {
+        const overlay = overlays[i];
+        if (!overlay || overlay.nodeType !== 1 || !overlay.isConnected) continue;
+        const anchorNodeId = String((overlay.dataset && overlay.dataset.mwNodeId) || '');
+        if (anchorNodeId && anchorNodeId !== videoNodeId) {
+          staleOverlay = overlay;
+          break;
+        }
+      }
+    }
+    if (staleOverlay) {
+      console.warn(
+        '[DIAG][NON_SHORTS_REATTACH] stale_overlay_detected',
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'overlayId=' + String((staleOverlay.dataset && staleOverlay.dataset.mwOverlayId) || 'unknown'),
+        'overlayNodeId=' + String((staleOverlay.dataset && staleOverlay.dataset.mwNodeId) || 'none'),
+        'activeVideoBlurred=' + activeVideoBlurred
+      );
+    }
+  }
+
+  function ensureNonShortsReattachListeners() {
+    if (window.__MW_NON_SHORTS_REATTACH_LISTENERS__) return;
+    window.__MW_NON_SHORTS_REATTACH_LISTENERS__ = true;
+    const onVideoLifecycleEvent = function(event) {
+      const target = event && event.target;
+      if (!target || target.nodeType !== 1) return;
+      if (String(target.tagName || '').toUpperCase() !== 'VIDEO') return;
+      diagNonShortsReattach(target, 'event:' + String(event.type || 'unknown'));
+    };
+    document.addEventListener('play', onVideoLifecycleEvent, true);
+    document.addEventListener('playing', onVideoLifecycleEvent, true);
+    document.addEventListener('loadeddata', onVideoLifecycleEvent, true);
+  }
+
   function getDiagNodeId(node) {
     if (!node || node.nodeType !== 1) return 'n/a';
     const existing = diagNodeIds.get(node);
@@ -6929,6 +7096,16 @@ export function generateModerationScript(config: InjectionConfig): string {
               hasYouTubeChanges = true;
             }
           }
+          if (isYouTube() && !isShortsModeActive()) {
+            if (String(node.tagName || '').toUpperCase() === 'VIDEO') {
+              diagNonShortsReattach(node, 'mutation_added:video');
+            }
+            if (typeof node.querySelectorAll === 'function') {
+              node.querySelectorAll('video').forEach(videoNode => {
+                diagNonShortsReattach(videoNode, 'mutation_added:descendant_video');
+              });
+            }
+          }
           
           // Add to viewport observer for lazy scanning
           observeForViewport(node);
@@ -6938,6 +7115,24 @@ export function generateModerationScript(config: InjectionConfig): string {
         if (mutation.type === 'attributes') {
           const target = mutation.target;
           const attr = mutation.attributeName || '';
+          if (
+            isYouTube() &&
+            !isShortsModeActive() &&
+            target &&
+            target.nodeType === 1 &&
+            String(target.tagName || '').toUpperCase() === 'VIDEO' &&
+            (
+              attr === 'src' ||
+              attr === 'poster' ||
+              attr === 'style' ||
+              attr === 'class' ||
+              attr === 'aria-hidden' ||
+              attr === 'aria-current' ||
+              attr === 'hidden'
+            )
+          ) {
+            diagNonShortsReattach(target, 'attr:' + attr);
+          }
           if (
             isYouTube() &&
             target &&
@@ -7447,6 +7642,7 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   ensureSensitivityToggle();
   ensureRevealOverlayPositionListeners();
+  ensureNonShortsReattachListeners();
 
   // SPA navigation detection
   const checkUrlChange = () => {
