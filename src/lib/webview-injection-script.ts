@@ -3048,6 +3048,35 @@ export function generateModerationScript(config: InjectionConfig): string {
         'computedFilter=' + String(computed.filter || '').substring(0, 120),
         'computedBackdrop=' + String(computed.backdropFilter || '').substring(0, 120)
       );
+    } else if (contextNode) {
+      const contextSrc = String((contextNode.dataset && contextNode.dataset.mwSrc) || '') || normalizedPoster || normalizedCurrent || '';
+      const contextCategory = String((contextNode.dataset && contextNode.dataset.mwCategory) || '') || 'flagged';
+      const contextItemId = String((contextNode.dataset && contextNode.dataset.mwItemId) || '');
+      const contextBlurStrengthRaw = Number((contextNode.dataset && contextNode.dataset.mwBlurStrength) || '');
+      const contextBlurStrength = (
+        Number.isFinite(contextBlurStrengthRaw) && contextBlurStrengthRaw > 0
+          ? contextBlurStrengthRaw
+          : (CONFIG.blurStrength || 30)
+      );
+      applyBlur(videoNode, contextSrc, contextCategory, contextBlurStrength, contextItemId);
+      console.log(
+        '[DIAG][NON_SHORTS_REATTACH] heal_apply_blur',
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'contextNodeId=' + getDiagNodeId(contextNode),
+        'contextKind=' + contextKind,
+        'contextSrc=' + String(contextSrc || '').substring(0, 180),
+        'blurStrength=' + contextBlurStrength
+      );
+      if (shouldDisableRevealUiForMvpMainPageSurface()) {
+        removeRevealOverlay(videoNode, contextSrc, 'non_shorts_reattach_mvp_suppress');
+        console.log(
+          '[DIAG][NON_SHORTS_REATTACH] non_shorts_reattach_mvp_suppress',
+          'reason=' + (reason || 'unknown'),
+          'nodeId=' + videoNodeId,
+          'contextSrc=' + String(contextSrc || '').substring(0, 180)
+        );
+      }
     }
 
     const overlayProbeSrc = (
@@ -3093,6 +3122,18 @@ export function generateModerationScript(config: InjectionConfig): string {
         'overlayNodeId=' + String((staleOverlay.dataset && staleOverlay.dataset.mwNodeId) || 'none'),
         'activeVideoBlurred=' + activeVideoBlurred
       );
+      if (staleOverlay.parentElement) {
+        const staleOverlayId = String((staleOverlay.dataset && staleOverlay.dataset.mwOverlayId) || 'unknown');
+        const staleOverlayNodeId = String((staleOverlay.dataset && staleOverlay.dataset.mwNodeId) || 'none');
+        staleOverlay.parentElement.removeChild(staleOverlay);
+        console.log(
+          '[DIAG][NON_SHORTS_REATTACH] stale_overlay_removed',
+          'reason=' + (reason || 'unknown'),
+          'nodeId=' + videoNodeId,
+          'overlayId=' + staleOverlayId,
+          'overlayNodeId=' + staleOverlayNodeId
+        );
+      }
     }
   }
 
