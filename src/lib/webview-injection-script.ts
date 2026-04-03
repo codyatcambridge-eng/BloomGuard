@@ -4915,6 +4915,16 @@ export function generateModerationScript(config: InjectionConfig): string {
       state.blurred.add(src);
       state.stats.blurred++;
       const containsOverlay = !!(typeof element.querySelector === 'function' && element.querySelector('.mw-reveal-overlay'));
+      if (!shortsMode && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
+        console.log(
+          '[DIAG][MVP_REVEAL_PATH] reveal_create_attempt',
+          'itemId=' + (itemId || 'none'),
+          'itemKey=' + getDiagItemKey(src),
+          'sourceType=' + String(element.dataset.mwSourceType || 'unknown'),
+          'suppressionExpected=' + String(shouldDisableRevealUiForMvpMainPageSurface()),
+          'nodeId=' + getDiagNodeId(element)
+        );
+      }
       
       createRevealOverlay(element, src, category, itemId);
       if (shortsMode && element.isConnected && !findRevealOverlayForElement(element, src)) {
@@ -5078,6 +5088,15 @@ export function generateModerationScript(config: InjectionConfig): string {
         'navId=' + NAV_ID,
         'pageEpoch=' + state.pageEpoch,
         'url=' + window.location.href
+      );
+      console.log(
+        '[DIAG][MVP_REVEAL_PATH] reveal_suppressed',
+        'itemId=' + (itemId || 'none'),
+        'itemKey=' + getDiagItemKey(src),
+        'suppressed=true',
+        'reason=mvp_main_page_reveal_ui_disabled',
+        'nodeId=' + getDiagNodeId(element),
+        'hasOverlayFlag=' + String(element.dataset.mwHasOverlay === 'true')
       );
       return;
     }
@@ -5404,6 +5423,14 @@ export function generateModerationScript(config: InjectionConfig): string {
         'x/y=' + (Number.isFinite(e.clientX) ? e.clientX : 'n/a') + '/' + (Number.isFinite(e.clientY) ? e.clientY : 'n/a'),
         'pointerEvents=' + (overlayComputed ? overlayComputed.pointerEvents : 'n/a')
       );
+      if (!shortsMode && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
+        console.log(
+          '[DIAG][MVP_REVEAL_PATH] tap_received',
+          'channel=overlay',
+          'overlayId=' + overlayId,
+          'itemKey=' + itemKey
+        );
+      }
       logRevealHittestSnapshot(overlay, btn, overlayId, 'overlay_click', e);
     });
     console.log('[DIAG][REVEAL_UI] bind_overlay', 'overlayId=' + overlayId);
@@ -5416,6 +5443,14 @@ export function generateModerationScript(config: InjectionConfig): string {
         'overlayId=' + overlayId,
         'target=' + getDiagTargetDescriptor(e.target)
       );
+      if (!shortsMode && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
+        console.log(
+          '[DIAG][MVP_REVEAL_PATH] tap_received',
+          'channel=button',
+          'overlayId=' + overlayId,
+          'itemKey=' + itemKey
+        );
+      }
       logRevealHittestSnapshot(overlay, btn, overlayId, 'button_click', e);
       const revealMeta = getRevealMetaForSource(src, element);
       const revealAllowed = !revealMeta.meta;
@@ -5520,6 +5555,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
     });
     console.log('[DIAG][REVEAL_UI] bind_button', 'overlayId=' + overlayId);
+    overlay.dataset.mwRevealHandlersBound = 'true';
     
     overlay.appendChild(btn);
     if (shortsMode) {
@@ -5544,6 +5580,32 @@ export function generateModerationScript(config: InjectionConfig): string {
       'overlayId=' + overlayId
     );
     logRevealHittestSnapshot(overlay, btn, overlayId, 'created', null);
+    if (!shortsMode && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
+      var overlayStyle = null;
+      var overlayRect = null;
+      try {
+        overlayStyle = window.getComputedStyle(overlay);
+      } catch (e) {}
+      try {
+        overlayRect = overlay.getBoundingClientRect();
+      } catch (e) {}
+      console.log(
+        '[DIAG][MVP_REVEAL_PATH] reveal_dom_state',
+        'itemId=' + (itemId || 'none'),
+        'itemKey=' + itemKey,
+        'suppressed=false',
+        'overlayPresent=' + String(!!overlay),
+        'overlayConnected=' + String(!!overlay.isConnected),
+        'overlayDisplay=' + (overlayStyle ? overlayStyle.display : 'n/a'),
+        'overlayVisibility=' + (overlayStyle ? overlayStyle.visibility : 'n/a'),
+        'overlayOpacity=' + (overlayStyle ? overlayStyle.opacity : 'n/a'),
+        'overlayZ=' + (overlayStyle ? overlayStyle.zIndex : 'n/a'),
+        'overlayPointer=' + (overlayStyle ? overlayStyle.pointerEvents : 'n/a'),
+        'overlayRect=' + (overlayRect ? (Math.round(overlayRect.width) + 'x' + Math.round(overlayRect.height)) : 'n/a'),
+        'parentConnected=' + String(!!(overlayParent && overlayParent.isConnected)),
+        'handlersBound=' + String(overlay.dataset.mwRevealHandlersBound === 'true')
+      );
+    }
     diagBlurStateLog(
       'createRevealOverlay.exit',
       element,
@@ -6197,6 +6259,20 @@ export function generateModerationScript(config: InjectionConfig): string {
         const preDecisionState = element.dataset.mwModerated || '';
         const preDecisionFilter = element.style.getPropertyValue('filter') || element.style.filter || '';
         const preDecisionHasBlur = preDecisionFilter.toLowerCase().includes('blur(');
+        const mvpMainSurface = !isShortsModeActive() && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href);
+        if (mvpMainSurface && shouldBlur) {
+          console.log(
+            '[DIAG][MVP_REVEAL_PATH] result_apply_blur_positive',
+            'itemId=' + (itemId || 'none'),
+            'itemKey=' + getDiagItemKey(src),
+            'sourceType=' + ((pendingItem && pendingItem.sourceType) || (element.dataset && element.dataset.mwSourceType) || 'unknown'),
+            'hostShouldBlur=' + String(!!shouldBlur),
+            'finalBlur=' + String(!!finalBlur),
+            'decisionReason=' + (decisionReason || 'none'),
+            'pageEpoch=' + state.pageEpoch,
+            'navId=' + NAV_ID
+          );
+        }
         if (finalBlur) {
           diagLogApplyByItemId(
             itemId,
