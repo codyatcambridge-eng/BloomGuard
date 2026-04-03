@@ -1551,6 +1551,24 @@ export function generateModerationScript(config: InjectionConfig): string {
     return isYouTubeShortsUrl(window.location.href);
   }
 
+  function isYouTubeMainPageThumbnailSurfaceUrl(value) {
+    if (!value) return false;
+    try {
+      var parsed = new URL(value, window.location.href);
+      var host = String(parsed.hostname || '').toLowerCase();
+      if (host !== 'm.youtube.com') return false;
+      var path = String(parsed.pathname || '/').toLowerCase();
+      return path === '/' || path === '/results' || path.indexOf('/feed') === 0;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function shouldDisableRevealUiForMvpMainPageSurface() {
+    if (isShortsModeActive()) return false;
+    return isYouTubeMainPageThumbnailSurfaceUrl(window.location.href);
+  }
+
   function getDiagUrlFamily(value) {
     if (!value) return 'unknown';
     if (isYouTubeShortsUrl(value)) return 'youtube_shorts';
@@ -4944,6 +4962,18 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function createRevealOverlay(element, src, category, itemId, allowShortsReresolve) {
     const shortsMode = isShortsModeActive();
+    if (shouldDisableRevealUiForMvpMainPageSurface()) {
+      removeRevealOverlay(element, src, 'mvp_main_page_reveal_ui_disabled');
+      element.dataset.mwHasOverlay = 'false';
+      console.log(
+        '[DIAG][REVEAL_UI] suppressed_mvp_main_page_surface',
+        'itemKey=' + getDiagItemKey(src),
+        'navId=' + NAV_ID,
+        'pageEpoch=' + state.pageEpoch,
+        'url=' + window.location.href
+      );
+      return;
+    }
     const allowReresolve = shortsMode && allowShortsReresolve !== false;
     if (shortsMode) {
       const stableResolution = resolveShortsStableBlurTarget(element, src);
