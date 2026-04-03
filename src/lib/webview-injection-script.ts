@@ -2956,6 +2956,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   const NON_SHORTS_REATTACH_CONTEXT_TTL_MS = 45000;
   const NON_SHORTS_REATTACH_CONTEXT_MAX = 400;
   const NON_SHORTS_REATTACH_COOLDOWN_MS = 80;
+  const NON_SHORTS_REATTACH_CARD_FALLBACK_ITEM_KEY = '__card_latest__';
 
   function isNonShortsYouTubeReattachContext() {
     return isYouTube() && !isShortsModeActive();
@@ -3003,6 +3004,12 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (cardEntry) {
         return { kind: 'itemkey_card', entry: cardEntry };
       }
+      const cardFallbackEntry = contextMap.get(
+        buildNonShortsReattachContextKey(cardKey, NON_SHORTS_REATTACH_CARD_FALLBACK_ITEM_KEY)
+      );
+      if (cardFallbackEntry) {
+        return { kind: 'card_latest', entry: cardFallbackEntry };
+      }
     }
     let best = null;
     contextMap.forEach(function(entry) {
@@ -3039,6 +3046,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     state.nonShortsReattachContext.set(buildNonShortsReattachContextKey(cardKey, itemKey), entry);
     if (cardKey !== 'none') {
       state.nonShortsReattachContext.set(buildNonShortsReattachContextKey('none', itemKey), entry);
+      state.nonShortsReattachContext.set(
+        buildNonShortsReattachContextKey(cardKey, NON_SHORTS_REATTACH_CARD_FALLBACK_ITEM_KEY),
+        entry
+      );
     }
     pruneNonShortsReattachContext(now);
     if (DIAG_YT_BLUR) {
