@@ -2967,6 +2967,8 @@ export function generateModerationScript(config: InjectionConfig): string {
     const source = getDiagSourceFields(videoNode);
     const normalizedPoster = normalizeUrl(source.poster || '') || '';
     const normalizedCurrent = normalizeUrl(source.currentSrc || '') || '';
+    const reattachItemKey = getDiagItemKey(normalizedPoster || normalizedCurrent || '');
+    const reattachItemId = String((videoNode.dataset && videoNode.dataset.mwItemId) || 'none');
     const videoNodeId = getDiagNodeId(videoNode);
     const card = (typeof videoNode.closest === 'function')
       ? videoNode.closest(NON_SHORTS_REATTACH_CARD_SELECTOR)
@@ -2996,6 +2998,13 @@ export function generateModerationScript(config: InjectionConfig): string {
       'poster=' + String(source.poster || '').substring(0, 180),
       'currentSrc=' + String(source.currentSrc || '').substring(0, 180)
     );
+    console.log(
+      '[DIAG][MVP_ITEM_CHAIN] stage=reattach_attempt',
+      'itemId=' + reattachItemId,
+      'itemKey=' + reattachItemKey,
+      'reason=' + (reason || 'unknown'),
+      'nodeId=' + videoNodeId
+    );
 
     let contextNode = null;
     let contextKind = 'none';
@@ -3024,6 +3033,8 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
 
     if (contextNode) {
+      const contextItemId = String((contextNode.dataset && contextNode.dataset.mwItemId) || reattachItemId || 'none');
+      const contextItemSrc = String((contextNode.dataset && contextNode.dataset.mwSrc) || normalizedPoster || normalizedCurrent || '');
       console.log(
         '[DIAG][NON_SHORTS_REATTACH] context_found',
         'reason=' + (reason || 'unknown'),
@@ -3031,6 +3042,14 @@ export function generateModerationScript(config: InjectionConfig): string {
         'contextNodeId=' + getDiagNodeId(contextNode),
         'contextKind=' + contextKind,
         'contextSrc=' + String((contextNode.dataset && contextNode.dataset.mwSrc) || '').substring(0, 180)
+      );
+      console.log(
+        '[DIAG][MVP_ITEM_CHAIN] stage=reattach_context_found',
+        'itemId=' + contextItemId,
+        'itemKey=' + getDiagItemKey(contextItemSrc),
+        'reason=' + (reason || 'unknown'),
+        'contextKind=' + contextKind,
+        'nodeId=' + videoNodeId
       );
     } else {
       console.log(
@@ -3046,6 +3065,13 @@ export function generateModerationScript(config: InjectionConfig): string {
         'nodeId=' + videoNodeId,
         'poster=' + String(normalizedPoster || '').substring(0, 180),
         'current=' + String(normalizedCurrent || '').substring(0, 180)
+      );
+      console.log(
+        '[DIAG][MVP_ITEM_CHAIN] stage=reattach_skip',
+        'itemId=' + reattachItemId,
+        'itemKey=' + reattachItemKey,
+        'reason=no_context',
+        'nodeId=' + videoNodeId
       );
     }
 
@@ -3124,6 +3150,13 @@ export function generateModerationScript(config: InjectionConfig): string {
         'reason=' + (reason || 'unknown'),
         'nodeId=' + videoNodeId
       );
+      console.log(
+        '[DIAG][MVP_ITEM_CHAIN] stage=reattach_skip',
+        'itemId=' + reattachItemId,
+        'itemKey=' + reattachItemKey,
+        'reason=no_blurred_context',
+        'nodeId=' + videoNodeId
+      );
     }
 
     const overlayProbeSrc = (
@@ -3150,6 +3183,22 @@ export function generateModerationScript(config: InjectionConfig): string {
         'reason=' + (reason || 'unknown'),
         'nodeId=' + videoNodeId,
         'overlayId=' + String((videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown')
+      );
+      console.log(
+        '[DIAG][MVP_ITEM_CHAIN] stage=reattach_rebound',
+        'itemId=' + reattachItemId,
+        'itemKey=' + reattachItemKey,
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'overlayId=' + String((videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown')
+      );
+    } else {
+      console.log(
+        '[DIAG][MVP_ITEM_CHAIN] stage=reattach_overlay_missing',
+        'itemId=' + reattachItemId,
+        'itemKey=' + reattachItemKey,
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + videoNodeId
       );
     }
 
@@ -4870,6 +4919,16 @@ export function generateModerationScript(config: InjectionConfig): string {
         element.style.removeProperty('-webkit-backdrop-filter');
         diagShortsBlurStackLog('hard_after_clear', element, src, 'itemId=' + (itemId || 'N/A'));
       }
+      if (!shortsMode && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
+        console.log(
+          '[DIAG][MVP_ITEM_CHAIN] stage=blur_target_resolved',
+          'itemId=' + (itemId || 'none'),
+          'itemKey=' + getDiagItemKey(src),
+          'nodeId=' + getDiagNodeId(element),
+          'sourceType=' + String((element.dataset && element.dataset.mwSourceType) || 'unknown'),
+          'connected=' + String(!!element.isConnected)
+        );
+      }
       // Force blur with !important for iOS WebKit
       element.style.setProperty('filter', 'blur(' + blurPx + 'px)', 'important');
       element.style.setProperty('-webkit-filter', 'blur(' + blurPx + 'px)', 'important');
@@ -5079,6 +5138,15 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function createRevealOverlay(element, src, category, itemId, allowShortsReresolve) {
     const shortsMode = isShortsModeActive();
+    if (!shortsMode && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
+      console.log(
+        '[DIAG][MVP_ITEM_CHAIN] stage=reveal_attempt',
+        'itemId=' + (itemId || 'none'),
+        'itemKey=' + getDiagItemKey(src),
+        'nodeId=' + getDiagNodeId(element),
+        'sourceType=' + String((element.dataset && element.dataset.mwSourceType) || 'unknown')
+      );
+    }
     if (shouldDisableRevealUiForMvpMainPageSurface()) {
       removeRevealOverlay(element, src, 'mvp_main_page_reveal_ui_disabled');
       element.dataset.mwHasOverlay = 'false';
@@ -5098,6 +5166,15 @@ export function generateModerationScript(config: InjectionConfig): string {
         'nodeId=' + getDiagNodeId(element),
         'hasOverlayFlag=' + String(element.dataset.mwHasOverlay === 'true')
       );
+      if (!shortsMode && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
+        console.log(
+          '[DIAG][MVP_ITEM_CHAIN] stage=reveal_skip',
+          'itemId=' + (itemId || 'none'),
+          'itemKey=' + getDiagItemKey(src),
+          'reason=mvp_main_page_reveal_ui_disabled',
+          'nodeId=' + getDiagNodeId(element)
+        );
+      }
       return;
     }
     const allowReresolve = shortsMode && allowShortsReresolve !== false;
@@ -5296,6 +5373,15 @@ export function generateModerationScript(config: InjectionConfig): string {
         ' srcType=' + (element.dataset.mwSourceType || 'unknown') +
         ' hint=' + describeElementHint(element)
       );
+      if (!shortsMode && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
+        console.log(
+          '[DIAG][MVP_ITEM_CHAIN] stage=reveal_skip',
+          'itemId=' + (itemId || 'none'),
+          'itemKey=' + getDiagItemKey(src),
+          'reason=disconnected',
+          'nodeId=' + getDiagNodeId(element)
+        );
+      }
       return;
     }
     const parent = element.parentElement;
@@ -5308,6 +5394,13 @@ export function generateModerationScript(config: InjectionConfig): string {
         ' tag=' + (element.tagName || 'unknown') +
         ' srcType=' + (element.dataset.mwSourceType || 'unknown') +
         ' hint=' + describeElementHint(element)
+      );
+      console.log(
+        '[DIAG][MVP_ITEM_CHAIN] stage=reveal_skip',
+        'itemId=' + (itemId || 'none'),
+        'itemKey=' + getDiagItemKey(src),
+        'reason=no_parent',
+        'nodeId=' + getDiagNodeId(element)
       );
       return;
     }
@@ -5370,6 +5463,15 @@ export function generateModerationScript(config: InjectionConfig): string {
       'navId=' + NAV_ID,
       'pageEpoch=' + state.pageEpoch
     );
+    if (!shortsMode && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
+      console.log(
+        '[DIAG][MVP_ITEM_CHAIN] stage=reveal_created',
+        'itemId=' + (itemId || 'none'),
+        'itemKey=' + itemKey,
+        'nodeId=' + getDiagNodeId(element),
+        'overlayId=' + overlayId
+      );
+    }
     if (!shortsMode && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
       console.log(
         '[DIAG][MVP_NON_SHORTS] reveal_control_created',
