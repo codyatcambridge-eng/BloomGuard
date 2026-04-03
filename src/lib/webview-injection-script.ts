@@ -702,6 +702,14 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   // ==================== STATE MANAGEMENT ====================
   
+  const persistedNonShortsReattachContext = (function() {
+    if (window.__MW_NON_SHORTS_REATTACH_CONTEXT__ && typeof window.__MW_NON_SHORTS_REATTACH_CONTEXT__.forEach === 'function') {
+      return window.__MW_NON_SHORTS_REATTACH_CONTEXT__;
+    }
+    window.__MW_NON_SHORTS_REATTACH_CONTEXT__ = new Map();
+    return window.__MW_NON_SHORTS_REATTACH_CONTEXT__;
+  })();
+
   const state = {
     pageEpoch: Number.isFinite(CONFIG.pageEpoch) ? Number(CONFIG.pageEpoch) : 1,
     scanned: new Set(),
@@ -738,7 +746,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       skippedMutationQueueCap: 0,
       staleEpochDiscarded: 0,
     },
-    nonShortsReattachContext: new Map(), // key -> { cardKey, itemKey, src, category, itemId, blurPx, nodeId, cardNodeId, updatedAt }
+    nonShortsReattachContext: persistedNonShortsReattachContext, // key -> { cardKey, itemKey, src, category, itemId, blurPx, nodeId, cardNodeId, updatedAt }
   };
 
   // Keep reveal stable for the current Shorts video (keyed by shorts:<videoId>).
@@ -3068,7 +3076,23 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!isNonShortsYouTubeReattachContext()) return;
     if (!videoNode || videoNode.nodeType !== 1) return;
     if (String(videoNode.tagName || '').toUpperCase() !== 'VIDEO') return;
-    if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
+    const currentUrl = window.location.href;
+    const isMainSurfaceUrl = isYouTubeMainPageThumbnailSurfaceUrl(currentUrl);
+    const reasonText = String(reason || 'unknown');
+    const reasonLooksTransition =
+      reasonText.indexOf('event:') === 0 ||
+      reasonText.indexOf('mutation_added') === 0 ||
+      reasonText.indexOf('attr:') === 0;
+    if (
+      !isMainSurfaceUrl &&
+      (
+        !reasonLooksTransition ||
+        !state.nonShortsReattachContext ||
+        state.nonShortsReattachContext.size < 1
+      )
+    ) {
+      return;
+    }
     const now = Date.now();
     const lastReattachAt = Number((videoNode.dataset && videoNode.dataset.mwNonShortsReattachAt) || '0');
     if (Number.isFinite(lastReattachAt) && (now - lastReattachAt) < NON_SHORTS_REATTACH_COOLDOWN_MS) {
@@ -3096,7 +3120,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       'cardNodeId=' + cardNodeId,
       'currentSrc=' + String(source.currentSrc || '').substring(0, 180),
       'poster=' + String(source.poster || '').substring(0, 180),
-      'url=' + window.location.href
+      'url=' + currentUrl,
+      'surface=' + (isMainSurfaceUrl ? 'main' : 'transition')
     );
     console.log(
       '[DIAG][MVP_NON_SHORTS] preview_transition_detected',
@@ -3123,7 +3148,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     let contextNode = null;
     let contextData = null;
     let contextKind = 'none';
-    if (card && typeof card.querySelector === 'function') {
+    if (isMainSurfaceUrl && card && typeof card.querySelector === 'function') {
       contextNode = card.querySelector('[data-mw-moderated="blurred"][data-mw-src]');
       if (contextNode) {
         contextKind = 'card_blurred';
@@ -3147,7 +3172,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         };
       }
     }
-    if (!contextData && (normalizedPoster || normalizedCurrent)) {
+    if (isMainSurfaceUrl && !contextData && (normalizedPoster || normalizedCurrent)) {
       const blurredCandidates = document.querySelectorAll('[data-mw-moderated="blurred"][data-mw-src]');
       for (let i = 0; i < blurredCandidates.length; i += 1) {
         const candidate = blurredCandidates[i];
