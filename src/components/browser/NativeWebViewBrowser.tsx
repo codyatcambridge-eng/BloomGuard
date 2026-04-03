@@ -2843,6 +2843,24 @@ export const NativeWebViewBrowser = () => {
     const hardLowHits = hardResults.filter(item => item.confidence >= modePolicy.hardMultiConfFloor);
     const hardUnsafeMaxConf = hardResults.reduce((max, item) => Math.max(max, item.confidence), 0);
     const shortsAnyShouldBlurHit = stickyShortsMode && eligibleResults.some(item => item.shouldBlur);
+    const nonShortsMainThumbAnyShouldBlurHit = (() => {
+      if (stickyShortsMode) return false;
+      try {
+        const parsed = new URL(currentUrl || '');
+        const host = parsed.hostname.toLowerCase();
+        const path = parsed.pathname || '/';
+        const isMYouTube = host === 'm.youtube.com';
+        const isMainSurface = path === '/' || path.startsWith('/results') || path.startsWith('/feed');
+        if (!isMYouTube || !isMainSurface || isYouTubeShortsUrl(currentUrl)) return false;
+      } catch {
+        return false;
+      }
+      return eligibleResults.some(item => {
+        if (!item.shouldBlur) return false;
+        const sourceType = String(item.sourceType || '').toLowerCase();
+        return sourceType === '' || sourceType === 'img' || sourceType === 'video-poster';
+      });
+    })();
 
     const softResults = eligibleResults.filter(item => item.shouldBlur && item.severity === 'soft');
     const softQualifiedHits = softResults.filter(item => item.confidence >= softConfidenceFloor);
@@ -2868,6 +2886,8 @@ export const NativeWebViewBrowser = () => {
     } else if (shortsAnyShouldBlurHit) {
       overlayDecision = true;
       decisionReason = 'shorts_item_blur_hit';
+    } else if (nonShortsMainThumbAnyShouldBlurHit) {
+      decisionReason = 'main_page_item_blur_hit';
     }
 
     const shouldDebugScanSummary = isDebugMode || localSettings.prototype_mode || localSettings.show_scan_notifications;
@@ -2884,12 +2904,14 @@ export const NativeWebViewBrowser = () => {
       );
     }
 
-    const shouldTreatAsUnsafe = hardOverlayDecision || shortsAnyShouldBlurHit;
+    const shouldTreatAsUnsafe = hardOverlayDecision || shortsAnyShouldBlurHit || nonShortsMainThumbAnyShouldBlurHit;
     // Preserve existing hard-only behavior outside Shorts; Shorts treat any shouldBlur hit as unsafe.
     if (shouldTreatAsUnsafe) {
       const unsafeReason = hardOverlayDecision
         ? `moderation_request_hard:${decisionReason}`
-        : 'moderation_request_shorts_item_blur';
+        : (shortsAnyShouldBlurHit
+          ? 'moderation_request_shorts_item_blur'
+          : 'moderation_request_main_page_item_blur');
       processModerationSafetySignal(true, unsafeReason);
     } else {
       processModerationSafetySignal(false, 'moderation_request_no_hard');
@@ -2912,6 +2934,7 @@ export const NativeWebViewBrowser = () => {
       'hardStrong=' + hardStrongHits.length,
       'hardLow=' + hardLowHits.length,
       'softQualified=' + softQualifiedHits.length,
+      'mainThumbAnyShouldBlur=' + nonShortsMainThumbAnyShouldBlurHit,
       'domOverlay=' + (ENABLE_DOM_BLUR ? 'on' : 'off'),
       'epoch=' + (requestEpoch ?? activeEpoch),
     );
