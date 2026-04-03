@@ -738,6 +738,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       skippedMutationQueueCap: 0,
       staleEpochDiscarded: 0,
     },
+    nonShortsReattachContext: new Map(), // key -> { cardKey, itemKey, src, category, itemId, blurPx, nodeId, cardNodeId, updatedAt }
   };
 
   // Keep reveal stable for the current Shorts video (keyed by shorts:<videoId>).
@@ -2952,9 +2953,104 @@ export function generateModerationScript(config: InjectionConfig): string {
     'ytd-grid-video-renderer',
     '#content',
   ].join(',');
+  const NON_SHORTS_REATTACH_CONTEXT_TTL_MS = 45000;
+  const NON_SHORTS_REATTACH_CONTEXT_MAX = 400;
+  const NON_SHORTS_REATTACH_COOLDOWN_MS = 80;
 
   function isNonShortsYouTubeReattachContext() {
     return isYouTube() && !isShortsModeActive();
+  }
+
+  function buildNonShortsReattachContextKey(cardKey, itemKey) {
+    return String(cardKey || 'none') + '|' + String(itemKey || 'unknown');
+  }
+
+  function pruneNonShortsReattachContext(now) {
+    const contextMap = state.nonShortsReattachContext;
+    if (!contextMap || typeof contextMap.forEach !== 'function') return;
+    const cutoff = now - NON_SHORTS_REATTACH_CONTEXT_TTL_MS;
+    contextMap.forEach(function(entry, key) {
+      const updatedAt = Number(entry && entry.updatedAt ? entry.updatedAt : 0);
+      if (!Number.isFinite(updatedAt) || updatedAt < cutoff) {
+        contextMap.delete(key);
+      }
+    });
+    if (contextMap.size <= NON_SHORTS_REATTACH_CONTEXT_MAX) return;
+    const entries = Array.from(contextMap.entries());
+    entries.sort(function(a, b) {
+      const aAt = Number(a && a[1] && a[1].updatedAt ? a[1].updatedAt : 0);
+      const bAt = Number(b && b[1] && b[1].updatedAt ? b[1].updatedAt : 0);
+      return aAt - bAt;
+    });
+    const removeCount = Math.max(0, entries.length - NON_SHORTS_REATTACH_CONTEXT_MAX);
+    for (let i = 0; i < removeCount; i += 1) {
+      contextMap.delete(entries[i][0]);
+    }
+  }
+
+  function findNonShortsReattachCardNode(node) {
+    if (!node || node.nodeType !== 1 || typeof node.closest !== 'function') return null;
+    return node.closest(NON_SHORTS_REATTACH_CARD_SELECTOR);
+  }
+
+  function findNonShortsReattachContextByItemKey(itemKey, cardKey) {
+    const contextMap = state.nonShortsReattachContext;
+    const now = Date.now();
+    pruneNonShortsReattachContext(now);
+    if (!contextMap || !itemKey) return null;
+    if (cardKey && cardKey !== 'none') {
+      const cardEntry = contextMap.get(buildNonShortsReattachContextKey(cardKey, itemKey));
+      if (cardEntry) {
+        return { kind: 'itemkey_card', entry: cardEntry };
+      }
+    }
+    let best = null;
+    contextMap.forEach(function(entry) {
+      if (!entry || entry.itemKey !== itemKey) return;
+      if (!best || Number(entry.updatedAt || 0) > Number(best.updatedAt || 0)) {
+        best = entry;
+      }
+    });
+    if (!best) return null;
+    return { kind: 'itemkey_global', entry: best };
+  }
+
+  function rememberNonShortsReattachContext(node, src, category, itemId, blurPx, reason) {
+    if (!isNonShortsYouTubeReattachContext()) return;
+    if (!node || node.nodeType !== 1) return;
+    if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
+    const normalizedSrc = normalizeUrl(src || '') || '';
+    const itemKey = getDiagItemKey(normalizedSrc || String(src || ''));
+    if (!itemKey || itemKey === 'unknown') return;
+    const cardNode = findNonShortsReattachCardNode(node);
+    const cardKey = cardNode ? getDiagNodeId(cardNode) : 'none';
+    const now = Date.now();
+    const entry = {
+      cardKey: cardKey,
+      itemKey: itemKey,
+      src: normalizedSrc || String(src || ''),
+      category: String(category || 'flagged'),
+      itemId: String(itemId || ''),
+      blurPx: Number.isFinite(blurPx) ? Number(blurPx) : (IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20)),
+      nodeId: getDiagNodeId(node),
+      cardNodeId: cardNode ? getDiagNodeId(cardNode) : 'none',
+      updatedAt: now,
+    };
+    state.nonShortsReattachContext.set(buildNonShortsReattachContextKey(cardKey, itemKey), entry);
+    if (cardKey !== 'none') {
+      state.nonShortsReattachContext.set(buildNonShortsReattachContextKey('none', itemKey), entry);
+    }
+    pruneNonShortsReattachContext(now);
+    if (DIAG_YT_BLUR) {
+      console.log(
+        '[DIAG][NON_SHORTS_REATTACH] context_remembered',
+        'reason=' + (reason || 'unknown'),
+        'itemKey=' + itemKey,
+        'itemId=' + String(entry.itemId || 'none'),
+        'cardNodeId=' + String(entry.cardNodeId || 'none'),
+        'nodeId=' + String(entry.nodeId || 'none')
+      );
+    }
   }
 
   function diagNonShortsReattach(videoNode, reason) {
@@ -2962,6 +3058,14 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!videoNode || videoNode.nodeType !== 1) return;
     if (String(videoNode.tagName || '').toUpperCase() !== 'VIDEO') return;
     if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
+    const now = Date.now();
+    const lastReattachAt = Number((videoNode.dataset && videoNode.dataset.mwNonShortsReattachAt) || '0');
+    if (Number.isFinite(lastReattachAt) && (now - lastReattachAt) < NON_SHORTS_REATTACH_COOLDOWN_MS) {
+      return;
+    }
+    if (videoNode.dataset) {
+      videoNode.dataset.mwNonShortsReattachAt = String(now);
+    }
 
     const source = getDiagSourceFields(videoNode);
     const normalizedPoster = normalizeUrl(source.poster || '') || '';
@@ -3006,14 +3110,33 @@ export function generateModerationScript(config: InjectionConfig): string {
     );
 
     let contextNode = null;
+    let contextData = null;
     let contextKind = 'none';
     if (card && typeof card.querySelector === 'function') {
       contextNode = card.querySelector('[data-mw-moderated="blurred"][data-mw-src]');
       if (contextNode) {
         contextKind = 'card_blurred';
+        contextData = {
+          src: String((contextNode.dataset && contextNode.dataset.mwSrc) || normalizedPoster || normalizedCurrent || ''),
+          category: String((contextNode.dataset && contextNode.dataset.mwCategory) || 'flagged'),
+          itemId: String((contextNode.dataset && contextNode.dataset.mwItemId) || reattachItemId || ''),
+          blurPx: Number((contextNode.dataset && contextNode.dataset.mwBlurStrength) || '') || (IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20)),
+        };
       }
     }
-    if (!contextNode && (normalizedPoster || normalizedCurrent)) {
+    if (!contextNode && reattachItemKey && reattachItemKey !== 'unknown') {
+      const remembered = findNonShortsReattachContextByItemKey(reattachItemKey, cardNodeId);
+      if (remembered && remembered.entry) {
+        contextKind = remembered.kind;
+        contextData = {
+          src: String(remembered.entry.src || normalizedPoster || normalizedCurrent || ''),
+          category: String(remembered.entry.category || 'flagged'),
+          itemId: String(remembered.entry.itemId || reattachItemId || ''),
+          blurPx: Number(remembered.entry.blurPx || (IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20))),
+        };
+      }
+    }
+    if (!contextData && (normalizedPoster || normalizedCurrent)) {
       const blurredCandidates = document.querySelectorAll('[data-mw-moderated="blurred"][data-mw-src]');
       for (let i = 0; i < blurredCandidates.length; i += 1) {
         const candidate = blurredCandidates[i];
@@ -3026,21 +3149,33 @@ export function generateModerationScript(config: InjectionConfig): string {
         ) {
           contextNode = candidate;
           contextKind = 'src_match';
+          contextData = {
+            src: String((candidate.dataset && candidate.dataset.mwSrc) || normalizedPoster || normalizedCurrent || ''),
+            category: String((candidate.dataset && candidate.dataset.mwCategory) || 'flagged'),
+            itemId: String((candidate.dataset && candidate.dataset.mwItemId) || reattachItemId || ''),
+            blurPx: Number((candidate.dataset && candidate.dataset.mwBlurStrength) || '') || (IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20)),
+          };
           break;
         }
       }
     }
 
-    if (contextNode) {
-      const contextItemId = String((contextNode.dataset && contextNode.dataset.mwItemId) || reattachItemId || 'none');
-      const contextItemSrc = String((contextNode.dataset && contextNode.dataset.mwSrc) || normalizedPoster || normalizedCurrent || '');
+    if (contextData) {
+      const contextItemId = String(contextData.itemId || reattachItemId || 'none');
+      const contextItemSrc = String(contextData.src || normalizedPoster || normalizedCurrent || '');
       console.log(
         '[DIAG][NON_SHORTS_REATTACH] context_found',
         'reason=' + (reason || 'unknown'),
         'nodeId=' + videoNodeId,
-        'contextNodeId=' + getDiagNodeId(contextNode),
+        'contextNodeId=' + (contextNode ? getDiagNodeId(contextNode) : 'none'),
         'contextKind=' + contextKind,
-        'contextSrc=' + String((contextNode.dataset && contextNode.dataset.mwSrc) || '').substring(0, 180)
+        'contextSrc=' + String(contextItemSrc || '').substring(0, 180)
+      );
+      console.log(
+        '[DIAG][NON_SHORTS_REATTACH] context_resolved_by=' + contextKind,
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'itemKey=' + reattachItemKey
       );
       console.log(
         '[DIAG][MVP_ITEM_CHAIN] stage=reattach_context_found',
@@ -3087,6 +3222,30 @@ export function generateModerationScript(config: InjectionConfig): string {
       computedBackdrop.indexOf('blur(') !== -1
     );
     if (activeVideoBlurred) {
+      const expectedBlurPx = IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20);
+      const expectedBlurToken = 'blur(' + expectedBlurPx + 'px)';
+      const hasExpectedBlur = (
+        inlineFilter.indexOf(expectedBlurToken) !== -1 ||
+        inlineBackdrop.indexOf(expectedBlurToken) !== -1 ||
+        computedFilter.indexOf(expectedBlurToken) !== -1 ||
+        computedBackdrop.indexOf(expectedBlurToken) !== -1
+      );
+      if (!hasExpectedBlur) {
+        videoNode.style.setProperty('filter', expectedBlurToken, 'important');
+        videoNode.style.setProperty('-webkit-filter', expectedBlurToken, 'important');
+        videoNode.style.setProperty('backdrop-filter', expectedBlurToken, 'important');
+        videoNode.style.setProperty('-webkit-backdrop-filter', expectedBlurToken, 'important');
+        videoNode.dataset.mwModerated = 'blurred';
+        videoNode.classList.add('mw-blurred');
+        console.log(
+          '[DIAG][NON_SHORTS_REATTACH] blur_strength_normalized',
+          'reason=' + (reason || 'unknown'),
+          'nodeId=' + videoNodeId,
+          'expected=' + expectedBlurToken,
+          'computedFilter=' + String(computed.filter || '').substring(0, 120),
+          'computedBackdrop=' + String(computed.backdropFilter || '').substring(0, 120)
+        );
+      }
       console.log(
         '[DIAG][NON_SHORTS_REATTACH] blur_reapplied',
         'reason=' + (reason || 'unknown'),
@@ -3101,11 +3260,11 @@ export function generateModerationScript(config: InjectionConfig): string {
         'nodeId=' + videoNodeId,
         'mode=already_blurred'
       );
-    } else if (contextNode) {
-      const contextSrc = String((contextNode.dataset && contextNode.dataset.mwSrc) || '') || normalizedPoster || normalizedCurrent || '';
-      const contextCategory = String((contextNode.dataset && contextNode.dataset.mwCategory) || '') || 'flagged';
-      const contextItemId = String((contextNode.dataset && contextNode.dataset.mwItemId) || '');
-      const contextBlurStrengthRaw = Number((contextNode.dataset && contextNode.dataset.mwBlurStrength) || '');
+    } else if (contextData) {
+      const contextSrc = String(contextData.src || '') || normalizedPoster || normalizedCurrent || '';
+      const contextCategory = String(contextData.category || '') || 'flagged';
+      const contextItemId = String(contextData.itemId || '');
+      const contextBlurStrengthRaw = Number(contextData.blurPx || '');
       const contextBlurStrength = (
         Number.isFinite(contextBlurStrengthRaw) && contextBlurStrengthRaw > 0
           ? contextBlurStrengthRaw
@@ -3116,7 +3275,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         '[DIAG][NON_SHORTS_REATTACH] heal_apply_blur',
         'reason=' + (reason || 'unknown'),
         'nodeId=' + videoNodeId,
-        'contextNodeId=' + getDiagNodeId(contextNode),
+        'contextNodeId=' + (contextNode ? getDiagNodeId(contextNode) : 'none'),
         'contextKind=' + contextKind,
         'contextSrc=' + String(contextSrc || '').substring(0, 180),
         'blurStrength=' + contextBlurStrength
@@ -3164,12 +3323,97 @@ export function generateModerationScript(config: InjectionConfig): string {
       normalizedCurrent ||
       ''
     );
-    const videoOverlay = findRevealOverlayForElement(videoNode, overlayProbeSrc);
-    const overlayAnchored = !!(
+    const overlayCategory = String(
+      (contextData && contextData.category) ||
+      (contextNode && contextNode.dataset && contextNode.dataset.mwCategory) ||
+      (videoNode.dataset && videoNode.dataset.mwCategory) ||
+      'flagged'
+    );
+    const overlayItemId = String(
+      (contextData && contextData.itemId) ||
+      (contextNode && contextNode.dataset && contextNode.dataset.mwItemId) ||
+      (videoNode.dataset && videoNode.dataset.mwItemId) ||
+      reattachItemId ||
+      ''
+    );
+    let videoOverlay = findRevealOverlayForElement(videoNode, overlayProbeSrc);
+    let overlayAnchored = !!(
       videoOverlay &&
       videoOverlay.isConnected &&
       String((videoOverlay.dataset && videoOverlay.dataset.mwNodeId) || '') === videoNodeId
     );
+    if (
+      activeVideoBlurred &&
+      !overlayAnchored &&
+      !shouldDisableRevealUiForMvpMainPageSurface()
+    ) {
+      let migratedOverlay = null;
+      if (card && typeof card.querySelectorAll === 'function') {
+        const overlaysInCard = card.querySelectorAll('.mw-reveal-overlay');
+        for (let i = 0; i < overlaysInCard.length; i += 1) {
+          const candidateOverlay = overlaysInCard[i];
+          if (!candidateOverlay || candidateOverlay.nodeType !== 1 || !candidateOverlay.isConnected) continue;
+          const overlayFor = String((candidateOverlay.dataset && candidateOverlay.dataset.mwFor) || '');
+          if (getDiagItemKey(overlayFor) !== reattachItemKey) continue;
+          const anchorNodeId = String((candidateOverlay.dataset && candidateOverlay.dataset.mwNodeId) || '');
+          if (anchorNodeId === videoNodeId) {
+            migratedOverlay = candidateOverlay;
+            break;
+          }
+          if (videoNode.parentElement) {
+            if (candidateOverlay.parentElement !== videoNode.parentElement) {
+              videoNode.parentElement.appendChild(candidateOverlay);
+            }
+            const parentPos = window.getComputedStyle(videoNode.parentElement).position;
+            if (parentPos === 'static') {
+              videoNode.parentElement.style.position = 'relative';
+            }
+          }
+          candidateOverlay.dataset.mwNodeId = videoNodeId;
+          candidateOverlay.dataset.mwFor = overlayProbeSrc;
+          candidateOverlay.style.display = 'flex';
+          candidateOverlay.style.pointerEvents = 'none';
+          migratedOverlay = candidateOverlay;
+          console.log(
+            '[DIAG][NON_SHORTS_REATTACH] overlay_migrated_to_video',
+            'reason=' + (reason || 'unknown'),
+            'nodeId=' + videoNodeId,
+            'overlayId=' + String((candidateOverlay.dataset && candidateOverlay.dataset.mwOverlayId) || 'unknown'),
+            'itemKey=' + reattachItemKey
+          );
+          break;
+        }
+      }
+      if (migratedOverlay) {
+        videoOverlay = migratedOverlay;
+      }
+      overlayAnchored = !!(
+        videoOverlay &&
+        videoOverlay.isConnected &&
+        String((videoOverlay.dataset && videoOverlay.dataset.mwNodeId) || '') === videoNodeId
+      );
+    }
+    if (
+      activeVideoBlurred &&
+      !overlayAnchored &&
+      !shouldDisableRevealUiForMvpMainPageSurface()
+    ) {
+      createRevealOverlay(videoNode, overlayProbeSrc, overlayCategory, overlayItemId);
+      videoOverlay = findRevealOverlayForElement(videoNode, overlayProbeSrc);
+      overlayAnchored = !!(
+        videoOverlay &&
+        videoOverlay.isConnected &&
+        String((videoOverlay.dataset && videoOverlay.dataset.mwNodeId) || '') === videoNodeId
+      );
+      console.log(
+        '[DIAG][NON_SHORTS_REATTACH] overlay_heal_create',
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'src=' + String(overlayProbeSrc || '').substring(0, 180),
+        'itemId=' + String(overlayItemId || 'none'),
+        'anchored=' + overlayAnchored
+      );
+    }
     if (overlayAnchored) {
       console.log(
         '[DIAG][NON_SHORTS_REATTACH] overlay_reanchored',
@@ -4940,6 +5184,14 @@ export function generateModerationScript(config: InjectionConfig): string {
       element.dataset.mwItemId = itemId || '';
       element.classList.remove('mw-softblur');
       element.classList.add('mw-blurred');
+      rememberNonShortsReattachContext(
+        element,
+        src,
+        category || 'flagged',
+        itemId || '',
+        blurPx,
+        'applyBlur'
+      );
       if (
         !shortsMode &&
         isYouTubeMainPageThumbnailSurfaceUrl(window.location.href) &&
