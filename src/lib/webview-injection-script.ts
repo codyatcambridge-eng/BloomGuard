@@ -393,7 +393,10 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function setOverlayEnabled(enabled, reason) {
     const prevEnabled = !!overlayState.enabled;
-    const nextEnabled = DOM_OVERLAY_ENABLED ? !!enabled : false;
+    const suppressFullscreenForMainPageThumbReason = reason === 'moderation_request_main_page_item_blur';
+    const nextEnabled = DOM_OVERLAY_ENABLED
+      ? (!!enabled && !suppressFullscreenForMainPageThumbReason)
+      : false;
     overlayState.enabled = nextEnabled;
     overlayState.reason = DOM_OVERLAY_ENABLED ? (reason || 'unknown') : 'dom_overlay_disabled';
     overlayState.updatedAt = Date.now();
