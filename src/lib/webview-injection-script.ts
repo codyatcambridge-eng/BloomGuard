@@ -2965,6 +2965,8 @@ export function generateModerationScript(config: InjectionConfig): string {
   const NON_SHORTS_REATTACH_CONTEXT_MAX = 400;
   const NON_SHORTS_REATTACH_COOLDOWN_MS = 80;
   const NON_SHORTS_REATTACH_CARD_FALLBACK_ITEM_KEY = '__card_latest__';
+  const NON_SHORTS_REATTACH_MIN_OVERLAY_INTERSECTION_RATIO = 0.35;
+  const NON_SHORTS_REATTACH_MAX_CENTER_OFFSET_RATIO = 0.7;
 
   function isNonShortsYouTubeReattachContext() {
     return isYouTube() && !isShortsModeActive();
@@ -3000,6 +3002,46 @@ export function generateModerationScript(config: InjectionConfig): string {
   function findNonShortsReattachCardNode(node) {
     if (!node || node.nodeType !== 1 || typeof node.closest !== 'function') return null;
     return node.closest(NON_SHORTS_REATTACH_CARD_SELECTOR);
+  }
+
+  function isNonShortsOverlayGeometryAnchored(overlay, targetNode) {
+    if (!overlay || overlay.nodeType !== 1 || !overlay.isConnected) return false;
+    if (!targetNode || targetNode.nodeType !== 1 || !targetNode.isConnected) return false;
+    if (typeof overlay.getBoundingClientRect !== 'function') return false;
+    if (typeof targetNode.getBoundingClientRect !== 'function') return false;
+    let overlayRect = null;
+    let targetRect = null;
+    try {
+      overlayRect = overlay.getBoundingClientRect();
+      targetRect = targetNode.getBoundingClientRect();
+    } catch (e) {
+      return false;
+    }
+    if (!overlayRect || !targetRect) return false;
+    const targetWidth = Number(targetRect.width || 0);
+    const targetHeight = Number(targetRect.height || 0);
+    if (targetWidth < 16 || targetHeight < 16) return false;
+
+    const targetArea = targetWidth * targetHeight;
+    const left = Math.max(Number(overlayRect.left || 0), Number(targetRect.left || 0));
+    const right = Math.min(Number(overlayRect.right || 0), Number(targetRect.right || 0));
+    const top = Math.max(Number(overlayRect.top || 0), Number(targetRect.top || 0));
+    const bottom = Math.min(Number(overlayRect.bottom || 0), Number(targetRect.bottom || 0));
+    const intersectionWidth = Math.max(0, right - left);
+    const intersectionHeight = Math.max(0, bottom - top);
+    const intersectionArea = intersectionWidth * intersectionHeight;
+    const intersectionRatio = targetArea > 0 ? (intersectionArea / targetArea) : 0;
+
+    const overlayCx = Number(overlayRect.left || 0) + (Number(overlayRect.width || 0) / 2);
+    const overlayCy = Number(overlayRect.top || 0) + (Number(overlayRect.height || 0) / 2);
+    const targetCx = Number(targetRect.left || 0) + (targetWidth / 2);
+    const targetCy = Number(targetRect.top || 0) + (targetHeight / 2);
+    const dx = Math.abs(overlayCx - targetCx);
+    const dy = Math.abs(overlayCy - targetCy);
+    const maxOffset = Math.max(targetWidth, targetHeight) * NON_SHORTS_REATTACH_MAX_CENTER_OFFSET_RATIO;
+    const centerCloseEnough = dx <= maxOffset && dy <= maxOffset;
+
+    return intersectionRatio >= NON_SHORTS_REATTACH_MIN_OVERLAY_INTERSECTION_RATIO && centerCloseEnough;
   }
 
   function findNonShortsReattachContextByItemKey(itemKey, cardKey) {
@@ -3376,11 +3418,43 @@ export function generateModerationScript(config: InjectionConfig): string {
       String((contextData && contextData.src) || (contextNode && contextNode.dataset && contextNode.dataset.mwSrc) || '')
     );
     let videoOverlay = findRevealOverlayForElement(videoNode, overlayProbeSrc);
-    let overlayAnchored = !!(
-      videoOverlay &&
-      videoOverlay.isConnected &&
-      String((videoOverlay.dataset && videoOverlay.dataset.mwNodeId) || '') === videoNodeId
-    );
+    const isOverlayNodeIdAnchored = function(overlay) {
+      return !!(
+        overlay &&
+        overlay.isConnected &&
+        String((overlay.dataset && overlay.dataset.mwNodeId) || '') === videoNodeId
+      );
+    };
+    const normalizeOverlayAnchor = function(overlay, phase) {
+      if (!isOverlayNodeIdAnchored(overlay)) {
+        return { overlay: overlay, anchored: false };
+      }
+      if (isNonShortsOverlayGeometryAnchored(overlay, videoNode)) {
+        return { overlay: overlay, anchored: true };
+      }
+      const overlayId = String((overlay.dataset && overlay.dataset.mwOverlayId) || 'unknown');
+      console.warn(
+        '[DIAG][NON_SHORTS_REATTACH] overlay_geometry_mismatch',
+        'reason=' + (reason || 'unknown'),
+        'phase=' + String(phase || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'overlayId=' + overlayId
+      );
+      if (overlay.parentElement) {
+        overlay.parentElement.removeChild(overlay);
+        console.log(
+          '[DIAG][NON_SHORTS_REATTACH] overlay_removed_geometry_mismatch',
+          'reason=' + (reason || 'unknown'),
+          'phase=' + String(phase || 'unknown'),
+          'nodeId=' + videoNodeId,
+          'overlayId=' + overlayId
+        );
+      }
+      return { overlay: null, anchored: false };
+    };
+    let normalizedOverlay = normalizeOverlayAnchor(videoOverlay, 'initial_probe');
+    videoOverlay = normalizedOverlay.overlay;
+    let overlayAnchored = normalizedOverlay.anchored;
     if (
       activeVideoBlurred &&
       !overlayAnchored &&
@@ -3430,11 +3504,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (migratedOverlay) {
         videoOverlay = migratedOverlay;
       }
-      overlayAnchored = !!(
-        videoOverlay &&
-        videoOverlay.isConnected &&
-        String((videoOverlay.dataset && videoOverlay.dataset.mwNodeId) || '') === videoNodeId
-      );
+      normalizedOverlay = normalizeOverlayAnchor(videoOverlay, 'post_migrate');
+      videoOverlay = normalizedOverlay.overlay;
+      overlayAnchored = normalizedOverlay.anchored;
     }
     if (
       activeVideoBlurred &&
@@ -3443,11 +3515,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     ) {
       createRevealOverlay(videoNode, overlayProbeSrc, overlayCategory, overlayItemId);
       videoOverlay = findRevealOverlayForElement(videoNode, overlayProbeSrc);
-      overlayAnchored = !!(
-        videoOverlay &&
-        videoOverlay.isConnected &&
-        String((videoOverlay.dataset && videoOverlay.dataset.mwNodeId) || '') === videoNodeId
-      );
+      normalizedOverlay = normalizeOverlayAnchor(videoOverlay, 'post_create');
+      videoOverlay = normalizedOverlay.overlay;
+      overlayAnchored = normalizedOverlay.anchored;
       console.log(
         '[DIAG][NON_SHORTS_REATTACH] overlay_heal_create',
         'reason=' + (reason || 'unknown'),
