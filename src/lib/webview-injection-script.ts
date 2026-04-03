@@ -391,6 +391,38 @@ export function generateModerationScript(config: InjectionConfig): string {
     return overlay;
   }
 
+  function logOverlayElementState(eventName, requestedEnabled, reason, prevEnabled, nextEnabled, overlay) {
+    const style = overlay ? window.getComputedStyle(overlay) : null;
+    const rect = overlay ? overlay.getBoundingClientRect() : null;
+    const viewportWidth = window.innerWidth || 0;
+    const viewportHeight = window.innerHeight || 0;
+    const fillsViewport = !!(
+      rect &&
+      viewportWidth > 0 &&
+      viewportHeight > 0 &&
+      rect.width >= viewportWidth * 0.95 &&
+      rect.height >= viewportHeight * 0.95
+    );
+    console.log(
+      '[DIAG][INJECT_OVERLAY_STATE]',
+      'event=' + eventName,
+      'requestedEnabled=' + (!!requestedEnabled),
+      'reason=' + String(reason || 'unknown'),
+      'prevEnabled=' + prevEnabled,
+      'nextEnabled=' + nextEnabled,
+      'overlayPresent=' + (!!overlay),
+      'overlayClassEnabled=' + (!!(overlay && overlay.classList.contains('mw-enabled'))),
+      'display=' + String(style ? style.display : 'none'),
+      'visibility=' + String(style ? style.visibility : 'hidden'),
+      'opacity=' + String(style ? style.opacity : '0'),
+      'pointerEvents=' + String(style ? style.pointerEvents : 'none'),
+      'rect=' + (rect ? (Math.round(rect.width) + 'x' + Math.round(rect.height)) : '0x0'),
+      'viewport=' + viewportWidth + 'x' + viewportHeight,
+      'fillsViewport=' + fillsViewport,
+      'updatedAt=' + Date.now(),
+    );
+  }
+
   function setOverlayEnabled(enabled, reason) {
     const prevEnabled = !!overlayState.enabled;
     const suppressFullscreenForMainPageThumbReason = reason === 'moderation_request_main_page_item_blur';
@@ -410,6 +442,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     } else {
       overlay.classList.remove('mw-enabled');
     }
+    logOverlayElementState('setOverlayEnabled', enabled, overlayState.reason, prevEnabled, overlayState.enabled, overlay);
     if (CONFIG.debug && prevEnabled !== overlayState.enabled) {
       console.log('[MW][Overlay] enabled=' + overlayState.enabled, 'reason=' + overlayState.reason);
     }

@@ -2016,6 +2016,17 @@ export const NativeWebViewBrowser = () => {
     if (!blurReadyRef.current) return;
 
     const pending = blurPendingRef.current || blurStateRef.current;
+    const hostState = blurStateRef.current;
+    console.log(
+      '[DIAG][HOST_OVERLAY_FLUSH]',
+      'overlayHostState=' + (hostState.enabled ? 'enabled' : 'disabled'),
+      'overlayReason=' + hostState.reason,
+      'flushEnabled=' + pending.enabled,
+      'flushReason=' + pending.reason,
+      'navId=' + activeNavIdRef.current,
+      'pageEpoch=' + activePageEpochRef.current,
+      'url=' + (webViewState.currentUrl || currentUrlRef.current || 'unknown'),
+    );
     const stateMessage = createBlurOverlayStateMessage(pending.enabled, pending.reason);
     const escapedMessage = escapeForJs(JSON.stringify(stateMessage));
 
