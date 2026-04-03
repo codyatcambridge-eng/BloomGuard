@@ -2962,6 +2962,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!isNonShortsYouTubeReattachContext()) return;
     if (!videoNode || videoNode.nodeType !== 1) return;
     if (String(videoNode.tagName || '').toUpperCase() !== 'VIDEO') return;
+    if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
 
     const source = getDiagSourceFields(videoNode);
     const normalizedPoster = normalizeUrl(source.poster || '') || '';
@@ -2980,6 +2981,20 @@ export function generateModerationScript(config: InjectionConfig): string {
       'currentSrc=' + String(source.currentSrc || '').substring(0, 180),
       'poster=' + String(source.poster || '').substring(0, 180),
       'url=' + window.location.href
+    );
+    console.log(
+      '[DIAG][MVP_NON_SHORTS] preview_transition_detected',
+      'reason=' + (reason || 'unknown'),
+      'nodeId=' + videoNodeId,
+      'cardNodeId=' + cardNodeId,
+      'url=' + window.location.href
+    );
+    console.log(
+      '[DIAG][MVP_NON_SHORTS] reattach_attempt',
+      'reason=' + (reason || 'unknown'),
+      'nodeId=' + videoNodeId,
+      'poster=' + String(source.poster || '').substring(0, 180),
+      'currentSrc=' + String(source.currentSrc || '').substring(0, 180)
     );
 
     let contextNode = null;
@@ -3025,6 +3040,13 @@ export function generateModerationScript(config: InjectionConfig): string {
         'poster=' + String(normalizedPoster || '').substring(0, 180),
         'current=' + String(normalizedCurrent || '').substring(0, 180)
       );
+      console.log(
+        '[DIAG][MVP_NON_SHORTS] reattach_skip_reason=no_context',
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'poster=' + String(normalizedPoster || '').substring(0, 180),
+        'current=' + String(normalizedCurrent || '').substring(0, 180)
+      );
     }
 
     const computed = getDiagComputedBlurState(videoNode);
@@ -3048,6 +3070,12 @@ export function generateModerationScript(config: InjectionConfig): string {
         'computedFilter=' + String(computed.filter || '').substring(0, 120),
         'computedBackdrop=' + String(computed.backdropFilter || '').substring(0, 120)
       );
+      console.log(
+        '[DIAG][MVP_NON_SHORTS] reattach_success',
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'mode=already_blurred'
+      );
     } else if (contextNode) {
       const contextSrc = String((contextNode.dataset && contextNode.dataset.mwSrc) || '') || normalizedPoster || normalizedCurrent || '';
       const contextCategory = String((contextNode.dataset && contextNode.dataset.mwCategory) || '') || 'flagged';
@@ -3068,6 +3096,13 @@ export function generateModerationScript(config: InjectionConfig): string {
         'contextSrc=' + String(contextSrc || '').substring(0, 180),
         'blurStrength=' + contextBlurStrength
       );
+      console.log(
+        '[DIAG][MVP_NON_SHORTS] reattach_success',
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'mode=heal_apply_blur',
+        'contextKind=' + contextKind
+      );
       if (shouldDisableRevealUiForMvpMainPageSurface()) {
         removeRevealOverlay(videoNode, contextSrc, 'non_shorts_reattach_mvp_suppress');
         console.log(
@@ -3076,7 +3111,19 @@ export function generateModerationScript(config: InjectionConfig): string {
           'nodeId=' + videoNodeId,
           'contextSrc=' + String(contextSrc || '').substring(0, 180)
         );
+        console.log(
+          '[DIAG][MVP_NON_SHORTS] reattach_skip_reason=reveal_ui_suppressed',
+          'reason=' + (reason || 'unknown'),
+          'nodeId=' + videoNodeId,
+          'contextSrc=' + String(contextSrc || '').substring(0, 180)
+        );
       }
+    } else {
+      console.log(
+        '[DIAG][MVP_NON_SHORTS] reattach_skip_reason=no_blurred_context',
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + videoNodeId
+      );
     }
 
     const overlayProbeSrc = (
@@ -3094,6 +3141,12 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (overlayAnchored) {
       console.log(
         '[DIAG][NON_SHORTS_REATTACH] overlay_reanchored',
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'overlayId=' + String((videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown')
+      );
+      console.log(
+        '[DIAG][MVP_NON_SHORTS] reveal_control_rebound',
         'reason=' + (reason || 'unknown'),
         'nodeId=' + videoNodeId,
         'overlayId=' + String((videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown')
@@ -4829,6 +4882,19 @@ export function generateModerationScript(config: InjectionConfig): string {
       element.dataset.mwItemId = itemId || '';
       element.classList.remove('mw-softblur');
       element.classList.add('mw-blurred');
+      if (
+        !shortsMode &&
+        isYouTubeMainPageThumbnailSurfaceUrl(window.location.href) &&
+        String(element.dataset.mwSourceType || '') === 'img'
+      ) {
+        console.log(
+          '[DIAG][MVP_NON_SHORTS] thumbnail_blurred',
+          'nodeId=' + getDiagNodeId(element),
+          'itemId=' + (itemId || 'none'),
+          'src=' + String(src || '').substring(0, 180),
+          'category=' + String(category || 'flagged')
+        );
+      }
       if (shortsMode && !shortsStableSelectorUsed && element.dataset.mwShortsStableSelector) {
         shortsStableSelectorUsed = element.dataset.mwShortsStableSelector;
       }
@@ -5285,6 +5351,15 @@ export function generateModerationScript(config: InjectionConfig): string {
       'navId=' + NAV_ID,
       'pageEpoch=' + state.pageEpoch
     );
+    if (!shortsMode && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
+      console.log(
+        '[DIAG][MVP_NON_SHORTS] reveal_control_created',
+        'overlayId=' + overlayId,
+        'targetNode=' + getDiagNodeId(element),
+        'itemKey=' + itemKey,
+        'pageEpoch=' + state.pageEpoch
+      );
+    }
     
     const badge = document.createElement('span');
     badge.style.cssText = [
