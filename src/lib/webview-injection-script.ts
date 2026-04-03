@@ -3347,6 +3347,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       reattachItemId ||
       ''
     );
+    const contextItemKey = getDiagItemKey(
+      String((contextData && contextData.src) || (contextNode && contextNode.dataset && contextNode.dataset.mwSrc) || '')
+    );
     let videoOverlay = findRevealOverlayForElement(videoNode, overlayProbeSrc);
     let overlayAnchored = !!(
       videoOverlay &&
@@ -3365,7 +3368,11 @@ export function generateModerationScript(config: InjectionConfig): string {
           const candidateOverlay = overlaysInCard[i];
           if (!candidateOverlay || candidateOverlay.nodeType !== 1 || !candidateOverlay.isConnected) continue;
           const overlayFor = String((candidateOverlay.dataset && candidateOverlay.dataset.mwFor) || '');
-          if (getDiagItemKey(overlayFor) !== reattachItemKey) continue;
+          const overlayItemKey = getDiagItemKey(overlayFor);
+          const matchesReattachKey = reattachItemKey !== 'unknown' && overlayItemKey === reattachItemKey;
+          const matchesContextKey = contextItemKey !== 'unknown' && overlayItemKey === contextItemKey;
+          const allowSingleOverlayCardFallback = overlaysInCard.length === 1 && contextKind !== 'none';
+          if (!matchesReattachKey && !matchesContextKey && !allowSingleOverlayCardFallback) continue;
           const anchorNodeId = String((candidateOverlay.dataset && candidateOverlay.dataset.mwNodeId) || '');
           if (anchorNodeId === videoNodeId) {
             migratedOverlay = candidateOverlay;
