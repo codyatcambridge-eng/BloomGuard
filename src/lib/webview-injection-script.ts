@@ -1565,8 +1565,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function shouldDisableRevealUiForMvpMainPageSurface() {
-    if (isShortsModeActive()) return false;
-    return isYouTubeMainPageThumbnailSurfaceUrl(window.location.href);
+    return false;
   }
 
   function getDiagUrlFamily(value) {
@@ -5068,10 +5067,15 @@ export function generateModerationScript(config: InjectionConfig): string {
           clearAllBlurAndOverlay(element, src, 'removeBlur_reveal', 'revealed');
         }
       } else {
+        element.style.removeProperty('filter');
+        element.style.removeProperty('-webkit-filter');
+        element.style.removeProperty('backdrop-filter');
+        element.style.removeProperty('-webkit-backdrop-filter');
         element.style.filter = 'none';
         element.dataset.mwModerated = 'revealed';
         element.dataset.mwPreblurClear = 'true';
         element.classList.remove('mw-softblur');
+        element.classList.remove('mw-blurred');
       }
       markRevealedForSource(src, element, 'removeBlur');
       
@@ -5604,56 +5608,62 @@ export function generateModerationScript(config: InjectionConfig): string {
           'holdMs=' + String(revealApplied.holdMs || 0)
         );
         
-        // POST a label request message so the host can open the labeling modal
-        var labelItemId = itemId || element.dataset.mwItemId || 'unknown_' + Date.now();
-        var mwModelVersion = element.dataset.mwModelVersion || null;
-        var mwDecisionReason = element.dataset.mwDecisionReason || null;
-        var mwNsfwRisk = toFiniteNumber(element.dataset.mwNsfwRisk);
-        var mwPersonPresent = element.dataset.mwPersonPresent === '1';
-        var mwSkinRatio = toFiniteNumber(element.dataset.mwSkinRatio);
-        var mwThirstScore = toFiniteNumber(element.dataset.mwThirstScore);
-        var mwSkinThreshold = toFiniteNumber(element.dataset.mwSkinThreshold);
-        var mwGrayMin = toFiniteNumber(element.dataset.mwGrayZoneMin);
-        var mwGrayMax = toFiniteNumber(element.dataset.mwGrayZoneMax);
-        var mwExplicitOverride = toFiniteNumber(element.dataset.mwExplicitOverride);
-        var mwImageWidth = toFiniteNumber(element.dataset.mwImageWidth);
-        var mwImageHeight = toFiniteNumber(element.dataset.mwImageHeight);
-        var mwHost = element.dataset.mwHost || null;
-        var labelRequest = {
-          type: 'gc-label-request',
-          requestId: 'r_' + Date.now().toString(36),
-          itemId: labelItemId,
-          src: src,
-          pageUrl: window.location.href,
-          platform: PLATFORM,
-          modelPrediction: {
-            category: category,
-            confidence: toFiniteNumber(element.dataset.mwConfidence),
-            model_version: mwModelVersion,
-            thresholds: {
-              nsfw_gray_zone_min: mwGrayMin,
-              nsfw_gray_zone_max: mwGrayMax,
-              explicit_override: mwExplicitOverride,
-              skin_ratio: mwSkinThreshold,
-            },
-            predictions: {
-              nsfwRisk: mwNsfwRisk,
-              personPresent: mwPersonPresent,
-              skinRatio: mwSkinRatio,
-              thirstScore: mwThirstScore,
-            },
-            decision_reason: mwDecisionReason,
-            image_width: mwImageWidth,
-            image_height: mwImageHeight,
-            host: mwHost,
-            timestamp: Date.now(),
-          }
-        };
-        console.log('[MW] posting gc-label-request', labelItemId);
-        postToHost(labelRequest);
-        
-        // Show brief correction overlay
-        showCorrectionOverlay(element, src, category, labelItemId);
+        // Keep second-tap playback clear on YouTube main-page MVP surfaces by skipping
+        // immediate label/correction UI that can steal the next user tap.
+        const suppressImmediateLabelUi =
+          !shortsMode && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href);
+        if (!suppressImmediateLabelUi) {
+          // POST a label request message so the host can open the labeling modal
+          var labelItemId = itemId || element.dataset.mwItemId || 'unknown_' + Date.now();
+          var mwModelVersion = element.dataset.mwModelVersion || null;
+          var mwDecisionReason = element.dataset.mwDecisionReason || null;
+          var mwNsfwRisk = toFiniteNumber(element.dataset.mwNsfwRisk);
+          var mwPersonPresent = element.dataset.mwPersonPresent === '1';
+          var mwSkinRatio = toFiniteNumber(element.dataset.mwSkinRatio);
+          var mwThirstScore = toFiniteNumber(element.dataset.mwThirstScore);
+          var mwSkinThreshold = toFiniteNumber(element.dataset.mwSkinThreshold);
+          var mwGrayMin = toFiniteNumber(element.dataset.mwGrayZoneMin);
+          var mwGrayMax = toFiniteNumber(element.dataset.mwGrayZoneMax);
+          var mwExplicitOverride = toFiniteNumber(element.dataset.mwExplicitOverride);
+          var mwImageWidth = toFiniteNumber(element.dataset.mwImageWidth);
+          var mwImageHeight = toFiniteNumber(element.dataset.mwImageHeight);
+          var mwHost = element.dataset.mwHost || null;
+          var labelRequest = {
+            type: 'gc-label-request',
+            requestId: 'r_' + Date.now().toString(36),
+            itemId: labelItemId,
+            src: src,
+            pageUrl: window.location.href,
+            platform: PLATFORM,
+            modelPrediction: {
+              category: category,
+              confidence: toFiniteNumber(element.dataset.mwConfidence),
+              model_version: mwModelVersion,
+              thresholds: {
+                nsfw_gray_zone_min: mwGrayMin,
+                nsfw_gray_zone_max: mwGrayMax,
+                explicit_override: mwExplicitOverride,
+                skin_ratio: mwSkinThreshold,
+              },
+              predictions: {
+                nsfwRisk: mwNsfwRisk,
+                personPresent: mwPersonPresent,
+                skinRatio: mwSkinRatio,
+                thirstScore: mwThirstScore,
+              },
+              decision_reason: mwDecisionReason,
+              image_width: mwImageWidth,
+              image_height: mwImageHeight,
+              host: mwHost,
+              timestamp: Date.now(),
+            }
+          };
+          console.log('[MW] posting gc-label-request', labelItemId);
+          postToHost(labelRequest);
+          
+          // Show brief correction overlay
+          showCorrectionOverlay(element, src, category, labelItemId);
+        }
       }
     });
     console.log('[DIAG][REVEAL_UI] bind_button', 'overlayId=' + overlayId);
