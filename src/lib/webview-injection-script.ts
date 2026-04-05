@@ -3664,8 +3664,16 @@ export function generateModerationScript(config: InjectionConfig): string {
     window.__MW_NON_SHORTS_REATTACH_LISTENERS__ = true;
     const onVideoLifecycleEvent = function(event) {
       const target = event && event.target;
-      if (!target || target.nodeType !== 1) return;
-      if (String(target.tagName || '').toUpperCase() !== 'VIDEO') return;
+      const eventType = String((event && event.type) || 'unknown');
+      if (!target || target.nodeType !== 1) {
+        console.log('[DIAG][MVP10_DISPATCH] skip_event_invalid_target', 'event=' + eventType);
+        return;
+      }
+      if (String(target.tagName || '').toUpperCase() !== 'VIDEO') {
+        console.log('[DIAG][MVP10_DISPATCH] skip_event_not_video', 'event=' + eventType, 'tag=' + String(target.tagName || 'unknown'));
+        return;
+      }
+      console.log('[DIAG][MVP10_DISPATCH] dispatch_event_video', 'event=' + eventType, 'nodeId=' + getDiagNodeId(target));
       diagNonShortsReattach(target, 'event:' + String(event.type || 'unknown'));
     };
     document.addEventListener('play', onVideoLifecycleEvent, true);
@@ -7898,13 +7906,25 @@ export function generateModerationScript(config: InjectionConfig): string {
           }
           if (isYouTube() && !isShortsModeActive()) {
             if (String(node.tagName || '').toUpperCase() === 'VIDEO') {
+              console.log('[DIAG][MVP10_DISPATCH] dispatch_mutation_added_video', 'nodeId=' + getDiagNodeId(node));
               diagNonShortsReattach(node, 'mutation_added:video');
             }
             if (typeof node.querySelectorAll === 'function') {
               node.querySelectorAll('video').forEach(videoNode => {
+                console.log('[DIAG][MVP10_DISPATCH] dispatch_mutation_added_descendant_video', 'nodeId=' + getDiagNodeId(videoNode));
                 diagNonShortsReattach(videoNode, 'mutation_added:descendant_video');
               });
             }
+          } else if (
+            String(node.tagName || '').toUpperCase() === 'VIDEO' ||
+            (typeof node.querySelectorAll === 'function' && node.querySelector('video'))
+          ) {
+            console.log(
+              '[DIAG][MVP10_DISPATCH] skip_mutation_added_gate',
+              'isYouTube=' + String(isYouTube()),
+              'shortsMode=' + String(isShortsModeActive()),
+              'nodeTag=' + String(node.tagName || 'unknown')
+            );
           }
           
           // Add to viewport observer for lazy scanning
@@ -7931,7 +7951,29 @@ export function generateModerationScript(config: InjectionConfig): string {
               attr === 'hidden'
             )
           ) {
+            console.log('[DIAG][MVP10_DISPATCH] dispatch_attr_video', 'attr=' + attr, 'nodeId=' + getDiagNodeId(target));
             diagNonShortsReattach(target, 'attr:' + attr);
+          } else if (
+            target &&
+            target.nodeType === 1 &&
+            String(target.tagName || '').toUpperCase() === 'VIDEO' &&
+            (
+              attr === 'src' ||
+              attr === 'poster' ||
+              attr === 'style' ||
+              attr === 'class' ||
+              attr === 'aria-hidden' ||
+              attr === 'aria-current' ||
+              attr === 'hidden'
+            )
+          ) {
+            console.log(
+              '[DIAG][MVP10_DISPATCH] skip_attr_gate',
+              'attr=' + attr,
+              'isYouTube=' + String(isYouTube()),
+              'shortsMode=' + String(isShortsModeActive()),
+              'nodeId=' + getDiagNodeId(target)
+            );
           }
           if (
             isYouTube() &&
