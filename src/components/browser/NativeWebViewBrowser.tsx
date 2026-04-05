@@ -1192,6 +1192,7 @@ export const NativeWebViewBrowser = () => {
       enabled: isRuntimeModerationEnabled,
       pageEpoch: webViewPageEpochRef.current,
       diagYouTubeShorts: localSettings.diag_youtube_shorts === true && isYouTubeUrl(targetUrl),
+      enableShortsHealthHeal: isYouTubeUrl(targetUrl),
     };
     console.log(
       '[MW-Inject][Config]',

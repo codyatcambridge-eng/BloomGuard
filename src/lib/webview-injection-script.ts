@@ -2886,7 +2886,13 @@ export function generateModerationScript(config: InjectionConfig): string {
       return false;
     }
     const targetWasPosterImg = String(context.targetTagName || '').toUpperCase() === 'IMG';
-    if (!targetWasPosterImg) {
+    const selectorUsed = String(context.selectorUsed || '');
+    const targetWasShortsStableContainer = (
+      selectorUsed.indexOf('ytm-reel-video-renderer') !== -1 ||
+      selectorUsed.indexOf('ytm-shorts-lockup-view-model') !== -1 ||
+      selectorUsed.indexOf('shorts-player') !== -1
+    );
+    if (!targetWasPosterImg && !targetWasShortsStableContainer) {
       diagShortsSwapMarker(videoNode, reason || 'unknown', true, false, 'target_not_img');
       if (DIAG_YT_BLUR) {
         diagShortsTimeline(
@@ -2894,7 +2900,8 @@ export function generateModerationScript(config: InjectionConfig): string {
           'reason=target_not_img' +
           ' containerNodeId=' + getDiagNodeId(container) +
           ' targetTagName=' + (context.targetTagName || 'none') +
-          ' targetNodeId=' + (context.targetNodeId || 'none')
+          ' targetNodeId=' + (context.targetNodeId || 'none') +
+          ' selectorUsed=' + selectorUsed
         );
       }
       return false;
