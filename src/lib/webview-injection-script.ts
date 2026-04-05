@@ -1573,6 +1573,19 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
   }
 
+  function isYouTubeHomepageThumbnailSurfaceUrl(value) {
+    if (!value) return false;
+    try {
+      var parsed = new URL(value, window.location.href);
+      var host = String(parsed.hostname || '').toLowerCase();
+      if (host !== 'm.youtube.com') return false;
+      var path = String(parsed.pathname || '/').toLowerCase();
+      return path === '/';
+    } catch (e) {
+      return false;
+    }
+  }
+
   function shouldDisableRevealUiForMvpMainPageSurface() {
     return false;
   }
@@ -3151,6 +3164,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     const currentUrl = window.location.href;
     const isMainSurfaceUrl = isYouTubeMainPageThumbnailSurfaceUrl(currentUrl);
+    const isHomepageSurfaceUrl = isYouTubeHomepageThumbnailSurfaceUrl(currentUrl);
     const reasonText = String(reason || 'unknown');
     const reasonLooksTransition =
       reasonText.indexOf('event:') === 0 ||
@@ -3518,11 +3532,11 @@ export function generateModerationScript(config: InjectionConfig): string {
     videoOverlay = normalizedOverlay.overlay;
     let overlayAnchored = normalizedOverlay.anchored;
     if (
+      isHomepageSurfaceUrl &&
       activeVideoBlurred &&
       !overlayAnchored &&
       !shouldDisableRevealUiForMvpMainPageSurface()
     ) {
-      let migratedOverlay = null;
       if (card && typeof card.querySelectorAll === 'function') {
         const overlaysInCard = card.querySelectorAll('.mw-reveal-overlay');
         for (let i = 0; i < overlaysInCard.length; i += 1) {
@@ -3532,41 +3546,23 @@ export function generateModerationScript(config: InjectionConfig): string {
           const overlayItemKey = getDiagItemKey(overlayFor);
           const matchesReattachKey = reattachItemKey !== 'unknown' && overlayItemKey === reattachItemKey;
           const matchesContextKey = contextItemKey !== 'unknown' && overlayItemKey === contextItemKey;
-          const allowSingleOverlayCardFallback = overlaysInCard.length === 1 && contextKind !== 'none';
-          if (!matchesReattachKey && !matchesContextKey && !allowSingleOverlayCardFallback) continue;
+          if (!matchesReattachKey && !matchesContextKey) continue;
           const anchorNodeId = String((candidateOverlay.dataset && candidateOverlay.dataset.mwNodeId) || '');
-          if (anchorNodeId === videoNodeId) {
-            migratedOverlay = candidateOverlay;
-            break;
+          if (anchorNodeId === videoNodeId) continue;
+          if (candidateOverlay.parentElement) {
+            candidateOverlay.parentElement.removeChild(candidateOverlay);
           }
-          if (videoNode.parentElement) {
-            if (candidateOverlay.parentElement !== videoNode.parentElement) {
-              videoNode.parentElement.appendChild(candidateOverlay);
-            }
-            const parentPos = window.getComputedStyle(videoNode.parentElement).position;
-            if (parentPos === 'static') {
-              videoNode.parentElement.style.position = 'relative';
-            }
-          }
-          candidateOverlay.dataset.mwNodeId = videoNodeId;
-          candidateOverlay.dataset.mwFor = overlayProbeSrc;
-          candidateOverlay.style.display = 'flex';
-          candidateOverlay.style.pointerEvents = 'none';
-          migratedOverlay = candidateOverlay;
           console.log(
-            '[DIAG][NON_SHORTS_REATTACH] overlay_migrated_to_video',
+            '[DIAG][NON_SHORTS_REATTACH] overlay_removed_for_rebind',
             'reason=' + (reason || 'unknown'),
             'nodeId=' + videoNodeId,
             'overlayId=' + String((candidateOverlay.dataset && candidateOverlay.dataset.mwOverlayId) || 'unknown'),
             'itemKey=' + reattachItemKey
           );
-          break;
         }
       }
-      if (migratedOverlay) {
-        videoOverlay = migratedOverlay;
-      }
-      normalizedOverlay = normalizeOverlayAnchor(videoOverlay, 'post_migrate');
+      videoOverlay = findRevealOverlayForElement(videoNode, overlayProbeSrc);
+      normalizedOverlay = normalizeOverlayAnchor(videoOverlay, 'post_rebind_cleanup');
       videoOverlay = normalizedOverlay.overlay;
       overlayAnchored = normalizedOverlay.anchored;
     }
@@ -6859,8 +6855,16 @@ export function generateModerationScript(config: InjectionConfig): string {
             );
           }
           markSafeResolved(src);
-          // Remove soft blur if result is safe
-          removeSoftBlur(element, src);
+          // Homepage non-shorts transition safety: clear any hard blur/overlay carryover on safe verdict.
+          const homepageNonShortsSurface =
+            !isShortsModeActive() &&
+            isYouTubeHomepageThumbnailSurfaceUrl(window.location.href);
+          if (homepageNonShortsSurface && (preDecisionState === 'blurred' || element.classList.contains('mw-blurred') || preDecisionHasBlur)) {
+            clearAllBlurAndOverlay(element, src, 'safe_result_clear_hard_blur_homepage', 'safe');
+          } else {
+            // Remove soft blur if result is safe
+            removeSoftBlur(element, src);
+          }
           if (wasInSoftBlur && !finalBlur) {
             state.stats.semanticDelaySaved++;
           }
