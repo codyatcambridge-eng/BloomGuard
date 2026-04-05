@@ -3118,9 +3118,37 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function diagNonShortsReattach(videoNode, reason) {
-    if (!isNonShortsYouTubeReattachContext()) return;
-    if (!videoNode || videoNode.nodeType !== 1) return;
-    if (String(videoNode.tagName || '').toUpperCase() !== 'VIDEO') return;
+    console.log(
+      '[DIAG][MVP10_ENTRY] reattach_enter',
+      'reason=' + (reason || 'unknown'),
+      'node=' + getDiagNodeId(videoNode)
+    );
+    if (!isNonShortsYouTubeReattachContext()) {
+      console.log(
+        '[DIAG][MVP10_ENTRY] bail_not_non_shorts_context',
+        'reason=' + (reason || 'unknown'),
+        'url=' + window.location.href
+      );
+      return;
+    }
+    if (!videoNode || videoNode.nodeType !== 1) {
+      console.log(
+        '[DIAG][MVP10_ENTRY] bail_invalid_node',
+        'reason=' + (reason || 'unknown'),
+        'hasNode=' + (!!videoNode),
+        'nodeType=' + String(videoNode && videoNode.nodeType)
+      );
+      return;
+    }
+    if (String(videoNode.tagName || '').toUpperCase() !== 'VIDEO') {
+      console.log(
+        '[DIAG][MVP10_ENTRY] bail_not_video',
+        'reason=' + (reason || 'unknown'),
+        'tag=' + String(videoNode.tagName || 'unknown'),
+        'nodeId=' + getDiagNodeId(videoNode)
+      );
+      return;
+    }
     const currentUrl = window.location.href;
     const isMainSurfaceUrl = isYouTubeMainPageThumbnailSurfaceUrl(currentUrl);
     const reasonText = String(reason || 'unknown');
@@ -3136,13 +3164,37 @@ export function generateModerationScript(config: InjectionConfig): string {
         state.nonShortsReattachContext.size < 1
       )
     ) {
+      console.log(
+        '[DIAG][MVP10_ENTRY] bail_transition_guard',
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + getDiagNodeId(videoNode),
+        'url=' + currentUrl,
+        'isMainSurfaceUrl=' + isMainSurfaceUrl,
+        'reasonLooksTransition=' + reasonLooksTransition,
+        'contextSize=' + Number((state.nonShortsReattachContext && state.nonShortsReattachContext.size) || 0)
+      );
       return;
     }
     const now = Date.now();
     const lastReattachAt = Number((videoNode.dataset && videoNode.dataset.mwNonShortsReattachAt) || '0');
     if (Number.isFinite(lastReattachAt) && (now - lastReattachAt) < NON_SHORTS_REATTACH_COOLDOWN_MS) {
+      console.log(
+        '[DIAG][MVP10_ENTRY] bail_cooldown_throttled',
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + getDiagNodeId(videoNode),
+        'elapsedMs=' + (now - lastReattachAt),
+        'cooldownMs=' + NON_SHORTS_REATTACH_COOLDOWN_MS
+      );
       return;
     }
+    console.log(
+      '[DIAG][MVP10_ENTRY] progressed_past_guards',
+      'reason=' + (reason || 'unknown'),
+      'nodeId=' + getDiagNodeId(videoNode),
+      'url=' + currentUrl,
+      'isMainSurfaceUrl=' + isMainSurfaceUrl,
+      'reasonLooksTransition=' + reasonLooksTransition
+    );
     if (videoNode.dataset) {
       videoNode.dataset.mwNonShortsReattachAt = String(now);
     }
