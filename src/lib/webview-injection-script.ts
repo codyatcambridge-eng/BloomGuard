@@ -3020,7 +3020,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!overlayRect || !targetRect) return false;
     const targetWidth = Number(targetRect.width || 0);
     const targetHeight = Number(targetRect.height || 0);
-    if (targetWidth < 16 || targetHeight < 16) return false;
+    if (targetWidth < 16 || targetHeight < 16) {
+      console.warn('[DIAG][MVP10_PROBE] geometry_target_too_small', 'targetNode=' + getDiagNodeId(targetNode), 'overlayNode=' + getDiagNodeId(overlay), 'targetWidth=' + targetWidth, 'targetHeight=' + targetHeight);
+      return false;
+    }
 
     const targetArea = targetWidth * targetHeight;
     const left = Math.max(Number(overlayRect.left || 0), Number(targetRect.left || 0));
@@ -3154,6 +3157,12 @@ export function generateModerationScript(config: InjectionConfig): string {
       ? videoNode.closest(NON_SHORTS_REATTACH_CARD_SELECTOR)
       : null;
     const cardNodeId = card ? getDiagNodeId(card) : 'none';
+    const isShortsShelfCard = !!(
+      card &&
+      typeof card.closest === 'function' &&
+      card.closest('ytd-rich-shelf-renderer[is-shorts], ytd-reel-shelf-renderer, ytm-rich-shelf-renderer, ytm-shorts-lockup-view-model, ytm-reel-item-renderer, ytd-reel-item-renderer')
+    );
+    console.log('[DIAG][MVP10_PROBE] reattach_fire', 'reason=' + (reason || 'unknown'), 'nodeId=' + videoNodeId, 'cardNodeId=' + cardNodeId, 'shortsShelf=' + isShortsShelfCard, 'surface=' + (isMainSurfaceUrl ? 'main' : 'transition'));
 
     console.log(
       '[DIAG][NON_SHORTS_REATTACH] attempt',
@@ -3271,6 +3280,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         'poster=' + String(normalizedPoster || '').substring(0, 180),
         'current=' + String(normalizedCurrent || '').substring(0, 180)
       );
+      console.log('[DIAG][MVP10_PROBE] reattach_no_context', 'reason=' + (reason || 'unknown'), 'nodeId=' + videoNodeId, 'shortsShelf=' + isShortsShelfCard, 'itemKey=' + reattachItemKey);
       console.log(
         '[DIAG][MVP_NON_SHORTS] reattach_skip_reason=no_context',
         'reason=' + (reason || 'unknown'),
@@ -3513,11 +3523,13 @@ export function generateModerationScript(config: InjectionConfig): string {
       !overlayAnchored &&
       !shouldDisableRevealUiForMvpMainPageSurface()
     ) {
+      console.log('[DIAG][MVP10_PROBE] overlay_create_call', 'reason=' + (reason || 'unknown'), 'nodeId=' + videoNodeId, 'shortsShelf=' + isShortsShelfCard, 'itemKey=' + reattachItemKey);
       createRevealOverlay(videoNode, overlayProbeSrc, overlayCategory, overlayItemId);
       videoOverlay = findRevealOverlayForElement(videoNode, overlayProbeSrc);
       normalizedOverlay = normalizeOverlayAnchor(videoOverlay, 'post_create');
       videoOverlay = normalizedOverlay.overlay;
       overlayAnchored = normalizedOverlay.anchored;
+      console.log('[DIAG][MVP10_PROBE] overlay_create_result', 'reason=' + (reason || 'unknown'), 'nodeId=' + videoNodeId, 'shortsShelf=' + isShortsShelfCard, 'overlayFound=' + (!!videoOverlay), 'anchored=' + overlayAnchored);
       console.log(
         '[DIAG][NON_SHORTS_REATTACH] overlay_heal_create',
         'reason=' + (reason || 'unknown'),
@@ -4765,6 +4777,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         'reason=' + (reason || 'unknown'),
         'node=' + getDiagNodeId(node)
       );
+      console.log('[DIAG][MVP10_PROBE] overlay_removed', 'overlayId=' + overlayId, 'reason=' + (reason || 'unknown'), 'node=' + getDiagNodeId(node));
       if (DIAG_YT_BLUR) {
         console.log(
           '[MW-YT][DIAG][OVERLAY]',
