@@ -3516,6 +3516,18 @@ export function generateModerationScript(config: InjectionConfig): string {
         return { overlay: overlay, anchored: true };
       }
       const overlayId = String((overlay.dataset && overlay.dataset.mwOverlayId) || 'unknown');
+      let _noLayoutRect = null;
+      try { _noLayoutRect = videoNode.getBoundingClientRect(); } catch (_e) {}
+      if (_noLayoutRect && _noLayoutRect.width === 0 && _noLayoutRect.height === 0) {
+        console.log(
+          '[DIAG][NON_SHORTS_REATTACH] overlay_preserved_no_layout',
+          'reason=' + (reason || 'unknown'),
+          'phase=' + String(phase || 'unknown'),
+          'nodeId=' + videoNodeId,
+          'overlayId=' + overlayId
+        );
+        return { overlay: overlay, anchored: false };
+      }
       console.warn(
         '[DIAG][NON_SHORTS_REATTACH] overlay_geometry_mismatch',
         'reason=' + (reason || 'unknown'),
