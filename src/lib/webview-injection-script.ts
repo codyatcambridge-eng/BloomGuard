@@ -3489,13 +3489,38 @@ export function generateModerationScript(config: InjectionConfig): string {
     const inlineBackdrop = String(videoNode.style.getPropertyValue('backdrop-filter') || '').toLowerCase();
     const computedFilter = String(computed.filter || '').toLowerCase();
     const computedBackdrop = String(computed.backdropFilter || '').toLowerCase();
-    const activeVideoBlurred = (
-      String(videoNode.dataset.mwModerated || '') === 'blurred' ||
+    let hasAuthoritativeBlur = isAuthoritativeHardBlur(videoNode);
+    const hasIncidentalBlur = (
       inlineFilter.indexOf('blur(') !== -1 ||
       inlineBackdrop.indexOf('blur(') !== -1 ||
       computedFilter.indexOf('blur(') !== -1 ||
       computedBackdrop.indexOf('blur(') !== -1
     );
+    let activeVideoBlurred = hasAuthoritativeBlur || hasIncidentalBlur;
+    if (activeVideoBlurred && !hasAuthoritativeBlur && !contextData) {
+      videoNode.style.removeProperty('filter');
+      videoNode.style.removeProperty('-webkit-filter');
+      videoNode.style.removeProperty('backdrop-filter');
+      videoNode.style.removeProperty('-webkit-backdrop-filter');
+      videoNode.classList.remove('mw-softblur');
+      videoNode.classList.remove('mw-blurred');
+      videoNode.dataset.mwModerated = 'safe';
+      clearAuthoritativeHardBlur(videoNode);
+      activeVideoBlurred = false;
+      console.log(
+        '[DIAG][NON_SHORTS_REATTACH] incidental_blur_cleared',
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'contextFound=false',
+        'contextKind=none'
+      );
+      postNonShortsTransitionDiag('incidental_blur_cleared', {
+        reason: String(reason || 'unknown'),
+        nodeId: videoNodeId,
+        contextFound: false,
+        contextKind: 'none',
+      });
+    }
     if (activeVideoBlurred) {
       const expectedBlurPx = IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20);
       const expectedBlurToken = 'blur(' + expectedBlurPx + 'px)';
@@ -3511,6 +3536,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         videoNode.style.setProperty('backdrop-filter', expectedBlurToken, 'important');
         videoNode.style.setProperty('-webkit-backdrop-filter', expectedBlurToken, 'important');
         videoNode.dataset.mwModerated = 'blurred';
+        markAuthoritativeHardBlur(videoNode, String((videoNode.dataset && videoNode.dataset.mwSrc) || ''));
         videoNode.classList.add('mw-blurred');
         console.log(
           '[DIAG][NON_SHORTS_REATTACH] blur_strength_normalized',
@@ -3774,6 +3800,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       reason: String(reason || 'unknown'),
       nodeId: videoNodeId,
       activeVideoBlurred: !!activeVideoBlurred,
+      authoritativeBlur: !!hasAuthoritativeBlur,
+      incidentalBlur: !!hasIncidentalBlur,
       contextFound: !!contextData,
       contextKind: String(contextKind || 'none'),
       overlayAnchored: !!overlayAnchored,
@@ -5222,11 +5250,38 @@ export function generateModerationScript(config: InjectionConfig): string {
       element.dataset.mwPreblurClear = 'true';
       element.dataset.mwOverlayOwnerToken = '';
       element.dataset.mwShortsOwnerToken = '';
+      element.dataset.mwHardBlur = '0';
+      element.dataset.mwHardBlurItemKey = '';
       if (isShortsModeActive()) {
         clearShortsBlurContextForNode(element, reason || 'clear_all');
       }
     } catch (e) {}
     return changed;
+  }
+
+  function isAuthoritativeHardBlur(node) {
+    if (!node || node.nodeType !== 1) return false;
+    return !!(
+      (node.dataset && node.dataset.mwHardBlur === '1') ||
+      (node.dataset && node.dataset.mwModerated === 'blurred') ||
+      (node.classList && node.classList.contains('mw-blurred'))
+    );
+  }
+
+  function markAuthoritativeHardBlur(node, src) {
+    if (!node || node.nodeType !== 1) return;
+    try {
+      node.dataset.mwHardBlur = '1';
+      node.dataset.mwHardBlurItemKey = getDiagItemKey(src || (node.dataset && node.dataset.mwSrc) || '');
+    } catch (e) {}
+  }
+
+  function clearAuthoritativeHardBlur(node) {
+    if (!node || node.nodeType !== 1) return;
+    try {
+      node.dataset.mwHardBlur = '0';
+      node.dataset.mwHardBlurItemKey = '';
+    } catch (e) {}
   }
 
   function applySoftBlur(element, src, itemId) {
@@ -5254,6 +5309,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       element.dataset.mwModerated = 'softblur';
       element.dataset.mwSrc = src;
       element.dataset.mwItemId = itemId || '';
+      clearAuthoritativeHardBlur(element);
       element.classList.add('mw-softblur');
       diagSoftBlurLog(
         'apply',
@@ -5296,6 +5352,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       } else if (element.dataset.mwModerated === 'softblur' || element.classList.contains('mw-softblur')) {
         element.style.filter = 'none';
         element.dataset.mwModerated = 'safe';
+        clearAuthoritativeHardBlur(element);
         element.classList.remove('mw-softblur');
         element.dataset.mwPreblurClear = 'true';
         element.dataset.mwPreblurClear = 'true';
@@ -5517,6 +5574,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       element.dataset.mwCategory = category || 'flagged';
       element.dataset.mwSrc = src;
       element.dataset.mwItemId = itemId || '';
+      markAuthoritativeHardBlur(element, src);
       element.classList.remove('mw-softblur');
       element.classList.add('mw-blurred');
       rememberNonShortsReattachContext(
@@ -5648,6 +5706,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           element.classList.remove('mw-softblur');
           element.classList.remove('mw-blurred');
           element.dataset.mwModerated = 'revealed';
+          clearAuthoritativeHardBlur(element);
           element.dataset.mwPreblurClear = 'true';
           clearShortsBlurContextForNode(element, 'removeBlur_reveal_keepOverlay');
         } else {
@@ -5660,6 +5719,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         element.style.removeProperty('-webkit-backdrop-filter');
         element.style.filter = 'none';
         element.dataset.mwModerated = 'revealed';
+        clearAuthoritativeHardBlur(element);
         element.dataset.mwPreblurClear = 'true';
         element.classList.remove('mw-softblur');
         element.classList.remove('mw-blurred');
@@ -5713,6 +5773,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       } else {
         element.style.filter = 'none';
         element.dataset.mwModerated = 'safe';
+        clearAuthoritativeHardBlur(element);
       }
       element.dataset.mwRevealed = 'false';
       element.dataset.mwPreblurClear = 'true';
