@@ -1057,6 +1057,14 @@ export function generateModerationScript(config: InjectionConfig): string {
     'noncePrefix=' + NONCE_PREFIX,
     'url=' + window.location.href,
   );
+  postToHost({
+    type: 'MW_PATCH_MARKER',
+    marker: 'shorts_transition_mvp_v2',
+    navId: NAV_ID,
+    pageEpoch: CONFIG.pageEpoch,
+    url: window.location.href,
+    timestamp: Date.now(),
+  });
   const timerState = {
     legacyResultsInterval: null,
     urlChangeInterval: null,
@@ -2976,6 +2984,20 @@ export function generateModerationScript(config: InjectionConfig): string {
     return isYouTube() && !isShortsModeActive();
   }
 
+  function postNonShortsTransitionDiag(stage, details) {
+    try {
+      postToHost({
+        type: 'MW_DIAG_TRANSITION',
+        stage: String(stage || 'unknown'),
+        url: window.location.href,
+        navId: NAV_ID,
+        pageEpoch: state.pageEpoch,
+        timestamp: Date.now(),
+        details: details && typeof details === 'object' ? details : {},
+      });
+    } catch (e) {}
+  }
+
   function buildNonShortsReattachContextKey(cardKey, itemKey) {
     return String(cardKey || 'none') + '|' + String(itemKey || 'unknown');
   }
@@ -3198,6 +3220,11 @@ export function generateModerationScript(config: InjectionConfig): string {
     ) {
       return;
     }
+    postNonShortsTransitionDiag('hit', {
+      reason: String(reason || 'unknown'),
+      isMainSurfaceUrl: !!isMainSurfaceUrl,
+      contextSize: state.nonShortsReattachContext ? state.nonShortsReattachContext.size : 0,
+    });
     const now = Date.now();
     const lastReattachAt = Number((videoNode.dataset && videoNode.dataset.mwNonShortsReattachAt) || '0');
     if (Number.isFinite(lastReattachAt) && (now - lastReattachAt) < NON_SHORTS_REATTACH_COOLDOWN_MS) {
@@ -3222,7 +3249,6 @@ export function generateModerationScript(config: InjectionConfig): string {
     let derivedAnchorItemKey = 'unknown';
     if (
       isHomeShortsShelfVideo &&
-      strictContinuityItemKey === 'unknown' &&
       card &&
       typeof card.querySelector === 'function'
     ) {
@@ -3336,9 +3362,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       const overlayContinuity = card
         ? getHomeShortsShelfOverlayContinuity(card, videoNode, fallbackItemKey)
         : null;
-      const allowCardFallback = usingDerivedStrictKey
-        ? !!strictItemKeyMatch
-        : !!(strictItemKeyMatch || overlayContinuity);
+      const allowCardFallback = !!strictItemKeyMatch;
       if (usingDerivedStrictKey && !strictItemKeyMatch) {
         console.log(
           '[DIAG][HOME_SHORTS_KEY_DERIVE] strict_miss_fail_closed',
@@ -3376,6 +3400,17 @@ export function generateModerationScript(config: InjectionConfig): string {
         );
       }
     }
+    postNonShortsTransitionDiag('match', {
+      reason: String(reason || 'unknown'),
+      nodeId: videoNodeId,
+      cardNodeId: cardNodeId,
+      reattachItemKey: String(reattachItemKey || 'unknown'),
+      strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+      derivedAnchorItemKey: String(derivedAnchorItemKey || 'unknown'),
+      contextFound: !!contextData,
+      contextKind: String(contextKind || 'none'),
+      isHomeShortsShelfVideo: !!isHomeShortsShelfVideo,
+    });
     if (isMainSurfaceUrl && !contextData && (normalizedPoster || normalizedCurrent)) {
       const blurredCandidates = document.querySelectorAll('[data-mw-moderated="blurred"][data-mw-src]');
       for (let i = 0; i < blurredCandidates.length; i += 1) {
@@ -3590,6 +3625,11 @@ export function generateModerationScript(config: InjectionConfig): string {
         'nodeId=' + videoNodeId,
         'overlayId=' + orphanOverlayId
       );
+      postNonShortsTransitionDiag('overlay_removed_no_blur', {
+        reason: String(reason || 'unknown'),
+        nodeId: videoNodeId,
+        overlayId: orphanOverlayId,
+      });
     }
     const isOverlayNodeIdAnchored = function(overlay) {
       return !!(
@@ -3730,6 +3770,15 @@ export function generateModerationScript(config: InjectionConfig): string {
         'nodeId=' + videoNodeId
       );
     }
+    postNonShortsTransitionDiag('apply', {
+      reason: String(reason || 'unknown'),
+      nodeId: videoNodeId,
+      activeVideoBlurred: !!activeVideoBlurred,
+      contextFound: !!contextData,
+      contextKind: String(contextKind || 'none'),
+      overlayAnchored: !!overlayAnchored,
+      overlayPresent: !!videoOverlay,
+    });
 
     let staleOverlay = null;
     if (card && typeof card.querySelectorAll === 'function') {
