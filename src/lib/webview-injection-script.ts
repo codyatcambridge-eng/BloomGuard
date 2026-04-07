@@ -1565,9 +1565,13 @@ export function generateModerationScript(config: InjectionConfig): string {
     try {
       var parsed = new URL(value, window.location.href);
       var host = String(parsed.hostname || '').toLowerCase();
-      if (host !== 'm.youtube.com') return false;
+      var isYouTubeMainHost =
+        host === 'youtube.com' ||
+        host === 'www.youtube.com' ||
+        host === 'm.youtube.com';
+      if (!isYouTubeMainHost) return false;
       var path = String(parsed.pathname || '/').toLowerCase();
-      return path === '/' || path === '/results' || path.indexOf('/feed') === 0;
+      return path === '/' || path.indexOf('/feed') === 0;
     } catch (e) {
       return false;
     }
@@ -3004,6 +3008,41 @@ export function generateModerationScript(config: InjectionConfig): string {
     return node.closest(NON_SHORTS_REATTACH_CARD_SELECTOR);
   }
 
+  function isYouTubeMainPageShortsShelfVideoNode(node) {
+    if (!node || node.nodeType !== 1) return false;
+    if (String(node.tagName || '').toUpperCase() !== 'VIDEO') return false;
+    if (isShortsModeActive()) return false;
+    if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return false;
+    if (typeof node.closest !== 'function') return false;
+    const lockup = node.closest('ytm-shorts-lockup-view-model');
+    if (lockup) return true;
+    const card = findNonShortsReattachCardNode(node);
+    if (!card || typeof card.querySelector !== 'function') return false;
+    const shortsLink = card.querySelector('a[href^="/shorts/"]');
+    return !!shortsLink;
+  }
+
+  function getHomeShortsShelfOverlayContinuity(card, videoNode, expectedItemKey) {
+    if (!card || !videoNode) return null;
+    if (typeof card.querySelectorAll !== 'function') return null;
+    const overlays = card.querySelectorAll('.mw-reveal-overlay[data-mw-for]');
+    for (let i = 0; i < overlays.length; i += 1) {
+      const overlay = overlays[i];
+      if (!overlay || overlay.nodeType !== 1 || !overlay.isConnected) continue;
+      if (!isNonShortsOverlayGeometryAnchored(overlay, videoNode)) continue;
+      const overlayFor = normalizeUrl(String((overlay.dataset && overlay.dataset.mwFor) || '')) || '';
+      if (!overlayFor) continue;
+      const overlayItemKey = getDiagItemKey(overlayFor);
+      if (!overlayItemKey || overlayItemKey === 'unknown') continue;
+      if (expectedItemKey && expectedItemKey !== 'unknown' && overlayItemKey !== expectedItemKey) continue;
+      return {
+        overlayItemKey: overlayItemKey,
+        overlayId: String((overlay.dataset && overlay.dataset.mwOverlayId) || 'unknown'),
+      };
+    }
+    return null;
+  }
+
   function isNonShortsOverlayGeometryAnchored(overlay, targetNode) {
     if (!overlay || overlay.nodeType !== 1 || !overlay.isConnected) return false;
     if (!targetNode || targetNode.nodeType !== 1 || !targetNode.isConnected) return false;
@@ -3212,6 +3251,47 @@ export function generateModerationScript(config: InjectionConfig): string {
           itemId: String(remembered.entry.itemId || reattachItemId || ''),
           blurPx: Number(remembered.entry.blurPx || (IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20))),
         };
+      }
+    }
+    if (!contextNode && !contextData && cardNodeId !== 'none' && isYouTubeMainPageShortsShelfVideoNode(videoNode)) {
+      const contextMap = state.nonShortsReattachContext;
+      const cardFallbackEntry = contextMap && contextMap.get
+        ? contextMap.get(buildNonShortsReattachContextKey(cardNodeId, NON_SHORTS_REATTACH_CARD_FALLBACK_ITEM_KEY))
+        : null;
+      const fallbackItemKey = cardFallbackEntry ? getDiagItemKey(String(cardFallbackEntry.src || '')) : 'unknown';
+      const strictItemKeyMatch = (
+        reattachItemKey &&
+        reattachItemKey !== 'unknown' &&
+        fallbackItemKey &&
+        fallbackItemKey !== 'unknown' &&
+        reattachItemKey === fallbackItemKey
+      );
+      const overlayContinuity = card
+        ? getHomeShortsShelfOverlayContinuity(card, videoNode, fallbackItemKey)
+        : null;
+      const allowCardFallback = !!(strictItemKeyMatch || overlayContinuity);
+      if (cardFallbackEntry && allowCardFallback) {
+        contextKind = 'card_latest_home_shorts';
+        contextData = {
+          src: String(cardFallbackEntry.src || normalizedPoster || normalizedCurrent || ''),
+          category: String(cardFallbackEntry.category || 'flagged'),
+          itemId: String(cardFallbackEntry.itemId || reattachItemId || ''),
+          blurPx: Number(cardFallbackEntry.blurPx || (IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20))),
+        };
+        if (overlayContinuity) {
+          contextKind = 'card_latest_home_shorts_overlay_continuity';
+        }
+      } else if (cardFallbackEntry) {
+        console.log(
+          '[DIAG][NON_SHORTS_REATTACH] card_fallback_blocked',
+          'reason=' + (reason || 'unknown'),
+          'nodeId=' + videoNodeId,
+          'cardNodeId=' + cardNodeId,
+          'reattachItemKey=' + String(reattachItemKey || 'unknown'),
+          'fallbackItemKey=' + String(fallbackItemKey || 'unknown'),
+          'strictItemKeyMatch=' + String(!!strictItemKeyMatch),
+          'overlayContinuity=' + String(!!overlayContinuity)
+        );
       }
     }
     if (isMainSurfaceUrl && !contextData && (normalizedPoster || normalizedCurrent)) {
