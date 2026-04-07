@@ -3208,7 +3208,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         (shortsAnchor && shortsAnchor.href) ||
         ''
       );
-      const anchorMatch = anchorHrefRaw.match(/\/shorts\/([^/?#]+)/);
+      const anchorMatch = anchorHrefRaw.match(/\\/shorts\\/([^/?#]+)/);
       if (anchorMatch && anchorMatch[1]) {
         derivedAnchorItemKey = String(anchorMatch[1]);
         strictContinuityItemKey = derivedAnchorItemKey;
