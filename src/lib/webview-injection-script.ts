@@ -3120,6 +3120,19 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!itemKey || itemKey === 'unknown') return;
     const cardNode = findNonShortsReattachCardNode(node);
     const cardKey = cardNode ? getDiagNodeId(cardNode) : 'none';
+    let homeShortsAnchorId = 'unknown';
+    if (cardNode && typeof cardNode.querySelector === 'function') {
+      const shortsAnchor = cardNode.querySelector('a[href^="/shorts/"]');
+      const anchorHrefRaw = String(
+        (shortsAnchor && shortsAnchor.getAttribute && shortsAnchor.getAttribute('href')) ||
+        (shortsAnchor && shortsAnchor.href) ||
+        ''
+      );
+      const anchorMatch = anchorHrefRaw.match(/\\/shorts\\/([^/?#]+)/);
+      if (anchorMatch && anchorMatch[1]) {
+        homeShortsAnchorId = String(anchorMatch[1]);
+      }
+    }
     const now = Date.now();
     const entry = {
       cardKey: cardKey,
@@ -3139,6 +3152,23 @@ export function generateModerationScript(config: InjectionConfig): string {
         buildNonShortsReattachContextKey(cardKey, NON_SHORTS_REATTACH_CARD_FALLBACK_ITEM_KEY),
         entry
       );
+      if (homeShortsAnchorId !== 'unknown') {
+        state.nonShortsReattachContext.set(
+          buildNonShortsReattachContextKey(cardKey, homeShortsAnchorId),
+          entry
+        );
+        state.nonShortsReattachContext.set(
+          buildNonShortsReattachContextKey('none', homeShortsAnchorId),
+          entry
+        );
+        console.log(
+          '[DIAG][HOME_SHORTS_KEY_BIND] remembered',
+          'shortsId=' + homeShortsAnchorId,
+          'itemKey=' + itemKey,
+          'cardNodeId=' + cardKey,
+          'reason=' + (reason || 'unknown')
+        );
+      }
     }
     pruneNonShortsReattachContext(now);
     if (DIAG_YT_BLUR) {
@@ -3222,6 +3252,10 @@ export function generateModerationScript(config: InjectionConfig): string {
         );
       }
     }
+    const usingDerivedStrictKey = (
+      reattachItemKey === 'unknown' &&
+      strictContinuityItemKey !== 'unknown'
+    );
 
     console.log(
       '[DIAG][NON_SHORTS_REATTACH] attempt',
@@ -3272,6 +3306,16 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     if (!contextNode && strictContinuityItemKey && strictContinuityItemKey !== 'unknown') {
       const remembered = findNonShortsReattachContextByItemKey(strictContinuityItemKey, cardNodeId);
+      if (usingDerivedStrictKey) {
+        console.log(
+          remembered && remembered.entry
+            ? '[DIAG][HOME_SHORTS_KEY_BIND] lookup_hit'
+            : '[DIAG][HOME_SHORTS_KEY_BIND] lookup_miss',
+          'shortsId=' + strictContinuityItemKey,
+          'cardNodeId=' + cardNodeId,
+          'reason=' + (reason || 'unknown')
+        );
+      }
       if (remembered && remembered.entry) {
         contextKind = remembered.kind;
         contextData = {
@@ -3298,10 +3342,6 @@ export function generateModerationScript(config: InjectionConfig): string {
       const overlayContinuity = card
         ? getHomeShortsShelfOverlayContinuity(card, videoNode, fallbackItemKey)
         : null;
-      const usingDerivedStrictKey = (
-        reattachItemKey === 'unknown' &&
-        strictContinuityItemKey !== 'unknown'
-      );
       const allowCardFallback = usingDerivedStrictKey
         ? !!strictItemKeyMatch
         : !!(strictItemKeyMatch || overlayContinuity);
