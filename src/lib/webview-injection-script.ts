@@ -3193,6 +3193,35 @@ export function generateModerationScript(config: InjectionConfig): string {
       ? videoNode.closest(NON_SHORTS_REATTACH_CARD_SELECTOR)
       : null;
     const cardNodeId = card ? getDiagNodeId(card) : 'none';
+    const isHomeShortsShelfVideo = isYouTubeMainPageShortsShelfVideoNode(videoNode);
+    let strictContinuityItemKey = reattachItemKey;
+    let derivedAnchorItemKey = 'unknown';
+    if (
+      isHomeShortsShelfVideo &&
+      strictContinuityItemKey === 'unknown' &&
+      card &&
+      typeof card.querySelector === 'function'
+    ) {
+      const shortsAnchor = card.querySelector('a[href^="/shorts/"]');
+      const anchorHrefRaw = String(
+        (shortsAnchor && shortsAnchor.getAttribute && shortsAnchor.getAttribute('href')) ||
+        (shortsAnchor && shortsAnchor.href) ||
+        ''
+      );
+      const anchorMatch = anchorHrefRaw.match(/\/shorts\/([^/?#]+)/);
+      if (anchorMatch && anchorMatch[1]) {
+        derivedAnchorItemKey = String(anchorMatch[1]);
+        strictContinuityItemKey = derivedAnchorItemKey;
+        console.log(
+          '[DIAG][HOME_SHORTS_KEY_DERIVE] derived',
+          'nodeId=' + videoNodeId,
+          'cardNodeId=' + cardNodeId,
+          'derivedKey=' + derivedAnchorItemKey,
+          'anchor=' + anchorHrefRaw.substring(0, 180),
+          'reason=' + (reason || 'unknown')
+        );
+      }
+    }
 
     console.log(
       '[DIAG][NON_SHORTS_REATTACH] attempt',
@@ -3241,8 +3270,8 @@ export function generateModerationScript(config: InjectionConfig): string {
         };
       }
     }
-    if (!contextNode && reattachItemKey && reattachItemKey !== 'unknown') {
-      const remembered = findNonShortsReattachContextByItemKey(reattachItemKey, cardNodeId);
+    if (!contextNode && strictContinuityItemKey && strictContinuityItemKey !== 'unknown') {
+      const remembered = findNonShortsReattachContextByItemKey(strictContinuityItemKey, cardNodeId);
       if (remembered && remembered.entry) {
         contextKind = remembered.kind;
         contextData = {
@@ -3253,23 +3282,40 @@ export function generateModerationScript(config: InjectionConfig): string {
         };
       }
     }
-    if (!contextNode && !contextData && cardNodeId !== 'none' && isYouTubeMainPageShortsShelfVideoNode(videoNode)) {
+    if (!contextNode && !contextData && cardNodeId !== 'none' && isHomeShortsShelfVideo) {
       const contextMap = state.nonShortsReattachContext;
       const cardFallbackEntry = contextMap && contextMap.get
         ? contextMap.get(buildNonShortsReattachContextKey(cardNodeId, NON_SHORTS_REATTACH_CARD_FALLBACK_ITEM_KEY))
         : null;
       const fallbackItemKey = cardFallbackEntry ? getDiagItemKey(String(cardFallbackEntry.src || '')) : 'unknown';
       const strictItemKeyMatch = (
-        reattachItemKey &&
-        reattachItemKey !== 'unknown' &&
+        strictContinuityItemKey &&
+        strictContinuityItemKey !== 'unknown' &&
         fallbackItemKey &&
         fallbackItemKey !== 'unknown' &&
-        reattachItemKey === fallbackItemKey
+        strictContinuityItemKey === fallbackItemKey
       );
       const overlayContinuity = card
         ? getHomeShortsShelfOverlayContinuity(card, videoNode, fallbackItemKey)
         : null;
-      const allowCardFallback = !!(strictItemKeyMatch || overlayContinuity);
+      const usingDerivedStrictKey = (
+        reattachItemKey === 'unknown' &&
+        strictContinuityItemKey !== 'unknown'
+      );
+      const allowCardFallback = usingDerivedStrictKey
+        ? !!strictItemKeyMatch
+        : !!(strictItemKeyMatch || overlayContinuity);
+      if (usingDerivedStrictKey && !strictItemKeyMatch) {
+        console.log(
+          '[DIAG][HOME_SHORTS_KEY_DERIVE] strict_miss_fail_closed',
+          'nodeId=' + videoNodeId,
+          'cardNodeId=' + cardNodeId,
+          'derivedKey=' + strictContinuityItemKey,
+          'fallbackItemKey=' + String(fallbackItemKey || 'unknown'),
+          'overlayContinuity=' + String(!!overlayContinuity),
+          'reason=' + (reason || 'unknown')
+        );
+      }
       if (cardFallbackEntry && allowCardFallback) {
         contextKind = 'card_latest_home_shorts';
         contextData = {
@@ -3288,9 +3334,11 @@ export function generateModerationScript(config: InjectionConfig): string {
           'nodeId=' + videoNodeId,
           'cardNodeId=' + cardNodeId,
           'reattachItemKey=' + String(reattachItemKey || 'unknown'),
+          'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
           'fallbackItemKey=' + String(fallbackItemKey || 'unknown'),
           'strictItemKeyMatch=' + String(!!strictItemKeyMatch),
-          'overlayContinuity=' + String(!!overlayContinuity)
+          'overlayContinuity=' + String(!!overlayContinuity),
+          'usingDerivedStrictKey=' + String(!!usingDerivedStrictKey)
         );
       }
     }
