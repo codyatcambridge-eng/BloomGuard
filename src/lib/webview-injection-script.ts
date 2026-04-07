@@ -1571,7 +1571,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         host === 'm.youtube.com';
       if (!isYouTubeMainHost) return false;
       var path = String(parsed.pathname || '/').toLowerCase();
-      return path === '/' || path.indexOf('/feed') === 0;
+      return path === '/' || path.indexOf('/feed') === 0 || path.indexOf('/results') === 0;
     } catch (e) {
       return false;
     }
@@ -3093,12 +3093,6 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (cardEntry) {
         return { kind: 'itemkey_card', entry: cardEntry };
       }
-      const cardFallbackEntry = contextMap.get(
-        buildNonShortsReattachContextKey(cardKey, NON_SHORTS_REATTACH_CARD_FALLBACK_ITEM_KEY)
-      );
-      if (cardFallbackEntry) {
-        return { kind: 'card_latest', entry: cardFallbackEntry };
-      }
     }
     let best = null;
     contextMap.forEach(function(entry) {
@@ -3586,6 +3580,17 @@ export function generateModerationScript(config: InjectionConfig): string {
       String((contextData && contextData.src) || (contextNode && contextNode.dataset && contextNode.dataset.mwSrc) || '')
     );
     let videoOverlay = findRevealOverlayForElement(videoNode, overlayProbeSrc);
+    if (!activeVideoBlurred && videoOverlay && videoOverlay.parentElement) {
+      const orphanOverlayId = String((videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown');
+      videoOverlay.parentElement.removeChild(videoOverlay);
+      videoOverlay = null;
+      console.log(
+        '[DIAG][NON_SHORTS_REATTACH] overlay_removed_no_blur',
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'overlayId=' + orphanOverlayId
+      );
+    }
     const isOverlayNodeIdAnchored = function(overlay) {
       return !!(
         overlay &&
