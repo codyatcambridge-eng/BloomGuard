@@ -3030,6 +3030,50 @@ export function generateModerationScript(config: InjectionConfig): string {
     return node.closest(NON_SHORTS_REATTACH_CARD_SELECTOR);
   }
 
+  function extractShortsIdFromHrefValue(rawHref) {
+    const href = String(rawHref || '');
+    if (!href) return 'unknown';
+    const match = href.match(/\\/shorts\\/([^/?#]+)/);
+    return match && match[1] ? String(match[1]) : 'unknown';
+  }
+
+  function deriveNearbyShortsAnchorId(node) {
+    if (!node || node.nodeType !== 1) return 'unknown';
+    try {
+      if (typeof node.closest === 'function') {
+        const directAnchor = node.closest('a[href*="/shorts/"]');
+        if (directAnchor) {
+          const directHref = String(
+            (directAnchor.getAttribute && directAnchor.getAttribute('href')) ||
+            directAnchor.href ||
+            ''
+          );
+          const directId = extractShortsIdFromHrefValue(directHref);
+          if (directId !== 'unknown') return directId;
+        }
+      }
+    } catch (e) {}
+    let cursor = node;
+    for (let depth = 0; depth < 6 && cursor; depth += 1) {
+      try {
+        if (typeof cursor.querySelector === 'function') {
+          const nestedAnchor = cursor.querySelector('a[href*="/shorts/"]');
+          if (nestedAnchor) {
+            const nestedHref = String(
+              (nestedAnchor.getAttribute && nestedAnchor.getAttribute('href')) ||
+              nestedAnchor.href ||
+              ''
+            );
+            const nestedId = extractShortsIdFromHrefValue(nestedHref);
+            if (nestedId !== 'unknown') return nestedId;
+          }
+        }
+      } catch (e) {}
+      cursor = cursor.parentElement || null;
+    }
+    return 'unknown';
+  }
+
   function isYouTubeMainPageShortsShelfVideoNode(node) {
     if (!node || node.nodeType !== 1) return false;
     if (String(node.tagName || '').toUpperCase() !== 'VIDEO') return false;
@@ -3247,6 +3291,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     const isHomeShortsShelfVideo = isYouTubeMainPageShortsShelfVideoNode(videoNode);
     let strictContinuityItemKey = reattachItemKey;
     let derivedAnchorItemKey = 'unknown';
+    const nearbyShortsAnchorId = deriveNearbyShortsAnchorId(videoNode);
     if (
       isHomeShortsShelfVideo &&
       card &&
@@ -3271,6 +3316,17 @@ export function generateModerationScript(config: InjectionConfig): string {
           'reason=' + (reason || 'unknown')
         );
       }
+    }
+    if (strictContinuityItemKey === 'unknown' && nearbyShortsAnchorId !== 'unknown') {
+      strictContinuityItemKey = nearbyShortsAnchorId;
+      derivedAnchorItemKey = nearbyShortsAnchorId;
+      console.log(
+        '[DIAG][HOME_SHORTS_KEY_DERIVE] nearby_anchor_fallback',
+        'nodeId=' + videoNodeId,
+        'cardNodeId=' + cardNodeId,
+        'derivedKey=' + nearbyShortsAnchorId,
+        'reason=' + (reason || 'unknown')
+      );
     }
     const usingDerivedStrictKey = (
       reattachItemKey === 'unknown' &&
@@ -3315,13 +3371,32 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (isMainSurfaceUrl && card && typeof card.querySelector === 'function') {
       contextNode = card.querySelector('[data-mw-moderated="blurred"][data-mw-src]');
       if (contextNode) {
-        contextKind = 'card_blurred';
-        contextData = {
-          src: String((contextNode.dataset && contextNode.dataset.mwSrc) || normalizedPoster || normalizedCurrent || ''),
-          category: String((contextNode.dataset && contextNode.dataset.mwCategory) || 'flagged'),
-          itemId: String((contextNode.dataset && contextNode.dataset.mwItemId) || reattachItemId || ''),
-          blurPx: Number((contextNode.dataset && contextNode.dataset.mwBlurStrength) || '') || (IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20)),
-        };
+        const contextSrcForCard = String((contextNode.dataset && contextNode.dataset.mwSrc) || '');
+        const contextItemKeyForCard = getDiagItemKey(contextSrcForCard);
+        const strictCardMatch = (
+          strictContinuityItemKey &&
+          strictContinuityItemKey !== 'unknown' &&
+          contextItemKeyForCard &&
+          contextItemKeyForCard !== 'unknown' &&
+          strictContinuityItemKey === contextItemKeyForCard
+        );
+        if (strictCardMatch) {
+          contextKind = 'card_blurred';
+          contextData = {
+            src: String((contextNode.dataset && contextNode.dataset.mwSrc) || normalizedPoster || normalizedCurrent || ''),
+            category: String((contextNode.dataset && contextNode.dataset.mwCategory) || 'flagged'),
+            itemId: String((contextNode.dataset && contextNode.dataset.mwItemId) || reattachItemId || ''),
+            blurPx: Number((contextNode.dataset && contextNode.dataset.mwBlurStrength) || '') || (IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20)),
+          };
+        } else {
+          console.log(
+            '[DIAG][NON_SHORTS_REATTACH] card_blurred_blocked_non_strict',
+            'reason=' + (reason || 'unknown'),
+            'nodeId=' + videoNodeId,
+            'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
+            'contextItemKey=' + String(contextItemKeyForCard || 'unknown')
+          );
+        }
       }
     }
     if (!contextNode && strictContinuityItemKey && strictContinuityItemKey !== 'unknown') {
@@ -3407,6 +3482,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       reattachItemKey: String(reattachItemKey || 'unknown'),
       strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
       derivedAnchorItemKey: String(derivedAnchorItemKey || 'unknown'),
+      nearbyShortsAnchorId: String(nearbyShortsAnchorId || 'unknown'),
       contextFound: !!contextData,
       contextKind: String(contextKind || 'none'),
       isHomeShortsShelfVideo: !!isHomeShortsShelfVideo,
@@ -3496,6 +3572,48 @@ export function generateModerationScript(config: InjectionConfig): string {
       computedFilter.indexOf('blur(') !== -1 ||
       computedBackdrop.indexOf('blur(') !== -1
     );
+    const hardBlurItemKey = String((videoNode.dataset && videoNode.dataset.mwHardBlurItemKey) || 'unknown');
+    const hardBlurSrc = normalizeUrl(String((videoNode.dataset && videoNode.dataset.mwHardBlurSrc) || '')) || '';
+    const strictIdentityKnown = strictContinuityItemKey && strictContinuityItemKey !== 'unknown';
+    const hardItemKeyKnown = hardBlurItemKey && hardBlurItemKey !== 'unknown';
+    const hardSrcMatchesCurrent = !!(
+      hardBlurSrc &&
+      (
+        (normalizedPoster && hardBlurSrc === normalizedPoster) ||
+        (normalizedCurrent && hardBlurSrc === normalizedCurrent)
+      )
+    );
+    const hardKeyMatchesStrict = !!(
+      strictIdentityKnown &&
+      hardItemKeyKnown &&
+      strictContinuityItemKey === hardBlurItemKey
+    );
+    if (hasAuthoritativeBlur && !contextData && !hardKeyMatchesStrict && !hardSrcMatchesCurrent) {
+      videoNode.style.removeProperty('filter');
+      videoNode.style.removeProperty('-webkit-filter');
+      videoNode.style.removeProperty('backdrop-filter');
+      videoNode.style.removeProperty('-webkit-backdrop-filter');
+      videoNode.classList.remove('mw-softblur');
+      videoNode.classList.remove('mw-blurred');
+      videoNode.dataset.mwModerated = 'safe';
+      clearAuthoritativeHardBlur(videoNode);
+      hasAuthoritativeBlur = false;
+      console.log(
+        '[DIAG][NON_SHORTS_REATTACH] hard_blur_provenance_mismatch_cleared',
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
+        'hardBlurItemKey=' + hardBlurItemKey,
+        'hardSrcMatchesCurrent=' + String(!!hardSrcMatchesCurrent)
+      );
+      postNonShortsTransitionDiag('hard_blur_provenance_mismatch_cleared', {
+        reason: String(reason || 'unknown'),
+        nodeId: videoNodeId,
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        hardBlurItemKey: hardBlurItemKey,
+        hardSrcMatchesCurrent: !!hardSrcMatchesCurrent,
+      });
+    }
     let activeVideoBlurred = hasAuthoritativeBlur || hasIncidentalBlur;
     if (activeVideoBlurred && !hasAuthoritativeBlur && !contextData) {
       videoNode.style.removeProperty('filter');
@@ -3572,6 +3690,9 @@ export function generateModerationScript(config: InjectionConfig): string {
           : (CONFIG.blurStrength || 30)
       );
       applyBlur(videoNode, contextSrc, contextCategory, contextBlurStrength, contextItemId);
+      if (strictContinuityItemKey && strictContinuityItemKey !== 'unknown') {
+        videoNode.dataset.mwHardBlurItemKey = strictContinuityItemKey;
+      }
       console.log(
         '[DIAG][NON_SHORTS_REATTACH] heal_apply_blur',
         'reason=' + (reason || 'unknown'),
@@ -5273,6 +5394,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     try {
       node.dataset.mwHardBlur = '1';
       node.dataset.mwHardBlurItemKey = getDiagItemKey(src || (node.dataset && node.dataset.mwSrc) || '');
+      node.dataset.mwHardBlurSrc = normalizeUrl(src || (node.dataset && node.dataset.mwSrc) || '') || '';
+      node.dataset.mwHardBlurEpoch = String(state.pageEpoch || 0);
+      node.dataset.mwHardBlurNav = String(NAV_ID || 'none');
     } catch (e) {}
   }
 
@@ -5281,6 +5405,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     try {
       node.dataset.mwHardBlur = '0';
       node.dataset.mwHardBlurItemKey = '';
+      node.dataset.mwHardBlurSrc = '';
+      node.dataset.mwHardBlurEpoch = '';
+      node.dataset.mwHardBlurNav = '';
     } catch (e) {}
   }
 
