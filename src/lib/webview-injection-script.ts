@@ -747,6 +747,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       staleEpochDiscarded: 0,
     },
     nonShortsReattachContext: persistedNonShortsReattachContext, // key -> { cardKey, itemKey, src, category, itemId, blurPx, nodeId, cardNodeId, updatedAt }
+    regularMainCardBlurLatch: new Map(), // key -> { cardNodeId, navId, pageEpoch, hardBlurItemKey, hardBlurSrc, setAt, lastSeenAt, expiresAt }
   };
 
   // Keep reveal stable for the current Shorts video (keyed by shorts:<videoId>).
@@ -2979,6 +2980,8 @@ export function generateModerationScript(config: InjectionConfig): string {
   const NON_SHORTS_REATTACH_CARD_FALLBACK_ITEM_KEY = '__card_latest__';
   const NON_SHORTS_REATTACH_MIN_OVERLAY_INTERSECTION_RATIO = 0.35;
   const NON_SHORTS_REATTACH_MAX_CENTER_OFFSET_RATIO = 0.7;
+  const REGULAR_MAIN_CARD_BLUR_LATCH_TTL_MS = 2200;
+  const REGULAR_MAIN_CARD_BLUR_LATCH_MAX = 160;
 
   function isNonShortsYouTubeReattachContext() {
     return isYouTube() && !isShortsModeActive();
@@ -3028,6 +3031,101 @@ export function generateModerationScript(config: InjectionConfig): string {
   function findNonShortsReattachCardNode(node) {
     if (!node || node.nodeType !== 1 || typeof node.closest !== 'function') return null;
     return node.closest(NON_SHORTS_REATTACH_CARD_SELECTOR);
+  }
+
+  function buildRegularMainCardBlurLatchKey(navId, pageEpoch, cardNodeId) {
+    return String(navId || 'none') + '|' + String(pageEpoch || 0) + '|' + String(cardNodeId || 'none');
+  }
+
+  function pruneRegularMainCardBlurLatch(now) {
+    const latchMap = state.regularMainCardBlurLatch;
+    if (!latchMap || typeof latchMap.forEach !== 'function') return;
+    latchMap.forEach(function(entry, key) {
+      const expiresAt = Number(entry && entry.expiresAt ? entry.expiresAt : 0);
+      if (!Number.isFinite(expiresAt) || expiresAt <= now) {
+        latchMap.delete(key);
+      }
+    });
+    if (latchMap.size <= REGULAR_MAIN_CARD_BLUR_LATCH_MAX) return;
+    const entries = Array.from(latchMap.entries());
+    entries.sort(function(a, b) {
+      const aAt = Number(a && a[1] && a[1].lastSeenAt ? a[1].lastSeenAt : 0);
+      const bAt = Number(b && b[1] && b[1].lastSeenAt ? b[1].lastSeenAt : 0);
+      return aAt - bAt;
+    });
+    const removeCount = Math.max(0, entries.length - REGULAR_MAIN_CARD_BLUR_LATCH_MAX);
+    for (let i = 0; i < removeCount; i += 1) {
+      latchMap.delete(entries[i][0]);
+    }
+  }
+
+  function writeRegularMainCardBlurLatch(cardNodeId, hardBlurItemKey, hardBlurSrc, reason, nodeId) {
+    if (!cardNodeId || cardNodeId === 'none') return;
+    if (!hardBlurItemKey || hardBlurItemKey === 'unknown') return;
+    if (!hardBlurSrc) return;
+    const now = Date.now();
+    pruneRegularMainCardBlurLatch(now);
+    const key = buildRegularMainCardBlurLatchKey(NAV_ID, state.pageEpoch, cardNodeId);
+    const entry = {
+      cardNodeId: String(cardNodeId || 'none'),
+      navId: String(NAV_ID || 'none'),
+      pageEpoch: Number(state.pageEpoch || 0),
+      hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+      hardBlurSrc: String(hardBlurSrc || ''),
+      setAt: now,
+      lastSeenAt: now,
+      expiresAt: now + REGULAR_MAIN_CARD_BLUR_LATCH_TTL_MS,
+    };
+    state.regularMainCardBlurLatch.set(key, entry);
+    console.log(
+      '[MW-MVP-REGULAR-THUMB-LATCH-V1-WRITE] card_scoped_latch_written',
+      'reason=' + String(reason || 'unknown'),
+      'nodeId=' + String(nodeId || 'none'),
+      'cardNodeId=' + String(cardNodeId || 'none'),
+      'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown'),
+      'hardBlurSrc=' + String(hardBlurSrc || '').substring(0, 180),
+      'navId=' + String(NAV_ID || 'none'),
+      'pageEpoch=' + String(state.pageEpoch || 0),
+      'ttlMs=' + String(REGULAR_MAIN_CARD_BLUR_LATCH_TTL_MS)
+    );
+  }
+
+  function readRegularMainCardBlurLatch(cardNodeId, hardBlurItemKey, hardBlurSrc) {
+    if (!cardNodeId || cardNodeId === 'none') {
+      return { entry: null, reason: 'missing_card_identity' };
+    }
+    if (!hardBlurItemKey || hardBlurItemKey === 'unknown') {
+      return { entry: null, reason: 'missing_hard_item_key' };
+    }
+    if (!hardBlurSrc) {
+      return { entry: null, reason: 'missing_hard_src' };
+    }
+    const now = Date.now();
+    pruneRegularMainCardBlurLatch(now);
+    const key = buildRegularMainCardBlurLatchKey(NAV_ID, state.pageEpoch, cardNodeId);
+    const entry = state.regularMainCardBlurLatch.get(key);
+    if (!entry) {
+      return { entry: null, reason: 'no_entry_for_scope' };
+    }
+    const entryExpiresAt = Number(entry.expiresAt || 0);
+    if (!Number.isFinite(entryExpiresAt) || entryExpiresAt <= now) {
+      state.regularMainCardBlurLatch.delete(key);
+      return { entry: null, reason: 'expired' };
+    }
+    if (String(entry.cardNodeId || 'none') !== String(cardNodeId || 'none')) {
+      state.regularMainCardBlurLatch.delete(key);
+      return { entry: null, reason: 'card_mismatch' };
+    }
+    if (String(entry.hardBlurItemKey || 'unknown') !== String(hardBlurItemKey || 'unknown')) {
+      return { entry: null, reason: 'item_key_mismatch' };
+    }
+    if (String(entry.hardBlurSrc || '') !== String(hardBlurSrc || '')) {
+      return { entry: null, reason: 'src_mismatch' };
+    }
+    entry.lastSeenAt = now;
+    entry.expiresAt = now + REGULAR_MAIN_CARD_BLUR_LATCH_TTL_MS;
+    state.regularMainCardBlurLatch.set(key, entry);
+    return { entry: entry, reason: 'match' };
   }
 
   function extractShortsIdFromHrefValue(rawHref) {
@@ -3743,8 +3841,6 @@ export function generateModerationScript(config: InjectionConfig): string {
       hardItemKeyKnown &&
       strictContinuityItemKey === hardBlurItemKey
     );
-    const REGULAR_MAIN_BLUR_HOLD_ROLLING_WINDOW_MS = 1000;
-    const REGULAR_MAIN_BLUR_HOLD_HARD_CAP_MS = 3200;
     const isTransitionChurnReason = !!(
       reasonText.indexOf('attr:') === 0 ||
       reasonText.indexOf('mutation_added:') === 0 ||
@@ -3752,125 +3848,114 @@ export function generateModerationScript(config: InjectionConfig): string {
       reasonText === 'event:playing' ||
       reasonText === 'event:play'
     );
-    const hasHardBlurOwnershipMarker = !!(
-      hasAuthoritativeBlur &&
-      hardItemKeyKnown &&
-      hardBlurSrc
-    );
-    const holdEligibleUnresolvedTransition = !!(
+    const hasHardBlurOwnershipMarker = !!(hardItemKeyKnown && hardBlurSrc);
+    const latchWriteEligible = !!(
       regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo &&
+      cardNodeId !== 'none' &&
+      hasAuthoritativeBlur &&
+      hasHardBlurOwnershipMarker &&
+      hardSrcMatchesCurrent
+    );
+    if (latchWriteEligible) {
+      writeRegularMainCardBlurLatch(
+        String(cardNodeId || 'none'),
+        String(hardBlurItemKey || 'unknown'),
+        String(hardBlurSrc || ''),
+        String(reason || 'unknown'),
+        String(videoNodeId || 'none')
+      );
+    }
+    const latchReuseAttempt = !!(
+      regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo &&
+      cardNodeId !== 'none' &&
       !contextData &&
       !strictIdentityKnown &&
       isTransitionChurnReason &&
-      hasHardBlurOwnershipMarker &&
-      !!hardSrcMatchesCurrent
+      hasHardBlurOwnershipMarker
     );
     let holdBlurDuringUnresolvedTransition = false;
-    if (holdEligibleUnresolvedTransition) {
-      const holdStartedAtRaw = Number((videoNode.dataset && videoNode.dataset.mwRegularMainBlurHoldStartedAt) || '0');
-      const holdLastSeenAtRaw = Number((videoNode.dataset && videoNode.dataset.mwRegularMainBlurHoldLastSeenAt) || '0');
-      const holdItemKey = String((videoNode.dataset && videoNode.dataset.mwRegularMainBlurHoldItemKey) || 'unknown');
-      const holdSrc = normalizeUrl(String((videoNode.dataset && videoNode.dataset.mwRegularMainBlurHoldSrc) || '')) || '';
-      const holdCardNodeId = String((videoNode.dataset && videoNode.dataset.mwRegularMainBlurHoldCardNodeId) || 'none');
-      const nowHoldMs = Date.now();
-      const holdStartedAt = Number.isFinite(holdStartedAtRaw) ? holdStartedAtRaw : 0;
-      const holdLastSeenAt = Number.isFinite(holdLastSeenAtRaw) ? holdLastSeenAtRaw : 0;
-      const effectiveHoldStart = holdStartedAt > 0 ? holdStartedAt : nowHoldMs;
-      const holdAgeMs = Math.max(0, nowHoldMs - effectiveHoldStart);
-      const holdGapMs = holdLastSeenAt > 0 ? Math.max(0, nowHoldMs - holdLastSeenAt) : 0;
-      const holdOwnsSameItemKey = holdItemKey !== 'unknown' && holdItemKey === hardBlurItemKey;
-      const holdOwnsSameSrc = !!(holdSrc && hardBlurSrc && holdSrc === hardBlurSrc);
-      const holdOwnsSameCard = holdCardNodeId === String(cardNodeId || 'none');
-      const isExistingHold = holdStartedAt > 0;
-      const holdOwnershipStable = !isExistingHold || (holdOwnsSameItemKey && holdOwnsSameSrc && holdOwnsSameCard);
-      if (isExistingHold && !holdOwnershipStable && videoNode.dataset) {
-        delete videoNode.dataset.mwRegularMainBlurHoldStartedAt;
-        delete videoNode.dataset.mwRegularMainBlurHoldLastSeenAt;
-        delete videoNode.dataset.mwRegularMainBlurHoldItemKey;
-        delete videoNode.dataset.mwRegularMainBlurHoldSrc;
-        delete videoNode.dataset.mwRegularMainBlurHoldCardNodeId;
-      }
-      if (!isExistingHold && videoNode.dataset) {
-        videoNode.dataset.mwRegularMainBlurHoldStartedAt = String(nowHoldMs);
-        videoNode.dataset.mwRegularMainBlurHoldLastSeenAt = String(nowHoldMs);
-        videoNode.dataset.mwRegularMainBlurHoldItemKey = String(hardBlurItemKey || 'unknown');
-        videoNode.dataset.mwRegularMainBlurHoldSrc = String(hardBlurSrc || '');
-        videoNode.dataset.mwRegularMainBlurHoldCardNodeId = String(cardNodeId || 'none');
-      }
-      if (
-        holdOwnershipStable &&
-        holdAgeMs < REGULAR_MAIN_BLUR_HOLD_HARD_CAP_MS &&
-        (!isExistingHold || holdGapMs <= REGULAR_MAIN_BLUR_HOLD_ROLLING_WINDOW_MS)
-      ) {
+    if (latchReuseAttempt) {
+      const latch = readRegularMainCardBlurLatch(
+        String(cardNodeId || 'none'),
+        String(hardBlurItemKey || 'unknown'),
+        String(hardBlurSrc || '')
+      );
+      if (latch && latch.entry) {
         holdBlurDuringUnresolvedTransition = true;
+        hasAuthoritativeBlur = true;
+        markAuthoritativeHardBlur(videoNode, String(hardBlurSrc || ''));
         if (videoNode.dataset) {
-          videoNode.dataset.mwRegularMainBlurHoldLastSeenAt = String(nowHoldMs);
+          videoNode.dataset.mwHardBlurItemKey = String(hardBlurItemKey || 'unknown');
+          videoNode.dataset.mwHardBlurSrc = String(hardBlurSrc || '');
+        }
+        if (!strictIdentityKnown) {
+          strictContinuityItemKey = String(hardBlurItemKey || 'unknown');
         }
         console.log(
-          '[MW-MVP-REGULAR-THUMB-BLUR-HOLD-V5] hold_unresolved_transition_renewed',
-          'reason=' + (reason || 'unknown'),
-          'nodeId=' + videoNodeId,
-          'marker=' + 'MW-MVP-REGULAR-THUMB-BLUR-HOLD-GATE-V6',
-          'holdAgeMs=' + holdAgeMs,
-          'holdGapMs=' + holdGapMs,
-          'windowMs=' + REGULAR_MAIN_BLUR_HOLD_ROLLING_WINDOW_MS,
-          'hardCapMs=' + REGULAR_MAIN_BLUR_HOLD_HARD_CAP_MS,
-          'cardNodeId=' + cardNodeId,
-          'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
-          'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown')
+          '[MW-MVP-REGULAR-THUMB-LATCH-V1-REUSE] card_scoped_latch_reused',
+          'reason=' + String(reason || 'unknown'),
+          'nodeId=' + String(videoNodeId || 'none'),
+          'cardNodeId=' + String(cardNodeId || 'none'),
+          'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown'),
+          'hardBlurSrc=' + String(hardBlurSrc || '').substring(0, 180),
+          'navId=' + String(NAV_ID || 'none'),
+          'pageEpoch=' + String(state.pageEpoch || 0)
         );
-        postNonShortsTransitionDiag('regular_main_blur_hold_unresolved_transition', {
+        postNonShortsTransitionDiag('regular_main_card_latch_reuse', {
           reason: String(reason || 'unknown'),
-          nodeId: videoNodeId,
-          marker: 'MW-MVP-REGULAR-THUMB-BLUR-HOLD-V5',
-          holdGateMarker: 'MW-MVP-REGULAR-THUMB-BLUR-HOLD-GATE-V6',
-          holdAgeMs: holdAgeMs,
-          holdGapMs: holdGapMs,
-          windowMs: REGULAR_MAIN_BLUR_HOLD_ROLLING_WINDOW_MS,
-          hardCapMs: REGULAR_MAIN_BLUR_HOLD_HARD_CAP_MS,
+          nodeId: String(videoNodeId || 'none'),
+          marker: 'MW-MVP-REGULAR-THUMB-LATCH-V1-REUSE',
           cardNodeId: String(cardNodeId || 'none'),
-          strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
           hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
         });
       } else {
-        if (videoNode.dataset) {
-          delete videoNode.dataset.mwRegularMainBlurHoldStartedAt;
-          delete videoNode.dataset.mwRegularMainBlurHoldLastSeenAt;
-          delete videoNode.dataset.mwRegularMainBlurHoldItemKey;
-          delete videoNode.dataset.mwRegularMainBlurHoldSrc;
-          delete videoNode.dataset.mwRegularMainBlurHoldCardNodeId;
-        }
         console.log(
-          '[MW-MVP-REGULAR-THUMB-BLUR-HOLD-V5] hold_expired_or_unstable_clear_allowed',
-          'reason=' + (reason || 'unknown'),
-          'nodeId=' + videoNodeId,
-          'marker=' + 'MW-MVP-REGULAR-THUMB-BLUR-HOLD-GATE-V6',
-          'holdAgeMs=' + holdAgeMs,
-          'holdGapMs=' + holdGapMs,
-          'windowMs=' + REGULAR_MAIN_BLUR_HOLD_ROLLING_WINDOW_MS,
-          'hardCapMs=' + REGULAR_MAIN_BLUR_HOLD_HARD_CAP_MS,
-          'ownershipStable=' + String(!!holdOwnershipStable),
-          'cardNodeId=' + cardNodeId
+          '[MW-MVP-REGULAR-THUMB-LATCH-V1-FAILCLOSED] latch_reuse_blocked',
+          'reason=' + String(reason || 'unknown'),
+          'failReason=' + String((latch && latch.reason) || 'unknown'),
+          'nodeId=' + String(videoNodeId || 'none'),
+          'cardNodeId=' + String(cardNodeId || 'none'),
+          'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown'),
+          'hardBlurSrc=' + String(hardBlurSrc || '').substring(0, 180),
+          'navId=' + String(NAV_ID || 'none'),
+          'pageEpoch=' + String(state.pageEpoch || 0)
         );
-        postNonShortsTransitionDiag('regular_main_blur_hold_expired_clear_allowed', {
+        postNonShortsTransitionDiag('regular_main_card_latch_fail_closed', {
           reason: String(reason || 'unknown'),
-          nodeId: videoNodeId,
-          marker: 'MW-MVP-REGULAR-THUMB-BLUR-HOLD-V5',
-          holdGateMarker: 'MW-MVP-REGULAR-THUMB-BLUR-HOLD-GATE-V6',
-          holdAgeMs: holdAgeMs,
-          holdGapMs: holdGapMs,
-          windowMs: REGULAR_MAIN_BLUR_HOLD_ROLLING_WINDOW_MS,
-          hardCapMs: REGULAR_MAIN_BLUR_HOLD_HARD_CAP_MS,
-          ownershipStable: !!holdOwnershipStable,
+          nodeId: String(videoNodeId || 'none'),
+          marker: 'MW-MVP-REGULAR-THUMB-LATCH-V1-FAILCLOSED',
+          failReason: String((latch && latch.reason) || 'unknown'),
           cardNodeId: String(cardNodeId || 'none'),
         });
       }
-    } else if (videoNode.dataset && videoNode.dataset.mwRegularMainBlurHoldStartedAt) {
-      delete videoNode.dataset.mwRegularMainBlurHoldStartedAt;
-      delete videoNode.dataset.mwRegularMainBlurHoldLastSeenAt;
-      delete videoNode.dataset.mwRegularMainBlurHoldItemKey;
-      delete videoNode.dataset.mwRegularMainBlurHoldSrc;
-      delete videoNode.dataset.mwRegularMainBlurHoldCardNodeId;
+    } else if (
+      regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo &&
+      !contextData &&
+      !strictIdentityKnown &&
+      isTransitionChurnReason
+    ) {
+      let failReason = 'latch_not_applicable';
+      if (String(cardNodeId || 'none') === 'none') {
+        failReason = 'missing_card_identity';
+      } else if (!hardItemKeyKnown) {
+        failReason = 'missing_hard_item_key';
+      } else if (!hardBlurSrc) {
+        failReason = 'missing_hard_src';
+      }
+      console.log(
+        '[MW-MVP-REGULAR-THUMB-LATCH-V1-FAILCLOSED] latch_reuse_blocked',
+        'reason=' + String(reason || 'unknown'),
+        'failReason=' + failReason,
+        'nodeId=' + String(videoNodeId || 'none'),
+        'cardNodeId=' + String(cardNodeId || 'none'),
+        'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown'),
+        'hardBlurSrc=' + String(hardBlurSrc || '').substring(0, 180),
+        'navId=' + String(NAV_ID || 'none'),
+        'pageEpoch=' + String(state.pageEpoch || 0)
+      );
     }
     if (
       hasAuthoritativeBlur &&
