@@ -4048,13 +4048,57 @@ export function generateModerationScript(config: InjectionConfig): string {
       overlayPresent: !!videoOverlay,
     });
 
+    const reattachItemKeyKnown = !!(reattachItemKey && reattachItemKey !== 'unknown');
+    const strictContinuityItemKeyKnown = !!(strictContinuityItemKey && strictContinuityItemKey !== 'unknown');
+    const contextFound = !!contextData;
+    const noisyAttrTransition = reasonText.indexOf('attr:') === 0;
+    const resolvedOwnershipKeys = new Set();
+    if (strictContinuityItemKeyKnown) resolvedOwnershipKeys.add(String(strictContinuityItemKey));
+    if (contextItemKey && contextItemKey !== 'unknown') resolvedOwnershipKeys.add(String(contextItemKey));
+    if (reattachItemKeyKnown) resolvedOwnershipKeys.add(String(reattachItemKey));
+    const hasResolvedOwnership = resolvedOwnershipKeys.size > 0 || contextFound;
+    const skipStaleSweepForUnresolvedNoise = !!(
+      isRegularMainSurfaceNonShortsVideo &&
+      noisyAttrTransition &&
+      !contextFound &&
+      !activeVideoBlurred &&
+      !hasResolvedOwnership
+    );
+    if (skipStaleSweepForUnresolvedNoise) {
+      console.log(
+        '[MW-MVP-REGULAR-THUMB-STALE-SWEEP-GUARD-V3] skip_unresolved_noise',
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'contextFound=' + String(contextFound),
+        'activeVideoBlurred=' + String(!!activeVideoBlurred)
+      );
+      postNonShortsTransitionDiag('regular_main_stale_overlay_sweep_skipped_unresolved_noise', {
+        reason: String(reason || 'unknown'),
+        nodeId: videoNodeId,
+        marker: 'MW-MVP-REGULAR-THUMB-STALE-SWEEP-GUARD-V3',
+        contextFound: !!contextFound,
+        activeVideoBlurred: !!activeVideoBlurred,
+      });
+    }
     let staleOverlayCount = 0;
-    if (card && typeof card.querySelectorAll === 'function') {
+    if (!skipStaleSweepForUnresolvedNoise && card && typeof card.querySelectorAll === 'function') {
       const overlays = card.querySelectorAll('.mw-reveal-overlay');
       for (let i = 0; i < overlays.length; i += 1) {
         const overlay = overlays[i];
         if (!overlay || overlay.nodeType !== 1 || !overlay.isConnected) continue;
         const anchorNodeId = String((overlay.dataset && overlay.dataset.mwNodeId) || '');
+        if (!anchorNodeId || anchorNodeId === videoNodeId) continue;
+        const overlayFor = String((overlay.dataset && overlay.dataset.mwFor) || '');
+        const overlayItemKey = getDiagItemKey(overlayFor);
+        const provablyStaleForResolvedOwnership = !!(
+          resolvedOwnershipKeys.size > 0 &&
+          overlayItemKey &&
+          overlayItemKey !== 'unknown' &&
+          !resolvedOwnershipKeys.has(String(overlayItemKey))
+        );
+        if (!provablyStaleForResolvedOwnership) {
+          continue;
+        }
         if (anchorNodeId && anchorNodeId !== videoNodeId) {
           console.warn(
             '[DIAG][NON_SHORTS_REATTACH] stale_overlay_detected',
@@ -4062,6 +4106,7 @@ export function generateModerationScript(config: InjectionConfig): string {
             'nodeId=' + videoNodeId,
             'overlayId=' + String((overlay.dataset && overlay.dataset.mwOverlayId) || 'unknown'),
             'overlayNodeId=' + String((overlay.dataset && overlay.dataset.mwNodeId) || 'none'),
+            'overlayItemKey=' + String(overlayItemKey || 'unknown'),
             'activeVideoBlurred=' + activeVideoBlurred
           );
           if (overlay.parentElement) {
@@ -4074,7 +4119,8 @@ export function generateModerationScript(config: InjectionConfig): string {
               'reason=' + (reason || 'unknown'),
               'nodeId=' + videoNodeId,
               'overlayId=' + staleOverlayId,
-              'overlayNodeId=' + staleOverlayNodeId
+              'overlayNodeId=' + staleOverlayNodeId,
+              'overlayItemKey=' + String(overlayItemKey || 'unknown')
             );
           }
         }
