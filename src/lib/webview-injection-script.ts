@@ -3624,6 +3624,48 @@ export function generateModerationScript(config: InjectionConfig): string {
         hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
       });
     }
+    if (
+      isRegularMainSurfaceNonShortsVideo &&
+      !isHomeShortsShelfVideo &&
+      !contextData &&
+      hardBlurItemKey &&
+      hardBlurItemKey !== 'unknown' &&
+      cardNodeId !== 'none'
+    ) {
+      const recovered = findNonShortsReattachContextByItemKey(hardBlurItemKey, cardNodeId);
+      const cardScopedRecovery = !!(
+        recovered &&
+        recovered.entry &&
+        recovered.kind === 'itemkey_card' &&
+        String((recovered.entry && recovered.entry.cardNodeId) || 'none') === String(cardNodeId || 'none')
+      );
+      if (cardScopedRecovery) {
+        contextKind = 'regular_main_preclear_card_recovery';
+        contextData = {
+          src: String(recovered.entry.src || normalizedPoster || normalizedCurrent || ''),
+          category: String(recovered.entry.category || 'flagged'),
+          itemId: String(recovered.entry.itemId || reattachItemId || ''),
+          blurPx: Number(recovered.entry.blurPx || (IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20))),
+        };
+        strictContinuityItemKey = hardBlurItemKey;
+        console.log(
+          '[MW-MVP-REGULAR-THUMB-PRECLEAR-CARD-RECOVERY-V1] recovered',
+          'reason=' + (reason || 'unknown'),
+          'nodeId=' + videoNodeId,
+          'cardNodeId=' + cardNodeId,
+          'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown'),
+          'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown')
+        );
+        postNonShortsTransitionDiag('regular_main_preclear_card_recovery', {
+          reason: String(reason || 'unknown'),
+          nodeId: videoNodeId,
+          cardNodeId: cardNodeId,
+          marker: 'MW-MVP-REGULAR-THUMB-PRECLEAR-CARD-RECOVERY-V1',
+          hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+          strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        });
+      }
+    }
     const strictIdentityKnown = strictContinuityItemKey && strictContinuityItemKey !== 'unknown';
     const hardItemKeyKnown = hardBlurItemKey && hardBlurItemKey !== 'unknown';
     const hardSrcMatchesCurrent = !!(
