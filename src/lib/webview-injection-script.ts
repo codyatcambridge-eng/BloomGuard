@@ -3289,6 +3289,15 @@ export function generateModerationScript(config: InjectionConfig): string {
       : null;
     const cardNodeId = card ? getDiagNodeId(card) : 'none';
     const isHomeShortsShelfVideo = isYouTubeMainPageShortsShelfVideoNode(videoNode);
+    const isRegularMainSurfaceNonShortsVideo = (function() {
+      if (!isMainSurfaceUrl || isHomeShortsShelfVideo) return false;
+      try {
+        const parsed = new URL(currentUrl, window.location.href);
+        return String(parsed.hostname || '').toLowerCase() === 'm.youtube.com';
+      } catch (e) {
+        return false;
+      }
+    })();
     let strictContinuityItemKey = reattachItemKey;
     let derivedAnchorItemKey = 'unknown';
     const nearbyShortsAnchorId = deriveNearbyShortsAnchorId(videoNode);
@@ -3574,6 +3583,47 @@ export function generateModerationScript(config: InjectionConfig): string {
     );
     const hardBlurItemKey = String((videoNode.dataset && videoNode.dataset.mwHardBlurItemKey) || 'unknown');
     const hardBlurSrc = normalizeUrl(String((videoNode.dataset && videoNode.dataset.mwHardBlurSrc) || '')) || '';
+    if (
+      isRegularMainSurfaceNonShortsVideo &&
+      !contextData &&
+      hasAuthoritativeBlur &&
+      hardBlurSrc &&
+      (
+        (normalizedPoster && hardBlurSrc === normalizedPoster) ||
+        (normalizedCurrent && hardBlurSrc === normalizedCurrent)
+      )
+    ) {
+      const rescuedBlurStrength = Number((videoNode.dataset && videoNode.dataset.mwBlurStrength) || '') || (IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20));
+      contextData = {
+        src: hardBlurSrc,
+        category: String((videoNode.dataset && videoNode.dataset.mwCategory) || 'flagged'),
+        itemId: String((videoNode.dataset && videoNode.dataset.mwItemId) || reattachItemId || ''),
+        blurPx: rescuedBlurStrength,
+      };
+      contextKind = 'regular_main_hard_src_continuity';
+      if (
+        (!strictContinuityItemKey || strictContinuityItemKey === 'unknown') &&
+        hardBlurItemKey &&
+        hardBlurItemKey !== 'unknown'
+      ) {
+        strictContinuityItemKey = hardBlurItemKey;
+      }
+      console.log(
+        '[MW-MVP-REGULAR-THUMB-CONTINUITY-V1] continuity_rescue',
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
+        'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown'),
+        'hardBlurSrc=' + String(hardBlurSrc || '').substring(0, 180)
+      );
+      postNonShortsTransitionDiag('regular_main_continuity_rescue', {
+        reason: String(reason || 'unknown'),
+        nodeId: videoNodeId,
+        marker: 'MW-MVP-REGULAR-THUMB-CONTINUITY-V1',
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+      });
+    }
     const strictIdentityKnown = strictContinuityItemKey && strictContinuityItemKey !== 'unknown';
     const hardItemKeyKnown = hardBlurItemKey && hardBlurItemKey !== 'unknown';
     const hardSrcMatchesCurrent = !!(
@@ -3793,6 +3843,16 @@ export function generateModerationScript(config: InjectionConfig): string {
         return { overlay: overlay, anchored: true };
       }
       const overlayId = String((overlay.dataset && overlay.dataset.mwOverlayId) || 'unknown');
+      if (isRegularMainSurfaceNonShortsVideo && activeVideoBlurred) {
+        console.warn(
+          '[MW-MVP-REGULAR-THUMB-CONTINUITY-V1] overlay_geometry_mismatch_keep',
+          'reason=' + (reason || 'unknown'),
+          'phase=' + String(phase || 'unknown'),
+          'nodeId=' + videoNodeId,
+          'overlayId=' + overlayId
+        );
+        return { overlay: overlay, anchored: false };
+      }
       console.warn(
         '[DIAG][NON_SHORTS_REATTACH] overlay_geometry_mismatch',
         'reason=' + (reason || 'unknown'),
