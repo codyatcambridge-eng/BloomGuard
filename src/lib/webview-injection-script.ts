@@ -3298,41 +3298,50 @@ export function generateModerationScript(config: InjectionConfig): string {
         return false;
       }
     })();
-    const cardHasShortsLockup = !!(
-      card &&
-      typeof card.querySelector === 'function' &&
-      card.querySelector('ytm-shorts-lockup-view-model')
+    const directShortsLockupNode = (
+      typeof videoNode.closest === 'function'
+        ? videoNode.closest('ytm-shorts-lockup-view-model')
+        : null
     );
-    const cardHasShortsAnchor = !!(
-      card &&
-      typeof card.querySelector === 'function' &&
-      card.querySelector('a[href^="/shorts/"]')
+    const directShortsAnchorNode = (
+      typeof videoNode.closest === 'function'
+        ? videoNode.closest('a[href*="/shorts/"]')
+        : null
+    );
+    const directShortsAnchorHref = String(
+      (directShortsAnchorNode && directShortsAnchorNode.getAttribute && directShortsAnchorNode.getAttribute('href')) ||
+      (directShortsAnchorNode && directShortsAnchorNode.href) ||
+      ''
+    );
+    const hasDirectShortsLockupOnNodePath = !!directShortsLockupNode;
+    const hasDirectShortsAnchorOnNodePath = (
+      !!directShortsAnchorNode &&
+      extractShortsIdFromHrefValue(directShortsAnchorHref) !== 'unknown'
     );
     const regularPathQuarantinePassed = !!(
       isRegularMainSurfaceNonShortsVideo &&
       !isHomeShortsShelfVideo &&
-      cardNodeId !== 'none' &&
-      !cardHasShortsLockup &&
-      !cardHasShortsAnchor
+      !hasDirectShortsLockupOnNodePath &&
+      !hasDirectShortsAnchorOnNodePath
     );
     if (isRegularMainSurfaceNonShortsVideo && !regularPathQuarantinePassed) {
       console.log(
-        '[MW-MVP-REGULAR-THUMB-QUARANTINE-V5] regular_path_special_handling_blocked',
+        '[MW-MVP-REGULAR-THUMB-QUARANTINE-V6-DIRECT-PATH] regular_path_special_handling_blocked',
         'reason=' + (reason || 'unknown'),
         'nodeId=' + videoNodeId,
         'cardNodeId=' + cardNodeId,
         'isHomeShortsShelfVideo=' + String(!!isHomeShortsShelfVideo),
-        'cardHasShortsLockup=' + String(!!cardHasShortsLockup),
-        'cardHasShortsAnchor=' + String(!!cardHasShortsAnchor)
+        'hasDirectShortsLockupOnNodePath=' + String(!!hasDirectShortsLockupOnNodePath),
+        'hasDirectShortsAnchorOnNodePath=' + String(!!hasDirectShortsAnchorOnNodePath)
       );
       postNonShortsTransitionDiag('regular_main_quarantine_blocked', {
         reason: String(reason || 'unknown'),
         nodeId: videoNodeId,
         cardNodeId: cardNodeId,
-        marker: 'MW-MVP-REGULAR-THUMB-QUARANTINE-V5',
+        marker: 'MW-MVP-REGULAR-THUMB-QUARANTINE-V6-DIRECT-PATH',
         isHomeShortsShelfVideo: !!isHomeShortsShelfVideo,
-        cardHasShortsLockup: !!cardHasShortsLockup,
-        cardHasShortsAnchor: !!cardHasShortsAnchor,
+        hasDirectShortsLockupOnNodePath: !!hasDirectShortsLockupOnNodePath,
+        hasDirectShortsAnchorOnNodePath: !!hasDirectShortsAnchorOnNodePath,
       });
     }
     let strictContinuityItemKey = reattachItemKey;
@@ -3753,7 +3762,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       !contextData &&
       !strictIdentityKnown &&
       isTransitionChurnReason &&
-      hasHardBlurOwnershipMarker
+      hasHardBlurOwnershipMarker &&
+      !!hardSrcMatchesCurrent
     );
     let holdBlurDuringUnresolvedTransition = false;
     if (holdEligibleUnresolvedTransition) {
@@ -3770,7 +3780,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       const holdGapMs = holdLastSeenAt > 0 ? Math.max(0, nowHoldMs - holdLastSeenAt) : 0;
       const holdOwnsSameItemKey = holdItemKey !== 'unknown' && holdItemKey === hardBlurItemKey;
       const holdOwnsSameSrc = !!(holdSrc && hardBlurSrc && holdSrc === hardBlurSrc);
-      const holdOwnsSameCard = holdCardNodeId !== 'none' && holdCardNodeId === String(cardNodeId || 'none');
+      const holdOwnsSameCard = holdCardNodeId === String(cardNodeId || 'none');
       const isExistingHold = holdStartedAt > 0;
       const holdOwnershipStable = !isExistingHold || (holdOwnsSameItemKey && holdOwnsSameSrc && holdOwnsSameCard);
       if (isExistingHold && !holdOwnershipStable && videoNode.dataset) {
@@ -3800,6 +3810,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           '[MW-MVP-REGULAR-THUMB-BLUR-HOLD-V5] hold_unresolved_transition_renewed',
           'reason=' + (reason || 'unknown'),
           'nodeId=' + videoNodeId,
+          'marker=' + 'MW-MVP-REGULAR-THUMB-BLUR-HOLD-GATE-V6',
           'holdAgeMs=' + holdAgeMs,
           'holdGapMs=' + holdGapMs,
           'windowMs=' + REGULAR_MAIN_BLUR_HOLD_ROLLING_WINDOW_MS,
@@ -3812,6 +3823,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           reason: String(reason || 'unknown'),
           nodeId: videoNodeId,
           marker: 'MW-MVP-REGULAR-THUMB-BLUR-HOLD-V5',
+          holdGateMarker: 'MW-MVP-REGULAR-THUMB-BLUR-HOLD-GATE-V6',
           holdAgeMs: holdAgeMs,
           holdGapMs: holdGapMs,
           windowMs: REGULAR_MAIN_BLUR_HOLD_ROLLING_WINDOW_MS,
@@ -3832,6 +3844,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           '[MW-MVP-REGULAR-THUMB-BLUR-HOLD-V5] hold_expired_or_unstable_clear_allowed',
           'reason=' + (reason || 'unknown'),
           'nodeId=' + videoNodeId,
+          'marker=' + 'MW-MVP-REGULAR-THUMB-BLUR-HOLD-GATE-V6',
           'holdAgeMs=' + holdAgeMs,
           'holdGapMs=' + holdGapMs,
           'windowMs=' + REGULAR_MAIN_BLUR_HOLD_ROLLING_WINDOW_MS,
@@ -3843,6 +3856,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           reason: String(reason || 'unknown'),
           nodeId: videoNodeId,
           marker: 'MW-MVP-REGULAR-THUMB-BLUR-HOLD-V5',
+          holdGateMarker: 'MW-MVP-REGULAR-THUMB-BLUR-HOLD-GATE-V6',
           holdAgeMs: holdAgeMs,
           holdGapMs: holdGapMs,
           windowMs: REGULAR_MAIN_BLUR_HOLD_ROLLING_WINDOW_MS,
