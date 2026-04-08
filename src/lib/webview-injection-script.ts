@@ -3697,7 +3697,86 @@ export function generateModerationScript(config: InjectionConfig): string {
       hardItemKeyKnown &&
       strictContinuityItemKey === hardBlurItemKey
     );
-    if (hasAuthoritativeBlur && !contextData && !hardKeyMatchesStrict && !hardSrcMatchesCurrent) {
+    const REGULAR_MAIN_BLUR_HOLD_TTL_MS = 1000;
+    const isTransitionChurnReason = !!(
+      reasonText.indexOf('attr:') === 0 ||
+      reasonText.indexOf('mutation_added:') === 0 ||
+      reasonText === 'event:loadeddata' ||
+      reasonText === 'event:playing' ||
+      reasonText === 'event:play'
+    );
+    const hasHardBlurOwnershipMarker = !!(
+      hasAuthoritativeBlur &&
+      hardItemKeyKnown &&
+      hardBlurSrc
+    );
+    const holdEligibleUnresolvedTransition = !!(
+      isRegularMainSurfaceNonShortsVideo &&
+      !isHomeShortsShelfVideo &&
+      !contextData &&
+      !strictIdentityKnown &&
+      isTransitionChurnReason &&
+      hasHardBlurOwnershipMarker
+    );
+    let holdBlurDuringUnresolvedTransition = false;
+    if (holdEligibleUnresolvedTransition) {
+      const holdStartedAtRaw = Number((videoNode.dataset && videoNode.dataset.mwRegularMainBlurHoldStartedAt) || '0');
+      const nowHoldMs = Date.now();
+      const holdStartedAt = Number.isFinite(holdStartedAtRaw) ? holdStartedAtRaw : 0;
+      const effectiveHoldStart = holdStartedAt > 0 ? holdStartedAt : nowHoldMs;
+      const holdAgeMs = Math.max(0, nowHoldMs - effectiveHoldStart);
+      if (holdStartedAt <= 0 && videoNode.dataset) {
+        videoNode.dataset.mwRegularMainBlurHoldStartedAt = String(nowHoldMs);
+      }
+      if (holdAgeMs < REGULAR_MAIN_BLUR_HOLD_TTL_MS) {
+        holdBlurDuringUnresolvedTransition = true;
+        console.log(
+          '[MW-MVP-REGULAR-THUMB-BLUR-HOLD-V4] hold_unresolved_transition',
+          'reason=' + (reason || 'unknown'),
+          'nodeId=' + videoNodeId,
+          'holdAgeMs=' + holdAgeMs,
+          'ttlMs=' + REGULAR_MAIN_BLUR_HOLD_TTL_MS,
+          'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
+          'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown')
+        );
+        postNonShortsTransitionDiag('regular_main_blur_hold_unresolved_transition', {
+          reason: String(reason || 'unknown'),
+          nodeId: videoNodeId,
+          marker: 'MW-MVP-REGULAR-THUMB-BLUR-HOLD-V4',
+          holdAgeMs: holdAgeMs,
+          ttlMs: REGULAR_MAIN_BLUR_HOLD_TTL_MS,
+          strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+          hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+        });
+      } else {
+        if (videoNode.dataset) {
+          delete videoNode.dataset.mwRegularMainBlurHoldStartedAt;
+        }
+        console.log(
+          '[MW-MVP-REGULAR-THUMB-BLUR-HOLD-V4] hold_expired_clear_allowed',
+          'reason=' + (reason || 'unknown'),
+          'nodeId=' + videoNodeId,
+          'holdAgeMs=' + holdAgeMs,
+          'ttlMs=' + REGULAR_MAIN_BLUR_HOLD_TTL_MS
+        );
+        postNonShortsTransitionDiag('regular_main_blur_hold_expired_clear_allowed', {
+          reason: String(reason || 'unknown'),
+          nodeId: videoNodeId,
+          marker: 'MW-MVP-REGULAR-THUMB-BLUR-HOLD-V4',
+          holdAgeMs: holdAgeMs,
+          ttlMs: REGULAR_MAIN_BLUR_HOLD_TTL_MS,
+        });
+      }
+    } else if (videoNode.dataset && videoNode.dataset.mwRegularMainBlurHoldStartedAt) {
+      delete videoNode.dataset.mwRegularMainBlurHoldStartedAt;
+    }
+    if (
+      hasAuthoritativeBlur &&
+      !contextData &&
+      !hardKeyMatchesStrict &&
+      !hardSrcMatchesCurrent &&
+      !holdBlurDuringUnresolvedTransition
+    ) {
       videoNode.style.removeProperty('filter');
       videoNode.style.removeProperty('-webkit-filter');
       videoNode.style.removeProperty('backdrop-filter');
