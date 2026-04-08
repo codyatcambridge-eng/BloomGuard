@@ -3327,15 +3327,32 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
     }
     if (strictContinuityItemKey === 'unknown' && nearbyShortsAnchorId !== 'unknown') {
-      strictContinuityItemKey = nearbyShortsAnchorId;
-      derivedAnchorItemKey = nearbyShortsAnchorId;
-      console.log(
-        '[DIAG][HOME_SHORTS_KEY_DERIVE] nearby_anchor_fallback',
-        'nodeId=' + videoNodeId,
-        'cardNodeId=' + cardNodeId,
-        'derivedKey=' + nearbyShortsAnchorId,
-        'reason=' + (reason || 'unknown')
-      );
+      if (isHomeShortsShelfVideo) {
+        strictContinuityItemKey = nearbyShortsAnchorId;
+        derivedAnchorItemKey = nearbyShortsAnchorId;
+        console.log(
+          '[DIAG][HOME_SHORTS_KEY_DERIVE] nearby_anchor_fallback',
+          'nodeId=' + videoNodeId,
+          'cardNodeId=' + cardNodeId,
+          'derivedKey=' + nearbyShortsAnchorId,
+          'reason=' + (reason || 'unknown')
+        );
+      } else if (isRegularMainSurfaceNonShortsVideo) {
+        console.log(
+          '[MW-MVP-REGULAR-THUMB-REATTACH-GUARD-V2] skip_nearby_shorts_anchor_non_shorts',
+          'reason=' + (reason || 'unknown'),
+          'nodeId=' + videoNodeId,
+          'cardNodeId=' + cardNodeId,
+          'nearbyShortsAnchorId=' + nearbyShortsAnchorId
+        );
+        postNonShortsTransitionDiag('regular_main_skip_nearby_shorts_anchor_non_shorts', {
+          reason: String(reason || 'unknown'),
+          nodeId: videoNodeId,
+          cardNodeId: cardNodeId,
+          marker: 'MW-MVP-REGULAR-THUMB-REATTACH-GUARD-V2',
+          nearbyShortsAnchorId: String(nearbyShortsAnchorId || 'unknown'),
+        });
+      }
     }
     const usingDerivedStrictKey = (
       reattachItemKey === 'unknown' &&
@@ -4031,7 +4048,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       overlayPresent: !!videoOverlay,
     });
 
-    let staleOverlay = null;
+    let staleOverlayCount = 0;
     if (card && typeof card.querySelectorAll === 'function') {
       const overlays = card.querySelectorAll('.mw-reveal-overlay');
       for (let i = 0; i < overlays.length; i += 1) {
@@ -4039,32 +4056,51 @@ export function generateModerationScript(config: InjectionConfig): string {
         if (!overlay || overlay.nodeType !== 1 || !overlay.isConnected) continue;
         const anchorNodeId = String((overlay.dataset && overlay.dataset.mwNodeId) || '');
         if (anchorNodeId && anchorNodeId !== videoNodeId) {
-          staleOverlay = overlay;
-          break;
+          console.warn(
+            '[DIAG][NON_SHORTS_REATTACH] stale_overlay_detected',
+            'reason=' + (reason || 'unknown'),
+            'nodeId=' + videoNodeId,
+            'overlayId=' + String((overlay.dataset && overlay.dataset.mwOverlayId) || 'unknown'),
+            'overlayNodeId=' + String((overlay.dataset && overlay.dataset.mwNodeId) || 'none'),
+            'activeVideoBlurred=' + activeVideoBlurred
+          );
+          if (overlay.parentElement) {
+            const staleOverlayId = String((overlay.dataset && overlay.dataset.mwOverlayId) || 'unknown');
+            const staleOverlayNodeId = String((overlay.dataset && overlay.dataset.mwNodeId) || 'none');
+            overlay.parentElement.removeChild(overlay);
+            staleOverlayCount += 1;
+            console.log(
+              '[DIAG][NON_SHORTS_REATTACH] stale_overlay_removed',
+              'reason=' + (reason || 'unknown'),
+              'nodeId=' + videoNodeId,
+              'overlayId=' + staleOverlayId,
+              'overlayNodeId=' + staleOverlayNodeId
+            );
+          }
         }
       }
     }
-    if (staleOverlay) {
-      console.warn(
-        '[DIAG][NON_SHORTS_REATTACH] stale_overlay_detected',
+    if (staleOverlayCount > 0 && isRegularMainSurfaceNonShortsVideo) {
+      console.log(
+        '[MW-MVP-REGULAR-THUMB-REATTACH-GUARD-V2] stale_overlay_sweep',
         'reason=' + (reason || 'unknown'),
         'nodeId=' + videoNodeId,
-        'overlayId=' + String((staleOverlay.dataset && staleOverlay.dataset.mwOverlayId) || 'unknown'),
-        'overlayNodeId=' + String((staleOverlay.dataset && staleOverlay.dataset.mwNodeId) || 'none'),
-        'activeVideoBlurred=' + activeVideoBlurred
+        'removed=' + staleOverlayCount
       );
-      if (staleOverlay.parentElement) {
-        const staleOverlayId = String((staleOverlay.dataset && staleOverlay.dataset.mwOverlayId) || 'unknown');
-        const staleOverlayNodeId = String((staleOverlay.dataset && staleOverlay.dataset.mwNodeId) || 'none');
-        staleOverlay.parentElement.removeChild(staleOverlay);
-        console.log(
-          '[DIAG][NON_SHORTS_REATTACH] stale_overlay_removed',
-          'reason=' + (reason || 'unknown'),
-          'nodeId=' + videoNodeId,
-          'overlayId=' + staleOverlayId,
-          'overlayNodeId=' + staleOverlayNodeId
-        );
-      }
+      postNonShortsTransitionDiag('regular_main_stale_overlay_sweep', {
+        reason: String(reason || 'unknown'),
+        nodeId: videoNodeId,
+        marker: 'MW-MVP-REGULAR-THUMB-REATTACH-GUARD-V2',
+        removed: staleOverlayCount,
+      });
+    }
+    if (staleOverlayCount > 0) {
+      console.log(
+        '[DIAG][NON_SHORTS_REATTACH] stale_overlay_sweep_done',
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'removed=' + staleOverlayCount
+      );
     }
   }
 
