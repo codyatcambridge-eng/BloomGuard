@@ -4275,6 +4275,24 @@ export function generateModerationScript(config: InjectionConfig): string {
         String((overlay.dataset && overlay.dataset.mwNodeId) || '') === videoNodeId
       );
     };
+    const normalizeNonShortsOverlayPresentation = function(overlay) {
+      if (!overlay || overlay.nodeType !== 1 || !overlay.isConnected) return;
+      overlay.style.position = 'absolute';
+      overlay.style.inset = '0';
+      overlay.style.display = 'flex';
+      overlay.style.alignItems = 'center';
+      overlay.style.justifyContent = 'center';
+      overlay.style.pointerEvents = 'none';
+      overlay.style.zIndex = '9998';
+      const button = overlay.querySelector ? overlay.querySelector('.mw-reveal-btn') : null;
+      if (button && button.nodeType === 1) {
+        button.style.pointerEvents = 'auto';
+      }
+    };
+    const applyRegularNonShortsOverlayNormalization = !!(
+      regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo
+    );
     const normalizeOverlayAnchor = function(overlay, phase) {
       if (!isOverlayNodeIdAnchored(overlay)) {
         return { overlay: overlay, anchored: false };
@@ -4355,6 +4373,24 @@ export function generateModerationScript(config: InjectionConfig): string {
           if (!matchesReattachKey && !matchesContextKey && !allowSingleOverlayCardFallback) continue;
           const anchorNodeId = String((candidateOverlay.dataset && candidateOverlay.dataset.mwNodeId) || '');
           if (anchorNodeId === videoNodeId) {
+            if (applyRegularNonShortsOverlayNormalization && videoNode.parentElement) {
+              if (candidateOverlay.parentElement !== videoNode.parentElement) {
+                videoNode.parentElement.appendChild(candidateOverlay);
+                console.log(
+                  '[DIAG][NON_SHORTS_REATTACH] overlay_reparent_same_nodeid',
+                  'reason=' + (reason || 'unknown'),
+                  'nodeId=' + videoNodeId,
+                  'overlayId=' + String((candidateOverlay.dataset && candidateOverlay.dataset.mwOverlayId) || 'unknown')
+                );
+              }
+              const parentPos = window.getComputedStyle(videoNode.parentElement).position;
+              if (parentPos === 'static') {
+                videoNode.parentElement.style.position = 'relative';
+              }
+            }
+            if (applyRegularNonShortsOverlayNormalization) {
+              normalizeNonShortsOverlayPresentation(candidateOverlay);
+            }
             migratedOverlay = candidateOverlay;
             break;
           }
@@ -4369,8 +4405,12 @@ export function generateModerationScript(config: InjectionConfig): string {
           }
           candidateOverlay.dataset.mwNodeId = videoNodeId;
           candidateOverlay.dataset.mwFor = overlayProbeSrc;
-          candidateOverlay.style.display = 'flex';
-          candidateOverlay.style.pointerEvents = 'none';
+          if (applyRegularNonShortsOverlayNormalization) {
+            normalizeNonShortsOverlayPresentation(candidateOverlay);
+          } else {
+            candidateOverlay.style.display = 'flex';
+            candidateOverlay.style.pointerEvents = 'none';
+          }
           migratedOverlay = candidateOverlay;
           console.log(
             '[DIAG][NON_SHORTS_REATTACH] overlay_migrated_to_video',
