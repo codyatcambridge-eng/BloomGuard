@@ -3056,6 +3056,29 @@ export function generateModerationScript(config: InjectionConfig): string {
     return node.closest(NON_SHORTS_REATTACH_STRONG_CARD_SELECTOR);
   }
 
+  function findRegularMainCardFallbackNode(node) {
+    if (!node || node.nodeType !== 1) return null;
+    let cursor = node.parentElement || null;
+    for (let depth = 0; depth < 10 && cursor; depth += 1) {
+      if (isNonShortsStrongCardNode(cursor)) return cursor;
+      const nodeId = String(cursor.id || '').toLowerCase();
+      if (nodeId === 'content') {
+        cursor = cursor.parentElement || null;
+        continue;
+      }
+      if (typeof cursor.querySelectorAll === 'function') {
+        const shortsLockups = cursor.querySelectorAll('ytm-shorts-lockup-view-model');
+        const shortsAnchors = cursor.querySelectorAll('a[href*="/shorts/"]');
+        if (shortsLockups.length < 1 && shortsAnchors.length < 1) {
+          const watchAnchors = cursor.querySelectorAll('a[href*="/watch"]');
+          if (watchAnchors.length === 1) return cursor;
+        }
+      }
+      cursor = cursor.parentElement || null;
+    }
+    return null;
+  }
+
   function buildRegularMainCardBlurLatchKey(navId, pageEpoch, cardNodeId) {
     return String(navId || 'none') + '|' + String(pageEpoch || 0) + '|' + String(cardNodeId || 'none');
   }
@@ -3457,15 +3480,27 @@ export function generateModerationScript(config: InjectionConfig): string {
           'cardNodeId=' + cardNodeId
         );
       } else {
-        card = null;
-        cardNodeId = 'none';
-        console.log(
-          '[MW-MVP-REGULAR-THUMB-CARD-BOUNDARY-V1] reject_weak_boundary',
-          'reason=' + (reason || 'unknown'),
-          'nodeId=' + videoNodeId,
-          'cardNodeId=none',
-          'weakBoundary=true'
-        );
+        const fallbackCard = findRegularMainCardFallbackNode(videoNode);
+        if (fallbackCard) {
+          card = fallbackCard;
+          cardNodeId = getDiagNodeId(fallbackCard);
+          console.log(
+            '[MW-MVP-REGULAR-THUMB-CARD-BOUNDARY-V1] fallback_watch_card_boundary',
+            'reason=' + (reason || 'unknown'),
+            'nodeId=' + videoNodeId,
+            'cardNodeId=' + cardNodeId
+          );
+        } else {
+          card = null;
+          cardNodeId = 'none';
+          console.log(
+            '[MW-MVP-REGULAR-THUMB-CARD-BOUNDARY-V1] reject_weak_boundary',
+            'reason=' + (reason || 'unknown'),
+            'nodeId=' + videoNodeId,
+            'cardNodeId=none',
+            'weakBoundary=true'
+          );
+        }
       }
     }
     if (isRegularMainSurfaceNonShortsVideo && !regularPathQuarantinePassed) {
@@ -3490,7 +3525,14 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     let strictContinuityItemKey = reattachItemKey;
     let derivedAnchorItemKey = 'unknown';
-    const nearbyShortsAnchorId = deriveNearbyShortsAnchorId(videoNode);
+    const nearbyShortsAnchorId = (function() {
+      if (isHomeShortsShelfVideo) return deriveNearbyShortsAnchorId(videoNode);
+      if (regularPathQuarantinePassed) {
+        if (!card) return 'unknown';
+        return deriveNearbyShortsAnchorId(card);
+      }
+      return deriveNearbyShortsAnchorId(videoNode);
+    })();
     if (
       isHomeShortsShelfVideo &&
       card &&
