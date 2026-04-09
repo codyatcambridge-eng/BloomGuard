@@ -2974,6 +2974,15 @@ export function generateModerationScript(config: InjectionConfig): string {
     'ytd-grid-video-renderer',
     '#content',
   ].join(',');
+  const NON_SHORTS_REATTACH_STRONG_CARD_SELECTOR = [
+    'ytm-rich-item-renderer',
+    'ytm-video-with-context-renderer',
+    'ytm-compact-video-renderer',
+    'ytd-rich-item-renderer',
+    'ytd-video-renderer',
+    'ytd-compact-video-renderer',
+    'ytd-grid-video-renderer',
+  ].join(',');
   const NON_SHORTS_REATTACH_CONTEXT_TTL_MS = 45000;
   const NON_SHORTS_REATTACH_CONTEXT_MAX = 400;
   const NON_SHORTS_REATTACH_COOLDOWN_MS = 80;
@@ -3031,6 +3040,20 @@ export function generateModerationScript(config: InjectionConfig): string {
   function findNonShortsReattachCardNode(node) {
     if (!node || node.nodeType !== 1 || typeof node.closest !== 'function') return null;
     return node.closest(NON_SHORTS_REATTACH_CARD_SELECTOR);
+  }
+
+  function isNonShortsStrongCardNode(node) {
+    if (!node || node.nodeType !== 1 || typeof node.matches !== 'function') return false;
+    try {
+      return !!node.matches(NON_SHORTS_REATTACH_STRONG_CARD_SELECTOR);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function findNonShortsStrongCardNode(node) {
+    if (!node || node.nodeType !== 1 || typeof node.closest !== 'function') return null;
+    return node.closest(NON_SHORTS_REATTACH_STRONG_CARD_SELECTOR);
   }
 
   function buildRegularMainCardBlurLatchKey(navId, pageEpoch, cardNodeId) {
@@ -3382,10 +3405,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     const reattachItemKey = getDiagItemKey(normalizedPoster || normalizedCurrent || '');
     const reattachItemId = String((videoNode.dataset && videoNode.dataset.mwItemId) || 'none');
     const videoNodeId = getDiagNodeId(videoNode);
-    const card = (typeof videoNode.closest === 'function')
+    let card = (typeof videoNode.closest === 'function')
       ? videoNode.closest(NON_SHORTS_REATTACH_CARD_SELECTOR)
       : null;
-    const cardNodeId = card ? getDiagNodeId(card) : 'none';
+    let cardNodeId = card ? getDiagNodeId(card) : 'none';
     const isHomeShortsShelfVideo = isYouTubeMainPageShortsShelfVideoNode(videoNode);
     const isRegularMainSurfaceNonShortsVideo = (function() {
       if (!isMainSurfaceUrl || isHomeShortsShelfVideo) return false;
@@ -3422,6 +3445,29 @@ export function generateModerationScript(config: InjectionConfig): string {
       !hasDirectShortsLockupOnNodePath &&
       !hasDirectShortsAnchorOnNodePath
     );
+    if (regularPathQuarantinePassed && card && !isNonShortsStrongCardNode(card)) {
+      const strongCard = findNonShortsStrongCardNode(videoNode);
+      if (strongCard) {
+        card = strongCard;
+        cardNodeId = getDiagNodeId(strongCard);
+        console.log(
+          '[MW-MVP-REGULAR-THUMB-CARD-BOUNDARY-V1] upgraded_boundary',
+          'reason=' + (reason || 'unknown'),
+          'nodeId=' + videoNodeId,
+          'cardNodeId=' + cardNodeId
+        );
+      } else {
+        card = null;
+        cardNodeId = 'none';
+        console.log(
+          '[MW-MVP-REGULAR-THUMB-CARD-BOUNDARY-V1] reject_weak_boundary',
+          'reason=' + (reason || 'unknown'),
+          'nodeId=' + videoNodeId,
+          'cardNodeId=none',
+          'weakBoundary=true'
+        );
+      }
+    }
     if (isRegularMainSurfaceNonShortsVideo && !regularPathQuarantinePassed) {
       console.log(
         '[MW-MVP-REGULAR-THUMB-QUARANTINE-V6-DIRECT-PATH] regular_path_special_handling_blocked',
@@ -3550,7 +3596,18 @@ export function generateModerationScript(config: InjectionConfig): string {
           contextItemKeyForCard !== 'unknown' &&
           strictContinuityItemKey === contextItemKeyForCard
         );
-        if (strictCardMatch) {
+        const cardContextHardItemKey = String((contextNode.dataset && contextNode.dataset.mwHardBlurItemKey) || 'unknown');
+        const cardContextHardSrc = normalizeUrl(String((contextNode.dataset && contextNode.dataset.mwHardBlurSrc) || '')) || '';
+        const strictUnknownButCardAuthoritative = !!(
+          regularPathQuarantinePassed &&
+          !isHomeShortsShelfVideo &&
+          cardNodeId !== 'none' &&
+          (!strictContinuityItemKey || strictContinuityItemKey === 'unknown') &&
+          isAuthoritativeHardBlur(contextNode) &&
+          cardContextHardItemKey !== 'unknown' &&
+          cardContextHardSrc
+        );
+        if (strictCardMatch || strictUnknownButCardAuthoritative) {
           contextKind = 'card_blurred';
           contextData = {
             src: String((contextNode.dataset && contextNode.dataset.mwSrc) || normalizedPoster || normalizedCurrent || ''),
@@ -3558,6 +3615,22 @@ export function generateModerationScript(config: InjectionConfig): string {
             itemId: String((contextNode.dataset && contextNode.dataset.mwItemId) || reattachItemId || ''),
             blurPx: Number((contextNode.dataset && contextNode.dataset.mwBlurStrength) || '') || (IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20)),
           };
+          if (strictUnknownButCardAuthoritative) {
+            strictContinuityItemKey = String(
+              (contextItemKeyForCard && contextItemKeyForCard !== 'unknown')
+                ? contextItemKeyForCard
+                : cardContextHardItemKey
+            );
+            console.log(
+              '[MW-MVP-REGULAR-THUMB-ADOPT-V1] strict_unknown_card_authoritative_adopt',
+              'reason=' + (reason || 'unknown'),
+              'nodeId=' + videoNodeId,
+              'cardNodeId=' + cardNodeId,
+              'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
+              'contextItemKey=' + String(contextItemKeyForCard || 'unknown'),
+              'contextHardItemKey=' + String(cardContextHardItemKey || 'unknown')
+            );
+          }
         } else {
           console.log(
             '[DIAG][NON_SHORTS_REATTACH] card_blurred_blocked_non_strict',
