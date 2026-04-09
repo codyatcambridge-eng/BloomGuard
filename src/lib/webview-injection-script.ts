@@ -4284,6 +4284,27 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       const overlayId = String((overlay.dataset && overlay.dataset.mwOverlayId) || 'unknown');
       if (regularPathQuarantinePassed && activeVideoBlurred) {
+        const resolvedRegularOwnership = !!(contextData || hasAuthoritativeBlur);
+        if (resolvedRegularOwnership) {
+          console.warn(
+            '[MW-MVP-REGULAR-THUMB-OVERLAY-ANCHOR-V1] overlay_geometry_mismatch_force_recreate',
+            'reason=' + (reason || 'unknown'),
+            'phase=' + String(phase || 'unknown'),
+            'nodeId=' + videoNodeId,
+            'overlayId=' + overlayId
+          );
+          if (overlay.parentElement) {
+            overlay.parentElement.removeChild(overlay);
+            console.log(
+              '[DIAG][NON_SHORTS_REATTACH] overlay_removed_geometry_mismatch_force_recreate',
+              'reason=' + (reason || 'unknown'),
+              'phase=' + String(phase || 'unknown'),
+              'nodeId=' + videoNodeId,
+              'overlayId=' + overlayId
+            );
+          }
+          return { overlay: null, anchored: false };
+        }
         console.warn(
           '[MW-MVP-REGULAR-THUMB-CONTINUITY-V1] overlay_geometry_mismatch_keep',
           'reason=' + (reason || 'unknown'),
