@@ -2986,6 +2986,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   const NON_SHORTS_REATTACH_CONTEXT_TTL_MS = 45000;
   const NON_SHORTS_REATTACH_CONTEXT_MAX = 400;
   const NON_SHORTS_REATTACH_COOLDOWN_MS = 80;
+  const NON_SHORTS_REVEAL_INTENT_TTL_MS = 1600;
   const NON_SHORTS_REATTACH_CARD_FALLBACK_ITEM_KEY = '__card_latest__';
   const NON_SHORTS_REATTACH_MIN_OVERLAY_INTERSECTION_RATIO = 0.35;
   const NON_SHORTS_REATTACH_MAX_CENTER_OFFSET_RATIO = 0.7;
@@ -3421,6 +3422,26 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (videoNode.dataset) {
       videoNode.dataset.mwNonShortsReattachAt = String(now);
     }
+    const revealFallbackScopeEligible = !!(
+      regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo
+    );
+    const isUserRevealIntentReason = !!(
+      reasonText === 'event:play' ||
+      reasonText === 'event:playing' ||
+      reasonText === 'event:loadeddata'
+    );
+    if (videoNode.dataset && revealFallbackScopeEligible && isUserRevealIntentReason) {
+      videoNode.dataset.mwPendingRevealUntil = String(now + NON_SHORTS_REVEAL_INTENT_TTL_MS);
+    }
+    const pendingRevealUntil = Number((videoNode.dataset && videoNode.dataset.mwPendingRevealUntil) || '0');
+    const pendingRevealActive = Number.isFinite(pendingRevealUntil) && pendingRevealUntil > now;
+    const videoLikelyPlaying = !!(
+      videoNode &&
+      !videoNode.paused &&
+      !videoNode.ended &&
+      Number(videoNode.readyState || 0) >= 2
+    );
 
     const source = getDiagSourceFields(videoNode);
     const normalizedPoster = normalizeUrl(source.poster || '') || '';
@@ -4252,7 +4273,53 @@ export function generateModerationScript(config: InjectionConfig): string {
       String((contextData && contextData.src) || (contextNode && contextNode.dataset && contextNode.dataset.mwSrc) || '')
     );
     let videoOverlay = findRevealOverlayForElement(videoNode, overlayProbeSrc);
-    if (!activeVideoBlurred && videoOverlay && videoOverlay.parentElement) {
+    const overlayNodeId = String((videoOverlay && videoOverlay.dataset && videoOverlay.dataset.mwNodeId) || '');
+    const overlayForSrc = String((videoOverlay && videoOverlay.dataset && videoOverlay.dataset.mwFor) || '');
+    const overlayForItemKey = getDiagItemKey(overlayForSrc);
+    const overlayWithinCard = !!(
+      card &&
+      videoOverlay &&
+      typeof card.contains === 'function' &&
+      card.contains(videoOverlay)
+    );
+    const cardOverlayCount = (
+      card && typeof card.querySelectorAll === 'function'
+        ? card.querySelectorAll('.mw-reveal-overlay').length
+        : 0
+    );
+    const keepOverlayDuringRegularUnresolvedChurn = !!(
+      regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo &&
+      isTransitionChurnReason &&
+      !activeVideoBlurred &&
+      !contextData &&
+      !!videoOverlay &&
+      !!videoOverlay.isConnected &&
+      !!videoOverlay.parentElement &&
+      overlayWithinCard &&
+      overlayNodeId === videoNodeId &&
+      overlayForItemKey !== 'unknown' &&
+      (
+        (reattachItemKey !== 'unknown' && overlayForItemKey === reattachItemKey) ||
+        (strictContinuityItemKey && strictContinuityItemKey !== 'unknown' && overlayForItemKey === strictContinuityItemKey) ||
+        (cardOverlayCount === 1)
+      )
+    );
+    const strictContinuityUnknown = !strictContinuityItemKey || strictContinuityItemKey === 'unknown';
+    const nonShortsPendingRevealGuard = !!(
+      revealFallbackScopeEligible &&
+      !contextData &&
+      strictContinuityUnknown &&
+      reattachItemKey === 'unknown' &&
+      (isUserRevealIntentReason || pendingRevealActive || videoLikelyPlaying)
+    );
+    if (
+      !activeVideoBlurred &&
+      !keepOverlayDuringRegularUnresolvedChurn &&
+      !nonShortsPendingRevealGuard &&
+      videoOverlay &&
+      videoOverlay.parentElement
+    ) {
       const orphanOverlayId = String((videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown');
       videoOverlay.parentElement.removeChild(videoOverlay);
       videoOverlay = null;
@@ -4266,6 +4333,98 @@ export function generateModerationScript(config: InjectionConfig): string {
         reason: String(reason || 'unknown'),
         nodeId: videoNodeId,
         overlayId: orphanOverlayId,
+      });
+    } else if (keepOverlayDuringRegularUnresolvedChurn) {
+      console.log(
+        '[MW-MVP-REGULAR-THUMB-OVERLAY-HOLD-V1] keep_overlay_unresolved_churn_same_node',
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'overlayId=' + String((videoOverlay && videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown'),
+        'overlayItemKey=' + String(overlayForItemKey || 'unknown'),
+        'cardOverlayCount=' + String(cardOverlayCount || 0)
+      );
+      postNonShortsTransitionDiag('regular_main_keep_overlay_unresolved_churn_same_node', {
+        reason: String(reason || 'unknown'),
+        nodeId: videoNodeId,
+        marker: 'MW-MVP-REGULAR-THUMB-OVERLAY-HOLD-V1',
+        overlayItemKey: String(overlayForItemKey || 'unknown'),
+        cardOverlayCount: Number(cardOverlayCount || 0),
+      });
+    } else if (nonShortsPendingRevealGuard && videoOverlay && videoOverlay.parentElement) {
+      console.log(
+        '[MW-MVP-REGULAR-THUMB-REVEAL-FALLBACK-V1] overlay_remove_blocked_pending_reveal',
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'overlayId=' + String((videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown')
+      );
+      postNonShortsTransitionDiag('overlay_remove_blocked_pending_reveal', {
+        reason: String(reason || 'unknown'),
+        nodeId: videoNodeId,
+        marker: 'MW-MVP-REGULAR-THUMB-REVEAL-FALLBACK-V1',
+        overlayId: String((videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown'),
+      });
+    }
+    const unresolvedOwnershipAtPlayIntent = !!(
+      revealFallbackScopeEligible &&
+      !contextData &&
+      strictContinuityUnknown &&
+      (reattachItemKey === 'unknown') &&
+      (isUserRevealIntentReason || pendingRevealActive || videoLikelyPlaying)
+    );
+    const hasResidualInlineBlur = !!(
+      String(videoNode.style.getPropertyValue('filter') || videoNode.style.filter || '').toLowerCase().indexOf('blur(') !== -1 ||
+      String(videoNode.style.getPropertyValue('backdrop-filter') || '').toLowerCase().indexOf('blur(') !== -1
+    );
+    const hasResidualBlurClass = !!(
+      videoNode.classList.contains('mw-softblur') ||
+      videoNode.classList.contains('mw-blurred') ||
+      String(videoNode.dataset.mwModerated || '') === 'softblur' ||
+      String(videoNode.dataset.mwModerated || '') === 'blurred'
+    );
+    const shouldApplyRevealFallback = !!(
+      unresolvedOwnershipAtPlayIntent &&
+      ((videoOverlay && videoOverlay.isConnected) || hasResidualInlineBlur || hasResidualBlurClass)
+    );
+    if (shouldApplyRevealFallback) {
+      const hadOverlay = !!(videoOverlay && videoOverlay.parentElement);
+      const changed = clearAllBlurAndOverlay(
+        videoNode,
+        overlayProbeSrc || String((videoNode.dataset && videoNode.dataset.mwSrc) || ''),
+        'regular_main_reveal_fallback_user_intent',
+        'revealed'
+      );
+      if (videoNode.dataset) {
+        videoNode.dataset.mwPendingRevealUntil = '0';
+      }
+      if (hadOverlay) {
+        videoOverlay = null;
+      }
+      if (changed) {
+        console.log(
+          '[MW-MVP-REGULAR-THUMB-REVEAL-FALLBACK-V1] reveal_fallback_applied',
+          'reason=' + (reason || 'unknown'),
+          'nodeId=' + videoNodeId,
+          'scope=regular_non_shorts',
+          'pendingRevealActive=' + String(!!pendingRevealActive),
+          'videoLikelyPlaying=' + String(!!videoLikelyPlaying),
+          'overlayPresent=' + String(!!hadOverlay)
+        );
+        postNonShortsTransitionDiag('reveal_fallback_applied', {
+          reason: String(reason || 'unknown'),
+          nodeId: videoNodeId,
+          marker: 'MW-MVP-REGULAR-THUMB-REVEAL-FALLBACK-V1',
+          scope: 'regular_non_shorts',
+          pendingRevealActive: !!pendingRevealActive,
+          videoLikelyPlaying: !!videoLikelyPlaying,
+          overlayPresent: !!hadOverlay,
+        });
+      }
+    } else if (!revealFallbackScopeEligible && isUserRevealIntentReason) {
+      postNonShortsTransitionDiag('reveal_fallback_skipped_scope', {
+        reason: String(reason || 'unknown'),
+        nodeId: videoNodeId,
+        marker: 'MW-MVP-REGULAR-THUMB-REVEAL-FALLBACK-V1',
+        scope: 'shorts_or_quarantined',
       });
     }
     const isOverlayNodeIdAnchored = function(overlay) {
