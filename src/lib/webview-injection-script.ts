@@ -4319,6 +4319,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     const nonShortsResolvedContextOverlayHold = !!(
       revealFallbackScopeEligible &&
       !!contextData &&
+      (activeVideoBlurred || hasAuthoritativeBlur) &&
       (
         resolvedContextKind === 'card_blurred' ||
         resolvedContextKind === 'itemkey_global'
