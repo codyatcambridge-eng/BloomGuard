@@ -3422,26 +3422,19 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (videoNode.dataset) {
       videoNode.dataset.mwNonShortsReattachAt = String(now);
     }
-    const revealFallbackScopeEligible = !!(
-      regularPathQuarantinePassed &&
-      !isHomeShortsShelfVideo
-    );
     const isUserRevealIntentReason = !!(
       reasonText === 'event:play' ||
       reasonText === 'event:playing' ||
       reasonText === 'event:loadeddata'
     );
-    if (videoNode.dataset && revealFallbackScopeEligible && isUserRevealIntentReason) {
-      videoNode.dataset.mwPendingRevealUntil = String(now + NON_SHORTS_REVEAL_INTENT_TTL_MS);
-    }
-    const pendingRevealUntil = Number((videoNode.dataset && videoNode.dataset.mwPendingRevealUntil) || '0');
-    const pendingRevealActive = Number.isFinite(pendingRevealUntil) && pendingRevealUntil > now;
     const videoLikelyPlaying = !!(
       videoNode &&
       !videoNode.paused &&
       !videoNode.ended &&
       Number(videoNode.readyState || 0) >= 2
     );
+    let revealFallbackScopeEligible = false;
+    let pendingRevealActive = false;
 
     const source = getDiagSourceFields(videoNode);
     const normalizedPoster = normalizeUrl(source.poster || '') || '';
@@ -3544,6 +3537,15 @@ export function generateModerationScript(config: InjectionConfig): string {
         hasDirectShortsAnchorOnNodePath: !!hasDirectShortsAnchorOnNodePath,
       });
     }
+    revealFallbackScopeEligible = !!(
+      regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo
+    );
+    if (videoNode.dataset && revealFallbackScopeEligible && isUserRevealIntentReason) {
+      videoNode.dataset.mwPendingRevealUntil = String(now + NON_SHORTS_REVEAL_INTENT_TTL_MS);
+    }
+    const pendingRevealUntil = Number((videoNode.dataset && videoNode.dataset.mwPendingRevealUntil) || '0');
+    pendingRevealActive = Number.isFinite(pendingRevealUntil) && pendingRevealUntil > now;
     let strictContinuityItemKey = reattachItemKey;
     let derivedAnchorItemKey = 'unknown';
     const nearbyShortsAnchorId = (function() {
@@ -4313,9 +4315,29 @@ export function generateModerationScript(config: InjectionConfig): string {
       reattachItemKey === 'unknown' &&
       (isUserRevealIntentReason || pendingRevealActive || videoLikelyPlaying)
     );
+    const resolvedContextKind = String(contextKind || 'none');
+    const nonShortsResolvedContextOverlayHold = !!(
+      revealFallbackScopeEligible &&
+      !!contextData &&
+      (
+        resolvedContextKind === 'card_blurred' ||
+        resolvedContextKind === 'itemkey_global'
+      ) &&
+      (
+        isUserRevealIntentReason ||
+        reasonText === 'event:loadeddata' ||
+        reasonText === 'event:playing' ||
+        reasonText.indexOf('attr:style') === 0 ||
+        pendingRevealActive ||
+        videoLikelyPlaying
+      ) &&
+      !!videoOverlay &&
+      !!videoOverlay.parentElement
+    );
     if (
       !activeVideoBlurred &&
       !keepOverlayDuringRegularUnresolvedChurn &&
+      !nonShortsResolvedContextOverlayHold &&
       !nonShortsPendingRevealGuard &&
       videoOverlay &&
       videoOverlay.parentElement
@@ -4349,6 +4371,21 @@ export function generateModerationScript(config: InjectionConfig): string {
         marker: 'MW-MVP-REGULAR-THUMB-OVERLAY-HOLD-V1',
         overlayItemKey: String(overlayForItemKey || 'unknown'),
         cardOverlayCount: Number(cardOverlayCount || 0),
+      });
+    } else if (nonShortsResolvedContextOverlayHold) {
+      console.log(
+        '[MW-MVP-REGULAR-THUMB-REVEAL-FALLBACK-V2] regular_non_shorts_overlay_remove_veto_context_resolved',
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'contextKind=' + resolvedContextKind,
+        'overlayId=' + String((videoOverlay && videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown')
+      );
+      postNonShortsTransitionDiag('regular_non_shorts_overlay_remove_veto_context_resolved', {
+        reason: String(reason || 'unknown'),
+        nodeId: videoNodeId,
+        marker: 'MW-MVP-REGULAR-THUMB-REVEAL-FALLBACK-V2',
+        contextKind: resolvedContextKind,
+        overlayId: String((videoOverlay && videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown'),
       });
     } else if (nonShortsPendingRevealGuard && videoOverlay && videoOverlay.parentElement) {
       console.log(
