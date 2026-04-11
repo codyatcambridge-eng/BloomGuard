@@ -1091,6 +1091,16 @@ export const NativeWebViewBrowser = () => {
 
     const targetUrl = urlHint || currentUrlRef.current || '';
     const navId = activeNavIdRef.current || 0;
+    if (isBootstrapBlankUrl(targetUrl)) {
+      console.log(
+        '[DIAG][INJECT] bootstrap_skip',
+        'reason=' + reason,
+        'navId=' + navId,
+        'pageEpoch=' + webViewPageEpochRef.current,
+        'url=' + (targetUrl || 'about:blank'),
+      );
+      return;
+    }
     const now = Date.now();
     const recentlyInjectedSameUrl =
       injectionDoneRef.current &&
@@ -1209,49 +1219,69 @@ export const NativeWebViewBrowser = () => {
       String(webViewPageEpochRef.current),
       String(targetUrl || 'unknown'),
     ].join('|');
+    const markNoHookRecoveryAttempt = () => {
+      const attemptedRecoveries = noHookFallbackRecoverKeysRef.current;
+      if (attemptedRecoveries.has(noHookFallbackKey)) return false;
+      attemptedRecoveries.add(noHookFallbackKey);
+      if (attemptedRecoveries.size > 256) {
+        attemptedRecoveries.clear();
+        attemptedRecoveries.add(noHookFallbackKey);
+      }
+      return true;
+    };
     try {
       const injectResult = await scriptExecutor(mainScript);
       const injectResultText = String(injectResult || '');
       const alreadyActive = injectResultText.includes('MW_ALREADY_ACTIVE');
       if (alreadyActive) {
         if (syncResult === 'NO_HOOK') {
-          const teardownResult = await scriptExecutor(`
-            (function() {
-              try {
-                if (typeof window.__MW_TEARDOWN__ !== 'function') return 'NO_TEARDOWN';
-                window.__MW_TEARDOWN__('host_no_hook_recover');
-                return 'TEARDOWN_OK';
-              } catch (e) {
-                return 'TEARDOWN_ERR:' + String(e);
+          if (markNoHookRecoveryAttempt()) {
+            const teardownResult = await scriptExecutor(`
+              (function() {
+                try {
+                  if (typeof window.__MW_TEARDOWN__ !== 'function') return 'NO_TEARDOWN';
+                  window.__MW_TEARDOWN__('host_no_hook_recover');
+                  return 'TEARDOWN_OK';
+                } catch (e) {
+                  return 'TEARDOWN_ERR:' + String(e);
+                }
+              })();
+            `);
+            const teardownText = String(teardownResult || 'null');
+            console.warn(
+              '[DIAG][INJECT] no_hook_active_recover',
+              'reason=' + reason,
+              'navId=' + navId,
+              'pageEpoch=' + webViewPageEpochRef.current,
+              'url=' + (targetUrl || 'unknown'),
+              'teardown=' + teardownText,
+            );
+            if (teardownText === 'TEARDOWN_OK') {
+              const reinjectResult = await scriptExecutor(mainScript);
+              const reinjectText = String(reinjectResult || '');
+              if (!reinjectText.includes('MW_ALREADY_ACTIVE')) {
+                injectionDoneRef.current = true;
+                lastInjectedUrlRef.current = targetUrl;
+                lastInjectionAtRef.current = Date.now();
+                console.log(
+                  '[DIAG][INJECT] no_hook_active_recover_success',
+                  'reason=' + reason,
+                  'navId=' + navId,
+                  'pageEpoch=' + webViewPageEpochRef.current,
+                  'url=' + (targetUrl || 'unknown'),
+                );
+                exitPendingReinject('inject_no_hook_recover_success', targetUrl);
+                return;
               }
-            })();
-          `);
-          const teardownText = String(teardownResult || 'null');
-          console.warn(
-            '[DIAG][INJECT] no_hook_active_recover',
-            'reason=' + reason,
-            'navId=' + navId,
-            'pageEpoch=' + webViewPageEpochRef.current,
-            'url=' + (targetUrl || 'unknown'),
-            'teardown=' + teardownText,
-          );
-          if (teardownText === 'TEARDOWN_OK') {
-            const reinjectResult = await scriptExecutor(mainScript);
-            const reinjectText = String(reinjectResult || '');
-            if (!reinjectText.includes('MW_ALREADY_ACTIVE')) {
-              injectionDoneRef.current = true;
-              lastInjectedUrlRef.current = targetUrl;
-              lastInjectionAtRef.current = Date.now();
-              console.log(
-                '[DIAG][INJECT] no_hook_active_recover_success',
-                'reason=' + reason,
-                'navId=' + navId,
-                'pageEpoch=' + webViewPageEpochRef.current,
-                'url=' + (targetUrl || 'unknown'),
-              );
-              exitPendingReinject('inject_no_hook_recover_success', targetUrl);
-              return;
             }
+          } else {
+            console.log(
+              '[DIAG][INJECT] no_hook_active_recover_dedup_skip',
+              'reason=' + reason,
+              'navId=' + navId,
+              'pageEpoch=' + webViewPageEpochRef.current,
+              'url=' + (targetUrl || 'unknown'),
+            );
           }
         }
         console.warn(
@@ -1264,13 +1294,7 @@ export const NativeWebViewBrowser = () => {
         return;
       }
       if (syncResult === 'NO_HOOK') {
-        const attemptedRecoveries = noHookFallbackRecoverKeysRef.current;
-        if (!attemptedRecoveries.has(noHookFallbackKey)) {
-          attemptedRecoveries.add(noHookFallbackKey);
-          if (attemptedRecoveries.size > 256) {
-            attemptedRecoveries.clear();
-            attemptedRecoveries.add(noHookFallbackKey);
-          }
+        if (markNoHookRecoveryAttempt()) {
           const teardownResult = await scriptExecutor(`
             (function() {
               try {
@@ -1428,11 +1452,22 @@ export const NativeWebViewBrowser = () => {
       console.log('[DIAG][LOAD] stage=success url=' + toDiagUrl(url));
       console.log('[Browser] ======= LOAD END =======');
       console.log('[Browser] URL:', url);
+      const skipBootstrapLoadEnd = isBootstrapBlankUrl(url);
+      if (skipBootstrapLoadEnd) {
+        console.log(
+          '[DIAG][LOAD] bootstrap_blank_skip',
+          'stage=onLoadEnd',
+          'url=' + toDiagUrl(url),
+          'navId=' + activeNavIdRef.current,
+          'pageEpoch=' + webViewPageEpochRef.current,
+        );
+      }
       logLifecycleSnapshot('page_load_end', url, 'onLoadEnd');
       logHostLayerDiagnostics('load_end');
       setIsLoading(false);
       setFlashGuardState?.(false, 'load_end');
       if (!ENABLE_SIGNAL_PIPELINE) return;
+      if (skipBootstrapLoadEnd) return;
       
       // Inject moderation script after page fully loads
       if (!injectionDoneRef.current) {
