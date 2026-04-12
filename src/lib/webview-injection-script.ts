@@ -4187,18 +4187,6 @@ export function generateModerationScript(config: InjectionConfig): string {
       });
     }
     let activeVideoBlurred = hasAuthoritativeBlur || hasIncidentalBlur;
-    const shouldApplyRegularNonShortsOverlayStickyHold = !!(
-      regularPathQuarantinePassed &&
-      !isHomeShortsShelfVideo &&
-      (activeVideoBlurred || hasAuthoritativeBlur)
-    );
-    if (shouldApplyRegularNonShortsOverlayStickyHold && videoNode.dataset) {
-      const currentStickyUntil = Number(videoNode.dataset.mwOverlayStickyUntil || '0');
-      const nextStickyUntil = now + 1200;
-      if (!Number.isFinite(currentStickyUntil) || currentStickyUntil < nextStickyUntil) {
-        videoNode.dataset.mwOverlayStickyUntil = String(nextStickyUntil);
-      }
-    }
     if (activeVideoBlurred && !hasAuthoritativeBlur && !contextData) {
       videoNode.style.removeProperty('filter');
       videoNode.style.removeProperty('-webkit-filter');
@@ -4441,14 +4429,6 @@ export function generateModerationScript(config: InjectionConfig): string {
       !!videoOverlay.parentElement &&
       (activeVideoBlurred || hasAuthoritativeBlur || hasResidualInlineBlur || hasResidualBlurClass)
     );
-    const nonShortsOverlayStickyHoldActive = !!(
-      regularPathQuarantinePassed &&
-      !isHomeShortsShelfVideo &&
-      Number.isFinite(Number((videoNode.dataset && videoNode.dataset.mwOverlayStickyUntil) || '0')) &&
-      Number((videoNode.dataset && videoNode.dataset.mwOverlayStickyUntil) || '0') > now &&
-      !!videoOverlay &&
-      !!videoOverlay.parentElement
-    );
     if (
       !activeVideoBlurred &&
       !keepOverlayDuringRegularUnresolvedChurn &&
@@ -4456,7 +4436,6 @@ export function generateModerationScript(config: InjectionConfig): string {
       !nonShortsCardBlurredContinuityOverlayHold &&
       !nonShortsPendingRevealGuard &&
       !nonShortsBlurInvariantOverlayHold &&
-      !nonShortsOverlayStickyHoldActive &&
       videoOverlay &&
       videoOverlay.parentElement
     ) {
@@ -4556,22 +4535,6 @@ export function generateModerationScript(config: InjectionConfig): string {
         authoritativeBlur: !!hasAuthoritativeBlur,
         residualInlineBlur: !!hasResidualInlineBlur,
         residualBlurClass: !!hasResidualBlurClass,
-        overlayId: String((videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown'),
-      });
-    } else if (nonShortsOverlayStickyHoldActive && videoOverlay && videoOverlay.parentElement) {
-      const stickyUntil = Number((videoNode.dataset && videoNode.dataset.mwOverlayStickyUntil) || '0');
-      console.log(
-        '[MW-MVP-REGULAR-THUMB-REVEAL-FALLBACK-V4] overlay_remove_veto_sticky_hold',
-        'reason=' + (reason || 'unknown'),
-        'nodeId=' + videoNodeId,
-        'stickyUntil=' + String(stickyUntil || 0),
-        'overlayId=' + String((videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown')
-      );
-      postNonShortsTransitionDiag('regular_non_shorts_overlay_sticky_hold_active', {
-        reason: String(reason || 'unknown'),
-        nodeId: videoNodeId,
-        marker: 'MW-MVP-REGULAR-THUMB-REVEAL-FALLBACK-V4',
-        stickyUntil: Number(stickyUntil || 0),
         overlayId: String((videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown'),
       });
     }
@@ -4676,20 +4639,23 @@ export function generateModerationScript(config: InjectionConfig): string {
             return { overlay: overlay, anchored: false };
           }
           console.warn(
-            '[MW-MVP-REGULAR-THUMB-OVERLAY-ANCHOR-V3] overlay_geometry_mismatch_defer_replace',
+            '[MW-MVP-REGULAR-THUMB-OVERLAY-ANCHOR-V1] overlay_geometry_mismatch_force_recreate',
             'reason=' + (reason || 'unknown'),
             'phase=' + String(phase || 'unknown'),
             'nodeId=' + videoNodeId,
             'overlayId=' + overlayId
           );
-          postNonShortsTransitionDiag('regular_non_shorts_overlay_replace_deferred', {
-            reason: String(reason || 'unknown'),
-            nodeId: videoNodeId,
-            marker: 'MW-MVP-REGULAR-THUMB-OVERLAY-ANCHOR-V3',
-            phase: String(phase || 'unknown'),
-            overlayId: overlayId,
-          });
-          return { overlay: overlay, anchored: false };
+          if (overlay.parentElement) {
+            overlay.parentElement.removeChild(overlay);
+            console.log(
+              '[DIAG][NON_SHORTS_REATTACH] overlay_removed_geometry_mismatch_force_recreate',
+              'reason=' + (reason || 'unknown'),
+              'phase=' + String(phase || 'unknown'),
+              'nodeId=' + videoNodeId,
+              'overlayId=' + overlayId
+            );
+          }
+          return { overlay: null, anchored: false };
         }
         console.warn(
           '[MW-MVP-REGULAR-THUMB-CONTINUITY-V1] overlay_geometry_mismatch_keep',
@@ -4815,35 +4781,6 @@ export function generateModerationScript(config: InjectionConfig): string {
         'itemId=' + String(overlayItemId || 'none'),
         'anchored=' + overlayAnchored
       );
-    }
-    const canForceRecoverAfterApply = !!(
-      regularPathQuarantinePassed &&
-      !isHomeShortsShelfVideo &&
-      (activeVideoBlurred || hasAuthoritativeBlur) &&
-      !overlayAnchored &&
-      !shouldDisableRevealUiForMvpMainPageSurface()
-    );
-    if (canForceRecoverAfterApply) {
-      const recoverSrc = overlayProbeSrc || String((videoNode.dataset && videoNode.dataset.mwSrc) || '');
-      createRevealOverlay(videoNode, recoverSrc, overlayCategory, overlayItemId);
-      videoOverlay = findRevealOverlayForElement(videoNode, recoverSrc);
-      normalizedOverlay = normalizeOverlayAnchor(videoOverlay, 'post_apply_recover');
-      videoOverlay = normalizedOverlay.overlay;
-      overlayAnchored = normalizedOverlay.anchored;
-      console.log(
-        '[MW-MVP-REGULAR-THUMB-REVEAL-FALLBACK-V4] force_recover_after_apply',
-        'reason=' + (reason || 'unknown'),
-        'nodeId=' + videoNodeId,
-        'overlayAnchored=' + String(!!overlayAnchored),
-        'overlayPresent=' + String(!!videoOverlay)
-      );
-      postNonShortsTransitionDiag('regular_non_shorts_overlay_force_recover_after_apply', {
-        reason: String(reason || 'unknown'),
-        nodeId: videoNodeId,
-        marker: 'MW-MVP-REGULAR-THUMB-REVEAL-FALLBACK-V4',
-        overlayAnchored: !!overlayAnchored,
-        overlayPresent: !!videoOverlay,
-      });
     }
     if (overlayAnchored) {
       console.log(
@@ -6135,6 +6072,41 @@ export function generateModerationScript(config: InjectionConfig): string {
     return null;
   }
 
+  function resolveNonShortsRevealOverlayParent(node) {
+    if (!node || node.nodeType !== 1) return null;
+    const immediateParent = node.parentElement;
+    if (!immediateParent) return null;
+
+    const looksLikeStableContainer = function(candidate) {
+      if (!candidate || candidate.nodeType !== 1 || !candidate.isConnected) return false;
+      let display = '';
+      try {
+        display = String(window.getComputedStyle(candidate).display || '');
+      } catch (e) {
+        display = '';
+      }
+      if (display === 'contents') return false;
+      try {
+        if (typeof candidate.getBoundingClientRect !== 'function') return false;
+        const rect = candidate.getBoundingClientRect();
+        const width = Number(rect && rect.width) || 0;
+        const height = Number(rect && rect.height) || 0;
+        return width >= 32 && height >= 32;
+      } catch (e) {
+        return false;
+      }
+    };
+
+    if (looksLikeStableContainer(immediateParent)) return immediateParent;
+    let cursor = immediateParent.parentElement;
+    for (let i = 0; i < 8 && cursor; i += 1) {
+      if (cursor === document.body || cursor === document.documentElement) break;
+      if (looksLikeStableContainer(cursor)) return cursor;
+      cursor = cursor.parentElement;
+    }
+    return immediateParent;
+  }
+
   function getDiagOverlayState(node) {
     if (!node || node.nodeType !== 1) {
       return { hasOverlayFlag: false, overlayAttached: false, overlayVisible: false };
@@ -7159,6 +7131,41 @@ export function generateModerationScript(config: InjectionConfig): string {
         positionShortsRevealOverlay(existingOverlay, element, 'existing_overlay');
         scheduleShortsRevealOverlayReposition('existing_overlay');
         console.log('[DIAG][REVEAL_UI] portal_update', 'itemKey=' + getDiagItemKey(src));
+      } else {
+        const nonShortsOverlayParent = resolveNonShortsRevealOverlayParent(element) || element.parentElement;
+        if (nonShortsOverlayParent) {
+          try {
+            const parentPos = window.getComputedStyle(nonShortsOverlayParent).position;
+            if (parentPos === 'static') {
+              nonShortsOverlayParent.style.position = 'relative';
+            }
+          } catch (e) {}
+          if (existingOverlay.parentElement !== nonShortsOverlayParent) {
+            nonShortsOverlayParent.appendChild(existingOverlay);
+          }
+        }
+        setRevealOverlayAnchorTarget(existingOverlay, element, 'existing_overlay');
+        existingOverlay.style.cssText = [
+          'position: absolute',
+          'inset: 0',
+          'display: flex',
+          'align-items: center',
+          'justify-content: center',
+          'background: rgba(0, 0, 0, 0.3)',
+          'z-index: 9998',
+          'cursor: default',
+          'pointer-events: none',
+        ].join(';');
+        const existingButton = existingOverlay.querySelector ? existingOverlay.querySelector('.mw-reveal-btn') : null;
+        if (existingButton && existingButton.nodeType === 1) {
+          existingButton.style.pointerEvents = 'auto';
+          existingButton.style.position = '';
+          existingButton.style.left = '';
+          existingButton.style.top = '';
+          existingButton.style.right = '';
+          existingButton.style.bottom = '';
+          existingButton.style.transform = '';
+        }
       }
       return;
     }
@@ -7206,7 +7213,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       );
       return;
     }
-    const overlayParent = shortsMode ? ensureRevealPortal() : parent;
+    const overlayParent = shortsMode ? ensureRevealPortal() : (resolveNonShortsRevealOverlayParent(element) || parent);
     if (!overlayParent) return;
     const overlayCountBefore = document.querySelectorAll('.mw-reveal-overlay').length;
     const itemKey = getDiagItemKey(src);
@@ -7229,9 +7236,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       'targetNode=' + getDiagNodeId(element)
     );
     if (!shortsMode) {
-      const parentPos = window.getComputedStyle(parent).position;
+      const parentPos = window.getComputedStyle(overlayParent).position;
       if (parentPos === 'static') {
-        parent.style.position = 'relative';
+        overlayParent.style.position = 'relative';
       }
     }
     
