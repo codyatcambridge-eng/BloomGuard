@@ -3581,6 +3581,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         );
       }
     }
+    let nearbyShortsGuardSkippedNonShorts = false;
     if (strictContinuityItemKey === 'unknown' && nearbyShortsAnchorId !== 'unknown') {
       if (isHomeShortsShelfVideo) {
         strictContinuityItemKey = nearbyShortsAnchorId;
@@ -3593,6 +3594,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           'reason=' + (reason || 'unknown')
         );
       } else if (regularPathQuarantinePassed) {
+        nearbyShortsGuardSkippedNonShorts = true;
         console.log(
           '[MW-MVP-REGULAR-THUMB-REATTACH-GUARD-V2] skip_nearby_shorts_anchor_non_shorts',
           'reason=' + (reason || 'unknown'),
@@ -3866,6 +3868,40 @@ export function generateModerationScript(config: InjectionConfig): string {
         'reason=no_context',
         'nodeId=' + videoNodeId
       );
+    }
+    const preserveCardBlurContinuityAfterNearbyShortsGuard = !!(
+      regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo &&
+      nearbyShortsGuardSkippedNonShorts &&
+      cardNodeId !== 'none' &&
+      !!contextData &&
+      String(contextKind || 'none') === 'card_blurred'
+    );
+    if (preserveCardBlurContinuityAfterNearbyShortsGuard) {
+      const cardContextItemKey = getDiagItemKey(String((contextData && contextData.src) || ''));
+      if (
+        (!strictContinuityItemKey || strictContinuityItemKey === 'unknown') &&
+        cardContextItemKey &&
+        cardContextItemKey !== 'unknown'
+      ) {
+        strictContinuityItemKey = cardContextItemKey;
+      }
+      console.log(
+        '[MW-MVP-REGULAR-THUMB-CONTINUITY-GUARD-V1] preserve_card_blurred_after_nearby_shorts_guard',
+        'reason=' + String(reason || 'unknown'),
+        'nodeId=' + String(videoNodeId || 'none'),
+        'cardNodeId=' + String(cardNodeId || 'none'),
+        'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
+        'contextItemKey=' + String(cardContextItemKey || 'unknown')
+      );
+      postNonShortsTransitionDiag('regular_main_preserve_card_blurred_after_nearby_shorts_guard', {
+        reason: String(reason || 'unknown'),
+        nodeId: String(videoNodeId || 'none'),
+        cardNodeId: String(cardNodeId || 'none'),
+        marker: 'MW-MVP-REGULAR-THUMB-CONTINUITY-GUARD-V1',
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        contextItemKey: String(cardContextItemKey || 'unknown'),
+      });
     }
 
     const computed = getDiagComputedBlurState(videoNode);
@@ -4205,6 +4241,10 @@ export function generateModerationScript(config: InjectionConfig): string {
       applyBlur(videoNode, contextSrc, contextCategory, contextBlurStrength, contextItemId);
       if (strictContinuityItemKey && strictContinuityItemKey !== 'unknown') {
         videoNode.dataset.mwHardBlurItemKey = strictContinuityItemKey;
+      }
+      if (preserveCardBlurContinuityAfterNearbyShortsGuard) {
+        hasAuthoritativeBlur = isAuthoritativeHardBlur(videoNode);
+        activeVideoBlurred = true;
       }
       console.log(
         '[DIAG][NON_SHORTS_REATTACH] heal_apply_blur',
