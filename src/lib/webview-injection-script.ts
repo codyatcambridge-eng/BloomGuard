@@ -6066,7 +6066,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         const overlay = overlays[i];
         if (!overlay || !overlay.isConnected) continue;
         if (overlay.dataset.mwNodeId === nodeId) return overlay;
-        if (!shortsMode && src && overlay.dataset.mwFor === src) return overlay;
+        if (!shortsMode && src && overlay.dataset.mwFor === src && isAuthoritativeHardBlur(node)) return overlay;
       }
     }
     return null;
@@ -7029,7 +7029,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       ' hasOverlay=' + (element.dataset.mwHasOverlay === 'true')
     );
     ensureRevealDocClickCapture();
-    if (shortsMode && element.dataset.mwModerated !== 'blurred') {
+    if (element.dataset.mwModerated !== 'blurred') {
       removeRevealOverlay(element, src, 'createRevealOverlay_not_blurred');
       if (DIAG_YT_BLUR) {
         diagFailCaseLog(
@@ -7093,10 +7093,6 @@ export function generateModerationScript(config: InjectionConfig): string {
     const existingOverlay = findRevealOverlayForElement(element, src);
     if (existingOverlay) {
       element.dataset.mwHasOverlay = 'true';
-      if (shortsMode && element.dataset.mwModerated !== 'blurred') {
-        removeRevealOverlay(element, src, 'createRevealOverlay_existing_not_blurred');
-        return;
-      }
       if (shortsMode) {
         const existingOwnerToken = String(existingOverlay.dataset.mwShortsOwnerToken || '');
         if (!shortsOwnerToken || existingOwnerToken !== shortsOwnerToken) {
