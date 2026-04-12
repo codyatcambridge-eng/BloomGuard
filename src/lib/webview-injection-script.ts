@@ -4413,12 +4413,29 @@ export function generateModerationScript(config: InjectionConfig): string {
         (contextItemKey && contextItemKey !== 'unknown' && overlayForItemKey === contextItemKey)
       )
     );
+    const hasResidualInlineBlur = !!(
+      String(videoNode.style.getPropertyValue('filter') || videoNode.style.filter || '').toLowerCase().indexOf('blur(') !== -1 ||
+      String(videoNode.style.getPropertyValue('backdrop-filter') || '').toLowerCase().indexOf('blur(') !== -1
+    );
+    const hasResidualBlurClass = !!(
+      videoNode.classList.contains('mw-softblur') ||
+      videoNode.classList.contains('mw-blurred') ||
+      String(videoNode.dataset.mwModerated || '') === 'softblur' ||
+      String(videoNode.dataset.mwModerated || '') === 'blurred'
+    );
+    const nonShortsBlurInvariantOverlayHold = !!(
+      revealFallbackScopeEligible &&
+      !!videoOverlay &&
+      !!videoOverlay.parentElement &&
+      (activeVideoBlurred || hasAuthoritativeBlur || hasResidualInlineBlur || hasResidualBlurClass)
+    );
     if (
       !activeVideoBlurred &&
       !keepOverlayDuringRegularUnresolvedChurn &&
       !nonShortsResolvedContextOverlayHold &&
       !nonShortsCardBlurredContinuityOverlayHold &&
       !nonShortsPendingRevealGuard &&
+      !nonShortsBlurInvariantOverlayHold &&
       videoOverlay &&
       videoOverlay.parentElement
     ) {
@@ -4499,6 +4516,27 @@ export function generateModerationScript(config: InjectionConfig): string {
         marker: 'MW-MVP-REGULAR-THUMB-REVEAL-FALLBACK-V1',
         overlayId: String((videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown'),
       });
+    } else if (nonShortsBlurInvariantOverlayHold && videoOverlay && videoOverlay.parentElement) {
+      console.log(
+        '[MW-MVP-REGULAR-THUMB-REVEAL-FALLBACK-V3] overlay_remove_veto_blur_invariant',
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'activeVideoBlurred=' + String(!!activeVideoBlurred),
+        'authoritativeBlur=' + String(!!hasAuthoritativeBlur),
+        'residualInlineBlur=' + String(!!hasResidualInlineBlur),
+        'residualBlurClass=' + String(!!hasResidualBlurClass),
+        'overlayId=' + String((videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown')
+      );
+      postNonShortsTransitionDiag('regular_non_shorts_overlay_remove_veto_blur_invariant', {
+        reason: String(reason || 'unknown'),
+        nodeId: videoNodeId,
+        marker: 'MW-MVP-REGULAR-THUMB-REVEAL-FALLBACK-V3',
+        activeVideoBlurred: !!activeVideoBlurred,
+        authoritativeBlur: !!hasAuthoritativeBlur,
+        residualInlineBlur: !!hasResidualInlineBlur,
+        residualBlurClass: !!hasResidualBlurClass,
+        overlayId: String((videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown'),
+      });
     }
     const unresolvedOwnershipAtPlayIntent = !!(
       revealFallbackScopeEligible &&
@@ -4506,16 +4544,6 @@ export function generateModerationScript(config: InjectionConfig): string {
       strictContinuityUnknown &&
       (reattachItemKey === 'unknown') &&
       (isUserRevealIntentReason || pendingRevealActive || videoLikelyPlaying)
-    );
-    const hasResidualInlineBlur = !!(
-      String(videoNode.style.getPropertyValue('filter') || videoNode.style.filter || '').toLowerCase().indexOf('blur(') !== -1 ||
-      String(videoNode.style.getPropertyValue('backdrop-filter') || '').toLowerCase().indexOf('blur(') !== -1
-    );
-    const hasResidualBlurClass = !!(
-      videoNode.classList.contains('mw-softblur') ||
-      videoNode.classList.contains('mw-blurred') ||
-      String(videoNode.dataset.mwModerated || '') === 'softblur' ||
-      String(videoNode.dataset.mwModerated || '') === 'blurred'
     );
     const shouldApplyRevealFallback = !!(
       unresolvedOwnershipAtPlayIntent &&
@@ -4599,6 +4627,17 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (regularPathQuarantinePassed && (activeVideoBlurred || hasAuthoritativeBlur)) {
         const resolvedRegularOwnership = !!(contextData || hasAuthoritativeBlur);
         if (resolvedRegularOwnership) {
+          const isFreshOverlayPhase = phase === 'post_create' || phase === 'post_migrate';
+          if (isFreshOverlayPhase) {
+            console.warn(
+              '[MW-MVP-REGULAR-THUMB-OVERLAY-ANCHOR-V2] overlay_geometry_mismatch_defer_remove_fresh_overlay',
+              'reason=' + (reason || 'unknown'),
+              'phase=' + String(phase || 'unknown'),
+              'nodeId=' + videoNodeId,
+              'overlayId=' + overlayId
+            );
+            return { overlay: overlay, anchored: false };
+          }
           console.warn(
             '[MW-MVP-REGULAR-THUMB-OVERLAY-ANCHOR-V1] overlay_geometry_mismatch_force_recreate',
             'reason=' + (reason || 'unknown'),
