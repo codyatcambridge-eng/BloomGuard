@@ -4375,10 +4375,28 @@ export function generateModerationScript(config: InjectionConfig): string {
       !!videoOverlay &&
       !!videoOverlay.parentElement
     );
+    const nonShortsCardBlurredContinuityOverlayHold = !!(
+      regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo &&
+      nearbyShortsGuardSkippedNonShorts &&
+      !!contextData &&
+      resolvedContextKind === 'card_blurred' &&
+      !!videoOverlay &&
+      !!videoOverlay.isConnected &&
+      !!videoOverlay.parentElement &&
+      overlayWithinCard &&
+      overlayNodeId === videoNodeId &&
+      overlayForItemKey !== 'unknown' &&
+      (
+        (strictContinuityItemKey && strictContinuityItemKey !== 'unknown' && overlayForItemKey === strictContinuityItemKey) ||
+        (contextItemKey && contextItemKey !== 'unknown' && overlayForItemKey === contextItemKey)
+      )
+    );
     if (
       !activeVideoBlurred &&
       !keepOverlayDuringRegularUnresolvedChurn &&
       !nonShortsResolvedContextOverlayHold &&
+      !nonShortsCardBlurredContinuityOverlayHold &&
       !nonShortsPendingRevealGuard &&
       videoOverlay &&
       videoOverlay.parentElement
@@ -4427,6 +4445,25 @@ export function generateModerationScript(config: InjectionConfig): string {
         marker: 'MW-MVP-REGULAR-THUMB-REVEAL-FALLBACK-V2',
         contextKind: resolvedContextKind,
         overlayId: String((videoOverlay && videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown'),
+      });
+    } else if (nonShortsCardBlurredContinuityOverlayHold) {
+      console.log(
+        '[MW-MVP-REGULAR-THUMB-CONTINUITY-GUARD-V2] overlay_remove_veto_card_blurred_nearby_shorts_guard',
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'overlayId=' + String((videoOverlay && videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown'),
+        'overlayItemKey=' + String(overlayForItemKey || 'unknown'),
+        'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
+        'contextItemKey=' + String(contextItemKey || 'unknown')
+      );
+      postNonShortsTransitionDiag('regular_main_overlay_remove_veto_card_blurred_nearby_shorts_guard', {
+        reason: String(reason || 'unknown'),
+        nodeId: videoNodeId,
+        marker: 'MW-MVP-REGULAR-THUMB-CONTINUITY-GUARD-V2',
+        overlayId: String((videoOverlay && videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown'),
+        overlayItemKey: String(overlayForItemKey || 'unknown'),
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        contextItemKey: String(contextItemKey || 'unknown'),
       });
     } else if (nonShortsPendingRevealGuard && videoOverlay && videoOverlay.parentElement) {
       console.log(
