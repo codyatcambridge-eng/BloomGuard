@@ -5865,6 +5865,185 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
   }
 
+  function getRevealOverlayDebugId(overlay) {
+    if (!overlay || overlay.nodeType !== 1) return 'unknown';
+    return String((overlay.dataset && overlay.dataset.mwOverlayId) || 'unknown');
+  }
+
+  function getRevealOverlaySrc(overlay) {
+    if (!overlay || overlay.nodeType !== 1) return '';
+    return String((overlay.dataset && overlay.dataset.mwFor) || '');
+  }
+
+  function isPortalRevealOverlay(overlay) {
+    if (!overlay || overlay.nodeType !== 1) return false;
+    const parent = overlay.parentElement;
+    return !!(parent && parent.nodeType === 1 && String(parent.id || '') === REVEAL_PORTAL_ID);
+  }
+
+  function resolveRevealOverlayAnchorTarget(overlay) {
+    if (!overlay || overlay.nodeType !== 1) return null;
+    const bound = (
+      overlay.__mwAnchorTarget &&
+      overlay.__mwAnchorTarget.nodeType === 1 &&
+      overlay.__mwAnchorTarget.isConnected
+    ) ? overlay.__mwAnchorTarget : null;
+    if (bound) return bound;
+    if (isPortalRevealOverlay(overlay) && isShortsModeActive()) {
+      return resolveShortsRevealOverlayAnchor(overlay);
+    }
+    return null;
+  }
+
+  function getRevealOverlayIdentityKey(src) {
+    const normalized = normalizeUrl(String(src || '')) || '';
+    const itemKey = getDiagItemKey(normalized || String(src || ''));
+    return {
+      src: String(src || ''),
+      normalizedSrc: normalized,
+      itemKey: String(itemKey || 'unknown'),
+    };
+  }
+
+  function getAuthoritativeIdentityForNode(node) {
+    if (!node || node.nodeType !== 1) {
+      return { authoritative: false, itemKey: 'unknown', hardSrc: '' };
+    }
+    const authoritative = isAuthoritativeHardBlur(node);
+    const itemKey = String((node.dataset && node.dataset.mwHardBlurItemKey) || 'unknown');
+    const hardSrc = String((node.dataset && node.dataset.mwHardBlurSrc) || '');
+    return { authoritative: !!authoritative, itemKey: itemKey, hardSrc: hardSrc };
+  }
+
+  function doesRevealOverlayIdentityMatch(anchorNode, overlayIdentity) {
+    if (!anchorNode || anchorNode.nodeType !== 1) return false;
+    const auth = getAuthoritativeIdentityForNode(anchorNode);
+    if (!auth.authoritative) return false;
+    const overlayItemKey = String(overlayIdentity && overlayIdentity.itemKey ? overlayIdentity.itemKey : 'unknown');
+    const overlayNormSrc = String(overlayIdentity && overlayIdentity.normalizedSrc ? overlayIdentity.normalizedSrc : '');
+    if (overlayItemKey && overlayItemKey !== 'unknown' && auth.itemKey && auth.itemKey !== 'unknown') {
+      return overlayItemKey === auth.itemKey;
+    }
+    const authHardSrc = normalizeUrl(auth.hardSrc || '') || '';
+    if (overlayNormSrc && authHardSrc) return overlayNormSrc === authHardSrc;
+    const anchorSrc = normalizeUrl(String((anchorNode.dataset && anchorNode.dataset.mwSrc) || '')) || '';
+    if (overlayNormSrc && anchorSrc) return overlayNormSrc === anchorSrc;
+    return false;
+  }
+
+  function isRevealOverlayScopeValid(overlay, anchorNode) {
+    if (!overlay || overlay.nodeType !== 1 || !overlay.isConnected) return false;
+    if (!anchorNode || anchorNode.nodeType !== 1 || !anchorNode.isConnected) return false;
+    if (isPortalRevealOverlay(overlay)) {
+      return isShortsModeActive();
+    }
+    const card = findNonShortsReattachCardNode(anchorNode);
+    if (card && card.nodeType === 1) {
+      return !!card.contains(overlay);
+    }
+    return !!(overlay.parentElement && overlay.parentElement.contains(anchorNode));
+  }
+
+  function enforceRevealOverlayVisibilityGuard(overlay, anchorHint, phase) {
+    if (!overlay || overlay.nodeType !== 1) return false;
+    const overlayId = getRevealOverlayDebugId(overlay);
+    const overlaySrc = getRevealOverlaySrc(overlay);
+    const overlayIdentity = getRevealOverlayIdentityKey(overlaySrc);
+    const portalOverlay = isPortalRevealOverlay(overlay);
+    const anchor = (anchorHint && anchorHint.nodeType === 1 && anchorHint.isConnected)
+      ? anchorHint
+      : resolveRevealOverlayAnchorTarget(overlay);
+
+    let rejectReason = '';
+    if (!anchor) {
+      rejectReason = 'no_anchor';
+    } else {
+      const auth = getAuthoritativeIdentityForNode(anchor);
+      if (!auth.authoritative) {
+        rejectReason = 'not_authoritative_blur';
+      } else if (!doesRevealOverlayIdentityMatch(anchor, overlayIdentity)) {
+        rejectReason = 'identity_mismatch';
+      } else if (!isRevealOverlayScopeValid(overlay, anchor)) {
+        rejectReason = 'scope_mismatch';
+      } else if (portalOverlay) {
+        const ctx = getShortsBlurContextForNode(anchor);
+        const token = String((overlay.dataset && overlay.dataset.mwShortsOwnerToken) || '');
+        if (!ctx || !ctx.ownerToken || !token || token !== String(ctx.ownerToken || '')) {
+          rejectReason = 'shorts_owner_mismatch';
+        }
+      }
+    }
+
+    if (!rejectReason) {
+      console.log(
+        '[DIAG][REVEAL_UI] visibility_guard_allow',
+        'overlayId=' + overlayId,
+        'phase=' + String(phase || 'unknown'),
+        'portal=' + String(!!portalOverlay),
+        'itemKey=' + String(overlayIdentity.itemKey || 'unknown')
+      );
+      return true;
+    }
+
+    console.log(
+      '[DIAG][REVEAL_UI] visibility_guard_reject',
+      'overlayId=' + overlayId,
+      'phase=' + String(phase || 'unknown'),
+      'portal=' + String(!!portalOverlay),
+      'reason=' + rejectReason,
+      'src=' + String(overlaySrc || '').substring(0, 160)
+    );
+
+    try {
+      overlay.style.display = 'none';
+      overlay.style.pointerEvents = 'none';
+    } catch (e) {}
+    try {
+      if (anchor && anchor.nodeType === 1 && anchor.isConnected) {
+        const overlayNodeId = String((overlay.dataset && overlay.dataset.mwNodeId) || '');
+        if (overlayNodeId && overlayNodeId === getDiagNodeId(anchor)) {
+          anchor.dataset.mwHasOverlay = 'false';
+          anchor.dataset.mwOverlayOwnerToken = '';
+        }
+      }
+    } catch (e) {}
+
+    if (portalOverlay) {
+      if (overlay.parentElement) {
+        overlay.parentElement.removeChild(overlay);
+      }
+      console.log(
+        '[DIAG][REVEAL_UI] portal_overlay_removed',
+        'overlayId=' + overlayId,
+        'reason=' + rejectReason
+      );
+      return false;
+    }
+
+    if (overlay.parentElement) {
+      overlay.parentElement.removeChild(overlay);
+    }
+    console.log(
+      '[DIAG][REVEAL_UI] card_overlay_hidden',
+      'overlayId=' + overlayId,
+      'reason=' + rejectReason
+    );
+    return false;
+  }
+
+  function enforceRevealOverlayVisibilityGuardGlobal(reason) {
+    const now = Date.now();
+    const lastAt = Number(timerState.revealVisibilityGuardAt || 0);
+    if (Number.isFinite(lastAt) && now - lastAt < 120) return;
+    timerState.revealVisibilityGuardAt = now;
+    const overlays = document.querySelectorAll('.mw-reveal-overlay');
+    for (let i = 0; i < overlays.length; i += 1) {
+      const overlay = overlays[i];
+      if (!overlay || overlay.nodeType !== 1 || !overlay.isConnected) continue;
+      enforceRevealOverlayVisibilityGuard(overlay, null, 'global:' + String(reason || 'unknown'));
+    }
+  }
+
   function resolveShortsRevealOverlayAnchor(overlay) {
     if (!overlay || overlay.nodeType !== 1) return null;
     const src = String((overlay.dataset && overlay.dataset.mwFor) || '');
@@ -6064,6 +6243,9 @@ export function generateModerationScript(config: InjectionConfig): string {
         }
         overlay.style.display = 'none';
         scheduleShortsRevealOverlayRetry(overlay, 'anchor_resolve_failed');
+        continue;
+      }
+      if (!enforceRevealOverlayVisibilityGuard(overlay, anchor, 'shorts_reposition:' + String(reason || 'unknown'))) {
         continue;
       }
       setRevealOverlayAnchorTarget(overlay, anchor, 'reposition:' + (reason || 'unknown'));
@@ -7334,6 +7516,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           existingButton.style.transform = '';
         }
       }
+      enforceRevealOverlayVisibilityGuard(existingOverlay, element, 'createRevealOverlay_reuse');
       return;
     }
     if (element.dataset.mwHasOverlay === 'true') {
@@ -7657,6 +7840,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     overlayParent.appendChild(overlay);
     element.dataset.mwHasOverlay = 'true';
+    if (!enforceRevealOverlayVisibilityGuard(overlay, element, 'createRevealOverlay_created')) {
+      return;
+    }
     const overlayCountAfter = document.querySelectorAll('.mw-reveal-overlay').length;
     console.log(
       '[DIAG][REVEAL_UI] overlay_count_before=' + overlayCountBefore,
@@ -8414,6 +8600,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (DEBUG_SKIP_DOMAIN_BLUR) {
         console.log('[MW] classification counts (kill-switch active):', JSON.stringify(state.stats.classificationCounts), 'blurSkipped=' + state.stats.blurSkippedByKillSwitch);
       }
+      enforceRevealOverlayVisibilityGuardGlobal('moderation_result');
     } catch (err) {
       const message = err && err.message ? err.message : String(err);
       console.error('[MW][InjectError]', message);
@@ -9558,6 +9745,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         }
       }
       
+      enforceRevealOverlayVisibilityGuardGlobal('mutation_batch');
       if (shortsAttrMode && hasYouTubeChanges) {
         scheduleShortsRevealOverlayReposition('mutation');
         scheduleYouTubeScan('mutation');
@@ -9700,10 +9888,11 @@ export function generateModerationScript(config: InjectionConfig): string {
           );
           applyBlur(el, src, category, blurStrengthPx, itemId);
           clearSafeResolved(src);
-        }
+      }
         clearPendingItem(itemId, 'legacy_result');
       }
     });
+    enforceRevealOverlayVisibilityGuardGlobal('legacy_results');
   }
 
   function startLegacyResultsPoll(reason) {
