@@ -4879,6 +4879,73 @@ export function generateModerationScript(config: InjectionConfig): string {
           });
         }
       }
+      // Fail-closed MVP polish: even if ownership is unresolved and our overlay lookup reports
+      // overlayPresent=0, a stale/orphan reveal UI may still be visible (attached outside the
+      // current ownership parent chain). Hunt for any reveal overlays that geometrically cover
+      // this video node and remove them.
+      try {
+        if (videoNode && videoNode.isConnected && typeof videoNode.getBoundingClientRect === 'function') {
+          const huntCandidates = [];
+          if (card && typeof card.querySelectorAll === 'function') {
+            const cardOverlays = card.querySelectorAll('.mw-reveal-overlay');
+            for (let i = 0; i < cardOverlays.length; i += 1) {
+              huntCandidates.push(cardOverlays[i]);
+            }
+          }
+          const globalOverlays = document.querySelectorAll('.mw-reveal-overlay');
+          for (let i = 0; i < globalOverlays.length; i += 1) {
+            huntCandidates.push(globalOverlays[i]);
+          }
+          const seenOverlays = new Set();
+          let orphanHits = 0;
+          for (let i = 0; i < huntCandidates.length; i += 1) {
+            const overlay = huntCandidates[i];
+            if (!overlay || overlay.nodeType !== 1 || !overlay.isConnected) continue;
+            if (seenOverlays.has(overlay)) continue;
+            seenOverlays.add(overlay);
+            if (!overlay.parentElement) continue;
+            if (overlay === videoOverlay) continue;
+            const anchored = isNonShortsOverlayGeometryAnchored(overlay, videoNode);
+            if (!anchored) continue;
+            const overlayId = String((overlay.dataset && overlay.dataset.mwOverlayId) || 'unknown');
+            const overlayNodeId = String((overlay.dataset && overlay.dataset.mwNodeId) || 'none');
+            const overlayFor = String((overlay.dataset && overlay.dataset.mwFor) || '');
+            const overlayItemKey = getDiagItemKey(overlayFor);
+            console.warn(
+              '[MW-MVP-REVEAL-ORPHAN-HUNT] hit',
+              'reason=' + (reason || 'unknown'),
+              'nodeId=' + videoNodeId,
+              'overlayFoundOutsideOwnership=true',
+              'overlayId=' + overlayId,
+              'overlayNodeId=' + overlayNodeId,
+              'overlayItemKey=' + String(overlayItemKey || 'unknown')
+            );
+            overlay.parentElement.removeChild(overlay);
+            orphanHits += 1;
+            console.warn(
+              '[MW-MVP-REVEAL-ORPHAN-HUNT] removed',
+              'reason=' + (reason || 'unknown'),
+              'nodeId=' + videoNodeId,
+              'overlayId=' + overlayId
+            );
+          }
+          if (orphanHits > 0) {
+            try { videoNode.dataset.mwHasOverlay = 'false'; } catch (e) {}
+            postNonShortsTransitionDiag('regular_main_reveal_orphan_hunt', {
+              reason: String(reason || 'unknown'),
+              nodeId: videoNodeId,
+              marker: 'MW-MVP-REVEAL-ORPHAN-HUNT',
+              removed: orphanHits,
+            });
+            console.warn(
+              '[MW-MVP-REVEAL-ORPHAN-HUNT] done',
+              'reason=' + (reason || 'unknown'),
+              'nodeId=' + videoNodeId,
+              'removed=' + orphanHits
+            );
+          }
+        }
+      } catch (e) {}
       console.log(
         '[MW-MVP-REGULAR-THUMB-STALE-SWEEP-GUARD-V3] skip_unresolved_noise',
         'reason=' + (reason || 'unknown'),
