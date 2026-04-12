@@ -1094,7 +1094,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   const MAX_SCAN_NODE_PER_SEC = isYouTubeHost ? 90 : 60;
   const MAX_MUTATION_SCAN_PER_SEC = isYouTubeHost ? 100 : 70;
   const MAX_MUTATION_QUEUE_ITEMS = isYouTubeHost ? 160 : 100;
-  const MUTATION_SCAN_FLUSH_DELAY_MS = isYouTubeHost ? 70 : 100;
+  const MUTATION_SCAN_FLUSH_DELAY_MS = isYouTubeHost ? 16 : 100;
   const MUTATION_SCAN_FLUSH_BATCH = isYouTubeHost ? 24 : 14;
   const rateLimiter = {
     enqueue: { sec: 0, count: 0 },
