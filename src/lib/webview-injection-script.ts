@@ -4187,6 +4187,18 @@ export function generateModerationScript(config: InjectionConfig): string {
       });
     }
     let activeVideoBlurred = hasAuthoritativeBlur || hasIncidentalBlur;
+    const shouldApplyRegularNonShortsOverlayStickyHold = !!(
+      regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo &&
+      (activeVideoBlurred || hasAuthoritativeBlur)
+    );
+    if (shouldApplyRegularNonShortsOverlayStickyHold && videoNode.dataset) {
+      const currentStickyUntil = Number(videoNode.dataset.mwOverlayStickyUntil || '0');
+      const nextStickyUntil = now + 1200;
+      if (!Number.isFinite(currentStickyUntil) || currentStickyUntil < nextStickyUntil) {
+        videoNode.dataset.mwOverlayStickyUntil = String(nextStickyUntil);
+      }
+    }
     if (activeVideoBlurred && !hasAuthoritativeBlur && !contextData) {
       videoNode.style.removeProperty('filter');
       videoNode.style.removeProperty('-webkit-filter');
@@ -4429,6 +4441,14 @@ export function generateModerationScript(config: InjectionConfig): string {
       !!videoOverlay.parentElement &&
       (activeVideoBlurred || hasAuthoritativeBlur || hasResidualInlineBlur || hasResidualBlurClass)
     );
+    const nonShortsOverlayStickyHoldActive = !!(
+      regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo &&
+      Number.isFinite(Number((videoNode.dataset && videoNode.dataset.mwOverlayStickyUntil) || '0')) &&
+      Number((videoNode.dataset && videoNode.dataset.mwOverlayStickyUntil) || '0') > now &&
+      !!videoOverlay &&
+      !!videoOverlay.parentElement
+    );
     if (
       !activeVideoBlurred &&
       !keepOverlayDuringRegularUnresolvedChurn &&
@@ -4436,6 +4456,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       !nonShortsCardBlurredContinuityOverlayHold &&
       !nonShortsPendingRevealGuard &&
       !nonShortsBlurInvariantOverlayHold &&
+      !nonShortsOverlayStickyHoldActive &&
       videoOverlay &&
       videoOverlay.parentElement
     ) {
@@ -4535,6 +4556,22 @@ export function generateModerationScript(config: InjectionConfig): string {
         authoritativeBlur: !!hasAuthoritativeBlur,
         residualInlineBlur: !!hasResidualInlineBlur,
         residualBlurClass: !!hasResidualBlurClass,
+        overlayId: String((videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown'),
+      });
+    } else if (nonShortsOverlayStickyHoldActive && videoOverlay && videoOverlay.parentElement) {
+      const stickyUntil = Number((videoNode.dataset && videoNode.dataset.mwOverlayStickyUntil) || '0');
+      console.log(
+        '[MW-MVP-REGULAR-THUMB-REVEAL-FALLBACK-V4] overlay_remove_veto_sticky_hold',
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'stickyUntil=' + String(stickyUntil || 0),
+        'overlayId=' + String((videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown')
+      );
+      postNonShortsTransitionDiag('regular_non_shorts_overlay_sticky_hold_active', {
+        reason: String(reason || 'unknown'),
+        nodeId: videoNodeId,
+        marker: 'MW-MVP-REGULAR-THUMB-REVEAL-FALLBACK-V4',
+        stickyUntil: Number(stickyUntil || 0),
         overlayId: String((videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown'),
       });
     }
@@ -4639,23 +4676,20 @@ export function generateModerationScript(config: InjectionConfig): string {
             return { overlay: overlay, anchored: false };
           }
           console.warn(
-            '[MW-MVP-REGULAR-THUMB-OVERLAY-ANCHOR-V1] overlay_geometry_mismatch_force_recreate',
+            '[MW-MVP-REGULAR-THUMB-OVERLAY-ANCHOR-V3] overlay_geometry_mismatch_defer_replace',
             'reason=' + (reason || 'unknown'),
             'phase=' + String(phase || 'unknown'),
             'nodeId=' + videoNodeId,
             'overlayId=' + overlayId
           );
-          if (overlay.parentElement) {
-            overlay.parentElement.removeChild(overlay);
-            console.log(
-              '[DIAG][NON_SHORTS_REATTACH] overlay_removed_geometry_mismatch_force_recreate',
-              'reason=' + (reason || 'unknown'),
-              'phase=' + String(phase || 'unknown'),
-              'nodeId=' + videoNodeId,
-              'overlayId=' + overlayId
-            );
-          }
-          return { overlay: null, anchored: false };
+          postNonShortsTransitionDiag('regular_non_shorts_overlay_replace_deferred', {
+            reason: String(reason || 'unknown'),
+            nodeId: videoNodeId,
+            marker: 'MW-MVP-REGULAR-THUMB-OVERLAY-ANCHOR-V3',
+            phase: String(phase || 'unknown'),
+            overlayId: overlayId,
+          });
+          return { overlay: overlay, anchored: false };
         }
         console.warn(
           '[MW-MVP-REGULAR-THUMB-CONTINUITY-V1] overlay_geometry_mismatch_keep',
@@ -4781,6 +4815,35 @@ export function generateModerationScript(config: InjectionConfig): string {
         'itemId=' + String(overlayItemId || 'none'),
         'anchored=' + overlayAnchored
       );
+    }
+    const canForceRecoverAfterApply = !!(
+      regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo &&
+      (activeVideoBlurred || hasAuthoritativeBlur) &&
+      !overlayAnchored &&
+      !shouldDisableRevealUiForMvpMainPageSurface()
+    );
+    if (canForceRecoverAfterApply) {
+      const recoverSrc = overlayProbeSrc || String((videoNode.dataset && videoNode.dataset.mwSrc) || '');
+      createRevealOverlay(videoNode, recoverSrc, overlayCategory, overlayItemId);
+      videoOverlay = findRevealOverlayForElement(videoNode, recoverSrc);
+      normalizedOverlay = normalizeOverlayAnchor(videoOverlay, 'post_apply_recover');
+      videoOverlay = normalizedOverlay.overlay;
+      overlayAnchored = normalizedOverlay.anchored;
+      console.log(
+        '[MW-MVP-REGULAR-THUMB-REVEAL-FALLBACK-V4] force_recover_after_apply',
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'overlayAnchored=' + String(!!overlayAnchored),
+        'overlayPresent=' + String(!!videoOverlay)
+      );
+      postNonShortsTransitionDiag('regular_non_shorts_overlay_force_recover_after_apply', {
+        reason: String(reason || 'unknown'),
+        nodeId: videoNodeId,
+        marker: 'MW-MVP-REGULAR-THUMB-REVEAL-FALLBACK-V4',
+        overlayAnchored: !!overlayAnchored,
+        overlayPresent: !!videoOverlay,
+      });
     }
     if (overlayAnchored) {
       console.log(
