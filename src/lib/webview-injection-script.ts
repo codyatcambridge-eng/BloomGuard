@@ -4131,12 +4131,20 @@ export function generateModerationScript(config: InjectionConfig): string {
         'pageEpoch=' + String(state.pageEpoch || 0)
       );
     }
+    const preserveShortsHardBlurDuringResolvedContinuity = !!(
+      isHomeShortsShelfVideo &&
+      isTransitionChurnReason &&
+      strictIdentityKnown &&
+      hardItemKeyKnown &&
+      strictContinuityItemKey === hardBlurItemKey
+    );
     if (
       hasAuthoritativeBlur &&
       !contextData &&
       !hardKeyMatchesStrict &&
       !hardSrcMatchesCurrent &&
-      !holdBlurDuringUnresolvedTransition
+      !holdBlurDuringUnresolvedTransition &&
+      !preserveShortsHardBlurDuringResolvedContinuity
     ) {
       videoNode.style.removeProperty('filter');
       videoNode.style.removeProperty('-webkit-filter');
@@ -4161,6 +4169,21 @@ export function generateModerationScript(config: InjectionConfig): string {
         strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
         hardBlurItemKey: hardBlurItemKey,
         hardSrcMatchesCurrent: !!hardSrcMatchesCurrent,
+      });
+    } else if (preserveShortsHardBlurDuringResolvedContinuity && hasAuthoritativeBlur) {
+      console.log(
+        '[MW-MVP-SHORTS-CONTINUITY-GUARD-V1] preserve_hard_blur_during_churn',
+        'reason=' + String(reason || 'unknown'),
+        'nodeId=' + String(videoNodeId || 'none'),
+        'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
+        'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown')
+      );
+      postNonShortsTransitionDiag('shorts_preserve_hard_blur_during_churn', {
+        reason: String(reason || 'unknown'),
+        nodeId: String(videoNodeId || 'none'),
+        marker: 'MW-MVP-SHORTS-CONTINUITY-GUARD-V1',
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
       });
     }
     let activeVideoBlurred = hasAuthoritativeBlur || hasIncidentalBlur;
@@ -4242,10 +4265,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (strictContinuityItemKey && strictContinuityItemKey !== 'unknown') {
         videoNode.dataset.mwHardBlurItemKey = strictContinuityItemKey;
       }
-      if (preserveCardBlurContinuityAfterNearbyShortsGuard) {
-        hasAuthoritativeBlur = isAuthoritativeHardBlur(videoNode);
-        activeVideoBlurred = true;
-      }
+      hasAuthoritativeBlur = isAuthoritativeHardBlur(videoNode);
+      activeVideoBlurred = hasAuthoritativeBlur || hasIncidentalBlur;
       console.log(
         '[DIAG][NON_SHORTS_REATTACH] heal_apply_blur',
         'reason=' + (reason || 'unknown'),
@@ -4575,7 +4596,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         return { overlay: overlay, anchored: true };
       }
       const overlayId = String((overlay.dataset && overlay.dataset.mwOverlayId) || 'unknown');
-      if (regularPathQuarantinePassed && activeVideoBlurred) {
+      if (regularPathQuarantinePassed && (activeVideoBlurred || hasAuthoritativeBlur)) {
         const resolvedRegularOwnership = !!(contextData || hasAuthoritativeBlur);
         if (resolvedRegularOwnership) {
           console.warn(
@@ -4629,7 +4650,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     videoOverlay = normalizedOverlay.overlay;
     let overlayAnchored = normalizedOverlay.anchored;
     if (
-      activeVideoBlurred &&
+      (activeVideoBlurred || hasAuthoritativeBlur) &&
       !overlayAnchored &&
       !shouldDisableRevealUiForMvpMainPageSurface()
     ) {
@@ -4704,7 +4725,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       overlayAnchored = normalizedOverlay.anchored;
     }
     if (
-      activeVideoBlurred &&
+      (activeVideoBlurred || hasAuthoritativeBlur) &&
       !overlayAnchored &&
       !shouldDisableRevealUiForMvpMainPageSurface()
     ) {
