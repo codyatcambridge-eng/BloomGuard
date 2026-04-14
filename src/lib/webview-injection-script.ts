@@ -3482,6 +3482,79 @@ export function generateModerationScript(config: InjectionConfig): string {
       !hasDirectShortsLockupOnNodePath &&
       !hasDirectShortsAnchorOnNodePath
     );
+    const isMainSurfaceRegularThumbPath = (function() {
+      if (!isMainSurfaceUrl || isHomeShortsShelfVideo || isShortsModeActive()) return false;
+      try {
+        const parsed = new URL(currentUrl, window.location.href);
+        const path = String(parsed.pathname || '/').toLowerCase();
+        const isAllowedPath = (
+          path === '/' ||
+          path.indexOf('/feed') === 0 ||
+          path.indexOf('/results') === 0
+        );
+        return (
+          String(parsed.hostname || '').toLowerCase() === 'm.youtube.com' &&
+          isAllowedPath
+        );
+      } catch (e) {
+        return false;
+      }
+    })();
+    if (
+      regularPathQuarantinePassed &&
+      !card &&
+      isMainSurfaceRegularThumbPath &&
+      !isShortsModeActive()
+    ) {
+      let fallbackSucceeded = false;
+      let fallbackFailReason = '';
+      const fallbackCandidate = findRegularMainCardFallbackNode(videoNode);
+      if (!fallbackCandidate || fallbackCandidate.nodeType !== 1 || !fallbackCandidate.isConnected) {
+        fallbackFailReason = 'missing_or_disconnected';
+      } else {
+        const containsVideo = (
+          typeof fallbackCandidate.contains === 'function'
+            ? fallbackCandidate.contains(videoNode)
+            : false
+        );
+        const isStrongCandidate = isNonShortsStrongCardNode(fallbackCandidate);
+        const hasShortsDescendants = !!(
+          typeof fallbackCandidate.querySelector === 'function' &&
+          fallbackCandidate.querySelector('ytm-shorts-lockup-view-model, a[href*="/shorts/"]')
+        );
+        const watchAnchorCount = (
+          typeof fallbackCandidate.querySelectorAll === 'function'
+            ? fallbackCandidate.querySelectorAll('a[href*="/watch"]').length
+            : 0
+        );
+        const videoCount = (
+          typeof fallbackCandidate.querySelectorAll === 'function'
+            ? fallbackCandidate.querySelectorAll('video').length
+            : 0
+        );
+        const weakOrAmbiguous = !isStrongCandidate && (watchAnchorCount !== 1 || videoCount !== 1);
+        if (!containsVideo) {
+          fallbackFailReason = 'outside_context';
+        } else if (hasShortsDescendants) {
+          fallbackFailReason = 'shorts_contamination';
+        } else if (weakOrAmbiguous) {
+          fallbackFailReason = 'weak_or_ambiguous';
+        } else {
+          card = fallbackCandidate;
+          cardNodeId = getDiagNodeId(fallbackCandidate);
+          fallbackSucceeded = true;
+        }
+      }
+      console.log(
+        '[DIAG][NON_SHORTS_REATTACH] fallback_from_null_card_main_surface',
+        'reason=' + (reason || 'unknown'),
+        'surface=main_surface_regular_thumb',
+        'url=' + currentUrl,
+        'success=' + String(fallbackSucceeded),
+        'cardNodeId=' + String(cardNodeId || 'none'),
+        'failReason=' + String(fallbackFailReason || 'none')
+      );
+    }
     if (regularPathQuarantinePassed && card && !isNonShortsStrongCardNode(card)) {
       const strongCard = findNonShortsStrongCardNode(videoNode);
       if (strongCard) {
@@ -4121,6 +4194,18 @@ export function generateModerationScript(config: InjectionConfig): string {
         hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
       });
     }
+    const freezeHomeMismatchClear = (function() {
+      if (
+        isShortsModeActive() ||
+        !isMainSurfaceRegularThumbPath ||
+        !regularPathQuarantinePassed ||
+        isHomeShortsShelfVideo ||
+        !isTransitionChurnReason
+      ) {
+        return false;
+      }
+      return true;
+    })();
     if (
       hasAuthoritativeBlur &&
       !contextData &&
@@ -4129,30 +4214,43 @@ export function generateModerationScript(config: InjectionConfig): string {
       !holdBlurDuringUnresolvedTransition &&
       !holdHomeShortsShelfBlurDuringUnresolvedTransition
     ) {
-      videoNode.style.removeProperty('filter');
-      videoNode.style.removeProperty('-webkit-filter');
-      videoNode.style.removeProperty('backdrop-filter');
-      videoNode.style.removeProperty('-webkit-backdrop-filter');
-      videoNode.classList.remove('mw-softblur');
-      videoNode.classList.remove('mw-blurred');
-      videoNode.dataset.mwModerated = 'safe';
-      clearAuthoritativeHardBlur(videoNode);
-      hasAuthoritativeBlur = false;
-      console.log(
-        '[DIAG][NON_SHORTS_REATTACH] hard_blur_provenance_mismatch_cleared',
-        'reason=' + (reason || 'unknown'),
-        'nodeId=' + videoNodeId,
-        'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
-        'hardBlurItemKey=' + hardBlurItemKey,
-        'hardSrcMatchesCurrent=' + String(!!hardSrcMatchesCurrent)
-      );
-      postNonShortsTransitionDiag('hard_blur_provenance_mismatch_cleared', {
-        reason: String(reason || 'unknown'),
-        nodeId: videoNodeId,
-        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
-        hardBlurItemKey: hardBlurItemKey,
-        hardSrcMatchesCurrent: !!hardSrcMatchesCurrent,
-      });
+      if (freezeHomeMismatchClear) {
+        console.log(
+          '[DIAG][NON_SHORTS_REATTACH] hard_blur_provenance_mismatch_frozen',
+          'reason=' + (reason || 'unknown'),
+          'surface=main_surface_regular_thumb',
+          'churn=' + String(!!isTransitionChurnReason),
+          'nodeId=' + videoNodeId,
+          'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
+          'hardBlurItemKey=' + hardBlurItemKey,
+          'hardSrcMatchesCurrent=' + String(!!hardSrcMatchesCurrent)
+        );
+      } else {
+        videoNode.style.removeProperty('filter');
+        videoNode.style.removeProperty('-webkit-filter');
+        videoNode.style.removeProperty('backdrop-filter');
+        videoNode.style.removeProperty('-webkit-backdrop-filter');
+        videoNode.classList.remove('mw-softblur');
+        videoNode.classList.remove('mw-blurred');
+        videoNode.dataset.mwModerated = 'safe';
+        clearAuthoritativeHardBlur(videoNode);
+        hasAuthoritativeBlur = false;
+        console.log(
+          '[DIAG][NON_SHORTS_REATTACH] hard_blur_provenance_mismatch_cleared',
+          'reason=' + (reason || 'unknown'),
+          'nodeId=' + videoNodeId,
+          'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
+          'hardBlurItemKey=' + hardBlurItemKey,
+          'hardSrcMatchesCurrent=' + String(!!hardSrcMatchesCurrent)
+        );
+        postNonShortsTransitionDiag('hard_blur_provenance_mismatch_cleared', {
+          reason: String(reason || 'unknown'),
+          nodeId: videoNodeId,
+          strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+          hardBlurItemKey: hardBlurItemKey,
+          hardSrcMatchesCurrent: !!hardSrcMatchesCurrent,
+        });
+      }
     }
     let activeVideoBlurred = hasAuthoritativeBlur || hasIncidentalBlur;
     if (activeVideoBlurred && !hasAuthoritativeBlur && !contextData) {
@@ -4374,10 +4472,90 @@ export function generateModerationScript(config: InjectionConfig): string {
       !!videoOverlay &&
       !!videoOverlay.parentElement
     );
+    let overlayHoldUnresolvedChurnAllowed = false;
+    if (videoNode && videoNode.dataset && (contextData || activeVideoBlurred)) {
+      videoNode.dataset.mwUnresolvedOverlayHoldUntil = '';
+      videoNode.dataset.mwUnresolvedOverlayHoldUsed = '';
+    }
+    if (videoOverlay && videoOverlay.parentElement) {
+      const unresolvedIdentity = (
+        cardNodeId === 'none' ||
+        (strictContinuityUnknown && reattachItemKey === 'unknown')
+      );
+      const holdScopeEligible = !!(
+        regularPathQuarantinePassed &&
+        !isHomeShortsShelfVideo &&
+        isMainSurfaceRegularThumbPath &&
+        isTransitionChurnReason &&
+        unresolvedIdentity &&
+        !contextData &&
+        !activeVideoBlurred
+      );
+      if (holdScopeEligible) {
+        const now = Date.now();
+        const holdUntilRaw = Number(videoNode.dataset.mwUnresolvedOverlayHoldUntil || '0');
+        const holdUntil = Number.isFinite(holdUntilRaw) ? holdUntilRaw : 0;
+        const holdUsed = videoNode.dataset.mwUnresolvedOverlayHoldUsed === '1';
+        const ownerByNodeId = overlayNodeId === videoNodeId;
+        const ownerBySrc = !!(overlayProbeSrc && overlayForSrc && overlayProbeSrc === overlayForSrc);
+        const ownershipProved = ownerByNodeId && ownerBySrc;
+        const parentOverlays = videoOverlay.parentElement.querySelectorAll('.mw-reveal-overlay');
+        let ownershipCandidateCount = 0;
+        for (let i = 0; i < parentOverlays.length; i += 1) {
+          const candidate = parentOverlays[i];
+          if (!candidate || !candidate.isConnected) continue;
+          const candidateNodeId = String((candidate.dataset && candidate.dataset.mwNodeId) || '');
+          const candidateFor = String((candidate.dataset && candidate.dataset.mwFor) || '');
+          if (candidateNodeId === videoNodeId || (overlayForSrc && candidateFor === overlayForSrc)) {
+            ownershipCandidateCount += 1;
+          }
+        }
+        const duplicateOrAmbiguous = ownershipCandidateCount !== 1;
+        let holdDecision = 'denied';
+        let denyReason = '';
+        if (!ownershipProved) {
+          denyReason = 'ownership_not_proved';
+        } else if (duplicateOrAmbiguous) {
+          denyReason = 'duplicate_or_ambiguous';
+        } else if (holdUntil > 0 && now <= holdUntil) {
+          overlayHoldUnresolvedChurnAllowed = true;
+          holdDecision = 'allowed';
+          denyReason = 'none';
+        } else if (!holdUsed) {
+          const nextHoldUntil = now + 260;
+          videoNode.dataset.mwUnresolvedOverlayHoldUntil = String(nextHoldUntil);
+          videoNode.dataset.mwUnresolvedOverlayHoldUsed = '1';
+          overlayHoldUnresolvedChurnAllowed = true;
+          holdDecision = 'allowed';
+          denyReason = 'none';
+        } else {
+          videoNode.dataset.mwUnresolvedOverlayHoldUntil = '';
+          holdDecision = 'denied';
+          denyReason = 'defer_window_expired';
+        }
+        console.log(
+          '[DIAG][NON_SHORTS_REATTACH] overlay_hold_unresolved_churn',
+          'reason=' + (reason || 'unknown'),
+          'allowed=' + String(overlayHoldUnresolvedChurnAllowed),
+          'decision=' + holdDecision,
+          'denyReason=' + (denyReason || 'none'),
+          'ownershipProved=' + String(ownershipProved),
+          'ownerByNodeId=' + String(ownerByNodeId),
+          'ownerBySrc=' + String(ownerBySrc),
+          'ownershipCandidateCount=' + String(ownershipCandidateCount),
+          'nodeId=' + videoNodeId,
+          'overlayId=' + String((videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown'),
+          'cardNodeId=' + String(cardNodeId || 'none'),
+          'reattachItemKey=' + String(reattachItemKey || 'unknown'),
+          'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown')
+        );
+      }
+    }
     if (
       !activeVideoBlurred &&
       !keepOverlayDuringRegularUnresolvedChurn &&
       !nonShortsResolvedContextOverlayHold &&
+      !overlayHoldUnresolvedChurnAllowed &&
       !nonShortsPendingRevealGuard &&
       videoOverlay &&
       videoOverlay.parentElement
@@ -4438,6 +4616,13 @@ export function generateModerationScript(config: InjectionConfig): string {
         reason: String(reason || 'unknown'),
         nodeId: videoNodeId,
         marker: 'MW-MVP-REGULAR-THUMB-REVEAL-FALLBACK-V1',
+        overlayId: String((videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown'),
+      });
+    } else if (overlayHoldUnresolvedChurnAllowed && videoOverlay && videoOverlay.parentElement) {
+      postNonShortsTransitionDiag('overlay_hold_unresolved_churn', {
+        reason: String(reason || 'unknown'),
+        nodeId: videoNodeId,
+        marker: 'overlay_hold_unresolved_churn',
         overlayId: String((videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown'),
       });
     }
