@@ -341,6 +341,7 @@ export const NativeWebViewBrowser = () => {
   const shortsScopedReqSeenRef = useRef<{ epoch: number; videoId: string; at: number } | null>(null);
   const shortsAckNoReqRecoverEpochRef = useRef<number | null>(null);
   const shortsAckNoReqRecoverTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const shortsVeilLiftEpochRef = useRef<number | null>(null);
   const shortsFirstEntryLatchRef = useRef<{
     armed: boolean;
     epoch: number;
@@ -1481,6 +1482,26 @@ export const NativeWebViewBrowser = () => {
       navigate('fallback', '', url);
     },
     onUrlChange: (url) => {
+      if (executeScript) {
+        const safeReason = escapeForJs('host_onUrlChange');
+        void executeScript(`
+          (function() {
+            try {
+              if (typeof window.__MW_HARD_TEARDOWN__ === 'function') {
+                window.__MW_HARD_TEARDOWN__('${safeReason}');
+                return 'HARD_TEARDOWN_OK';
+              }
+              if (typeof window.__MW_TEARDOWN__ === 'function') {
+                window.__MW_TEARDOWN__('${safeReason}');
+                return 'TEARDOWN_OK';
+              }
+              return 'NO_HOOK';
+            } catch (e) {
+              return 'ERR:' + String(e);
+            }
+          })();
+        `).catch(() => undefined);
+      }
       const previousUrl = currentUrlRef.current || webViewState.currentUrl || '';
       const previousFamily = getCacheFamilyContext(previousUrl);
       const nextFamily = getCacheFamilyContext(url);
@@ -1513,6 +1534,7 @@ export const NativeWebViewBrowser = () => {
       nonBootstrapAckObservedRef.current = false;
       epochContextCurrentRef.current = false;
       relaxedEpochBypassHookStableRef.current = false;
+      shortsVeilLiftEpochRef.current = null;
       blurReadyRef.current = false;
       blurReadyDedupeRef.current = { key: '', at: 0 };
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
@@ -1562,6 +1584,7 @@ export const NativeWebViewBrowser = () => {
       nonBootstrapAckObservedRef.current = false;
       epochContextCurrentRef.current = false;
       relaxedEpochBypassHookStableRef.current = false;
+      shortsVeilLiftEpochRef.current = null;
       blurReadyRef.current = false;
       blurPendingRef.current = null;
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
@@ -2127,7 +2150,7 @@ export const NativeWebViewBrowser = () => {
       'url=' + urlHint,
       'listenersAttached=' + webViewListenersAttached,
     );
-    const timer = setTimeout(reinjectAndPing, 250);
+    const timer = setTimeout(reinjectAndPing, 50);
     console.log(
       '[MW-Host][Timer] start',
       'name=reinjectTimer',
@@ -3114,6 +3137,40 @@ export const NativeWebViewBrowser = () => {
             armShortsLegacyFallbackProbe('first_entry_ack_no_req', SHORTS_LEGACY_FALLBACK_ENTRY_PROBE_MS);
             })();
           }, SHORTS_ACK_NO_REQ_RECOVER_DELAY_MS);
+        }
+        return;
+      }
+      if (typedMessage.type === 'MW_SHORTS_VERDICT_APPLIED') {
+        const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
+        const messageEpoch = (
+          typeof typedMessage.pageEpoch === 'number' && Number.isFinite(typedMessage.pageEpoch)
+        ) ? Number(typedMessage.pageEpoch) : null;
+        const activeEpoch = webViewPageEpochRef.current;
+        if (
+          executeScript &&
+          isYouTubeShortsUrl(activeUrl) &&
+          messageEpoch !== null &&
+          messageEpoch === activeEpoch &&
+          relaxedEpochBypassHookStableRef.current &&
+          shortsVeilLiftEpochRef.current !== activeEpoch
+        ) {
+          shortsVeilLiftEpochRef.current = activeEpoch;
+          const liftReason = escapeForJs('shorts_verdict_applied');
+          void executeScript(`
+            (function() {
+              try {
+                window.postMessage({
+                  type: 'MW_BLUR_COMMAND',
+                  command: 'LIFT_SHORTS_VEIL',
+                  reason: '${liftReason}',
+                  timestamp: Date.now()
+                }, '*');
+                return 'OK';
+              } catch (e) {
+                return 'ERR:' + String(e);
+              }
+            })();
+          `).catch(() => undefined);
         }
         return;
       }
