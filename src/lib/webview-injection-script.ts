@@ -4206,6 +4206,69 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       return true;
     })();
+    let deferMainSurfaceMismatchClear = false;
+    if (
+      !isShortsModeActive() &&
+      !isHomeShortsShelfVideo &&
+      isMainSurfaceRegularThumbPath &&
+      isTransitionChurnReason &&
+      !contextData &&
+      (
+        cardNodeId === 'none' ||
+        (!strictIdentityKnown && reattachItemKey === 'unknown')
+      )
+    ) {
+      const overlayOwnerSrcProbe = (
+        String((videoNode.dataset && videoNode.dataset.mwSrc) || '') ||
+        normalizedPoster ||
+        normalizedCurrent ||
+        ''
+      );
+      const overlayBeforeMismatchClear = findRevealOverlayForElement(videoNode, overlayOwnerSrcProbe);
+      const overlayBeforeNodeId = String((overlayBeforeMismatchClear && overlayBeforeMismatchClear.dataset && overlayBeforeMismatchClear.dataset.mwNodeId) || '');
+      const overlayBeforeForSrc = String((overlayBeforeMismatchClear && overlayBeforeMismatchClear.dataset && overlayBeforeMismatchClear.dataset.mwFor) || '');
+      const overlayBeforeForItemKey = getDiagItemKey(overlayBeforeForSrc);
+      const ownerByNodeId = overlayBeforeNodeId === videoNodeId;
+      const ownerByItemKey = !!(
+        hardItemKeyKnown &&
+        overlayBeforeForItemKey &&
+        overlayBeforeForItemKey !== 'unknown' &&
+        overlayBeforeForItemKey === hardBlurItemKey
+      );
+      const ownershipProved = ownerByNodeId && (ownerByItemKey || !!overlayBeforeForSrc);
+      const sameNodeOverlayCount = (
+        overlayBeforeMismatchClear &&
+        overlayBeforeMismatchClear.parentElement &&
+        typeof overlayBeforeMismatchClear.parentElement.querySelectorAll === 'function'
+      ) ? overlayBeforeMismatchClear.parentElement.querySelectorAll(
+        '.mw-reveal-overlay[data-mw-node-id="' + String(videoNodeId || '') + '"]'
+      ).length : 0;
+      const noAmbiguity = sameNodeOverlayCount <= 1;
+      const now = Date.now();
+      const deferUntilRaw = Number((videoNode.dataset && videoNode.dataset.mwMainSurfaceMismatchDeferUntil) || '0');
+      const deferUntil = Number.isFinite(deferUntilRaw) ? deferUntilRaw : 0;
+      const deferUsed = !!(videoNode.dataset && videoNode.dataset.mwMainSurfaceMismatchDeferUsed === '1');
+      const deferWindowActive = deferUntil > 0 && now <= deferUntil;
+      if (ownershipProved && noAmbiguity && (deferWindowActive || !deferUsed)) {
+        if (!deferWindowActive && videoNode.dataset) {
+          videoNode.dataset.mwMainSurfaceMismatchDeferUntil = String(now + 320);
+          videoNode.dataset.mwMainSurfaceMismatchDeferUsed = '1';
+        }
+        deferMainSurfaceMismatchClear = true;
+      }
+      console.log(
+        '[DIAG][NON_SHORTS_REATTACH] hard_blur_provenance_mismatch_defer_eval',
+        'reason=' + String(reason || 'unknown'),
+        'nodeId=' + String(videoNodeId || 'none'),
+        'allowed=' + String(deferMainSurfaceMismatchClear),
+        'ownerByNodeId=' + String(ownerByNodeId),
+        'ownerByItemKey=' + String(ownerByItemKey),
+        'sameNodeOverlayCount=' + String(sameNodeOverlayCount),
+        'cardNodeId=' + String(cardNodeId || 'none'),
+        'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
+        'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown')
+      );
+    }
     if (
       hasAuthoritativeBlur &&
       !contextData &&
@@ -4214,11 +4277,12 @@ export function generateModerationScript(config: InjectionConfig): string {
       !holdBlurDuringUnresolvedTransition &&
       !holdHomeShortsShelfBlurDuringUnresolvedTransition
     ) {
-      if (freezeHomeMismatchClear) {
+      if (freezeHomeMismatchClear || deferMainSurfaceMismatchClear) {
         console.log(
           '[DIAG][NON_SHORTS_REATTACH] hard_blur_provenance_mismatch_frozen',
           'reason=' + (reason || 'unknown'),
           'surface=main_surface_regular_thumb',
+          'deferMainSurfaceMismatchClear=' + String(!!deferMainSurfaceMismatchClear),
           'churn=' + String(!!isTransitionChurnReason),
           'nodeId=' + videoNodeId,
           'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
@@ -4251,6 +4315,10 @@ export function generateModerationScript(config: InjectionConfig): string {
           hardSrcMatchesCurrent: !!hardSrcMatchesCurrent,
         });
       }
+    }
+    if (videoNode && videoNode.dataset && (contextData || strictIdentityKnown)) {
+      videoNode.dataset.mwMainSurfaceMismatchDeferUntil = '';
+      videoNode.dataset.mwMainSurfaceMismatchDeferUsed = '';
     }
     let activeVideoBlurred = hasAuthoritativeBlur || hasIncidentalBlur;
     if (activeVideoBlurred && !hasAuthoritativeBlur && !contextData) {
@@ -4472,6 +4540,75 @@ export function generateModerationScript(config: InjectionConfig): string {
       !!videoOverlay &&
       !!videoOverlay.parentElement
     );
+    const shortsResolvedContextOverlayHold = !!(
+      isHomeShortsShelfVideo &&
+      !!contextData &&
+      (
+        resolvedContextKind === 'itemkey_global' ||
+        resolvedContextKind === 'card_blurred'
+      ) &&
+      (
+        (strictContinuityItemKey && strictContinuityItemKey !== 'unknown') ||
+        (derivedAnchorItemKey && derivedAnchorItemKey !== 'unknown')
+      ) &&
+      (
+        reasonText === 'event:loadeddata' ||
+        reasonText === 'event:playing' ||
+        reasonText.indexOf('attr:style') === 0 ||
+        reasonText.indexOf('attr:src') === 0 ||
+        reasonText.indexOf('mutation_added:') === 0
+      ) &&
+      !!videoOverlay &&
+      !!videoOverlay.parentElement &&
+      overlayNodeId === videoNodeId
+    );
+    const resolvedContextBlurRepairEligible = !!(
+      (nonShortsResolvedContextOverlayHold || shortsResolvedContextOverlayHold) &&
+      !activeVideoBlurred &&
+      !!videoOverlay &&
+      !!videoOverlay.parentElement &&
+      overlayNodeId === videoNodeId &&
+      (
+        (strictContinuityItemKey && strictContinuityItemKey !== 'unknown') ||
+        (overlayForItemKey && overlayForItemKey !== 'unknown')
+      )
+    );
+    if (resolvedContextBlurRepairEligible) {
+      const expectedBlurPx = IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20);
+      const expectedBlurToken = 'blur(' + expectedBlurPx + 'px)';
+      videoNode.style.setProperty('filter', expectedBlurToken, 'important');
+      videoNode.style.setProperty('-webkit-filter', expectedBlurToken, 'important');
+      videoNode.style.setProperty('backdrop-filter', expectedBlurToken, 'important');
+      videoNode.style.setProperty('-webkit-backdrop-filter', expectedBlurToken, 'important');
+      videoNode.dataset.mwModerated = 'blurred';
+      videoNode.classList.add('mw-blurred');
+      markAuthoritativeHardBlur(
+        videoNode,
+        String(
+          (videoNode.dataset && videoNode.dataset.mwSrc) ||
+          overlayForSrc ||
+          (contextData && contextData.src) ||
+          ''
+        )
+      );
+      hasAuthoritativeBlur = true;
+      activeVideoBlurred = true;
+      console.log(
+        '[DIAG][NON_SHORTS_REATTACH] resolved_context_blur_repair_applied',
+        'reason=' + String(reason || 'unknown'),
+        'nodeId=' + String(videoNodeId || 'none'),
+        'contextKind=' + String(resolvedContextKind || 'none'),
+        'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
+        'overlayId=' + String((videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown')
+      );
+      postNonShortsTransitionDiag('resolved_context_blur_repair_applied', {
+        reason: String(reason || 'unknown'),
+        nodeId: String(videoNodeId || 'none'),
+        marker: 'resolved_context_blur_repair_applied',
+        contextKind: String(resolvedContextKind || 'none'),
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+      });
+    }
     let overlayHoldUnresolvedChurnAllowed = false;
     if (videoNode && videoNode.dataset && (contextData || activeVideoBlurred)) {
       videoNode.dataset.mwUnresolvedOverlayHoldUntil = '';
@@ -4576,6 +4713,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       !activeVideoBlurred &&
       !keepOverlayDuringRegularUnresolvedChurn &&
       !nonShortsResolvedContextOverlayHold &&
+      !shortsResolvedContextOverlayHold &&
       !overlayHoldUnresolvedChurnAllowed &&
       !nonShortsPendingRevealGuard &&
       videoOverlay &&
@@ -4623,6 +4761,21 @@ export function generateModerationScript(config: InjectionConfig): string {
         reason: String(reason || 'unknown'),
         nodeId: videoNodeId,
         marker: 'MW-MVP-REGULAR-THUMB-REVEAL-FALLBACK-V2',
+        contextKind: resolvedContextKind,
+        overlayId: String((videoOverlay && videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown'),
+      });
+    } else if (shortsResolvedContextOverlayHold) {
+      console.log(
+        '[DIAG][SHORTS_REATTACH] shorts_overlay_remove_veto_context_resolved',
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'contextKind=' + resolvedContextKind,
+        'overlayId=' + String((videoOverlay && videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown')
+      );
+      postNonShortsTransitionDiag('shorts_overlay_remove_veto_context_resolved', {
+        reason: String(reason || 'unknown'),
+        nodeId: videoNodeId,
+        marker: 'shorts_overlay_remove_veto_context_resolved',
         contextKind: resolvedContextKind,
         overlayId: String((videoOverlay && videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown'),
       });
@@ -7192,22 +7345,38 @@ export function generateModerationScript(config: InjectionConfig): string {
       );
       if (isMainSurfaceRegularThumbPath && element && element.parentElement) {
         const elementNodeId = getDiagNodeId(element);
-        const siblingOverlays = element.parentElement.querySelectorAll('.mw-reveal-overlay');
+        const allOverlays = document.querySelectorAll('.mw-reveal-overlay');
         const duplicateCandidates = [];
-        for (let i = 0; i < siblingOverlays.length; i += 1) {
-          const candidate = siblingOverlays[i];
+        for (let i = 0; i < allOverlays.length; i += 1) {
+          const candidate = allOverlays[i];
           if (!candidate || !candidate.isConnected) continue;
           const candidateNodeId = String((candidate.dataset && candidate.dataset.mwNodeId) || '');
           const candidateFor = String((candidate.dataset && candidate.dataset.mwFor) || '');
-          const weakSrcMatch = !candidateNodeId && !!src && candidateFor === src;
+          const weakSrcMatch = (
+            !candidateNodeId &&
+            !!src &&
+            candidateFor === src &&
+            candidate.parentElement === element.parentElement
+          );
           if (candidateNodeId === elementNodeId || weakSrcMatch) {
             duplicateCandidates.push(candidate);
           }
         }
         if (duplicateCandidates.length > 1) {
-          const survivor = duplicateCandidates[0];
-          for (let i = 1; i < duplicateCandidates.length; i += 1) {
+          let survivor = null;
+          for (let i = 0; i < duplicateCandidates.length; i += 1) {
+            const candidate = duplicateCandidates[i];
+            if (candidate && candidate.parentElement === element.parentElement) {
+              survivor = candidate;
+              break;
+            }
+          }
+          if (!survivor) {
+            survivor = duplicateCandidates[0];
+          }
+          for (let i = 0; i < duplicateCandidates.length; i += 1) {
             const duplicate = duplicateCandidates[i];
+            if (!duplicate || duplicate === survivor) continue;
             if (duplicate && duplicate.parentElement) {
               duplicate.parentElement.removeChild(duplicate);
             }
