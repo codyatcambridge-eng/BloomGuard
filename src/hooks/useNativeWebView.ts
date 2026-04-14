@@ -10,7 +10,7 @@ const FLASH_GUARD_PROOF_MS = 2000;
 
 const FLASH_GUARD_SCRIPT = `(() => {
   const HOST_ID = 'mw-shadow-veil-host';
-  const BASE_BG = 'rgba(8,12,18,0.45)';
+  const BASE_BG = 'transparent';
   const DIAG_ON = ${FLASH_GUARD_DIAG_VISUAL ? 'true' : 'false'};
   const DIAG_MS = ${FLASH_GUARD_DIAG_VISUAL_MS};
 
@@ -35,8 +35,8 @@ const FLASH_GUARD_SCRIPT = `(() => {
       'position:fixed',
       'inset:0',
       'background:' + BASE_BG,
-      'backdrop-filter:blur(22px) saturate(0.8)',
-      '-webkit-backdrop-filter:blur(22px) saturate(0.8)',
+      'backdrop-filter:blur(20px)',
+      '-webkit-backdrop-filter:blur(20px)',
       'transition:opacity 120ms ease',
       'opacity:1'
     ].join('!important;') + '!important;';
@@ -89,7 +89,7 @@ const FLASH_GUARD_SCRIPT = `(() => {
 
   if (DIAG_ON && !api.__diagPeeked && veil) {
     api.__diagPeeked = true;
-    const diagBg = 'linear-gradient(135deg, rgba(46,134,255,0.28), ' + BASE_BG + ')';
+    const diagBg = BASE_BG;
     veil.style.background = diagBg;
     veil.style.opacity = '0.9';
     setTimeout(() => {
@@ -113,8 +113,8 @@ const FLASH_GUARD_SCRIPT = `(() => {
 
 const FLASH_GUARD_PROOF_SCRIPT = `(() => {
   const HOST_ID = 'mw-shadow-veil-host';
-  const BASE_BG = 'rgba(8,12,18,0.45)';
-  const BLUE_TINT = 'linear-gradient(135deg, rgba(32,142,255,0.72), rgba(8,12,18,0.62))';
+  const BASE_BG = 'transparent';
+  const BLUE_TINT = 'transparent';
 
   let host = document.getElementById(HOST_ID);
   if (!host) {
@@ -142,8 +142,8 @@ const FLASH_GUARD_PROOF_SCRIPT = `(() => {
       'position:fixed',
       'inset:0',
       'background:' + BLUE_TINT,
-      'backdrop-filter:blur(22px) saturate(0.8)',
-      '-webkit-backdrop-filter:blur(22px) saturate(0.8)',
+      'backdrop-filter:blur(20px)',
+      '-webkit-backdrop-filter:blur(20px)',
       'opacity:0.95',
       'visibility:visible',
       'z-index:2147483647',
@@ -632,6 +632,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
         const url = payload.url || '';
         console.log('[NativeWebView] URL changed:', url);
         currentUrlRef.current = url;
+        onUrlChangeRef.current?.(url);
 
         const context = readListenerDiagContext();
         listenerOwnerRef.current = {
@@ -641,7 +642,6 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
         logChurnDiag('urlChangeEvent', 'event_received', 'useNativeWebView.listeners.urlChangeEvent');
 
         setState(prev => ({ ...prev, currentUrl: url }));
-        onUrlChangeRef.current?.(url);
 
         // Update history
         if (historyIndexRef.current === historyStackRef.current.length - 1) {

@@ -1482,9 +1482,11 @@ export const NativeWebViewBrowser = () => {
       navigate('fallback', '', url);
     },
     onUrlChange: (url) => {
+      const previousUrl = currentUrlRef.current || webViewState.currentUrl || '';
+      markNavigation('onUrlChange', url);
       if (executeScript) {
         const safeReason = escapeForJs('host_onUrlChange');
-        void executeScript(`
+        const teardownPromise = executeScript(`
           (function() {
             try {
               if (typeof window.__MW_HARD_TEARDOWN__ === 'function') {
@@ -1500,9 +1502,25 @@ export const NativeWebViewBrowser = () => {
               return 'ERR:' + String(e);
             }
           })();
-        `).catch(() => undefined);
+        `);
+        if (isYouTubeShortsUrl(url)) {
+          void teardownPromise
+            .then(() => installShortsSkeleton('shorts_url_change_pre_first_frame'))
+            .then((installed) => {
+              shortsSkeletonInstalledRef.current = installed;
+            })
+            .catch(() => undefined);
+        } else if (shortsSkeletonInstalledRef.current) {
+          void teardownPromise
+            .then(() => removeShortsSkeleton('leave_shorts_url_change'))
+            .then(() => {
+              shortsSkeletonInstalledRef.current = false;
+            })
+            .catch(() => undefined);
+        } else {
+          void teardownPromise.catch(() => undefined);
+        }
       }
-      const previousUrl = currentUrlRef.current || webViewState.currentUrl || '';
       const previousFamily = getCacheFamilyContext(previousUrl);
       const nextFamily = getCacheFamilyContext(url);
       const previousShortsId = getYouTubeShortsId(previousUrl);
@@ -1521,7 +1539,6 @@ export const NativeWebViewBrowser = () => {
       console.log('[Browser] ======= URL CHANGE =======');
       console.log('[Browser] New URL:', url);
       console.log('[DIAG][LOAD] stage=url_change url=' + toDiagUrl(url));
-      markNavigation('onUrlChange', url);
       moderationNavGenerationRef.current += 1;
       pendingRequestsRef.current.clear();
       logLifecycleSnapshot('url_change', url, 'onUrlChange');
@@ -1606,6 +1623,139 @@ export const NativeWebViewBrowser = () => {
     getListenerDiagContext: getWebViewListenerDiagContext,
   });
   const executeScriptRef = useRef(executeScript);
+  const shortsSkeletonInstalledRef = useRef(false);
+
+  const installShortsSkeleton = useCallback(async (reason: string) => {
+    if (!executeScript) return false;
+    const safeReason = escapeForJs(reason || 'shorts_skeleton_install');
+    try {
+      const result = await executeScript(`
+        (function() {
+          try {
+            var HOST_ID = 'mw-shorts-skeleton-host';
+            var STYLE_ID = 'mw-shorts-skeleton-style';
+            var parseShortsId = function(url) {
+              try {
+                var parsed = new URL(url || location.href, location.href);
+                var pathMatch = String(parsed.pathname || '').match(/^\\/shorts\\/([^/?#]+)/);
+                if (pathMatch && pathMatch[1]) return pathMatch[1];
+                var queryId = parsed.searchParams.get('v');
+                return queryId || '';
+              } catch (e) {
+                return '';
+              }
+            };
+            var activeVideoId = parseShortsId(location.href);
+            var verdictCache = window.__MW_SHORTS_VERDICT_CACHE__ && typeof window.__MW_SHORTS_VERDICT_CACHE__ === 'object'
+              ? window.__MW_SHORTS_VERDICT_CACHE__
+              : null;
+            var cached = verdictCache && activeVideoId ? verdictCache[activeVideoId] : null;
+            var cachedNeutral = !!(cached && (cached.verdict === 'neutral' || cached.shouldBlur === false));
+            if (cachedNeutral) {
+              var cachedHost = document.getElementById(HOST_ID);
+              if (cachedHost) {
+                cachedHost.dataset.mwShortsSkeleton = 'off';
+                cachedHost.dataset.mwShortsSkeletonReason = 'cached_neutral_' + activeVideoId;
+                try { cachedHost.remove(); } catch (e) {}
+              }
+              var cachedStyle = document.getElementById(STYLE_ID);
+              if (cachedStyle) {
+                try { cachedStyle.remove(); } catch (e) {}
+              }
+              return 'SKIP_NEUTRAL';
+            }
+
+            var style = document.getElementById(STYLE_ID);
+            if (!style) {
+              style = document.createElement('style');
+              style.id = STYLE_ID;
+              style.textContent = [
+                '#shorts-player, #shorts-player * {',
+                '  -webkit-filter: blur(34px) saturate(1.05) contrast(1.06) !important;',
+                '  filter: blur(34px) saturate(1.05) contrast(1.06) !important;',
+                '  will-change: filter !important;',
+                '}',
+                'ytm-media-item img, ytm-thumbnail img, ytm-rich-item-renderer img, ytm-shorts-lockup-view-model img {',
+                '  -webkit-filter: blur(16px) saturate(1.04) contrast(1.04) !important;',
+                '  filter: blur(16px) saturate(1.04) contrast(1.04) !important;',
+                '}',
+              ].join('\\n');
+              (document.head || document.documentElement || document.body).appendChild(style);
+            }
+
+            var host = document.getElementById(HOST_ID);
+            if (!host) {
+              host = document.createElement('div');
+              host.id = HOST_ID;
+              host.setAttribute('aria-hidden', 'true');
+              host.style.cssText = 'position:fixed;inset:0;z-index:2147483647;pointer-events:none;opacity:1;';
+              (document.documentElement || document.body).appendChild(host);
+            }
+            var shadow = host.shadowRoot || null;
+            if (!shadow) {
+              try { shadow = host.attachShadow({ mode: 'closed' }); } catch (e) { shadow = null; }
+            }
+            var veil = shadow ? shadow.firstChild : null;
+            if (!veil && shadow) {
+              veil = document.createElement('div');
+              shadow.appendChild(veil);
+            }
+            if (veil && veil.style) {
+              veil.style.cssText = [
+                'position:fixed',
+                'inset:0',
+                'background:transparent',
+                'backdrop-filter:blur(20px)',
+                '-webkit-backdrop-filter:blur(20px)',
+                'opacity:1',
+                'transition:opacity 120ms ease',
+                'pointer-events:none'
+              ].join('!important;') + '!important;';
+            }
+            host.dataset.mwShortsSkeleton = 'on';
+            host.dataset.mwShortsSkeletonReason = '${safeReason}';
+            return 'OK';
+          } catch (e) {
+            return 'ERR:' + String(e);
+          }
+        })();
+      `);
+      return String(result || '').startsWith('OK') || String(result || '').startsWith('SKIP_NEUTRAL');
+    } catch {
+      return false;
+    }
+  }, [executeScript]);
+
+  const removeShortsSkeleton = useCallback(async (reason: string) => {
+    if (!executeScript) return false;
+    const safeReason = escapeForJs(reason || 'shorts_skeleton_remove');
+    try {
+      const result = await executeScript(`
+        (function() {
+          try {
+            var HOST_ID = 'mw-shorts-skeleton-host';
+            var STYLE_ID = 'mw-shorts-skeleton-style';
+            var host = document.getElementById(HOST_ID);
+            if (host) {
+              host.dataset.mwShortsSkeleton = 'off';
+              host.dataset.mwShortsSkeletonReason = '${safeReason}';
+              try { host.remove(); } catch (e) {}
+            }
+            var style = document.getElementById(STYLE_ID);
+            if (style) {
+              try { style.remove(); } catch (e) {}
+            }
+            return 'OK';
+          } catch (e) {
+            return 'ERR:' + String(e);
+          }
+        })();
+      `);
+      return String(result || '').startsWith('OK');
+    } catch {
+      return false;
+    }
+  }, [executeScript]);
 
   const requestShortsReentryRefresh = useCallback(async (
     reason: string,
@@ -3168,19 +3318,38 @@ export const NativeWebViewBrowser = () => {
       }
       if (typedMessage.type === 'MW_SHORTS_VERDICT_APPLIED') {
         const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
+        const activeVideoId = getYouTubeShortsId(activeUrl);
         const messageEpoch = (
           typeof typedMessage.pageEpoch === 'number' && Number.isFinite(typedMessage.pageEpoch)
         ) ? Number(typedMessage.pageEpoch) : null;
         const activeEpoch = webViewPageEpochRef.current;
+        const messageVideoId = typeof typedMessage.videoId === 'string' && typedMessage.videoId
+          ? typedMessage.videoId
+          : 'none';
+        if (messageEpoch === null || messageEpoch !== activeEpoch) {
+          console.log(
+            '[DIAG][SHORTS_VEIL_GATE]',
+            'action=drop_verdict_applied_epoch_mismatch',
+            'messageEpoch=' + String(messageEpoch ?? 'none'),
+            'activeEpoch=' + activeEpoch,
+            'messageVideoId=' + messageVideoId,
+            'activeVideoId=' + activeVideoId,
+            'url=' + (activeUrl || 'unknown'),
+          );
+          return;
+        }
         if (
           executeScript &&
           isYouTubeShortsUrl(activeUrl) &&
-          messageEpoch !== null &&
           messageEpoch === activeEpoch &&
+          activeVideoId !== 'none' &&
+          messageVideoId !== 'none' &&
+          messageVideoId === activeVideoId &&
           relaxedEpochBypassHookStableRef.current &&
           shortsVeilLiftEpochRef.current !== activeEpoch
         ) {
           shortsVeilLiftEpochRef.current = activeEpoch;
+          shortsSkeletonInstalledRef.current = false;
           const liftReason = escapeForJs('shorts_verdict_applied');
           void executeScript(`
             (function() {
@@ -3191,12 +3360,33 @@ export const NativeWebViewBrowser = () => {
                   reason: '${liftReason}',
                   timestamp: Date.now()
                 }, '*');
+                try {
+                  var host = document.getElementById('mw-shorts-skeleton-host');
+                  if (host) host.remove();
+                } catch (e) {}
+                try {
+                  var style = document.getElementById('mw-shorts-skeleton-style');
+                  if (style) style.remove();
+                } catch (e) {}
                 return 'OK';
               } catch (e) {
                 return 'ERR:' + String(e);
               }
             })();
           `).catch(() => undefined);
+        } else if (
+          isYouTubeShortsUrl(activeUrl) &&
+          messageEpoch === activeEpoch &&
+          (messageVideoId === 'none' || activeVideoId === 'none' || messageVideoId !== activeVideoId)
+        ) {
+          console.log(
+            '[DIAG][SHORTS_VEIL_GATE]',
+            'action=ignore_verdict_applied_for_non_active_video',
+            'messageVideoId=' + messageVideoId,
+            'activeVideoId=' + activeVideoId,
+            'pageEpoch=' + activeEpoch,
+            'url=' + (activeUrl || 'unknown'),
+          );
         }
         return;
       }
