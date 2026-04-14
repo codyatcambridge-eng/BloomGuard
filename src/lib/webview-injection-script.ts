@@ -4498,7 +4498,15 @@ export function generateModerationScript(config: InjectionConfig): string {
         const holdUsed = videoNode.dataset.mwUnresolvedOverlayHoldUsed === '1';
         const ownerByNodeId = overlayNodeId === videoNodeId;
         const ownerBySrc = !!(overlayProbeSrc && overlayForSrc && overlayProbeSrc === overlayForSrc);
-        const ownershipProved = ownerByNodeId && ownerBySrc;
+        const overlayProbeItemKey = getDiagItemKey(overlayProbeSrc);
+        const ownerByItemKey = !!(
+          overlayProbeItemKey &&
+          overlayProbeItemKey !== 'unknown' &&
+          overlayForItemKey &&
+          overlayForItemKey !== 'unknown' &&
+          overlayProbeItemKey === overlayForItemKey
+        );
+        const ownershipProved = ownerByNodeId && (ownerBySrc || ownerByItemKey);
         const parentOverlays = videoOverlay.parentElement.querySelectorAll('.mw-reveal-overlay');
         let ownershipCandidateCount = 0;
         for (let i = 0; i < parentOverlays.length; i += 1) {
@@ -4506,7 +4514,18 @@ export function generateModerationScript(config: InjectionConfig): string {
           if (!candidate || !candidate.isConnected) continue;
           const candidateNodeId = String((candidate.dataset && candidate.dataset.mwNodeId) || '');
           const candidateFor = String((candidate.dataset && candidate.dataset.mwFor) || '');
-          if (candidateNodeId === videoNodeId || (overlayForSrc && candidateFor === overlayForSrc)) {
+          const candidateForItemKey = getDiagItemKey(candidateFor);
+          if (
+            candidateNodeId === videoNodeId ||
+            (overlayForSrc && candidateFor === overlayForSrc) ||
+            (
+              overlayForItemKey &&
+              overlayForItemKey !== 'unknown' &&
+              candidateForItemKey &&
+              candidateForItemKey !== 'unknown' &&
+              candidateForItemKey === overlayForItemKey
+            )
+          ) {
             ownershipCandidateCount += 1;
           }
         }
@@ -4542,6 +4561,8 @@ export function generateModerationScript(config: InjectionConfig): string {
           'ownershipProved=' + String(ownershipProved),
           'ownerByNodeId=' + String(ownerByNodeId),
           'ownerBySrc=' + String(ownerBySrc),
+          'ownerByItemKey=' + String(ownerByItemKey),
+          'overlayProbeItemKey=' + String(overlayProbeItemKey || 'unknown'),
           'ownershipCandidateCount=' + String(ownershipCandidateCount),
           'nodeId=' + videoNodeId,
           'overlayId=' + String((videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown'),
@@ -7159,6 +7180,47 @@ export function generateModerationScript(config: InjectionConfig): string {
         src,
         'mwModerated=' + (element.dataset.mwModerated || 'none')
       );
+    }
+    // MVP hardening: on non-Shorts main-surface regular cards, collapse duplicate
+    // overlays bound to the same node before normal overlay resolution.
+    if (!shortsMode) {
+      const host = String(window.location.hostname || '').toLowerCase();
+      const path = String(window.location.pathname || '/');
+      const isMainSurfaceRegularThumbPath = (
+        host === 'm.youtube.com' &&
+        (path === '/' || path.indexOf('/feed') === 0 || path.indexOf('/results') === 0)
+      );
+      if (isMainSurfaceRegularThumbPath && element && element.parentElement) {
+        const elementNodeId = getDiagNodeId(element);
+        const siblingOverlays = element.parentElement.querySelectorAll('.mw-reveal-overlay');
+        const duplicateCandidates = [];
+        for (let i = 0; i < siblingOverlays.length; i += 1) {
+          const candidate = siblingOverlays[i];
+          if (!candidate || !candidate.isConnected) continue;
+          const candidateNodeId = String((candidate.dataset && candidate.dataset.mwNodeId) || '');
+          const candidateFor = String((candidate.dataset && candidate.dataset.mwFor) || '');
+          const weakSrcMatch = !candidateNodeId && !!src && candidateFor === src;
+          if (candidateNodeId === elementNodeId || weakSrcMatch) {
+            duplicateCandidates.push(candidate);
+          }
+        }
+        if (duplicateCandidates.length > 1) {
+          const survivor = duplicateCandidates[0];
+          for (let i = 1; i < duplicateCandidates.length; i += 1) {
+            const duplicate = duplicateCandidates[i];
+            if (duplicate && duplicate.parentElement) {
+              duplicate.parentElement.removeChild(duplicate);
+            }
+          }
+          console.log(
+            '[DIAG][REVEAL_UI] duplicate_overlay_collapsed',
+            'nodeId=' + elementNodeId,
+            'removed=' + String(duplicateCandidates.length - 1),
+            'survivor=' + String((survivor.dataset && survivor.dataset.mwOverlayId) || 'unknown'),
+            'scope=main_surface_regular_non_shorts'
+          );
+        }
+      }
     }
     const existingOverlay = findRevealOverlayForElement(element, src);
     if (existingOverlay) {
