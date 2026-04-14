@@ -4316,10 +4316,18 @@ export function generateModerationScript(config: InjectionConfig): string {
       (isUserRevealIntentReason || pendingRevealActive || videoLikelyPlaying)
     );
     const resolvedContextKind = String(contextKind || 'none');
+    // BlurMVP fix: when contextKind=card_blurred with a confirmed strict-continuity
+    // key match, the context registry IS the authoritative blur signal.  The video
+    // node itself may have no inline filter (blur was applied to the img/card element),
+    // so requiring activeVideoBlurred here caused the hold to silently fail and the
+    // overlay to be ejected on every attr:style churn event.
+    const cardBlurContextIsAuthoritative = !!(
+      resolvedContextKind === 'card_blurred' && !strictContinuityUnknown
+    );
     const nonShortsResolvedContextOverlayHold = !!(
       revealFallbackScopeEligible &&
       !!contextData &&
-      (activeVideoBlurred || hasAuthoritativeBlur) &&
+      (activeVideoBlurred || hasAuthoritativeBlur || cardBlurContextIsAuthoritative) &&
       (
         resolvedContextKind === 'card_blurred' ||
         resolvedContextKind === 'itemkey_global'
@@ -4329,6 +4337,10 @@ export function generateModerationScript(config: InjectionConfig): string {
         reasonText === 'event:loadeddata' ||
         reasonText === 'event:playing' ||
         reasonText.indexOf('attr:style') === 0 ||
+        // attr:src fires on thumbnail quality upgrades (hq480→hq720) for the same
+        // video ID — getDiagItemKey maps both to the same key, so the strict match
+        // is valid and holding here eliminates the remove→recreate one-frame flicker.
+        (reasonText.indexOf('attr:src') === 0 && !strictContinuityUnknown) ||
         pendingRevealActive ||
         videoLikelyPlaying
       ) &&
@@ -4529,6 +4541,20 @@ export function generateModerationScript(config: InjectionConfig): string {
         );
         return { overlay: overlay, anchored: false };
       }
+      // BlurMVP fix: when context registry is authoritative (card_blurred + strict key),
+      // keep the overlay and let the migration/create loop reposition it rather than
+      // removing it here — avoids the "tap to reveal" button flicker on transient
+      // style-churn geometry shifts where activeVideoBlurred is false.
+      if (cardBlurContextIsAuthoritative) {
+        console.warn(
+          '[DIAG][NON_SHORTS_REATTACH] overlay_geometry_mismatch_keep_card_blurred',
+          'reason=' + (reason || 'unknown'),
+          'phase=' + String(phase || 'unknown'),
+          'nodeId=' + videoNodeId,
+          'overlayId=' + overlayId
+        );
+        return { overlay: overlay, anchored: false };
+      }
       console.warn(
         '[DIAG][NON_SHORTS_REATTACH] overlay_geometry_mismatch',
         'reason=' + (reason || 'unknown'),
@@ -4552,7 +4578,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     videoOverlay = normalizedOverlay.overlay;
     let overlayAnchored = normalizedOverlay.anchored;
     if (
-      activeVideoBlurred &&
+      (activeVideoBlurred || cardBlurContextIsAuthoritative) &&
       !overlayAnchored &&
       !shouldDisableRevealUiForMvpMainPageSurface()
     ) {
@@ -4627,9 +4653,13 @@ export function generateModerationScript(config: InjectionConfig): string {
       overlayAnchored = normalizedOverlay.anchored;
     }
     if (
-      activeVideoBlurred &&
+      (activeVideoBlurred || cardBlurContextIsAuthoritative) &&
       !overlayAnchored &&
-      !shouldDisableRevealUiForMvpMainPageSurface()
+      !shouldDisableRevealUiForMvpMainPageSurface() &&
+      // Belt-and-suspenders: never re-create the overlay if the user has already
+      // explicitly revealed this item — the DOM [data-mw-moderated="blurred"] guard
+      // already prevents this in practice, but make the intent explicit.
+      !isRevealedForSource(overlayProbeSrc, videoNode)
     ) {
       createRevealOverlay(videoNode, overlayProbeSrc, overlayCategory, overlayItemId);
       videoOverlay = findRevealOverlayForElement(videoNode, overlayProbeSrc);
