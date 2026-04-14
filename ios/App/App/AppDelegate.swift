@@ -9,12 +9,12 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     var window: UIWindow?
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-        // ── BlurMVP Startup Diagnostic ────────────────────────────────────────
+        // ── BlurKing Startup Runtime Diagnostic ───────────────────────────────
         // Confirms the binary being executed is freshly built from mvpcandidate1.
         // If you DON'T see this print at launch you are running a stale/cached build.
         let launchTime = ISO8601DateFormatter().string(from: Date())
-        print("▶▶▶ [BlurMVP][STARTUP] branch=mvpcandidate1 | launched=\(launchTime)")
-        print("▶▶▶ [BlurMVP][STARTUP] bundle=\(Bundle.main.bundleIdentifier ?? "unknown") | version=\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?") (\(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"))")
+        print("▶▶▶ [BlurKing][STARTUP] marker=BlurKing | branch=mvpcandidate1 | launched=\(launchTime)")
+        print("▶▶▶ [BlurKing][STARTUP] bundle=\(Bundle.main.bundleIdentifier ?? "unknown") | version=\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?") (\(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"))")
         // ─────────────────────────────────────────────────────────────────────
 
         // Restore InAppBrowser lifecycle bridge so native plugins can observe the active WKWebView.

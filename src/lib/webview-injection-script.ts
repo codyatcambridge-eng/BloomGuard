@@ -4095,12 +4095,39 @@ export function generateModerationScript(config: InjectionConfig): string {
         'pageEpoch=' + String(state.pageEpoch || 0)
       );
     }
+    const holdHomeShortsShelfBlurDuringUnresolvedTransition = !!(
+      isHomeShortsShelfVideo &&
+      isTransitionChurnReason &&
+      hasAuthoritativeBlur &&
+      !contextData &&
+      hasHardBlurOwnershipMarker &&
+      !hardKeyMatchesStrict &&
+      !hardSrcMatchesCurrent
+    );
+    if (holdHomeShortsShelfBlurDuringUnresolvedTransition) {
+      console.log(
+        '[MW-MVP-HOME-SHORTS-UNRESOLVED-HOLD-V1] hold_authoritative_blur_unresolved_transition',
+        'reason=' + String(reason || 'unknown'),
+        'nodeId=' + String(videoNodeId || 'none'),
+        'cardNodeId=' + String(cardNodeId || 'none'),
+        'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown'),
+        'hardBlurSrc=' + String(hardBlurSrc || '').substring(0, 180)
+      );
+      postNonShortsTransitionDiag('home_shorts_hold_authoritative_blur_unresolved_transition', {
+        reason: String(reason || 'unknown'),
+        nodeId: String(videoNodeId || 'none'),
+        marker: 'MW-MVP-HOME-SHORTS-UNRESOLVED-HOLD-V1',
+        cardNodeId: String(cardNodeId || 'none'),
+        hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+      });
+    }
     if (
       hasAuthoritativeBlur &&
       !contextData &&
       !hardKeyMatchesStrict &&
       !hardSrcMatchesCurrent &&
-      !holdBlurDuringUnresolvedTransition
+      !holdBlurDuringUnresolvedTransition &&
+      !holdHomeShortsShelfBlurDuringUnresolvedTransition
     ) {
       videoNode.style.removeProperty('filter');
       videoNode.style.removeProperty('-webkit-filter');
