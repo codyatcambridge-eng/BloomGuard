@@ -2987,11 +2987,14 @@ export function generateModerationScript(config: InjectionConfig): string {
   const NON_SHORTS_REATTACH_CONTEXT_MAX = 400;
   const NON_SHORTS_REATTACH_COOLDOWN_MS = 80;
   const NON_SHORTS_REVEAL_INTENT_TTL_MS = 1600;
+  const MANUAL_REVEAL_TARGET_WINDOW_MS = 1400;
   const NON_SHORTS_REATTACH_CARD_FALLBACK_ITEM_KEY = '__card_latest__';
   const NON_SHORTS_REATTACH_MIN_OVERLAY_INTERSECTION_RATIO = 0.35;
   const NON_SHORTS_REATTACH_MAX_CENTER_OFFSET_RATIO = 0.7;
   const REGULAR_MAIN_CARD_BLUR_LATCH_TTL_MS = 2200;
   const REGULAR_MAIN_CARD_BLUR_LATCH_MAX = 160;
+  let lastManualRevealTargetNodeId = '';
+  let lastManualRevealTargetUntil = 0;
 
   function isNonShortsYouTubeReattachContext() {
     return isYouTube() && !isShortsModeActive();
@@ -3422,7 +3425,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (videoNode.dataset) {
       videoNode.dataset.mwNonShortsReattachAt = String(now);
     }
-    const isUserRevealIntentReason = !!(
+    const isUserRevealIntentReasonBase = !!(
       reasonText === 'event:play' ||
       reasonText === 'event:playing' ||
       reasonText === 'event:loadeddata'
@@ -3442,6 +3445,28 @@ export function generateModerationScript(config: InjectionConfig): string {
     const reattachItemKey = getDiagItemKey(normalizedPoster || normalizedCurrent || '');
     const reattachItemId = String((videoNode.dataset && videoNode.dataset.mwItemId) || 'none');
     const videoNodeId = getDiagNodeId(videoNode);
+    const manualRevealWindowActive = (
+      Number.isFinite(lastManualRevealTargetUntil) &&
+      lastManualRevealTargetUntil > now
+    );
+    const isManualRevealTargetNode = !!(
+      manualRevealWindowActive &&
+      lastManualRevealTargetNodeId &&
+      lastManualRevealTargetNodeId === videoNodeId
+    );
+    const isUserRevealIntentReason = !!(
+      isUserRevealIntentReasonBase &&
+      (!manualRevealWindowActive || isManualRevealTargetNode)
+    );
+    if (manualRevealWindowActive && !isManualRevealTargetNode && reasonLooksTransition) {
+      postNonShortsTransitionDiag('skip_non_target_manual_reveal_window', {
+        reason: String(reason || 'unknown'),
+        nodeId: videoNodeId,
+        marker: 'MW-MVP-MANUAL-REVEAL-TARGET-WINDOW-V1',
+        targetNodeId: String(lastManualRevealTargetNodeId || 'none'),
+      });
+      return;
+    }
     let card = (typeof videoNode.closest === 'function')
       ? videoNode.closest(NON_SHORTS_REATTACH_CARD_SELECTOR)
       : null;
@@ -7665,6 +7690,8 @@ export function generateModerationScript(config: InjectionConfig): string {
           'beforeBlurCount=' + beforeBlurCount
         );
         const revealApplied = markRevealedForSource(src, element, 'manual_reveal');
+        lastManualRevealTargetNodeId = getDiagNodeId(element);
+        lastManualRevealTargetUntil = Date.now() + MANUAL_REVEAL_TARGET_WINDOW_MS;
         // Shorts MVP: a single tap should fully reveal and clear the overlay
         // to avoid a second tap requirement on active shorts.
         removeBlur(element, src, { keepOverlay: false });
