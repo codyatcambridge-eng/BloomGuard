@@ -615,6 +615,84 @@ export function generateModerationScript(config: InjectionConfig): string {
     }, 0);
   }
 
+  // MVP Hardening: homepage thumbnail "safety veil" to prevent positive/negative flashes
+  // while thumbnails are awaiting a moderation decision.
+  let homeVeilLiftRaf = null;
+  function applyHomepageThumbnailVeil(element, src, reason) {
+    if (!element || element.nodeType !== 1) return;
+    if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
+    if (isRevealedForSource(src, element)) return;
+    try {
+      element.classList.add('mw-thumb-veil');
+      if (element.dataset) {
+        element.dataset.mwVeiled = 'true';
+        element.dataset.mwVeilReason = String(reason || 'unknown');
+        element.dataset.mwVeilSrc = String(src || '');
+        element.dataset.mwVeilEpoch = String(state.pageEpoch || 0);
+      }
+    } catch (e) {}
+  }
+
+  function liftHomepageThumbnailVeil(element, src, reason) {
+    if (!element || element.nodeType !== 1) return;
+    try {
+      element.classList.remove('mw-thumb-veil');
+      element.style.removeProperty('opacity');
+      if (element.dataset) {
+        element.dataset.mwVeiled = 'false';
+        element.dataset.mwVeilLiftReason = String(reason || 'unknown');
+        element.dataset.mwVeilLiftAt = String(Date.now());
+      }
+    } catch (e) {}
+  }
+
+  function scheduleHomepageThumbnailVeilLift(element, src, reason) {
+    if (!element || element.nodeType !== 1) return;
+    if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
+    // Coalesce lifts so we always reveal on the next frame after the decision is applied.
+    if (homeVeilLiftRaf !== null) {
+      try {
+        if (typeof window.cancelAnimationFrame === 'function') {
+          window.cancelAnimationFrame(homeVeilLiftRaf);
+        }
+      } catch (e) {}
+      homeVeilLiftRaf = null;
+    }
+    try {
+      if (typeof window.requestAnimationFrame === 'function') {
+        homeVeilLiftRaf = window.requestAnimationFrame(function() {
+          homeVeilLiftRaf = null;
+          liftHomepageThumbnailVeil(element, src, reason || 'verdict');
+        });
+        return;
+      }
+    } catch (e) {}
+    setTimeout(function() {
+      homeVeilLiftRaf = null;
+      liftHomepageThumbnailVeil(element, src, reason || 'verdict');
+    }, 0);
+  }
+
+  function liftHomepageThumbnailVeilFanout(src, reason) {
+    if (!src) return;
+    if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
+    const normalizedSrc = normalizeUrl(src || '') || String(src || '');
+    const itemKey = getDiagItemKey(normalizedSrc || src || '');
+    const candidates = document.querySelectorAll('.mw-thumb-veil');
+    for (let i = 0; i < candidates.length; i += 1) {
+      const node = candidates[i];
+      if (!node || node.nodeType !== 1 || !node.isConnected) continue;
+      const veiledSrc = normalizeUrl((node.dataset && node.dataset.mwVeilSrc) || '') || '';
+      const veiledKey = String((node.dataset && node.dataset.mwItemKey) || '') || getDiagItemKey(veiledSrc || '');
+      if (
+        (veiledSrc && normalizedSrc && veiledSrc === normalizedSrc) ||
+        (itemKey && itemKey !== 'unknown' && veiledKey === itemKey)
+      ) {
+        scheduleHomepageThumbnailVeilLift(node, veiledSrc || normalizedSrc, reason || 'fanout');
+      }
+    }
+  }
+
   function handleBlurCommand(message) {
     if (!message || typeof message !== 'object') return false;
     if (message.type === 'MW_SHIELD_ACTION') {
@@ -758,6 +836,11 @@ export function generateModerationScript(config: InjectionConfig): string {
     safeResolved: new Set(), // src values resolved as safe to suppress legacy re-blur
     safeResolvedAt: new Map(), // src -> timestamp (bounded/ttl for legacy suppression)
     blurred: new Set(),
+    // Media identity tracking (YouTube DOM churn hardening):
+    // key = getDiagItemKey(src|poster) (typically the video id on ytimg.com assets)
+    // value = last verdict + blur config so we can re-bind blur/reveal UI when nodes are swapped.
+    mediaVerdicts: new Map(), // itemKey -> { verdict, src, category, blurPx, itemId, updatedAt }
+    mediaKeyBySrc: new Map(), // normalizedSrc -> itemKey
     revealed: new Set(), // Tracks URLs that user has manually revealed
     revealedMeta: new Map(), // revealKey -> { revealedAt, expiresAt, reason, src, shortsId }
     elements: new Map(), // itemId -> element
@@ -1175,6 +1258,41 @@ export function generateModerationScript(config: InjectionConfig): string {
   const mutationScanQueue = [];
   const mutationScanSet = new Set();
   let mutationScanTimer = null;
+
+  const MEDIA_VERDICT_TTL_MS = 90_000;
+
+  function rememberMediaVerdict(src, verdict, category, blurPx, itemId, reason) {
+    const normalizedSrc = normalizeUrl(src || '') || '';
+    const itemKey = getDiagItemKey(normalizedSrc || src || '');
+    if (!itemKey || itemKey === 'unknown') return;
+    const entry = {
+      verdict: String(verdict || 'unknown'),
+      src: normalizedSrc || String(src || ''),
+      category: String(category || 'flagged'),
+      blurPx: Number.isFinite(blurPx) ? Number(blurPx) : null,
+      itemId: String(itemId || ''),
+      updatedAt: Date.now(),
+      reason: String(reason || 'unknown'),
+    };
+    state.mediaVerdicts.set(itemKey, entry);
+    if (normalizedSrc) {
+      state.mediaKeyBySrc.set(normalizedSrc, itemKey);
+    }
+  }
+
+  function getRememberedMediaVerdictForSrc(src) {
+    const normalizedSrc = normalizeUrl(src || '') || '';
+    const itemKey = state.mediaKeyBySrc.get(normalizedSrc) || getDiagItemKey(normalizedSrc || src || '');
+    if (!itemKey || itemKey === 'unknown') return null;
+    const entry = state.mediaVerdicts.get(itemKey);
+    if (!entry) return null;
+    const age = Date.now() - Number(entry.updatedAt || 0);
+    if (!Number.isFinite(age) || age > MEDIA_VERDICT_TTL_MS) {
+      state.mediaVerdicts.delete(itemKey);
+      return null;
+    }
+    return { itemKey: itemKey, entry: entry };
+  }
 
   function allowPerSecond(bucket, maxPerSecond) {
     const nowSec = Math.floor(Date.now() / 1000);
@@ -5686,6 +5804,92 @@ export function generateModerationScript(config: InjectionConfig): string {
     return null;
   }
 
+  function doesNodeLookBlurred(node) {
+    if (!node || node.nodeType !== 1) return false;
+    try {
+      const inlineFilter = String(node.style.getPropertyValue('filter') || node.style.filter || '').toLowerCase();
+      const inlineBackdrop = String(node.style.getPropertyValue('backdrop-filter') || '').toLowerCase();
+      return !!(
+        inlineFilter.includes('blur(') ||
+        inlineBackdrop.includes('blur(') ||
+        node.dataset.mwModerated === 'blurred' ||
+        node.classList.contains('mw-blurred') ||
+        node.dataset.mwHardBlur === '1'
+      );
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function findConnectedNodeForItemKey(itemKey) {
+    if (!itemKey || itemKey === 'unknown') return null;
+    // First: any already-moderated nodes that have the key.
+    const moderated = document.querySelectorAll('[data-mw-item-key]');
+    for (let i = 0; i < moderated.length; i += 1) {
+      const node = moderated[i];
+      if (!node || node.nodeType !== 1 || !node.isConnected) continue;
+      if (!node.dataset || node.dataset.mwItemKey !== itemKey) continue;
+      return node;
+    }
+    // Fallback: scan common media nodes and match by derived item key.
+    const candidates = document.querySelectorAll('img[src], img[data-thumb], video[poster]');
+    for (let i = 0; i < candidates.length; i += 1) {
+      const node = candidates[i];
+      if (!node || node.nodeType !== 1 || !node.isConnected) continue;
+      const source = getDiagSourceFields(node);
+      const candidateSrc =
+        normalizeUrl(source.currentSrc || '') ||
+        normalizeUrl((node.getAttribute && node.getAttribute('src')) || '') ||
+        normalizeUrl((node.getAttribute && node.getAttribute('poster')) || '') ||
+        '';
+      if (!candidateSrc) continue;
+      if (getDiagItemKey(candidateSrc) !== itemKey) continue;
+      return node;
+    }
+    return null;
+  }
+
+  function findConnectedModeratedNodeForMediaIdentity(src, itemKey) {
+    const bySrc = findConnectedModeratedNodeForSrc(src);
+    if (bySrc) return bySrc;
+    const key = itemKey || getDiagItemKey(src);
+    if (!key || key === 'unknown') return null;
+    return findConnectedNodeForItemKey(key);
+  }
+
+  function reapplyHardBlurWithoutOverlay(element, src, category, blurPx, itemId, reason) {
+    if (!element || element.nodeType !== 1) return false;
+    if (isRevealedForSource(src, element)) return false;
+    const desiredBlur = Number.isFinite(blurPx) ? Number(blurPx) : (IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20));
+    try {
+      element.style.setProperty('filter', 'blur(' + desiredBlur + 'px)', 'important');
+      element.style.setProperty('-webkit-filter', 'blur(' + desiredBlur + 'px)', 'important');
+      element.style.setProperty('backdrop-filter', 'blur(' + desiredBlur + 'px)', 'important');
+      element.style.setProperty('-webkit-backdrop-filter', 'blur(' + desiredBlur + 'px)', 'important');
+      element.dataset.mwModerated = 'blurred';
+      element.dataset.mwCategory = String(category || 'flagged');
+      element.dataset.mwSrc = String(src || '');
+      element.dataset.mwItemId = String(itemId || '');
+      element.dataset.mwBlurStrength = String(desiredBlur);
+      element.dataset.mwItemKey = getDiagItemKey(src || '');
+      markAuthoritativeHardBlur(element, src);
+      element.classList.remove('mw-softblur');
+      element.classList.add('mw-blurred');
+      rememberNonShortsReattachContext(
+        element,
+        src,
+        category || 'flagged',
+        itemId || '',
+        desiredBlur,
+        'reapplyHardBlur/' + String(reason || 'unknown')
+      );
+      rememberMediaVerdict(src, 'blur', category || 'flagged', desiredBlur, itemId || '', 'reapplyHardBlur/' + String(reason || 'unknown'));
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
   function healRevealOverlaysBySrc(reason) {
     const overlays = document.querySelectorAll('.mw-reveal-overlay[data-mw-for]');
     if (!overlays || overlays.length === 0) return;
@@ -5694,6 +5898,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (!overlay || overlay.nodeType !== 1) continue;
       const src = String((overlay.dataset && overlay.dataset.mwFor) || '');
       if (!src) continue;
+      const overlayItemKey = String((overlay.dataset && overlay.dataset.mwItemKey) || '') || getDiagItemKey(src);
       const boundAnchor = (
         overlay.__mwAnchorTarget &&
         overlay.__mwAnchorTarget.nodeType === 1 &&
@@ -5701,7 +5906,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       ) ? overlay.__mwAnchorTarget : null;
       if (boundAnchor) continue;
 
-      const nextAnchor = findConnectedModeratedNodeForSrc(src);
+      const nextAnchor = findConnectedModeratedNodeForMediaIdentity(src, overlayItemKey);
       if (!nextAnchor) continue;
 
       const shortsMode = isYouTubeShortsUrl(window.location.href);
@@ -5717,14 +5922,46 @@ export function generateModerationScript(config: InjectionConfig): string {
         }
       }
       overlay.dataset.mwNodeId = getDiagNodeId(nextAnchor);
+      if (overlayItemKey) {
+        overlay.dataset.mwItemKey = overlayItemKey;
+      }
       setRevealOverlayAnchorTarget(overlay, nextAnchor, 'heal_src_rebind:' + String(reason || 'unknown'));
       scheduleShortsRevealOverlayReposition('heal_src_rebind');
+
+      // If YouTube churn swapped the underlying media node, ensure the blur state follows
+      // the media identity (src/poster) even when the new node hasn't been scanned yet.
+      if (!doesNodeLookBlurred(nextAnchor)) {
+        const overlayCategory = String((overlay.dataset && overlay.dataset.mwCategory) || 'flagged');
+        const overlayItemId = String((overlay.dataset && overlay.dataset.mwItemId) || '');
+        const remembered = getRememberedMediaVerdictForSrc(src);
+        const rememberedCategory = remembered && remembered.entry ? String(remembered.entry.category || overlayCategory) : overlayCategory;
+        const rememberedBlurPx = remembered && remembered.entry ? toFiniteNumber(remembered.entry.blurPx) : null;
+        const blurPx = rememberedBlurPx !== null ? rememberedBlurPx : toFiniteNumber((overlay.dataset && overlay.dataset.mwBlurStrength) || '');
+        const applied = reapplyHardBlurWithoutOverlay(
+          nextAnchor,
+          src,
+          rememberedCategory,
+          blurPx,
+          overlayItemId,
+          'overlay_heal'
+        );
+        if (applied && DIAG_YT_BLUR) {
+          console.log(
+            '[DIAG][REVEAL_HEAL] blur_reapplied',
+            'reason=' + String(reason || 'unknown'),
+            'overlayId=' + String((overlay.dataset && overlay.dataset.mwOverlayId) || 'unknown'),
+            'itemKey=' + String(overlayItemKey || 'unknown'),
+            'nextNode=' + getDiagNodeId(nextAnchor)
+          );
+        }
+      }
       if (DIAG_YT_BLUR) {
         console.log(
           '[DIAG][REVEAL_HEAL] rebind',
           'reason=' + String(reason || 'unknown'),
           'overlayId=' + String((overlay.dataset && overlay.dataset.mwOverlayId) || 'unknown'),
           'src=' + String(src).substring(0, 180),
+          'itemKey=' + String(overlayItemKey || 'unknown'),
           'nextNode=' + getDiagNodeId(nextAnchor)
         );
       }
@@ -6675,6 +6912,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       element.dataset.mwCategory = category || 'flagged';
       element.dataset.mwSrc = src;
       element.dataset.mwItemId = itemId || '';
+      element.dataset.mwItemKey = getDiagItemKey(src);
+      element.dataset.mwBlurStrength = String(blurPx);
       markAuthoritativeHardBlur(element, src);
       element.classList.remove('mw-softblur');
       element.classList.add('mw-blurred');
@@ -6715,6 +6954,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         diagScheduleBlurredNodePresenceChecks(element, src, itemId);
       }
       diagLogBlurAppliedNodeDetails(element, src, category, itemId, shortsStableSelectorUsed);
+      rememberMediaVerdict(src, 'blur', category || 'flagged', blurPx, itemId || '', 'applyBlur');
       
       state.blurred.add(src);
       state.stats.blurred++;
@@ -7084,6 +7324,9 @@ export function generateModerationScript(config: InjectionConfig): string {
         }
       }
       existingOverlay.dataset.mwFor = src;
+      existingOverlay.dataset.mwItemKey = getDiagItemKey(src);
+      existingOverlay.dataset.mwCategory = String(category || existingOverlay.dataset.mwCategory || 'flagged');
+      existingOverlay.dataset.mwItemId = String(itemId || existingOverlay.dataset.mwItemId || '');
       existingOverlay.dataset.mwNodeId = getDiagNodeId(element);
       if (shortsMode && shortsOwnerToken) {
         existingOverlay.dataset.mwShortsOwnerToken = shortsOwnerToken;
@@ -7191,6 +7434,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     const overlayId = 'mwov_' + Date.now().toString(36) + '_' + diagRevealOverlaySeq;
     overlay.className = 'mw-reveal-overlay';
     overlay.dataset.mwFor = src;
+    overlay.dataset.mwItemKey = itemKey;
+    overlay.dataset.mwCategory = String(category || 'flagged');
+    overlay.dataset.mwItemId = String(itemId || '');
     overlay.dataset.mwNodeId = getDiagNodeId(element);
     if (shortsMode && shortsOwnerToken) {
       overlay.dataset.mwShortsOwnerToken = shortsOwnerToken;
@@ -7292,7 +7538,7 @@ export function generateModerationScript(config: InjectionConfig): string {
 
     let revealPointerConsumedAt = 0;
     const handleReveal = function(e, channel) {
-      if (channel === 'pointerdown') {
+      if (channel === 'pointerdown' || channel === 'touchstart' || channel === 'touchend') {
         revealPointerConsumedAt = Date.now();
         try {
           e.preventDefault();
@@ -7437,6 +7683,12 @@ export function generateModerationScript(config: InjectionConfig): string {
     btn.addEventListener('pointerdown', function(e) {
       handleReveal(e, 'pointerdown');
     }, { capture: true });
+    btn.addEventListener('touchstart', function(e) {
+      handleReveal(e, 'touchstart');
+    }, { capture: true, passive: false });
+    btn.addEventListener('touchend', function(e) {
+      handleReveal(e, 'touchend');
+    }, { capture: true, passive: false });
     btn.addEventListener('click', function(e) {
       handleReveal(e, 'click');
     });
@@ -7706,7 +7958,6 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function cleanupRejectedOrTimedOutRequest(requestId, reason) {
-    if (!isShortsModeActive()) return;
     diagScanBatchStartAtByRequestId.delete(requestId);
     const pendingRequest = state.pendingRequests.get(requestId);
     if (!pendingRequest || !Array.isArray(pendingRequest.items)) return;
@@ -7716,8 +7967,11 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (element && element.isConnected) {
         const removed = removeSoftBlur(element, item.src);
         if (removed) cleanedElements += 1;
+        // Fail-open: never leave a homepage thumbnail invisible if the request is rejected/tears down.
+        scheduleHomepageThumbnailVeilLift(element, item.src, 'reject_cleanup');
       }
       findAndRemoveSoftBlur(item.src);
+      liftHomepageThumbnailVeilFanout(item.src, 'reject_cleanup_fanout');
       clearPendingItem(item.itemId, reason || 'request_reject_cleanup');
     });
     state.pendingRequests.delete(requestId);
@@ -7787,6 +8041,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         const element = state.elements.get(item.itemId);
         if (element && element.isConnected) {
           applyBlur(element, item.src, 'timeout', CONFIG.blurStrength, item.itemId);
+          scheduleHomepageThumbnailVeilLift(element, item.src, 'timeout_failClosed');
         }
         state.scanned.add(item.src);
       });
@@ -7799,6 +8054,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         if (element && element.isConnected) {
           removeSoftBlur(element, item.src);
           element.dataset.mwModerated = 'timeout-safe';
+          scheduleHomepageThumbnailVeilLift(element, item.src, 'timeout_failOpen');
         }
         markSafeResolved(item.src);
         // Don't add to scanned so they can be retried later
@@ -7817,15 +8073,16 @@ export function generateModerationScript(config: InjectionConfig): string {
     try {
       const { requestId, results, nonce } = message;
       const resultEpoch = Number.isFinite(message.pageEpoch) ? Number(message.pageEpoch) : null;
+      const resultSovereignId = typeof message.sovereignId === 'string' ? String(message.sovereignId) : '';
       const expectedNoncePrefix = String(CONFIG.nonce || '').substring(0, 6);
       const receivedNoncePrefix = String(nonce || 'none').substring(0, 6);
       const stickyShortsMode = isYouTubeShortsUrl(window.location.href);
-      const relaxedYouTubeEpochMode = isYouTubeDomainUrl(window.location.href);
-      if (resultEpoch !== null && resultEpoch !== state.pageEpoch && !relaxedYouTubeEpochMode) {
+      const isYouTube = isYouTubeDomainUrl(window.location.href);
+      if (resultEpoch !== null && resultEpoch !== state.pageEpoch) {
         diagEpochBypassCounters.epoch_bypass_blocked += 1;
         diagLogEpochBypass(
           'epoch_bypass_blocked',
-          'result_epoch_mismatch_non_youtube',
+          isYouTube ? 'result_epoch_mismatch_youtube_strict' : 'result_epoch_mismatch_non_youtube',
           resultEpoch,
           state.pageEpoch,
           window.location.href
@@ -7856,27 +8113,6 @@ export function generateModerationScript(config: InjectionConfig): string {
         cleanupRejectedOrTimedOutRequest(requestId, 'reject_epoch');
         return;
       }
-      if (resultEpoch !== null && resultEpoch !== state.pageEpoch && relaxedYouTubeEpochMode) {
-        diagEpochBypassCounters.epoch_bypass_allowed += 1;
-        diagLogEpochBypass(
-          'epoch_bypass_allowed',
-          'result_epoch_mismatch_youtube_relaxed',
-          resultEpoch,
-          state.pageEpoch,
-          window.location.href
-        );
-        if (DIAG_YT_BLUR) {
-          console.log(
-            '[MW-YT][DIAG][EPOCH][INJECT]',
-            'action=stale_injected_bypass_youtube',
-            'requestId=' + requestId,
-            'resultEpoch=' + resultEpoch,
-            'activeEpoch=' + state.pageEpoch,
-            'scope=' + (stickyShortsMode ? 'shorts' : 'youtube'),
-            'url=' + window.location.href
-          );
-        }
-      }
       
       if (!requestId || !Array.isArray(results)) {
         console.log('[MW] Invalid result message:', message);
@@ -7898,6 +8134,50 @@ export function generateModerationScript(config: InjectionConfig): string {
         );
         cleanupRejectedOrTimedOutRequest(requestId, 'reject_nonce');
         return;
+      }
+
+      // Tighten sovereign alignment (prevents cross-video/cross-nav leaks on SPA transitions).
+      if (resultSovereignId) {
+        const expectedSovereignId = [
+          getSovereignNavToken(),
+          String(state.pageEpoch || 0),
+          String(getCurrentShortsUrlId() || 'none'),
+        ].join('|');
+        const expectedParts = expectedSovereignId.split('|');
+        const receivedParts = resultSovereignId.split('|');
+        const receivedNav = receivedParts[0] || 'none';
+        const receivedEpoch = receivedParts[1] || 'none';
+        const receivedVideo = receivedParts[2] || 'none';
+        const expectedNav = expectedParts[0] || 'none';
+        const expectedEpoch = expectedParts[1] || 'none';
+        const expectedVideo = expectedParts[2] || 'none';
+        const navOk = receivedNav === expectedNav;
+        const epochOk = receivedEpoch === expectedEpoch;
+        const videoOk = !stickyShortsMode || receivedVideo === expectedVideo;
+        if (!navOk || !epochOk || !videoOk) {
+          state.stats.staleEpochDiscarded++;
+          logShortsScanSkip('sovereign_mismatch', null, 'request:' + String(requestId || 'none'), 'result');
+          if (DIAG_YT_BLUR) {
+            console.warn(
+              '[MW-YT][DIAG][SOVEREIGN][INJECT]',
+              'action=reject_sovereign_mismatch',
+              'requestId=' + requestId,
+              'received=' + resultSovereignId,
+              'expected=' + expectedSovereignId,
+              'stickyShorts=' + stickyShortsMode,
+              'url=' + window.location.href
+            );
+          }
+          console.warn(
+            '[MW][RejectResult]',
+            'reason=sovereign',
+            'requestId=' + requestId,
+            'received=' + resultSovereignId,
+            'expected=' + expectedSovereignId,
+          );
+          cleanupRejectedOrTimedOutRequest(requestId, 'reject_sovereign');
+          return;
+        }
       }
       
       const pendingRequest = state.pendingRequests.get(requestId);
@@ -8183,6 +8463,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           });
           // Apply strong blur
           applyBlur(element, src, predictedLabel || category || 'flagged', CONFIG.blurStrength, itemId);
+          scheduleHomepageThumbnailVeilLift(element, src, 'verdict_blur');
         } else {
           if (preDecisionState === 'blurred' || element.classList.contains('mw-blurred') || preDecisionHasBlur) {
             console.log(
@@ -8197,6 +8478,11 @@ export function generateModerationScript(config: InjectionConfig): string {
           markSafeResolved(src);
           // Remove soft blur if result is safe
           removeSoftBlur(element, src);
+          // Cache safe verdict by media identity (prevents churn requeue + reflash)
+          if (rawCategory !== 'safe_epoch_stale' && rawCategory !== 'safe_sovereign_stale') {
+            rememberMediaVerdict(src, 'safe', normalizedCategory || category || 'neutral', null, itemId || '', 'handleModerationResult_safe');
+          }
+          scheduleHomepageThumbnailVeilLift(element, src, 'verdict_safe');
           if (wasInSoftBlur && !finalBlur) {
             state.stats.semanticDelaySaved++;
           }
@@ -8227,10 +8513,12 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (finalBlur) {
         clearSafeResolved(src);
         findAndBlur(src, predictedLabel || category, CONFIG.blurStrength, true, itemId);
+        liftHomepageThumbnailVeilFanout(src, 'verdict_blur_fanout');
       } else {
         markSafeResolved(src);
         // Remove soft blur from all matching elements
         findAndRemoveSoftBlur(src);
+        liftHomepageThumbnailVeilFanout(src, 'verdict_safe_fanout');
       }
       });
       if (DEBUG_SKIP_DOMAIN_BLUR) {
@@ -8548,6 +8836,38 @@ export function generateModerationScript(config: InjectionConfig): string {
       logShortsScanSkip('revealed_persistence', null, url, sourceType);
       return false;
     }
+
+    // DOM churn hardening: if we already have a recent verdict for this media identity,
+    // immediately re-bind blur/reveal UI to the new node rather than enqueueing a new scan.
+    const remembered = getRememberedMediaVerdictForSrc(url);
+    if (remembered && remembered.entry) {
+      const verdict = String(remembered.entry.verdict || '');
+      if (verdict === 'blur') {
+        if (!doesNodeLookBlurred(element)) {
+          const rememberedBlurPx = toFiniteNumber(remembered.entry.blurPx);
+          const blurPx = rememberedBlurPx !== null ? rememberedBlurPx : (IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20));
+          applyBlur(
+            element,
+            url,
+            String(remembered.entry.category || 'flagged'),
+            blurPx,
+            String(remembered.entry.itemId || ''),
+          );
+        }
+        state.scanned.add(url);
+        logShortsScanSkip('media_identity_rebind_blur', null, url, sourceType);
+        return false;
+      }
+      if (verdict === 'safe') {
+        // Ensure any pending veil/soft blur is removed for a known-safe thumbnail.
+        removeSoftBlur(element, url);
+        liftHomepageThumbnailVeil(element, url, 'media_identity_rebind_safe');
+        markSafeResolved(url);
+        state.scanned.add(url);
+        logShortsScanSkip('media_identity_rebind_safe', null, url, sourceType);
+        return false;
+      }
+    }
     
     if (state.pending.size >= MAX_PENDING_ITEMS || batchQueue.length >= MAX_BATCH_QUEUE_ITEMS) {
       state.stats.skippedQueueCap++;
@@ -8576,6 +8896,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     // Store element reference
     state.elements.set(itemId, element);
     element.dataset.mwSourceType = sourceType || 'unknown';
+    element.dataset.mwItemKey = getDiagItemKey(url);
     
     // On Shorts, avoid pre-blur before verdict to prevent false first-entry blur.
     // We only blur once moderation returns a positive result.
@@ -8593,6 +8914,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
     } else {
       // Non-Shorts keeps pre-blur to minimize flashes.
+      applyHomepageThumbnailVeil(element, url, 'queueForScan');
       applySoftBlur(element, url, itemId);
     }
     const blurTimer = null;
@@ -9649,6 +9971,12 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       .mw-softblur {
         transition: filter 0.2s ease !important;
+      }
+      .mw-thumb-veil {
+        opacity: 0 !important;
+      }
+      img.mw-thumb-veil, video.mw-thumb-veil, yt-img-shadow.mw-thumb-veil {
+        transition: opacity 0.12s ease !important;
       }
       .mw-correction-overlay {
         pointer-events: auto !important;

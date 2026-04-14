@@ -132,6 +132,7 @@ export interface ModerationResultMessage {
   type: 'gc-moderation-result';
   requestId: string;
   pageEpoch?: number;
+  sovereignId?: string;
   results: ModerationResultItem[];
   nonce: string;
   timestamp?: number;
@@ -254,12 +255,14 @@ export function createResultMessage(
   requestId: string,
   results: ModerationResultItem[],
   nonce: string,
-  pageEpoch?: number
+  pageEpoch?: number,
+  sovereignId?: string
 ): ModerationResultMessage {
   return {
     type: 'gc-moderation-result',
     requestId,
     pageEpoch,
+    sovereignId,
     results,
     nonce,
     timestamp: Date.now(),

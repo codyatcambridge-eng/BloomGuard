@@ -992,12 +992,11 @@ export const NativeWebViewBrowser = () => {
     const previousUrl = currentUrlRef.current || '';
     const previousEpoch = webViewPageEpochRef.current || 0;
     const sameUrl = !!previousUrl && previousUrl === url;
-    const holdEpoch =
-      reason === 'onUrlChange' &&
-      (
-        sameUrl ||
-        (isYouTubeShortsUrl(previousUrl) && isYouTubeShortsUrl(url))
-      );
+    // Hardening: keep `pageEpoch` tightly aligned to host navigation so that
+    // any in-flight moderation work from the previous URL is rejected by both
+    // host and injected script (prevents `safe_epoch_stale` / stale sovereign mismatches).
+    // Only hold the epoch when the URL is truly unchanged.
+    const holdEpoch = reason === 'onUrlChange' && sameUrl;
     navigationSeqRef.current += 1;
     activeNavIdRef.current = navigationSeqRef.current;
     if (!holdEpoch || previousEpoch <= 0) {
@@ -1472,6 +1471,7 @@ export const NativeWebViewBrowser = () => {
       setIsLoading(false);
       setFlashGuardState?.(true, 'load_error');
       clearLoadEndInjectTimer();
+      pendingRequestsRef.current.clear();
       injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
       nonBootstrapAckObservedRef.current = false;
@@ -1523,6 +1523,7 @@ export const NativeWebViewBrowser = () => {
       console.log('[DIAG][LOAD] stage=url_change url=' + toDiagUrl(url));
       markNavigation('onUrlChange', url);
       moderationNavGenerationRef.current += 1;
+      pendingRequestsRef.current.clear();
       logLifecycleSnapshot('url_change', url, 'onUrlChange');
       logHostLayerDiagnostics('url_change');
       setUrlInput(url);
@@ -1572,6 +1573,7 @@ export const NativeWebViewBrowser = () => {
       teardownWebViewScheduling('webview_closed', webViewState.currentUrl).catch(() => undefined);
       clearLoadEndInjectTimer();
       exitPendingReinject('webview_closed', webViewState.currentUrl || currentUrlRef.current || '');
+      pendingRequestsRef.current.clear();
       moderationBridge.clearCache({
         reason: 'webview_closed',
         previousFamily: getCacheFamilyContext(webViewState.currentUrl || currentUrlRef.current || ''),
@@ -2469,7 +2471,13 @@ export const NativeWebViewBrowser = () => {
       }));
 
       try {
-        const staleMessage = createResultMessage(requestId, staleResults, nonce, requestEpoch ?? undefined);
+        const staleMessage = createResultMessage(
+          requestId,
+          staleResults,
+          nonce,
+          requestEpoch ?? undefined,
+          requestSovereignId || undefined,
+        );
         await postMessageToWebView(staleMessage as unknown as Record<string, unknown>);
       } catch {
         // Fail-open by design for stale requests.
@@ -2547,7 +2555,13 @@ export const NativeWebViewBrowser = () => {
         severity: 'safe' as ModerationSeverity,
       }));
       try {
-        const staleMessage = createResultMessage(requestId, staleResults, nonce, requestEpoch ?? undefined);
+        const staleMessage = createResultMessage(
+          requestId,
+          staleResults,
+          nonce,
+          requestEpoch ?? undefined,
+          requestSovereignId || undefined,
+        );
         await postMessageToWebView(staleMessage as unknown as Record<string, unknown>);
       } catch {
         // Fail-open by design for stale requests.
@@ -2658,6 +2672,9 @@ export const NativeWebViewBrowser = () => {
           pageEpoch: requestEpoch ?? activeEpoch,
           sourceType: item.sourceType,
         });
+        if (hardKillStaleRequest('scan_loop_post_item:' + String(item.itemId || 'none'))) {
+          return;
+        }
         
         if (scanResult) {
           const decisionReason = scanResult.decisionReason || scanResult.reason;
@@ -2716,6 +2733,9 @@ export const NativeWebViewBrowser = () => {
           });
           console.log('[MW-Host] scan result', item.itemId, ':', finalCategory, 'blur=' + finalShouldBlur, 'conf=' + finalConfidence.toFixed(3));
         } else {
+          if (hardKillStaleRequest('scan_loop_post_item_null:' + String(item.itemId || 'none'))) {
+            return;
+          }
           const forceShortsUncertainBlur = stickyShortsMode && item.sourceType === 'video-frame';
           const shouldBlurOnFailure = localSettings.fail_closed === true;
           const finalShouldBlur = forceShortsUncertainBlur ? true : shouldBlurOnFailure;
@@ -2980,7 +3000,13 @@ export const NativeWebViewBrowser = () => {
     console.log('[MW-Host] posting results back', requestId, 'count=' + results.length, 'nonce=' + nonce.substring(0, 10));
     
     try {
-      const resultMessage = createResultMessage(requestId, results, nonce, requestEpoch ?? undefined);
+      const resultMessage = createResultMessage(
+        requestId,
+        results,
+        nonce,
+        requestEpoch ?? undefined,
+        requestSovereignId || undefined,
+      );
       const posted = await postMessageToWebView(resultMessage as unknown as Record<string, unknown>);
       if (posted) {
         console.log('[MW-Host] Results posted via postMessage for', requestId);
