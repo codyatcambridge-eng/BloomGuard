@@ -3026,6 +3026,17 @@ export function generateModerationScript(config: InjectionConfig): string {
     return Date.now();
   }
 
+  function shouldPreserveShortsContinuityBlurLocal(input) {
+    if (!input || typeof input !== 'object') return false;
+    if (!input.isHomeShortsShelfVideo) return false;
+    if (!input.isTransitionChurnReason) return false;
+    if (!input.hasTransientIdentityOrContextGap) return false;
+    const elapsed = Number(input.elapsedSinceAuthoritativeBlurMs);
+    if (!Number.isFinite(elapsed) || elapsed < 0) return false;
+    const graceWindowMs = Math.max(0, Number(input.graceWindowMs) || 0);
+    return elapsed <= graceWindowMs;
+  }
+
   function rememberShortsAuthoritativeBlurMoment(videoNode, anchorNode) {
     const now = getMonotonicNowMs();
     if (videoNode && videoNode.nodeType === 1) {
@@ -4088,7 +4099,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       !contextData &&
       (!strictIdentityKnown || (!normalizedPoster && !normalizedCurrent))
     );
-    const shortsContinuityGraceActive = shouldPreserveShortsContinuityBlur({
+    const shortsContinuityGraceActive = shouldPreserveShortsContinuityBlurLocal({
       isHomeShortsShelfVideo: !!isHomeShortsShelfVideo,
       isTransitionChurnReason: !!isTransitionChurnReason,
       hasTransientIdentityOrContextGap: !!shortsTransientIdentityOrContextGap,
