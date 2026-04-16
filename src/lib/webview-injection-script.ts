@@ -147,6 +147,7 @@ export function getCategoryThresholds(dialLevel: number): { porn: number; sexy: 
 }
 
 export function shouldPreserveShortsContinuityBlur(input: ShortsContinuityGraceInput): boolean {
+  if (!input || typeof input !== 'object') return false;
   if (!input.isHomeShortsShelfVideo) return false;
   if (!input.isTransitionChurnReason) return false;
   if (!input.hasTransientIdentityOrContextGap) return false;
