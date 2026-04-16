@@ -738,6 +738,13 @@ export function generateModerationScript(config: InjectionConfig): string {
     window.__MW_NON_SHORTS_REATTACH_CONTEXT__ = new Map();
     return window.__MW_NON_SHORTS_REATTACH_CONTEXT__;
   })();
+  const persistedMainSurfaceLaneByNode = (function() {
+    if (window.__MW_MAIN_SURFACE_LANE_BY_NODE__ && typeof window.__MW_MAIN_SURFACE_LANE_BY_NODE__.get === 'function') {
+      return window.__MW_MAIN_SURFACE_LANE_BY_NODE__;
+    }
+    window.__MW_MAIN_SURFACE_LANE_BY_NODE__ = new WeakMap();
+    return window.__MW_MAIN_SURFACE_LANE_BY_NODE__;
+  })();
 
   const state = {
     pageEpoch: Number.isFinite(CONFIG.pageEpoch) ? Number(CONFIG.pageEpoch) : 1,
@@ -3578,12 +3585,20 @@ export function generateModerationScript(config: InjectionConfig): string {
       (directShortsAnchorNode && directShortsAnchorNode.href) ||
       ''
     );
+    const nearestRegularCardNode = (
+      typeof videoNode.closest === 'function'
+        ? (videoNode.closest(NON_SHORTS_REATTACH_STRONG_CARD_SELECTOR) || findRegularMainCardFallbackNode(videoNode))
+        : null
+    );
+    const nearestRegularCardNodeId = nearestRegularCardNode ? getDiagNodeId(nearestRegularCardNode) : 'none';
+    const nearestShortsLockupNodeId = directShortsLockupNode ? getDiagNodeId(directShortsLockupNode) : 'none';
     let continuityAnchorNode = directShortsAnchorNode || null;
     const hasDirectShortsLockupOnNodePath = !!directShortsLockupNode;
     const hasDirectShortsAnchorOnNodePath = (
       !!directShortsAnchorNode &&
       extractShortsIdFromHrefValue(directShortsAnchorHref) !== 'unknown'
     );
+    let viaCardShortsLink = false;
     const regularPathQuarantinePassed = !!(
       isRegularMainSurfaceNonShortsVideo &&
       !isHomeShortsShelfVideo &&
@@ -3670,6 +3685,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       typeof card.querySelector === 'function'
     ) {
       const shortsAnchor = card.querySelector('a[href^="/shorts/"]');
+      viaCardShortsLink = !!shortsAnchor;
       if (shortsAnchor) continuityAnchorNode = shortsAnchor;
       const anchorHrefRaw = String(
         (shortsAnchor && shortsAnchor.getAttribute && shortsAnchor.getAttribute('href')) ||
@@ -3737,6 +3753,54 @@ export function generateModerationScript(config: InjectionConfig): string {
       reattachItemKey === 'unknown' &&
       strictContinuityItemKey !== 'unknown'
     );
+    if (isMainSurfaceUrl) {
+      postNonShortsTransitionDiag('identity_split_candidate', {
+        reason: String(reason || 'unknown'),
+        nodeId: videoNodeId,
+        marker: 'MW-FLICKER-IDENTITY-SPLIT-CANDIDATE-V1',
+        nearestRegularCardNodeId: String(nearestRegularCardNodeId || 'none'),
+        nearestShortsLockupNodeId: String(nearestShortsLockupNodeId || 'none'),
+        viaLockup: !!hasDirectShortsLockupOnNodePath,
+        viaDirectShortsAnchor: !!hasDirectShortsAnchorOnNodePath,
+        viaCardShortsLink: !!viaCardShortsLink,
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        nearbyShortsAnchorId: String(nearbyShortsAnchorId || 'unknown'),
+        derivedAnchorItemKey: String(derivedAnchorItemKey || 'unknown'),
+      });
+      const nextLane = (
+        isHomeShortsShelfVideo
+          ? 'shorts'
+          : (regularPathQuarantinePassed ? 'regular' : 'other')
+      );
+      const previousLaneState = persistedMainSurfaceLaneByNode.get(videoNode) || null;
+      if (
+        previousLaneState &&
+        previousLaneState.lane &&
+        previousLaneState.lane !== nextLane &&
+        previousLaneState.lane !== 'other' &&
+        nextLane !== 'other'
+      ) {
+        postNonShortsTransitionDiag('lane_flip_same_node', {
+          reason: String(reason || 'unknown'),
+          nodeId: videoNodeId,
+          marker: 'MW-FLICKER-LANE-FLIP-SAME-NODE-V1',
+          prevLane: String(previousLaneState.lane || 'unknown'),
+          nextLane: String(nextLane || 'unknown'),
+          prevReason: String(previousLaneState.reason || 'unknown'),
+          nextReason: String(reason || 'unknown'),
+          prevStrictKey: String(previousLaneState.strictContinuityItemKey || 'unknown'),
+          nextStrictKey: String(strictContinuityItemKey || 'unknown'),
+          prevCardNodeId: String(previousLaneState.cardNodeId || 'none'),
+          nextCardNodeId: String(cardNodeId || 'none'),
+        });
+      }
+      persistedMainSurfaceLaneByNode.set(videoNode, {
+        lane: nextLane,
+        reason: String(reason || 'unknown'),
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        cardNodeId: String(cardNodeId || 'none'),
+      });
+    }
 
     console.log(
       '[DIAG][NON_SHORTS_REATTACH] attempt',
@@ -3773,6 +3837,8 @@ export function generateModerationScript(config: InjectionConfig): string {
     let contextNode = null;
     let contextData = null;
     let contextKind = 'none';
+    let shortsItemKeyLookupMiss = false;
+    let regularItemKeyLookupMiss = false;
     if (isMainSurfaceUrl && card && typeof card.querySelector === 'function') {
       contextNode = card.querySelector('[data-mw-moderated="blurred"][data-mw-src]');
       if (contextNode) {
@@ -3831,6 +3897,32 @@ export function generateModerationScript(config: InjectionConfig): string {
         }
       }
     }
+    if (isMainSurfaceUrl && isHomeShortsShelfVideo) {
+      const shortsCardBoundaryCandidate = (
+        card ||
+        (typeof videoNode.closest === 'function' ? videoNode.closest(NON_SHORTS_REATTACH_STRONG_CARD_SELECTOR) : null) ||
+        findRegularMainCardFallbackNode(videoNode)
+      );
+      const shortsCardBoundaryCandidateId = shortsCardBoundaryCandidate ? getDiagNodeId(shortsCardBoundaryCandidate) : 'none';
+      const shortsCardBoundaryFound = !!shortsCardBoundaryCandidate;
+      const shortsCardBoundaryRejectedReason = (
+        !shortsCardBoundaryFound
+          ? 'no_card_boundary'
+          : (cardNodeId === 'none'
+              ? 'candidate_not_selected'
+              : (shortsCardBoundaryCandidateId !== cardNodeId ? 'candidate_mismatch' : 'none'))
+      );
+      postNonShortsTransitionDiag('shorts_card_boundary_lookup_result', {
+        reason: String(reason || 'unknown'),
+        nodeId: videoNodeId,
+        marker: 'MW-FLICKER-SHORTS-CARD-BOUNDARY-LOOKUP-RESULT-V1',
+        cardNodeIdCandidate: String(shortsCardBoundaryCandidateId || 'none'),
+        cardBoundaryFound: !!shortsCardBoundaryFound,
+        cardBoundaryRejectedReason: String(shortsCardBoundaryRejectedReason || 'none'),
+        isHomeShortsShelfVideo: !!isHomeShortsShelfVideo,
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+      });
+    }
     if (!contextNode && strictContinuityItemKey && strictContinuityItemKey !== 'unknown') {
       const remembered = findNonShortsReattachContextByItemKey(strictContinuityItemKey, cardNodeId);
       if (
@@ -3838,6 +3930,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         isHomeShortsShelfVideo &&
         (!remembered || !remembered.entry)
       ) {
+        shortsItemKeyLookupMiss = true;
         postNonShortsTransitionDiag('shorts_itemkey_lookup_miss', {
           reason: String(reason || 'unknown'),
           nodeId: videoNodeId,
@@ -3847,6 +3940,14 @@ export function generateModerationScript(config: InjectionConfig): string {
           nearbyShortsAnchorId: String(nearbyShortsAnchorId || 'unknown'),
           reattachItemKey: String(reattachItemKey || 'unknown'),
         });
+      }
+      if (
+        isMainSurfaceUrl &&
+        !isHomeShortsShelfVideo &&
+        regularPathQuarantinePassed &&
+        (!remembered || !remembered.entry)
+      ) {
+        regularItemKeyLookupMiss = true;
       }
       if (usingDerivedStrictKey) {
         console.log(
@@ -3956,6 +4057,29 @@ export function generateModerationScript(config: InjectionConfig): string {
           break;
         }
       }
+    }
+    if (
+      isMainSurfaceUrl &&
+      !isHomeShortsShelfVideo &&
+      regularPathQuarantinePassed &&
+      !contextData
+    ) {
+      let regularMissType = 'card_found_no_blurred_context';
+      if (cardNodeId === 'none') {
+        regularMissType = 'no_card_boundary';
+      } else if (!strictContinuityItemKey || strictContinuityItemKey === 'unknown') {
+        regularMissType = 'strict_key_unknown';
+      } else if (regularItemKeyLookupMiss) {
+        regularMissType = 'strict_key_known_context_map_miss';
+      }
+      postNonShortsTransitionDiag('regular_context_lookup_miss', {
+        reason: String(reason || 'unknown'),
+        nodeId: videoNodeId,
+        marker: 'MW-FLICKER-REGULAR-CONTEXT-LOOKUP-MISS-V1',
+        cardNodeId: String(cardNodeId || 'none'),
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        missType: String(regularMissType || 'card_found_no_blurred_context'),
+      });
     }
 
     if (contextData) {
@@ -4314,6 +4438,19 @@ export function generateModerationScript(config: InjectionConfig): string {
       !preserveShortsHardBlurDuringResolvedContinuity &&
       !preserveShortsHardBlurDuringGraceWindow
     ) {
+      if (isMainSurfaceUrl && !isHomeShortsShelfVideo && regularPathQuarantinePassed) {
+        postNonShortsTransitionDiag('regular_provenance_clear_source', {
+          reason: String(reason || 'unknown'),
+          nodeId: videoNodeId,
+          marker: 'MW-FLICKER-REGULAR-PROVENANCE-CLEAR-SOURCE-V1',
+          previousHardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+          currentStrictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+          previousSrc: String(hardBlurSrc || ''),
+          currentSrc: String(normalizedPoster || normalizedCurrent || (videoNode.dataset && videoNode.dataset.mwSrc) || ''),
+          nearbyShortsAnchorId: String(nearbyShortsAnchorId || 'unknown'),
+          wasPreviouslyRegularPreserved: !!preserveCardBlurContinuityAfterNearbyShortsGuard,
+        });
+      }
       videoNode.style.removeProperty('filter');
       videoNode.style.removeProperty('-webkit-filter');
       videoNode.style.removeProperty('backdrop-filter');
@@ -4359,7 +4496,53 @@ export function generateModerationScript(config: InjectionConfig): string {
       });
     }
     let activeVideoBlurred = hasAuthoritativeBlur || hasIncidentalBlur;
-    if (activeVideoBlurred && !hasAuthoritativeBlur && !contextData && !preserveShortsHardBlurDuringGraceWindow) {
+    const preexistingOverlayInDeadEnd = !!(
+      isMainSurfaceUrl &&
+      isHomeShortsShelfVideo &&
+      !contextData &&
+      strictContinuityItemKey &&
+      strictContinuityItemKey !== 'unknown' &&
+      shortsItemKeyLookupMiss &&
+      findRevealOverlayForElement(
+        videoNode,
+        String((videoNode.dataset && videoNode.dataset.mwSrc) || normalizedPoster || normalizedCurrent || '')
+      )
+    );
+    const shortsNoContextLocalBlurHold = !!(
+      isMainSurfaceUrl &&
+      isHomeShortsShelfVideo &&
+      !contextData &&
+      strictContinuityItemKey &&
+      strictContinuityItemKey !== 'unknown' &&
+      shortsItemKeyLookupMiss &&
+      !hasAuthoritativeBlur &&
+      hasIncidentalBlur &&
+      !preexistingOverlayInDeadEnd
+    );
+    if (shortsNoContextLocalBlurHold) {
+      markAuthoritativeHardBlur(
+        videoNode,
+        String((videoNode.dataset && videoNode.dataset.mwSrc) || normalizedPoster || normalizedCurrent || '')
+      );
+      if (videoNode.dataset) {
+        videoNode.dataset.mwHardBlurItemKey = String(strictContinuityItemKey || 'unknown');
+      }
+      hasAuthoritativeBlur = isAuthoritativeHardBlur(videoNode);
+      activeVideoBlurred = hasAuthoritativeBlur || hasIncidentalBlur;
+    } else if (activeVideoBlurred && !hasAuthoritativeBlur && !contextData && !preserveShortsHardBlurDuringGraceWindow) {
+      if (isMainSurfaceUrl && !isHomeShortsShelfVideo && regularPathQuarantinePassed) {
+        postNonShortsTransitionDiag('regular_provenance_clear_source', {
+          reason: String(reason || 'unknown'),
+          nodeId: videoNodeId,
+          marker: 'MW-FLICKER-REGULAR-PROVENANCE-CLEAR-SOURCE-V1',
+          previousHardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+          currentStrictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+          previousSrc: String(hardBlurSrc || ''),
+          currentSrc: String(normalizedPoster || normalizedCurrent || (videoNode.dataset && videoNode.dataset.mwSrc) || ''),
+          nearbyShortsAnchorId: String(nearbyShortsAnchorId || 'unknown'),
+          wasPreviouslyRegularPreserved: !!preserveCardBlurContinuityAfterNearbyShortsGuard,
+        });
+      }
       videoNode.style.removeProperty('filter');
       videoNode.style.removeProperty('-webkit-filter');
       videoNode.style.removeProperty('backdrop-filter');
