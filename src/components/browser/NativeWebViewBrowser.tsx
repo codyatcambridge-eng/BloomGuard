@@ -1616,7 +1616,10 @@ export const NativeWebViewBrowser = () => {
     getListenerDiagContext: getWebViewListenerDiagContext,
   });
   const executeScriptRef = useRef(executeScript);
-
+  // Ref so the legacy-poll useEffect can read the latest moderationBridge without
+  // declaring it as a dep (moderationBridge is a new object every render, which
+  // would otherwise restart the poll timer on every moderation result).
+  const moderationBridgeRef = useRef(moderationBridge);
   const requestShortsReentryRefresh = useCallback(async (
     reason: string,
     urlHint?: string,
@@ -1807,7 +1810,8 @@ export const NativeWebViewBrowser = () => {
 
   useEffect(() => {
     executeScriptRef.current = executeScript;
-  }, [executeScript]);
+    moderationBridgeRef.current = moderationBridge;
+  }, [executeScript, moderationBridge]);
 
   useEffect(() => {
     console.log(
@@ -3772,7 +3776,7 @@ export const NativeWebViewBrowser = () => {
           
           console.log('[MW-Host] Legacy processing:', src.substring(0, 60));
           
-          const scanResult = await moderationBridge.scanImage(src, thresholds, {
+          const scanResult = await moderationBridgeRef.current.scanImage(src, thresholds, {
             requestId: 'legacy_poll',
             itemId: typeof item.itemId === 'string' ? item.itemId : 'legacy_item',
             navId: activeNavIdRef.current,
@@ -3936,7 +3940,10 @@ export const NativeWebViewBrowser = () => {
     webViewState.isOpen,
     webViewListenersAttached,
     isRuntimeModerationEnabled,
-    moderationBridge,
+    // moderationBridge is intentionally excluded: it is a new object on every render
+    // (useModerationBridge returns a plain object literal).  Reading it via
+    // moderationBridgeRef.current inside the effect avoids stop/start churn on
+    // every moderation result.  The ref is kept in sync by its own useEffect above.
     localSettings.blur_strength_px,
     webViewState.currentUrl,
     shortsLegacyFallbackVersion,

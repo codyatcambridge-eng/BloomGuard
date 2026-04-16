@@ -2982,6 +2982,28 @@ export function generateModerationScript(config: InjectionConfig): string {
         reattached = true;
       }
     }
+    // Also re-blur img elements (e.g. Shorts home shelf card thumbnails) that were
+    // previously flagged but whose blur was dropped by virtual-scroll remove/re-insert.
+    const imgs = diagCollectDescendantTagNodes(node, 'img');
+    for (let j = 0; j < imgs.length; j += 1) {
+      const img = imgs[j];
+      if (!img || img.nodeType !== 1) continue;
+      if (isAdaptiveOverlayNode(img)) continue;
+      if (!img.isConnected) continue;
+      const imgSrc = normalizeUrl(img.src || img.dataset.src || '') ||
+                     (img.src || img.dataset.src || '');
+      if (!imgSrc) continue;
+      if (!state.blurred.has(imgSrc)) continue;
+      if (isRevealedForSource(imgSrc, img)) continue;
+      if (img.dataset.mwModerated === 'blurred' &&
+          (img.style.getPropertyValue('filter') || img.style.filter || '').toLowerCase().includes('blur(')) {
+        continue;
+      }
+      const reattachCategory = String((img.dataset && img.dataset.mwCategory) || 'flagged');
+      const reattachBlurPx = Number((img.dataset && img.dataset.mwBlurStrength) || '') || CONFIG.blurStrength;
+      applyBlur(img, imgSrc, reattachCategory, reattachBlurPx, null);
+      reattached = true;
+    }
     return reattached;
   }
 
@@ -9210,6 +9232,13 @@ export function generateModerationScript(config: InjectionConfig): string {
       diagScanRunLog('scanImgElement', img, src, false, 'reason=duplicate_src');
       return;
     }
+    // Node recycled with new content: clear stale moderation markers so the new src
+    // gets a fresh scan and soft blur is not blocked by a prior safe decision.
+    if (img.dataset.mwOrigSrc && img.dataset.mwOrigSrc !== src) {
+      img.dataset.mwModerated = '';
+      img.dataset.mwScanned = 'false';
+      img.dataset.mwPreblurClear = '';
+    }
     
     img.dataset.mwScanned = 'true';
     img.dataset.mwLastScanSrc = src;
@@ -9812,6 +9841,27 @@ export function generateModerationScript(config: InjectionConfig): string {
             )
           ) {
             diagNonShortsReattach(target, 'attr:' + attr);
+          }
+          // Non-Shorts YouTube: when img src changes in-place, clear stale scan markers
+          // so the recycled node gets a fresh scan with soft blur applied immediately.
+          if (
+            isYouTube() &&
+            !isShortsModeActive() &&
+            target &&
+            target.nodeType === 1 &&
+            String(target.tagName || '').toUpperCase() === 'IMG' &&
+            attr === 'src'
+          ) {
+            const newSrc = target.src || '';
+            const lastScanSrc = target.dataset.mwLastScanSrc || '';
+            if (newSrc && lastScanSrc && lastScanSrc !== newSrc) {
+              target.dataset.mwScanned = 'false';
+              target.dataset.mwLastScanSrc = '';
+              target.dataset.mwPreblurClear = '';
+              target.dataset.mwOrigSrc = '';
+              target.dataset.mwModerated = '';
+              queueMutationScan(target, 'attr:src_img_changed');
+            }
           }
           if (
             isYouTube() &&
