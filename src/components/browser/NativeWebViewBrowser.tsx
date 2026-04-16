@@ -3552,6 +3552,7 @@ export const NativeWebViewBrowser = () => {
     let pollTimer: NodeJS.Timeout | null = null;
     let pollInFlight = false;
     let consecutiveEmptyPolls = 0;
+    let consecutiveUndefinedBridgeReturns = 0;
     let lastActivityAt = Date.now();
     let lastEmptyPollReason = 'none';
     let lastProducerMode = 'unknown';
@@ -3583,6 +3584,7 @@ export const NativeWebViewBrowser = () => {
       idlePollMs = IDLE_MIN_POLL_MS;
       pollDelayMs = MIN_POLL_MS;
       consecutiveEmptyPolls = 0;
+      consecutiveUndefinedBridgeReturns = 0;
       console.log('[MW-Host][Poll] exitingIdle', 'reason=' + reason, 'pollMs=' + pollDelayMs);
     };
 
@@ -3706,6 +3708,7 @@ export const NativeWebViewBrowser = () => {
 
         if (!result || result === 'null') {
           lastEmptyPollReason = 'null_or_empty_result';
+          consecutiveUndefinedBridgeReturns += 1;
           logYouTubeDiag(
             'emptyPollReason',
             'empty_poll_reason=' + lastEmptyPollReason +
@@ -3780,8 +3783,7 @@ export const NativeWebViewBrowser = () => {
           return false;
         }
         lastEmptyPollReason = 'none';
-        
-        console.log('[MW-Host] Legacy poll: found', items.length, 'items in queue');
+        consecutiveUndefinedBridgeReturns = 0;
         
         // Process each scan request
         for (const item of items) {
@@ -3883,6 +3885,7 @@ export const NativeWebViewBrowser = () => {
       } else if (hadWork) {
         lastActivityAt = Date.now();
         consecutiveEmptyPolls = 0;
+        consecutiveUndefinedBridgeReturns = 0;
         lastEmptyPollReason = 'none';
         exitIdleMode('request');
         pollDelayMs = MIN_POLL_MS;
@@ -3893,9 +3896,9 @@ export const NativeWebViewBrowser = () => {
             // Normal path: injection script confirmed queue is empty and producer is disabled.
             (lastPollStatus === 'EMPTY' && lastEmptyPollReason === 'queue_empty' && lastProducerMode === 'disabled') ||
             // Fallback path: executeScript returns undefined (InAppBrowser bridge doesn't serialize
-            // the return value).  After IDLE_EMPTY_POLLS consecutive undefined returns the queue is
-            // effectively empty — the main moderation path uses postMessage, not this queue.
-            (consecutiveEmptyPolls >= IDLE_EMPTY_POLLS && lastEmptyPollReason === 'null_or_empty_result')
+            // the return value).  Track undefined returns separately from hadWork so a busy feed
+            // that processes real scan results doesn't reset the counter and prevent self-disable.
+            (consecutiveUndefinedBridgeReturns >= IDLE_EMPTY_POLLS && lastEmptyPollReason === 'null_or_empty_result')
           );
         if (shouldSelfDisableNonShortsLegacyPoll) {
           legacyPollSelfDisabledContextRef.current = pollContextKey;
@@ -3907,6 +3910,7 @@ export const NativeWebViewBrowser = () => {
             'status=' + lastPollStatus,
             'emptyReason=' + lastEmptyPollReason,
             'producer=' + lastProducerMode,
+            'consecutiveUndefinedBridgeReturns=' + consecutiveUndefinedBridgeReturns,
             'navId=' + activeNavIdRef.current,
             'url=' + (activeUrl || 'unknown'),
           );

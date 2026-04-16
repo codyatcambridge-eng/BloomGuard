@@ -3174,10 +3174,19 @@ export function generateModerationScript(config: InjectionConfig): string {
   function findRegularMainCardFallbackNode(node) {
     if (!node || node.nodeType !== 1) return null;
     let cursor = node.parentElement || null;
-    for (let depth = 0; depth < 10 && cursor; depth += 1) {
+    for (let depth = 0; depth < 16 && cursor; depth += 1) {
       if (isNonShortsStrongCardNode(cursor)) return cursor;
       const nodeId = String(cursor.id || '').toLowerCase();
       if (nodeId === 'content') {
+        cursor = cursor.parentElement || null;
+        continue;
+      }
+      const tagName = String(cursor.tagName || '').toLowerCase();
+      if (
+        tagName === 'ytm-rich-grid-renderer' ||
+        tagName === 'ytd-rich-section-renderer' ||
+        (cursor.hasAttribute && cursor.hasAttribute('data-context-item-id'))
+      ) {
         cursor = cursor.parentElement || null;
         continue;
       }
@@ -3187,6 +3196,19 @@ export function generateModerationScript(config: InjectionConfig): string {
         if (shortsLockups.length < 1 && shortsAnchors.length < 1) {
           const watchAnchors = cursor.querySelectorAll('a[href*="/watch"]');
           if (watchAnchors.length === 1) return cursor;
+          if (watchAnchors.length > 1) {
+            const videoIdSet = new Set();
+            for (let i = 0; i < watchAnchors.length; i += 1) {
+              const href = String(
+                (watchAnchors[i].getAttribute && watchAnchors[i].getAttribute('href')) ||
+                (watchAnchors[i].href) ||
+                ''
+              );
+              const m = href.match(/[?&]v=([^&/#]+)/);
+              videoIdSet.add(m ? m[1] : href);
+            }
+            if (videoIdSet.size === 1) return cursor;
+          }
         }
       }
       cursor = cursor.parentElement || null;
@@ -4494,6 +4516,38 @@ export function generateModerationScript(config: InjectionConfig): string {
         graceActive: !!preserveShortsHardBlurDuringGraceWindow,
         graceAgeMs: Number.isFinite(shortsAuthoritativeBlurAgeMs) ? Math.round(shortsAuthoritativeBlurAgeMs) : -1,
       });
+    }
+    if (
+      isMainSurfaceUrl &&
+      regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo &&
+      !contextData &&
+      !hasAuthoritativeBlur &&
+      state.blurred &&
+      state.blurred.size > 0
+    ) {
+      const resolvedUrl = normalizedPoster || normalizedCurrent || String((videoNode.dataset && videoNode.dataset.mwSrc) || '');
+      if (resolvedUrl && state.blurred.has(resolvedUrl)) {
+        contextKind = 'state_blurred_fallback';
+        contextData = {
+          src: resolvedUrl,
+          category: String((videoNode.dataset && videoNode.dataset.mwCategory) || 'flagged'),
+          itemId: String((videoNode.dataset && videoNode.dataset.mwItemId) || reattachItemId || ''),
+          blurPx: IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20),
+        };
+        console.log(
+          '[MW-FLICKER-STATE-BLURRED-FALLBACK-V1] state_blurred_fallback_hit',
+          'reason=' + String(reason || 'unknown'),
+          'nodeId=' + videoNodeId,
+          'resolvedUrl=' + String(resolvedUrl || '').substring(0, 180)
+        );
+        postNonShortsTransitionDiag('state_blurred_fallback', {
+          reason: String(reason || 'unknown'),
+          nodeId: videoNodeId,
+          marker: 'MW-FLICKER-STATE-BLURRED-FALLBACK-V1',
+          resolvedUrl: String(resolvedUrl || '').substring(0, 180),
+        });
+      }
     }
     let activeVideoBlurred = hasAuthoritativeBlur || hasIncidentalBlur;
     const preexistingOverlayInDeadEnd = !!(
@@ -10110,6 +10164,31 @@ export function generateModerationScript(config: InjectionConfig): string {
               attr === 'hidden'
             )
           ) {
+            if (
+              (attr === 'src' || attr === 'poster') &&
+              state.blurred &&
+              state.blurred.size > 0
+            ) {
+              const prevSrc = normalizeUrl(
+                String(target.dataset.mwLastScanSrc || target.dataset.mwSrc || target.dataset.mwOrigSrc || '')
+              ) || '';
+              if (prevSrc && state.blurred.has(prevSrc)) {
+                const newAttrRaw = attr === 'src'
+                  ? String(target.src || target.getAttribute('src') || '')
+                  : String(target.getAttribute('poster') || '');
+                const newAttrSrc = normalizeUrl(newAttrRaw) || '';
+                if (newAttrSrc) {
+                  applySoftBlur(target, newAttrSrc, String((target.dataset && target.dataset.mwItemId) || ''));
+                  console.log(
+                    '[MW-FLICKER-VIDEO-PREBLUR-V1] pre_blur_on_attr_src',
+                    'attr=' + attr,
+                    'nodeId=' + getDiagNodeId(target),
+                    'prevSrc=' + String(prevSrc || '').substring(0, 100),
+                    'newSrc=' + String(newAttrSrc || '').substring(0, 100)
+                  );
+                }
+              }
+            }
             diagNonShortsReattach(target, 'attr:' + attr);
           }
           // Non-Shorts YouTube: when img src changes in-place, clear stale scan markers
