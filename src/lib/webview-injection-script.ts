@@ -3001,6 +3001,15 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       const reattachCategory = String((img.dataset && img.dataset.mwCategory) || 'flagged');
       const reattachBlurPx = Number((img.dataset && img.dataset.mwBlurStrength) || '') || CONFIG.blurStrength;
+      console.log(
+        '[MW-FLICKER][REATTACH_IMG] Shorts shelf img re-blurred on node insert',
+        'node=' + getDiagNodeId(img),
+        'src=' + imgSrc.substring(0, 120),
+        'reason=' + (reason || 'unknown'),
+        'category=' + reattachCategory,
+        'blurPx=' + reattachBlurPx,
+        'connected=' + img.isConnected
+      );
       applyBlur(img, imgSrc, reattachCategory, reattachBlurPx, null);
       reattached = true;
     }
@@ -9075,6 +9084,16 @@ export function generateModerationScript(config: InjectionConfig): string {
         // display/logging-only; the important thing is that blur strength matches CONFIG.
         const reattachCategory = String((element.dataset && element.dataset.mwCategory) || 'flagged');
         const reattachBlurPx = Number((element.dataset && element.dataset.mwBlurStrength) || '') || CONFIG.blurStrength;
+        console.log(
+          '[MW-FLICKER][VSCROLL_REBLUR] virtual-scroll node needs re-blur',
+          'src=' + url.substring(0, 120),
+          'node=' + getDiagNodeId(element),
+          'sourceType=' + (sourceType || 'unknown'),
+          'category=' + reattachCategory,
+          'blurPx=' + reattachBlurPx,
+          'moderated=' + (element.dataset.mwModerated || 'none'),
+          'connected=' + element.isConnected
+        );
         applyBlur(element, url, reattachCategory, reattachBlurPx, null);
         logShortsScanSkip('cache_scanned_reblur_applied', null, url, sourceType);
       }
@@ -9235,6 +9254,14 @@ export function generateModerationScript(config: InjectionConfig): string {
     // Node recycled with new content: clear stale moderation markers so the new src
     // gets a fresh scan and soft blur is not blocked by a prior safe decision.
     if (img.dataset.mwOrigSrc && img.dataset.mwOrigSrc !== src) {
+      console.log(
+        '[MW-FLICKER][RECYCLE] img node recycled - stale markers cleared',
+        'node=' + getDiagNodeId(img),
+        'prevSrc=' + img.dataset.mwOrigSrc.substring(0, 120),
+        'newSrc=' + src.substring(0, 120),
+        'wasModerated=' + (img.dataset.mwModerated || 'none'),
+        'wasScanned=' + (img.dataset.mwScanned || 'false')
+      );
       img.dataset.mwModerated = '';
       img.dataset.mwScanned = 'false';
       img.dataset.mwPreblurClear = '';
@@ -9855,6 +9882,14 @@ export function generateModerationScript(config: InjectionConfig): string {
             const newSrc = target.src || '';
             const lastScanSrc = target.dataset.mwLastScanSrc || '';
             if (newSrc && lastScanSrc && lastScanSrc !== newSrc) {
+              console.log(
+                '[MW-FLICKER][SRC_SWAP] in-place img src changed - scan markers cleared',
+                'node=' + getDiagNodeId(target),
+                'prevSrc=' + lastScanSrc.substring(0, 120),
+                'newSrc=' + newSrc.substring(0, 120),
+                'wasModerated=' + (target.dataset.mwModerated || 'none'),
+                'connected=' + target.isConnected
+              );
               target.dataset.mwScanned = 'false';
               target.dataset.mwLastScanSrc = '';
               target.dataset.mwPreblurClear = '';
