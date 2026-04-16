@@ -365,6 +365,16 @@ export function generateModerationScript(config: InjectionConfig): string {
     } catch (e) {}
   }
 
+  // Routes diagnostic console.log lines through the native bridge so they appear
+  // in Xcode's debugger console (not just Safari Web Inspector).
+  function mwDiagLog() {
+    console.log.apply(console, arguments);
+    try {
+      var msg = Array.prototype.slice.call(arguments).join(' ');
+      postToHost({ type: 'MW_DIAG_LOG', msg: msg });
+    } catch (e) {}
+  }
+
   function readHostEventPayload(eventLike) {
     if (!eventLike || typeof eventLike !== 'object') return null;
     if (eventLike.detail && typeof eventLike.detail === 'object') return eventLike.detail;
@@ -3001,7 +3011,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       const reattachCategory = String((img.dataset && img.dataset.mwCategory) || 'flagged');
       const reattachBlurPx = Number((img.dataset && img.dataset.mwBlurStrength) || '') || CONFIG.blurStrength;
-      console.log(
+      mwDiagLog(
         '[MW-FLICKER][REATTACH_IMG] Shorts shelf img re-blurred on node insert',
         'node=' + getDiagNodeId(img),
         'src=' + imgSrc.substring(0, 120),
@@ -9084,7 +9094,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         // display/logging-only; the important thing is that blur strength matches CONFIG.
         const reattachCategory = String((element.dataset && element.dataset.mwCategory) || 'flagged');
         const reattachBlurPx = Number((element.dataset && element.dataset.mwBlurStrength) || '') || CONFIG.blurStrength;
-        console.log(
+        mwDiagLog(
           '[MW-FLICKER][VSCROLL_REBLUR] virtual-scroll node needs re-blur',
           'src=' + url.substring(0, 120),
           'node=' + getDiagNodeId(element),
@@ -9254,7 +9264,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     // Node recycled with new content: clear stale moderation markers so the new src
     // gets a fresh scan and soft blur is not blocked by a prior safe decision.
     if (img.dataset.mwOrigSrc && img.dataset.mwOrigSrc !== src) {
-      console.log(
+      mwDiagLog(
         '[MW-FLICKER][RECYCLE] img node recycled - stale markers cleared',
         'node=' + getDiagNodeId(img),
         'prevSrc=' + img.dataset.mwOrigSrc.substring(0, 120),
@@ -9882,7 +9892,7 @@ export function generateModerationScript(config: InjectionConfig): string {
             const newSrc = target.src || '';
             const lastScanSrc = target.dataset.mwLastScanSrc || '';
             if (newSrc && lastScanSrc && lastScanSrc !== newSrc) {
-              console.log(
+              mwDiagLog(
                 '[MW-FLICKER][SRC_SWAP] in-place img src changed - scan markers cleared',
                 'node=' + getDiagNodeId(target),
                 'prevSrc=' + lastScanSrc.substring(0, 120),

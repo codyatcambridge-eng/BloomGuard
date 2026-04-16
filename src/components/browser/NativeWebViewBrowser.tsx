@@ -3326,6 +3326,22 @@ export const NativeWebViewBrowser = () => {
         console.log('[MW-Host] correction feedback received');
         return;
       }
+
+      if (typedMessage.type === 'MW_DIAG_LOG') {
+        console.warn('[MW-DIAG][LOG]', String(typedMessage.msg ?? ''));
+        return;
+      }
+
+      if (typedMessage.type === 'MW_DIAG_TRANSITION') {
+        const stage = String(typedMessage.stage ?? 'unknown');
+        const navId = String(typedMessage.navId ?? '?');
+        const pageEpoch = String(typedMessage.pageEpoch ?? '?');
+        const details = typedMessage.details && typeof typedMessage.details === 'object'
+          ? JSON.stringify(typedMessage.details)
+          : '{}';
+        console.warn('[MW-DIAG][TRANSITION]', 'stage=' + stage, 'navId=' + navId, 'pageEpoch=' + pageEpoch, 'details=' + details);
+        return;
+      }
       
       if (isValidModerationRequest(message)) {
         if (message.nonce !== sessionNonce) {
