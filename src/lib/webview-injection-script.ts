@@ -3174,6 +3174,8 @@ export function generateModerationScript(config: InjectionConfig): string {
   function findRegularMainCardFallbackNode(node) {
     if (!node || node.nodeType !== 1) return null;
     let cursor = node.parentElement || null;
+    // Depth 16 covers the deepest observed YouTube mobile DOM card nesting (was 10,
+    // increased to catch cards nested inside rich-grid-renderer layouts).
     for (let depth = 0; depth < 16 && cursor; depth += 1) {
       if (isNonShortsStrongCardNode(cursor)) return cursor;
       const nodeId = String(cursor.id || '').toLowerCase();
