@@ -3690,6 +3690,19 @@ export function generateModerationScript(config: InjectionConfig): string {
         );
       }
     }
+    if (isMainSurfaceUrl && isHomeShortsShelfVideo) {
+      postNonShortsTransitionDiag('classify_shorts_true_source', {
+        reason: String(reason || 'unknown'),
+        nodeId: videoNodeId,
+        cardNodeId: cardNodeId,
+        marker: 'MW-FLICKER-CLASSIFY-SHORTS-TRUE-SOURCE-V1',
+        hasDirectShortsLockupOnNodePath: !!hasDirectShortsLockupOnNodePath,
+        hasDirectShortsAnchorOnNodePath: !!hasDirectShortsAnchorOnNodePath,
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        derivedAnchorItemKey: String(derivedAnchorItemKey || 'unknown'),
+        nearbyShortsAnchorId: String(nearbyShortsAnchorId || 'unknown'),
+      });
+    }
     let nearbyShortsGuardSkippedNonShorts = false;
     if (strictContinuityItemKey === 'unknown' && nearbyShortsAnchorId !== 'unknown') {
       if (isHomeShortsShelfVideo) {
@@ -3820,6 +3833,21 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     if (!contextNode && strictContinuityItemKey && strictContinuityItemKey !== 'unknown') {
       const remembered = findNonShortsReattachContextByItemKey(strictContinuityItemKey, cardNodeId);
+      if (
+        isMainSurfaceUrl &&
+        isHomeShortsShelfVideo &&
+        (!remembered || !remembered.entry)
+      ) {
+        postNonShortsTransitionDiag('shorts_itemkey_lookup_miss', {
+          reason: String(reason || 'unknown'),
+          nodeId: videoNodeId,
+          cardNodeId: cardNodeId,
+          marker: 'MW-FLICKER-SHORTS-ITEMKEY-LOOKUP-MISS-V1',
+          strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+          nearbyShortsAnchorId: String(nearbyShortsAnchorId || 'unknown'),
+          reattachItemKey: String(reattachItemKey || 'unknown'),
+        });
+      }
       if (usingDerivedStrictKey) {
         console.log(
           remembered && remembered.entry
@@ -4700,6 +4728,28 @@ export function generateModerationScript(config: InjectionConfig): string {
       unresolvedOwnershipAtPlayIntent &&
       ((videoOverlay && videoOverlay.isConnected) || hasResidualInlineBlur || hasResidualBlurClass)
     );
+    if (
+      isMainSurfaceUrl &&
+      isHomeShortsShelfVideo &&
+      !contextData &&
+      !revealFallbackScopeEligible &&
+      (isUserRevealIntentReason || pendingRevealActive || videoLikelyPlaying)
+    ) {
+      postNonShortsTransitionDiag('no_context_decision', {
+        reason: String(reason || 'unknown'),
+        nodeId: videoNodeId,
+        marker: 'MW-FLICKER-NO-CONTEXT-DECISION-V1',
+        cardNodeId: cardNodeId,
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        nearbyShortsAnchorId: String(nearbyShortsAnchorId || 'unknown'),
+        reattachItemKey: String(reattachItemKey || 'unknown'),
+        revealFallbackScopeEligible: !!revealFallbackScopeEligible,
+        activeVideoBlurred: !!activeVideoBlurred,
+        authoritativeBlur: !!hasAuthoritativeBlur,
+        overlayPresent: !!videoOverlay,
+        contextSize: Number((state.nonShortsReattachContext && state.nonShortsReattachContext.size) || 0),
+      });
+    }
     if (shouldApplyRevealFallback) {
       const hadOverlay = !!(videoOverlay && videoOverlay.parentElement);
       const changed = clearAllBlurAndOverlay(
