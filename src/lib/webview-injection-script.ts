@@ -59,6 +59,14 @@ export interface AnatomicalPolicyInput {
   sensitivity: number;
 }
 
+export interface ShortsContinuityGraceInput {
+  isHomeShortsShelfVideo: boolean;
+  isTransitionChurnReason: boolean;
+  hasTransientIdentityOrContextGap: boolean;
+  elapsedSinceAuthoritativeBlurMs: number;
+  graceWindowMs: number;
+}
+
 const MVP_UNSAFE_CATEGORIES = new Set([
   'swimwear',
   'shirtless',
@@ -136,6 +144,16 @@ export function getCategoryThresholds(dialLevel: number): { porn: number; sexy: 
     case 4: return { porn: 0.15, sexy: 0.25, hentai: 0.15 };    // Maximum
     default: return { porn: 0.3, sexy: 0.45, hentai: 0.3 };
   }
+}
+
+export function shouldPreserveShortsContinuityBlur(input: ShortsContinuityGraceInput): boolean {
+  if (!input.isHomeShortsShelfVideo) return false;
+  if (!input.isTransitionChurnReason) return false;
+  if (!input.hasTransientIdentityOrContextGap) return false;
+  const elapsed = Number(input.elapsedSinceAuthoritativeBlurMs);
+  if (!Number.isFinite(elapsed) || elapsed < 0) return false;
+  const graceWindowMs = Math.max(0, Number(input.graceWindowMs) || 0);
+  return elapsed <= graceWindowMs;
 }
 
 /**
@@ -1444,6 +1462,8 @@ export function generateModerationScript(config: InjectionConfig): string {
   const diagShortsBlurParentObserverByNode = new WeakMap();
   const diagShortsBlurredHtml5MainVideoNodeIds = new Set();
   const diagShortsLastBlurNodeIdBySrc = {};
+  const shortsAuthoritativeBlurAtByNode = new WeakMap();
+  const shortsAuthoritativeBlurAtByAnchor = new WeakMap();
   const SHORTS_STABLE_CONTAINER_SELECTORS = [
     '#shorts-player ytm-reel-video-renderer[aria-hidden="false"]',
     '#shorts-player ytm-reel-video-renderer[selected]',
@@ -2992,9 +3012,43 @@ export function generateModerationScript(config: InjectionConfig): string {
   const NON_SHORTS_REATTACH_MAX_CENTER_OFFSET_RATIO = 0.7;
   const REGULAR_MAIN_CARD_BLUR_LATCH_TTL_MS = 2200;
   const REGULAR_MAIN_CARD_BLUR_LATCH_MAX = 160;
+  const SHORTS_CONTINUITY_GRACE_WINDOW_MS = 1200;
 
   function isNonShortsYouTubeReattachContext() {
     return isYouTube() && !isShortsModeActive();
+  }
+
+  function getMonotonicNowMs() {
+    try {
+      const now = Number(performance.now());
+      if (Number.isFinite(now) && now >= 0) return now;
+    } catch (e) {}
+    return Date.now();
+  }
+
+  function rememberShortsAuthoritativeBlurMoment(videoNode, anchorNode) {
+    const now = getMonotonicNowMs();
+    if (videoNode && videoNode.nodeType === 1) {
+      shortsAuthoritativeBlurAtByNode.set(videoNode, now);
+    }
+    if (anchorNode && anchorNode.nodeType === 1) {
+      shortsAuthoritativeBlurAtByAnchor.set(anchorNode, now);
+    }
+  }
+
+  function getShortsAuthoritativeBlurAgeMs(videoNode, anchorNode) {
+    const now = getMonotonicNowMs();
+    let latestAt = -1;
+    if (videoNode && videoNode.nodeType === 1) {
+      const nodeAt = Number(shortsAuthoritativeBlurAtByNode.get(videoNode));
+      if (Number.isFinite(nodeAt)) latestAt = Math.max(latestAt, nodeAt);
+    }
+    if (anchorNode && anchorNode.nodeType === 1) {
+      const anchorAt = Number(shortsAuthoritativeBlurAtByAnchor.get(anchorNode));
+      if (Number.isFinite(anchorAt)) latestAt = Math.max(latestAt, anchorAt);
+    }
+    if (!Number.isFinite(latestAt) || latestAt < 0) return Number.POSITIVE_INFINITY;
+    return Math.max(0, now - latestAt);
   }
 
   function postNonShortsTransitionDiag(stage, details) {
@@ -3471,6 +3525,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       (directShortsAnchorNode && directShortsAnchorNode.href) ||
       ''
     );
+    let continuityAnchorNode = directShortsAnchorNode || null;
     const hasDirectShortsLockupOnNodePath = !!directShortsLockupNode;
     const hasDirectShortsAnchorOnNodePath = (
       !!directShortsAnchorNode &&
@@ -3562,6 +3617,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       typeof card.querySelector === 'function'
     ) {
       const shortsAnchor = card.querySelector('a[href^="/shorts/"]');
+      if (shortsAnchor) continuityAnchorNode = shortsAnchor;
       const anchorHrefRaw = String(
         (shortsAnchor && shortsAnchor.getAttribute && shortsAnchor.getAttribute('href')) ||
         (shortsAnchor && shortsAnchor.href) ||
@@ -4003,7 +4059,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     const strictIdentityKnown = strictContinuityItemKey && strictContinuityItemKey !== 'unknown';
     const hardItemKeyKnown = hardBlurItemKey && hardBlurItemKey !== 'unknown';
-    const hardSrcMatchesCurrent = !!(
+    const hardSrcMatchesCurrentExact = !!(
       hardBlurSrc &&
       (
         (normalizedPoster && hardBlurSrc === normalizedPoster) ||
@@ -4021,6 +4077,32 @@ export function generateModerationScript(config: InjectionConfig): string {
       reasonText === 'event:loadeddata' ||
       reasonText === 'event:playing' ||
       reasonText === 'event:play'
+    );
+    if (isHomeShortsShelfVideo && hasAuthoritativeBlur) {
+      rememberShortsAuthoritativeBlurMoment(videoNode, continuityAnchorNode);
+    }
+    const shortsAuthoritativeBlurAgeMs = isHomeShortsShelfVideo
+      ? getShortsAuthoritativeBlurAgeMs(videoNode, continuityAnchorNode)
+      : Number.POSITIVE_INFINITY;
+    const shortsTransientIdentityOrContextGap = !!(
+      !contextData &&
+      (!strictIdentityKnown || (!normalizedPoster && !normalizedCurrent))
+    );
+    const shortsContinuityGraceActive = shouldPreserveShortsContinuityBlur({
+      isHomeShortsShelfVideo: !!isHomeShortsShelfVideo,
+      isTransitionChurnReason: !!isTransitionChurnReason,
+      hasTransientIdentityOrContextGap: !!shortsTransientIdentityOrContextGap,
+      elapsedSinceAuthoritativeBlurMs: shortsAuthoritativeBlurAgeMs,
+      graceWindowMs: SHORTS_CONTINUITY_GRACE_WINDOW_MS,
+    });
+    const hardSrcMatchesCurrent = !!(
+      hardSrcMatchesCurrentExact ||
+      (
+        shortsContinuityGraceActive &&
+        !!hardBlurSrc &&
+        !normalizedPoster &&
+        !normalizedCurrent
+      )
     );
     const hasHardBlurOwnershipMarker = !!(hardItemKeyKnown && hardBlurSrc);
     const latchWriteEligible = !!(
@@ -4138,13 +4220,18 @@ export function generateModerationScript(config: InjectionConfig): string {
       hardItemKeyKnown &&
       strictContinuityItemKey === hardBlurItemKey
     );
+    const preserveShortsHardBlurDuringGraceWindow = !!(
+      isHomeShortsShelfVideo &&
+      shortsContinuityGraceActive
+    );
     if (
       hasAuthoritativeBlur &&
       !contextData &&
       !hardKeyMatchesStrict &&
       !hardSrcMatchesCurrent &&
       !holdBlurDuringUnresolvedTransition &&
-      !preserveShortsHardBlurDuringResolvedContinuity
+      !preserveShortsHardBlurDuringResolvedContinuity &&
+      !preserveShortsHardBlurDuringGraceWindow
     ) {
       videoNode.style.removeProperty('filter');
       videoNode.style.removeProperty('-webkit-filter');
@@ -4170,13 +4257,15 @@ export function generateModerationScript(config: InjectionConfig): string {
         hardBlurItemKey: hardBlurItemKey,
         hardSrcMatchesCurrent: !!hardSrcMatchesCurrent,
       });
-    } else if (preserveShortsHardBlurDuringResolvedContinuity && hasAuthoritativeBlur) {
+    } else if ((preserveShortsHardBlurDuringResolvedContinuity || preserveShortsHardBlurDuringGraceWindow) && hasAuthoritativeBlur) {
       console.log(
         '[MW-MVP-SHORTS-CONTINUITY-GUARD-V1] preserve_hard_blur_during_churn',
         'reason=' + String(reason || 'unknown'),
         'nodeId=' + String(videoNodeId || 'none'),
         'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
-        'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown')
+        'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown'),
+        'graceActive=' + String(!!preserveShortsHardBlurDuringGraceWindow),
+        'graceAgeMs=' + String(Math.round(shortsAuthoritativeBlurAgeMs || 0))
       );
       postNonShortsTransitionDiag('shorts_preserve_hard_blur_during_churn', {
         reason: String(reason || 'unknown'),
@@ -4184,10 +4273,12 @@ export function generateModerationScript(config: InjectionConfig): string {
         marker: 'MW-MVP-SHORTS-CONTINUITY-GUARD-V1',
         strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
         hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+        graceActive: !!preserveShortsHardBlurDuringGraceWindow,
+        graceAgeMs: Number.isFinite(shortsAuthoritativeBlurAgeMs) ? Math.round(shortsAuthoritativeBlurAgeMs) : -1,
       });
     }
     let activeVideoBlurred = hasAuthoritativeBlur || hasIncidentalBlur;
-    if (activeVideoBlurred && !hasAuthoritativeBlur && !contextData) {
+    if (activeVideoBlurred && !hasAuthoritativeBlur && !contextData && !preserveShortsHardBlurDuringGraceWindow) {
       videoNode.style.removeProperty('filter');
       videoNode.style.removeProperty('-webkit-filter');
       videoNode.style.removeProperty('backdrop-filter');
@@ -4210,6 +4301,13 @@ export function generateModerationScript(config: InjectionConfig): string {
         contextFound: false,
         contextKind: 'none',
       });
+    } else if (activeVideoBlurred && !hasAuthoritativeBlur && !contextData && preserveShortsHardBlurDuringGraceWindow) {
+      console.log(
+        '[MW-MVP-SHORTS-CONTINUITY-GUARD-V1] preserve_incidental_blur_during_grace',
+        'reason=' + String(reason || 'unknown'),
+        'nodeId=' + String(videoNodeId || 'none'),
+        'graceAgeMs=' + String(Math.round(shortsAuthoritativeBlurAgeMs || 0))
+      );
     }
     if (activeVideoBlurred) {
       const expectedBlurPx = IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20);
@@ -6745,6 +6843,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       node.dataset.mwHardBlurSrc = normalizeUrl(src || (node.dataset && node.dataset.mwSrc) || '') || '';
       node.dataset.mwHardBlurEpoch = String(state.pageEpoch || 0);
       node.dataset.mwHardBlurNav = String(NAV_ID || 'none');
+      if (isYouTubeMainPageShortsShelfVideoNode(node)) {
+        rememberShortsAuthoritativeBlurMoment(node, null);
+      }
     } catch (e) {}
   }
 
@@ -6756,6 +6857,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       node.dataset.mwHardBlurSrc = '';
       node.dataset.mwHardBlurEpoch = '';
       node.dataset.mwHardBlurNav = '';
+      shortsAuthoritativeBlurAtByNode.delete(node);
     } catch (e) {}
   }
 

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   applyAnatomicalThresholdDecision,
   applyFailOpenAndModePolicyDecision,
+  shouldPreserveShortsContinuityBlur,
 } from '@/lib/webview-injection-script';
 
 describe('webview injection blur policy', () => {
@@ -100,5 +101,41 @@ describe('webview injection blur policy', () => {
     });
     expect(timeoutDecision.shouldBlur).toBe(true);
     expect(timeoutDecision.reason).toBe('failClosed/timeout');
+  });
+});
+
+describe('shorts continuity grace policy', () => {
+  it('preserves blur only for shorts churn with transient gaps inside grace window', () => {
+    expect(shouldPreserveShortsContinuityBlur({
+      isHomeShortsShelfVideo: true,
+      isTransitionChurnReason: true,
+      hasTransientIdentityOrContextGap: true,
+      elapsedSinceAuthoritativeBlurMs: 350,
+      graceWindowMs: 1200,
+    })).toBe(true);
+  });
+
+  it('fails closed when grace preconditions are not met', () => {
+    expect(shouldPreserveShortsContinuityBlur({
+      isHomeShortsShelfVideo: false,
+      isTransitionChurnReason: true,
+      hasTransientIdentityOrContextGap: true,
+      elapsedSinceAuthoritativeBlurMs: 100,
+      graceWindowMs: 1200,
+    })).toBe(false);
+    expect(shouldPreserveShortsContinuityBlur({
+      isHomeShortsShelfVideo: true,
+      isTransitionChurnReason: false,
+      hasTransientIdentityOrContextGap: true,
+      elapsedSinceAuthoritativeBlurMs: 100,
+      graceWindowMs: 1200,
+    })).toBe(false);
+    expect(shouldPreserveShortsContinuityBlur({
+      isHomeShortsShelfVideo: true,
+      isTransitionChurnReason: true,
+      hasTransientIdentityOrContextGap: true,
+      elapsedSinceAuthoritativeBlurMs: 1800,
+      graceWindowMs: 1200,
+    })).toBe(false);
   });
 });
