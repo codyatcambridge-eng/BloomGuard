@@ -3869,9 +3869,14 @@ export const NativeWebViewBrowser = () => {
       } else {
         const shouldSelfDisableNonShortsLegacyPoll =
           isNonShortsYouTubeContext &&
-          lastPollStatus === 'EMPTY' &&
-          lastEmptyPollReason === 'queue_empty' &&
-          lastProducerMode === 'disabled';
+          (
+            // Normal path: injection script confirmed queue is empty and producer is disabled.
+            (lastPollStatus === 'EMPTY' && lastEmptyPollReason === 'queue_empty' && lastProducerMode === 'disabled') ||
+            // Fallback path: executeScript returns undefined (InAppBrowser bridge doesn't serialize
+            // the return value).  After IDLE_EMPTY_POLLS consecutive undefined returns the queue is
+            // effectively empty — the main moderation path uses postMessage, not this queue.
+            (consecutiveEmptyPolls >= IDLE_EMPTY_POLLS && lastEmptyPollReason === 'null_or_empty_result')
+          );
         if (shouldSelfDisableNonShortsLegacyPoll) {
           legacyPollSelfDisabledContextRef.current = pollContextKey;
           cancelled = true;

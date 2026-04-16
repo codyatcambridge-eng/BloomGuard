@@ -7153,12 +7153,23 @@ export function generateModerationScript(config: InjectionConfig): string {
           'connected=' + String(!!element.isConnected)
         );
       }
-      // Force blur with !important for iOS WebKit
+      // Force blur with !important for iOS WebKit.
+      // Zero any existing transition first so a re-apply after reveal doesn't
+      // animate in over 300ms (which would leave content briefly visible).
+      element.style.setProperty('transition', 'none', 'important');
       element.style.setProperty('filter', 'blur(' + blurPx + 'px)', 'important');
       element.style.setProperty('-webkit-filter', 'blur(' + blurPx + 'px)', 'important');
       element.style.setProperty('backdrop-filter', 'blur(' + blurPx + 'px)', 'important');
       element.style.setProperty('-webkit-backdrop-filter', 'blur(' + blurPx + 'px)', 'important');
-      element.style.transition = 'filter 0.3s ease';
+      // Re-enable smooth transition for future user-reveal animation after one paint frame.
+      // removeProperty clears the 'none !important' override so it doesn't permanently
+      // suppress future transitions; then we set the non-important value for the reveal.
+      requestAnimationFrame(function() {
+        try {
+          element.style.removeProperty('transition');
+          element.style.transition = 'filter 0.3s ease';
+        } catch (_e) {}
+      });
       element.dataset.mwModerated = 'blurred';
       element.dataset.mwCategory = category || 'flagged';
       element.dataset.mwSrc = src;
@@ -7456,11 +7467,17 @@ export function generateModerationScript(config: InjectionConfig): string {
         resolvedTarget.style.removeProperty('backdrop-filter');
         resolvedTarget.style.removeProperty('-webkit-backdrop-filter');
         diagShortsBlurStackLog('overlay_reresolve_after_clear', resolvedTarget, src, 'reason=' + (reason || 'unknown'));
+        resolvedTarget.style.setProperty('transition', 'none', 'important');
         resolvedTarget.style.setProperty('filter', 'blur(' + resolvedBlurPx + 'px)', 'important');
         resolvedTarget.style.setProperty('-webkit-filter', 'blur(' + resolvedBlurPx + 'px)', 'important');
         resolvedTarget.style.setProperty('backdrop-filter', 'blur(' + resolvedBlurPx + 'px)', 'important');
         resolvedTarget.style.setProperty('-webkit-backdrop-filter', 'blur(' + resolvedBlurPx + 'px)', 'important');
-        resolvedTarget.style.transition = 'filter 0.3s ease';
+        requestAnimationFrame(function() {
+          try {
+            resolvedTarget.style.removeProperty('transition');
+            resolvedTarget.style.transition = 'filter 0.3s ease';
+          } catch (_e) {}
+        });
         resolvedTarget.dataset.mwModerated = 'blurred';
         resolvedTarget.dataset.mwCategory = category || 'flagged';
         resolvedTarget.dataset.mwSrc = src;
@@ -9019,6 +9036,26 @@ export function generateModerationScript(config: InjectionConfig): string {
     // Skip already processed
     if (state.scanned.has(url)) {
       logShortsScanSkip('cache_scanned', null, url, sourceType);
+      // Re-apply blur to recycled DOM nodes (virtual-scroll removes/re-adds elements).
+      // When the URL was previously blurred but the new element has no blur markers,
+      // apply blur immediately without re-scanning to close the visibility gap.
+      if (
+        !isShortsModeActive() &&
+        state.blurred.has(url) &&
+        element &&
+        element.nodeType === 1 &&
+        element.isConnected &&
+        !isRevealedForSource(url, element) &&
+        element.dataset.mwModerated !== 'blurred'
+      ) {
+        // Fresh DOM node from virtual-scroll rehide: dataset fields will be empty so
+        // the fallbacks (CONFIG.blurStrength / 'flagged') are used.  The category is
+        // display/logging-only; the important thing is that blur strength matches CONFIG.
+        const reattachCategory = String((element.dataset && element.dataset.mwCategory) || 'flagged');
+        const reattachBlurPx = Number((element.dataset && element.dataset.mwBlurStrength) || '') || CONFIG.blurStrength;
+        applyBlur(element, url, reattachCategory, reattachBlurPx, null);
+        logShortsScanSkip('cache_scanned_reblur_applied', null, url, sourceType);
+      }
       return false;
     }
     
