@@ -4502,6 +4502,16 @@ export function generateModerationScript(config: InjectionConfig): string {
       !preserveShortsHardBlurDuringResolvedContinuity &&
       !preserveShortsHardBlurDuringGraceWindow
     ) {
+      if (isNodeClassificationLocked(videoNode, reason)) {
+        mwDiagLog('[MW-PERSIST][PROVENANCE-BLOCKED] hard_blur_provenance_mismatch suppressed — classification locked',
+          'reason=' + String(reason || 'unknown'),
+          'node=' + videoNodeId,
+          'hardBlurItemKey=' + String(hardBlurItemKey || ''),
+          'strictContinuityItemKey=' + String(strictContinuityItemKey || ''),
+          'classifiedEpoch=' + String((videoNode.dataset && videoNode.dataset.mwClassifiedEpoch) || '0'),
+          'pageEpoch=' + String(CONFIG.pageEpoch)
+        );
+      } else {
       if (isMainSurfaceUrl && !isHomeShortsShelfVideo && regularPathQuarantinePassed) {
         postNonShortsTransitionDiag('regular_provenance_clear_source', {
           reason: String(reason || 'unknown'),
@@ -4539,6 +4549,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         hardBlurItemKey: hardBlurItemKey,
         hardSrcMatchesCurrent: !!hardSrcMatchesCurrent,
       });
+      }
     } else if ((preserveShortsHardBlurDuringResolvedContinuity || preserveShortsHardBlurDuringGraceWindow) && hasAuthoritativeBlur) {
       console.log(
         '[MW-MVP-SHORTS-CONTINUITY-GUARD-V1] preserve_hard_blur_during_churn',
