@@ -5047,7 +5047,11 @@ export function generateModerationScript(config: InjectionConfig): string {
         videoNode.style.webkitFilter = 'blur(' + CONFIG.softBlurStrength + 'px)';
         videoNode.classList.add('mw-softblur');
         if (videoNode.dataset) videoNode.dataset.mwModerated = 'softblur';
-        mwDiagLog('[MW-FLICKER][NO-CONTEXT-HOLD] soft blur applied pending context resolve', 'nodeId=' + videoNodeId, 'key=' + String(strictContinuityItemKey || 'unknown'));
+        // Stamp authoritative hard blur so isNodeClassificationLocked can protect this
+        // node via the mwHardBlurEpoch path even without a full applyBlur() call.
+        markAuthoritativeHardBlur(videoNode, String((videoNode.dataset && videoNode.dataset.mwSrc) || ''));
+        if (videoNode.dataset) videoNode.dataset.mwHardBlurItemKey = String(strictContinuityItemKey || 'unknown');
+        mwDiagLog('[MW-FLICKER][NO-CONTEXT-HOLD] soft blur applied + authoritative stamp', 'nodeId=' + videoNodeId, 'key=' + String(strictContinuityItemKey || 'unknown'), 'hardBlurEpoch=' + String(CONFIG.pageEpoch));
       }
     }
     if (shouldApplyRevealFallback) {
@@ -7184,15 +7188,25 @@ export function generateModerationScript(config: InjectionConfig): string {
   function isNodeClassificationLocked(element, reason) {
     if (!element || !element.dataset) return false;
     if (!element.isConnected) return false; // node destroyed — lock lifted
-    const state = String(element.dataset.mwModerated || '');
-    if (state !== 'blurred') return false; // only hard blur is terminal
     const isUserReveal = typeof reason === 'string' && (
       reason.indexOf('reveal') !== -1 ||
       reason.indexOf('user_intent') !== -1
     );
     if (isUserReveal) return false; // user action always wins
-    const classifiedEpoch = Number(element.dataset.mwClassifiedEpoch || 0);
-    return classifiedEpoch > 0 && classifiedEpoch === CONFIG.pageEpoch;
+    // Path A: fully classified via applyBlur (mwModerated=blurred + epoch stamp)
+    const state = String(element.dataset.mwModerated || '');
+    if (state === 'blurred') {
+      const classifiedEpoch = Number(element.dataset.mwClassifiedEpoch || 0);
+      if (classifiedEpoch > 0 && classifiedEpoch === CONFIG.pageEpoch) return true;
+    }
+    // Path B: authoritative hard blur tracked via markAuthoritativeHardBlur (covers
+    // nodes promoted from incidental/softblur without going through applyBlur)
+    const hardBlur = String(element.dataset.mwHardBlur || '') === '1';
+    if (hardBlur) {
+      const hardBlurEpoch = Number(element.dataset.mwHardBlurEpoch || 0);
+      if (hardBlurEpoch > 0 && hardBlurEpoch === CONFIG.pageEpoch) return true;
+    }
+    return false;
   }
 
   function clearAllBlurAndOverlay(element, src, reason, nextModeratedState) {
