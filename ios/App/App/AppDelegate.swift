@@ -11,6 +11,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         // Restore InAppBrowser lifecycle bridge so native plugins can observe the active WKWebView.
         InAppBrowserLifecycleBridge.installIfNeeded()
+        NSLog("[FlashShield][STARTUP_DIAG] test1111")
         return true
     }
 
