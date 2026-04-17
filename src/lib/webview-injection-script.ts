@@ -4695,6 +4695,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         videoNode.style.setProperty('backdrop-filter', expectedBlurToken, 'important');
         videoNode.style.setProperty('-webkit-backdrop-filter', expectedBlurToken, 'important');
         videoNode.dataset.mwModerated = 'blurred';
+        videoNode.dataset.mwClassifiedEpoch = String(CONFIG.pageEpoch);
         markAuthoritativeHardBlur(videoNode, String((videoNode.dataset && videoNode.dataset.mwSrc) || ''));
         videoNode.classList.add('mw-blurred');
         console.log(
@@ -7298,6 +7299,28 @@ export function generateModerationScript(config: InjectionConfig): string {
     } catch (e) {}
   }
 
+  // Shorts fail-closed guard: ownership churn may invalidate reveal UI identity,
+  // but must not clear established blur on the active node.
+  function quarantineShortsRevealOverlay(node, src, reason) {
+    if (!node || node.nodeType !== 1) return;
+    try {
+      const overlay = findRevealOverlayForElement(node, src || (node.dataset && node.dataset.mwSrc) || '');
+      if (overlay && overlay.parentElement) {
+        overlay.parentElement.removeChild(overlay);
+      }
+      node.dataset.mwHasOverlay = 'false';
+      node.dataset.mwOverlayOwnerToken = '';
+      node.dataset.mwOwnerMismatchRetryScheduled = 'false';
+      console.log(
+        '[DIAG][REVEAL_UI] shorts_overlay_quarantined',
+        'node=' + getDiagNodeId(node),
+        'reason=' + String(reason || 'unknown'),
+        'moderated=' + String(node.dataset.mwModerated || 'none'),
+        'hardBlur=' + String(node.dataset.mwHardBlur || '0')
+      );
+    } catch (e) {}
+  }
+
   function applySoftBlur(element, src, itemId) {
     diagBlurStateLog('applySoftBlur.enter', element, src, 'itemId=' + (itemId || 'none'));
     // Check persistence: if user revealed this, don't blur
@@ -7905,10 +7928,12 @@ export function generateModerationScript(config: InjectionConfig): string {
           } catch (_e) {}
         });
         resolvedTarget.dataset.mwModerated = 'blurred';
+        resolvedTarget.dataset.mwClassifiedEpoch = String(CONFIG.pageEpoch);
         resolvedTarget.dataset.mwCategory = category || 'flagged';
         resolvedTarget.dataset.mwSrc = src;
         resolvedTarget.dataset.mwItemId = itemId || '';
         resolvedTarget.dataset.mwShortsStableSelector = resolvedSelector || '';
+        markAuthoritativeHardBlur(resolvedTarget, src);
         resolvedTarget.classList.add('mw-blurred');
         setShortsBlurContextForNode(
           resolvedTarget,
@@ -7985,7 +8010,11 @@ export function generateModerationScript(config: InjectionConfig): string {
         }
         element.dataset.mwOwnerMismatchCount = '0';
         element.dataset.mwOwnerMismatchRetryScheduled = 'false';
-        clearAllBlurAndOverlay(element, src || (activeContext && activeContext.src) || '', 'createRevealOverlay_owner_mismatch', 'safe');
+        quarantineShortsRevealOverlay(
+          element,
+          src || (activeContext && activeContext.src) || '',
+          'createRevealOverlay_owner_mismatch'
+        );
         return;
       }
       element.dataset.mwOwnerMismatchCount = '0';
@@ -8006,7 +8035,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (shortsMode) {
         const existingOwnerToken = String(existingOverlay.dataset.mwShortsOwnerToken || '');
         if (!shortsOwnerToken || existingOwnerToken !== shortsOwnerToken) {
-          clearAllBlurAndOverlay(element, src, 'createRevealOverlay_existing_owner_mismatch', 'safe');
+          quarantineShortsRevealOverlay(element, src, 'createRevealOverlay_existing_owner_mismatch');
           return;
         }
       }
