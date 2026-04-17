@@ -372,6 +372,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     try {
       var msg = Array.prototype.slice.call(arguments).join(' ');
       postToHost({ type: 'MW_DIAG_LOG', msg: msg });
+      if (msg.indexOf('[MW-FLICKER]') !== -1 &&
+          window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.blurDiagnostics) {
+        window.webkit.messageHandlers.blurDiagnostics.postMessage(msg);
+      }
     } catch (e) {}
   }
 
@@ -3062,6 +3066,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   const REGULAR_MAIN_CARD_BLUR_LATCH_TTL_MS = 2200;
   const REGULAR_MAIN_CARD_BLUR_LATCH_MAX = 160;
   const SHORTS_CONTINUITY_GRACE_WINDOW_MS = 1200;
+  const MAIN_SURFACE_LANE_FLIP_WINDOW_MS = 4000;
 
   function isNonShortsYouTubeReattachContext() {
     return isYouTube() && !isShortsModeActive();
@@ -3778,31 +3783,62 @@ export function generateModerationScript(config: InjectionConfig): string {
       strictContinuityItemKey !== 'unknown'
     );
     if (isMainSurfaceUrl) {
-      postNonShortsTransitionDiag('identity_split_candidate', {
-        reason: String(reason || 'unknown'),
-        nodeId: videoNodeId,
-        marker: 'MW-FLICKER-IDENTITY-SPLIT-CANDIDATE-V1',
-        nearestRegularCardNodeId: String(nearestRegularCardNodeId || 'none'),
-        nearestShortsLockupNodeId: String(nearestShortsLockupNodeId || 'none'),
-        viaLockup: !!hasDirectShortsLockupOnNodePath,
-        viaDirectShortsAnchor: !!hasDirectShortsAnchorOnNodePath,
-        viaCardShortsLink: !!viaCardShortsLink,
-        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
-        nearbyShortsAnchorId: String(nearbyShortsAnchorId || 'unknown'),
-        derivedAnchorItemKey: String(derivedAnchorItemKey || 'unknown'),
-      });
-      const nextLane = (
+      const currentLaneCandidate = (
         isHomeShortsShelfVideo
           ? 'shorts'
-          : (regularPathQuarantinePassed ? 'regular' : 'other')
+          : (regularPathQuarantinePassed ? 'regular' : 'unknown')
       );
+      const identityAmbiguous = !!(
+        (
+          (hasDirectShortsLockupOnNodePath || hasDirectShortsAnchorOnNodePath || viaCardShortsLink) &&
+          nearestRegularCardNodeId !== 'none'
+        ) ||
+        (
+          strictContinuityItemKey &&
+          strictContinuityItemKey !== 'unknown' &&
+          nearbyShortsAnchorId &&
+          nearbyShortsAnchorId !== 'unknown' &&
+          strictContinuityItemKey !== nearbyShortsAnchorId
+        ) ||
+        (
+          derivedAnchorItemKey &&
+          derivedAnchorItemKey !== 'unknown' &&
+          reattachItemKey &&
+          reattachItemKey !== 'unknown' &&
+          derivedAnchorItemKey !== reattachItemKey
+        )
+      );
+      if (identityAmbiguous) {
+        postNonShortsTransitionDiag('identity_split_candidate', {
+          reason: String(reason || 'unknown'),
+          nodeId: videoNodeId,
+          marker: 'MW-FLICKER-IDENTITY-SPLIT-CANDIDATE-V1',
+          nearestRegularCardNodeId: String(nearestRegularCardNodeId || 'none'),
+          nearestShortsLockupNodeId: String(nearestShortsLockupNodeId || 'none'),
+          viaLockup: !!hasDirectShortsLockupOnNodePath,
+          viaDirectShortsAnchor: !!hasDirectShortsAnchorOnNodePath,
+          viaCardShortsLink: !!viaCardShortsLink,
+          strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+          nearbyShortsAnchorId: String(nearbyShortsAnchorId || 'unknown'),
+          derivedAnchorItemKey: String(derivedAnchorItemKey || 'unknown'),
+          currentLaneCandidate: String(currentLaneCandidate || 'unknown'),
+        });
+      }
+      const nextLane = currentLaneCandidate;
+      const nowMs = Date.now();
       const previousLaneState = persistedMainSurfaceLaneByNode.get(videoNode) || null;
+      const isShortWindowFlip = !!(
+        previousLaneState &&
+        Number.isFinite(previousLaneState.seenAt) &&
+        (nowMs - Number(previousLaneState.seenAt || 0)) <= MAIN_SURFACE_LANE_FLIP_WINDOW_MS
+      );
       if (
         previousLaneState &&
         previousLaneState.lane &&
         previousLaneState.lane !== nextLane &&
-        previousLaneState.lane !== 'other' &&
-        nextLane !== 'other'
+        previousLaneState.lane !== 'unknown' &&
+        nextLane !== 'unknown' &&
+        isShortWindowFlip
       ) {
         postNonShortsTransitionDiag('lane_flip_same_node', {
           reason: String(reason || 'unknown'),
@@ -3816,6 +3852,8 @@ export function generateModerationScript(config: InjectionConfig): string {
           nextStrictKey: String(strictContinuityItemKey || 'unknown'),
           prevCardNodeId: String(previousLaneState.cardNodeId || 'none'),
           nextCardNodeId: String(cardNodeId || 'none'),
+          prevNearbyShortsAnchorId: String(previousLaneState.nearbyShortsAnchorId || 'unknown'),
+          nextNearbyShortsAnchorId: String(nearbyShortsAnchorId || 'unknown'),
         });
       }
       persistedMainSurfaceLaneByNode.set(videoNode, {
@@ -3823,6 +3861,8 @@ export function generateModerationScript(config: InjectionConfig): string {
         reason: String(reason || 'unknown'),
         strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
         cardNodeId: String(cardNodeId || 'none'),
+        nearbyShortsAnchorId: String(nearbyShortsAnchorId || 'unknown'),
+        seenAt: nowMs,
       });
     }
 
@@ -4988,6 +5028,16 @@ export function generateModerationScript(config: InjectionConfig): string {
         overlayPresent: !!videoOverlay,
         contextSize: Number((state.nonShortsReattachContext && state.nonShortsReattachContext.size) || 0),
       });
+      // MVP: hold with soft blur while context is still resolving — prevents the
+      // ~600ms flash between first loadeddata (no context yet) and second loadeddata
+      // (authoritative context arrives). applyBlur() on the next event will replace this.
+      if (reasonText === 'event:loadeddata' && !activeVideoBlurred && videoNode.isConnected) {
+        videoNode.style.filter = 'blur(' + CONFIG.softBlurStrength + 'px)';
+        videoNode.style.webkitFilter = 'blur(' + CONFIG.softBlurStrength + 'px)';
+        videoNode.classList.add('mw-softblur');
+        if (videoNode.dataset) videoNode.dataset.mwModerated = 'softblur';
+        mwDiagLog('[MW-FLICKER][NO-CONTEXT-HOLD] soft blur applied pending context resolve', 'nodeId=' + videoNodeId, 'key=' + String(strictContinuityItemKey || 'unknown'));
+      }
     }
     if (shouldApplyRevealFallback) {
       const hadOverlay = !!(videoOverlay && videoOverlay.parentElement);
@@ -7118,8 +7168,28 @@ export function generateModerationScript(config: InjectionConfig): string {
    * Apply soft blur (semantic delay) - light blur while waiting for result
    * After CONFIG.semanticDelayMs, if no result, keep soft blur only
    */
+  // Classification Persistence: hard blur is terminal within a page epoch.
+  // Only a user-reveal action or node destruction can clear it.
+  function isNodeClassificationLocked(element, reason) {
+    if (!element || !element.dataset) return false;
+    if (!element.isConnected) return false; // node destroyed — lock lifted
+    const state = String(element.dataset.mwModerated || '');
+    if (state !== 'blurred') return false; // only hard blur is terminal
+    const isUserReveal = typeof reason === 'string' && (
+      reason.indexOf('reveal') !== -1 ||
+      reason.indexOf('user_intent') !== -1
+    );
+    if (isUserReveal) return false; // user action always wins
+    const classifiedEpoch = Number(element.dataset.mwClassifiedEpoch || 0);
+    return classifiedEpoch > 0 && classifiedEpoch === CONFIG.pageEpoch;
+  }
+
   function clearAllBlurAndOverlay(element, src, reason, nextModeratedState) {
     if (!element || element.nodeType !== 1) return false;
+    if (isNodeClassificationLocked(element, reason)) {
+      mwDiagLog('[MW-PERSIST] clearAllBlurAndOverlay blocked — classification locked', 'reason=' + String(reason || ''), 'node=' + getDiagNodeId(element));
+      return false;
+    }
     let changed = false;
     try {
       const beforeFilter = String(element.style.getPropertyValue('filter') || element.style.filter || '').toLowerCase();
@@ -7501,6 +7571,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         } catch (_e) {}
       });
       element.dataset.mwModerated = 'blurred';
+      element.dataset.mwClassifiedEpoch = String(CONFIG.pageEpoch);
       element.dataset.mwCategory = category || 'flagged';
       element.dataset.mwSrc = src;
       element.dataset.mwItemId = itemId || '';
@@ -9500,6 +9571,8 @@ export function generateModerationScript(config: InjectionConfig): string {
           if (element.dataset.mwViewportQueued !== 'true') {
             element.dataset.mwViewportQueued = 'true';
             queueMutationScan(element, 'viewport_intersection');
+          } else {
+            mwDiagLog('[MW-FLICKER][VIEWPORT] re-entry blocked by mwViewportQueued guard — node=' + (element.dataset.mwNodeId || element.tagName || 'unknown') + ' src=' + String(element.src || element.dataset.mwLastScanSrc || '').substring(0, 80));
           }
         }
       });
@@ -9564,6 +9637,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       img.dataset.mwModerated = '';
       img.dataset.mwScanned = 'false';
       img.dataset.mwPreblurClear = '';
+      img.dataset.mwViewportQueued = '';
     }
     
     img.dataset.mwScanned = 'true';
@@ -10142,6 +10216,24 @@ export function generateModerationScript(config: InjectionConfig): string {
             }
           }
           
+          // Privacy by Default: soft-blur img/video on DOM entry before scan completes.
+          // Prevents flash of unblurred content during the scan latency window.
+          // Skips nodes already classified, user-revealed, or in Shorts mode (handled separately).
+          if (
+            node.isConnected &&
+            node.nodeType === 1 &&
+            !isShortsModeActive() &&
+            isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)
+          ) {
+            const _tag = String(node.tagName || '').toLowerCase();
+            const _state = String((node.dataset && node.dataset.mwModerated) || '');
+            if ((_tag === 'img' || _tag === 'video') && _state === '' && _state !== 'revealed') {
+              node.style.filter = 'blur(' + CONFIG.softBlurStrength + 'px)';
+              node.style.webkitFilter = 'blur(' + CONFIG.softBlurStrength + 'px)';
+              node.classList.add('mw-softblur');
+              node.dataset.mwModerated = 'softblur';
+            }
+          }
           // Add to viewport observer for lazy scanning
           observeForViewport(node);
           queueMutationScan(node, 'mutation_added');
@@ -10219,6 +10311,7 @@ export function generateModerationScript(config: InjectionConfig): string {
               target.dataset.mwPreblurClear = '';
               target.dataset.mwOrigSrc = '';
               target.dataset.mwModerated = '';
+              target.dataset.mwViewportQueued = '';
               queueMutationScan(target, 'attr:src_img_changed');
             }
           }

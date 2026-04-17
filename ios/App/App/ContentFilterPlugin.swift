@@ -1,6 +1,18 @@
 import Foundation
 import Capacitor
 import WebKit
+import OSLog
+
+private let bgLogger = Logger(subsystem: "com.bloomguard.app", category: "blur-diagnostics")
+
+private class BlurDiagnosticsHandler: NSObject, WKScriptMessageHandler {
+    func userContentController(_ userContentController: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        guard let body = message.body as? String else { return }
+        bgLogger.info("\(body, privacy: .public)")
+        NSLog("[BlurDiag] %@", body)
+    }
+}
 
 @objc(ContentFilter)
 public class ContentFilterPlugin: CAPPlugin, CAPBridgedPlugin {
@@ -16,9 +28,12 @@ public class ContentFilterPlugin: CAPPlugin, CAPBridgedPlugin {
     private var scanning = false
     private let logCooldownMs: Double = 800
     private var lastLogAt: TimeInterval = 0
+    private let blurDiagHandler = BlurDiagnosticsHandler()
 
     public override func load() {
         super.load()
+        bgLogger.info("[BlurDiag] ContentFilterPlugin.load() called")
+        NSLog("[BlurDiag] ContentFilterPlugin.load() called")
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(onAttach(_:)),
@@ -64,13 +79,19 @@ public class ContentFilterPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc private func onAttach(_ notification: Notification) {
         guard let webView = notification.userInfo?["webView"] as? WKWebView else { return }
         activeWebView = webView
-        rateLimitedLog("[FlashShield][DIAG] attached WKWebView")
+        let ucc = webView.configuration.userContentController
+        ucc.removeScriptMessageHandler(forName: "blurDiagnostics")
+        ucc.add(blurDiagHandler, name: "blurDiagnostics")
+        bgLogger.info("[BlurDiag] onAttach fired — blurDiagnostics handler registered")
+        NSLog("[BlurDiag] onAttach fired — blurDiagnostics handler registered")
+        rateLimitedLog("[FlashShield][DIAG] attached WKWebView — blurDiagnostics handler registered")
     }
 
     @objc private func onDetach(_ notification: Notification) {
         if let webView = notification.userInfo?["webView"] as? WKWebView, webView === activeWebView {
+            webView.configuration.userContentController.removeScriptMessageHandler(forName: "blurDiagnostics")
             activeWebView = nil
-            rateLimitedLog("[FlashShield][DIAG] detached WKWebView")
+            rateLimitedLog("[FlashShield][DIAG] detached WKWebView — blurDiagnostics handler removed")
         }
     }
 
