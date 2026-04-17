@@ -3130,6 +3130,127 @@ export function generateModerationScript(config: InjectionConfig): string {
     } catch (e) {}
   }
 
+  function emitAuditMarker(marker, details) {
+    const payload = details && typeof details === 'object' ? details : {};
+    try {
+      postToHost({
+        type: 'MW_AUDIT',
+        marker: String(marker || 'MW-AUDIT-UNKNOWN'),
+        url: window.location.href,
+        navId: NAV_ID,
+        pageEpoch: state.pageEpoch,
+        timestamp: Date.now(),
+        details: payload,
+      });
+    } catch (e) {}
+    try {
+      console.warn('[' + String(marker || 'MW-AUDIT-UNKNOWN') + ']', JSON.stringify(payload));
+    } catch (e) {}
+  }
+
+  function getAuditSurfaceLane(isHomeShortsShelfVideo) {
+    return isHomeShortsShelfVideo ? 'home_shorts_shelf' : 'regular_video_card';
+  }
+
+  function toAuditBlurMode(blurPx) {
+    const n = Number(blurPx || 0);
+    if (n === 40) return 'hard40';
+    if (n === 8) return 'soft8';
+    return 'other';
+  }
+
+  function classifyOwnershipProof(details) {
+    const strictKey = String((details && details.strictKey) || 'unknown');
+    const reattachKey = String((details && details.reattachKey) || 'unknown');
+    const contextKey = String((details && details.contextKey) || 'unknown');
+    const hardKey = String((details && details.hardKey) || 'unknown');
+    const keys = [strictKey, reattachKey, contextKey, hardKey].filter(function(k) {
+      return !!k && k !== 'unknown';
+    });
+    const uniqueKeys = Array.from(new Set(keys));
+    const strictMatch = !!(
+      strictKey !== 'unknown' &&
+      (
+        (contextKey !== 'unknown' && strictKey === contextKey) ||
+        (reattachKey !== 'unknown' && strictKey === reattachKey)
+      )
+    );
+    if (strictMatch) return 'strict_match';
+    const sameOwnerHard = !!(
+      hardKey !== 'unknown' &&
+      (
+        (strictKey !== 'unknown' && strictKey === hardKey) ||
+        (reattachKey !== 'unknown' && reattachKey === hardKey)
+      )
+    );
+    if (sameOwnerHard) return 'same_owner_hard';
+    if (uniqueKeys.length === 0) return 'none';
+    if (uniqueKeys.length === 1) return 'none';
+    return 'ambiguous';
+  }
+
+  function classifyIdentityCertainty(details) {
+    const strictKey = String((details && details.strictKey) || 'unknown');
+    const reattachKey = String((details && details.reattachKey) || 'unknown');
+    const contextKey = String((details && details.contextKey) || 'unknown');
+    const hardKey = String((details && details.hardKey) || 'unknown');
+    const keys = [strictKey, reattachKey, contextKey, hardKey].filter(function(k) {
+      return !!k && k !== 'unknown';
+    });
+    if (keys.length === 0) return 'unknown';
+    const proof = classifyOwnershipProof(details);
+    if (proof === 'strict_match' || proof === 'same_owner_hard') return 'certain';
+    return 'ambiguous';
+  }
+
+  function emitAuditBlurAuthz(details) {
+    const payload = details && typeof details === 'object' ? details : {};
+    const strictKey = String(payload.strictKey || 'unknown');
+    const reattachKey = String(payload.reattachKey || 'unknown');
+    const contextItemKey = String(payload.contextItemKey || 'unknown');
+    const hardBlurItemKey = String(payload.hardBlurItemKey || 'unknown');
+    const proof = String(payload.ownershipProof || classifyOwnershipProof({
+      strictKey: strictKey,
+      reattachKey: reattachKey,
+      contextKey: contextItemKey,
+      hardKey: hardBlurItemKey,
+    }));
+    const certainty = String(payload.identityCertainty || classifyIdentityCertainty({
+      strictKey: strictKey,
+      reattachKey: reattachKey,
+      contextKey: contextItemKey,
+      hardKey: hardBlurItemKey,
+    }));
+    emitAuditMarker('MW-AUDIT-BLUR-AUTHZ', {
+      nodeId: String(payload.nodeId || 'none'),
+      surfaceLane: String(payload.surfaceLane || 'regular_video_card'),
+      authzPath: String(payload.authzPath || 'other'),
+      strictKey: strictKey,
+      reattachKey: reattachKey,
+      contextItemKey: contextItemKey,
+      hardBlurItemKey: hardBlurItemKey,
+      ownershipProof: proof,
+      identityCertainty: certainty,
+      blurMode: String(payload.blurMode || 'other'),
+      allowed: !!payload.allowed,
+    });
+  }
+
+  function emitAuditRevealAuthz(details) {
+    const payload = details && typeof details === 'object' ? details : {};
+    emitAuditMarker('MW-AUDIT-REVEAL-AUTHZ', {
+      nodeId: String(payload.nodeId || 'none'),
+      surfaceLane: String(payload.surfaceLane || 'regular_video_card'),
+      action: String(payload.action || 'other'),
+      authzPath: String(payload.authzPath || 'other'),
+      overlayItemKey: String(payload.overlayItemKey || 'unknown'),
+      overlayNodeId: String(payload.overlayNodeId || 'none'),
+      ownershipProof: String(payload.ownershipProof || 'none'),
+      identityCertainty: String(payload.identityCertainty || 'unknown'),
+      allowed: !!payload.allowed,
+    });
+  }
+
   function buildNonShortsReattachContextKey(cardKey, itemKey) {
     return String(cardKey || 'none') + '|' + String(itemKey || 'unknown');
   }
@@ -3538,6 +3659,13 @@ export function generateModerationScript(config: InjectionConfig): string {
     const currentUrl = window.location.href;
     const isMainSurfaceUrl = isYouTubeMainPageThumbnailSurfaceUrl(currentUrl);
     const reasonText = String(reason || 'unknown');
+    const churnEventType = (function() {
+      if (reasonText.indexOf('mutation_added:') === 0) return 'preview_insert';
+      if (reasonText.indexOf('attr:src') === 0 || reasonText.indexOf('attr:poster') === 0 || reasonText.indexOf('attr:currentSrc') === 0) return 'src_swap';
+      if (reasonText === 'event:loadeddata' || reasonText === 'event:playing' || reasonText === 'event:play') return 'img_to_video';
+      if (reasonText.indexOf('overlay') !== -1) return 'overlay_rebind';
+      return 'other';
+    })();
     const reasonLooksTransition =
       reasonText.indexOf('event:') === 0 ||
       reasonText.indexOf('mutation_added') === 0 ||
@@ -3590,6 +3718,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       : null;
     let cardNodeId = card ? getDiagNodeId(card) : 'none';
     const isHomeShortsShelfVideo = isYouTubeMainPageShortsShelfVideoNode(videoNode);
+    const surfaceLane = getAuditSurfaceLane(isHomeShortsShelfVideo);
     const isRegularMainSurfaceNonShortsVideo = (function() {
       if (!isMainSurfaceUrl || isHomeShortsShelfVideo) return false;
       try {
@@ -3749,6 +3878,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       });
     }
     let nearbyShortsGuardSkippedNonShorts = false;
+    let laneFlipSeen = false;
     if (strictContinuityItemKey === 'unknown' && nearbyShortsAnchorId !== 'unknown') {
       if (isHomeShortsShelfVideo) {
         strictContinuityItemKey = nearbyShortsAnchorId;
@@ -3840,6 +3970,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         nextLane !== 'unknown' &&
         isShortWindowFlip
       ) {
+        laneFlipSeen = true;
         postNonShortsTransitionDiag('lane_flip_same_node', {
           reason: String(reason || 'unknown'),
           nodeId: videoNodeId,
@@ -3855,6 +3986,12 @@ export function generateModerationScript(config: InjectionConfig): string {
           prevNearbyShortsAnchorId: String(previousLaneState.nearbyShortsAnchorId || 'unknown'),
           nextNearbyShortsAnchorId: String(nearbyShortsAnchorId || 'unknown'),
         });
+        emitAuditMarker('MW-AUDIT-CHURN-CLASS', {
+          nodeId: videoNodeId,
+          eventType: 'lane_flip',
+          isHomeShortsShelfVideo: !!isHomeShortsShelfVideo,
+          nearbyShortsGuardSkippedNonShorts: !!nearbyShortsGuardSkippedNonShorts,
+        });
       }
       persistedMainSurfaceLaneByNode.set(videoNode, {
         lane: nextLane,
@@ -3865,6 +4002,12 @@ export function generateModerationScript(config: InjectionConfig): string {
         seenAt: nowMs,
       });
     }
+    emitAuditMarker('MW-AUDIT-CHURN-CLASS', {
+      nodeId: videoNodeId,
+      eventType: churnEventType,
+      isHomeShortsShelfVideo: !!isHomeShortsShelfVideo,
+      nearbyShortsGuardSkippedNonShorts: !!nearbyShortsGuardSkippedNonShorts,
+    });
 
     console.log(
       '[DIAG][NON_SHORTS_REATTACH] attempt',
@@ -3958,6 +4101,17 @@ export function generateModerationScript(config: InjectionConfig): string {
             'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
             'contextItemKey=' + String(contextItemKeyForCard || 'unknown')
           );
+          emitAuditBlurAuthz({
+            nodeId: videoNodeId,
+            surfaceLane: surfaceLane,
+            authzPath: 'card_blurred_preserve',
+            strictKey: String(strictContinuityItemKey || 'unknown'),
+            reattachKey: String(reattachItemKey || 'unknown'),
+            contextItemKey: String(contextItemKeyForCard || 'unknown'),
+            hardBlurItemKey: String((videoNode.dataset && videoNode.dataset.mwHardBlurItemKey) || 'unknown'),
+            blurMode: 'hard40',
+            allowed: false,
+          });
         }
       }
     }
@@ -4227,6 +4381,17 @@ export function generateModerationScript(config: InjectionConfig): string {
         strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
         contextItemKey: String(cardContextItemKey || 'unknown'),
       });
+      emitAuditBlurAuthz({
+        nodeId: videoNodeId,
+        surfaceLane: surfaceLane,
+        authzPath: 'card_blurred_preserve',
+        strictKey: String(strictContinuityItemKey || 'unknown'),
+        reattachKey: String(reattachItemKey || 'unknown'),
+        contextItemKey: String(cardContextItemKey || 'unknown'),
+        hardBlurItemKey: String((videoNode.dataset && videoNode.dataset.mwHardBlurItemKey) || 'unknown'),
+        blurMode: 'hard40',
+        allowed: true,
+      });
     }
 
     const computed = getDiagComputedBlurState(videoNode);
@@ -4283,6 +4448,17 @@ export function generateModerationScript(config: InjectionConfig): string {
         strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
         hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
       });
+      emitAuditBlurAuthz({
+        nodeId: videoNodeId,
+        surfaceLane: surfaceLane,
+        authzPath: 'hard_src_continuity',
+        strictKey: String(strictContinuityItemKey || 'unknown'),
+        reattachKey: String(reattachItemKey || 'unknown'),
+        contextItemKey: String(getDiagItemKey(String(hardBlurSrc || '')) || 'unknown'),
+        hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+        blurMode: toAuditBlurMode(rescuedBlurStrength),
+        allowed: true,
+      });
     }
     if (
       regularPathQuarantinePassed &&
@@ -4323,6 +4499,17 @@ export function generateModerationScript(config: InjectionConfig): string {
           marker: 'MW-MVP-REGULAR-THUMB-PRECLEAR-CARD-RECOVERY-V1',
           hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
           strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        });
+        emitAuditBlurAuthz({
+          nodeId: videoNodeId,
+          surfaceLane: surfaceLane,
+          authzPath: 'latch',
+          strictKey: String(strictContinuityItemKey || 'unknown'),
+          reattachKey: String(reattachItemKey || 'unknown'),
+          contextItemKey: String(getDiagItemKey(String((contextData && contextData.src) || '')) || 'unknown'),
+          hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+          blurMode: toAuditBlurMode(Number((contextData && contextData.blurPx) || 0)),
+          allowed: true,
         });
       }
     }
@@ -4435,6 +4622,17 @@ export function generateModerationScript(config: InjectionConfig): string {
           cardNodeId: String(cardNodeId || 'none'),
           hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
         });
+        emitAuditBlurAuthz({
+          nodeId: videoNodeId,
+          surfaceLane: surfaceLane,
+          authzPath: 'latch',
+          strictKey: String(strictContinuityItemKey || 'unknown'),
+          reattachKey: String(reattachItemKey || 'unknown'),
+          contextItemKey: 'unknown',
+          hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+          blurMode: 'hard40',
+          allowed: true,
+        });
       } else {
         console.log(
           '[MW-MVP-REGULAR-THUMB-LATCH-V1-FAILCLOSED] latch_reuse_blocked',
@@ -4453,6 +4651,17 @@ export function generateModerationScript(config: InjectionConfig): string {
           marker: 'MW-MVP-REGULAR-THUMB-LATCH-V1-FAILCLOSED',
           failReason: String((latch && latch.reason) || 'unknown'),
           cardNodeId: String(cardNodeId || 'none'),
+        });
+        emitAuditBlurAuthz({
+          nodeId: videoNodeId,
+          surfaceLane: surfaceLane,
+          authzPath: 'latch',
+          strictKey: String(strictContinuityItemKey || 'unknown'),
+          reattachKey: String(reattachItemKey || 'unknown'),
+          contextItemKey: 'unknown',
+          hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+          blurMode: 'hard40',
+          allowed: false,
         });
       }
     } else if (
@@ -4600,8 +4809,36 @@ export function generateModerationScript(config: InjectionConfig): string {
           marker: 'MW-FLICKER-STATE-BLURRED-FALLBACK-V1',
           resolvedUrl: String(resolvedUrl || '').substring(0, 180),
         });
+        emitAuditBlurAuthz({
+          nodeId: videoNodeId,
+          surfaceLane: surfaceLane,
+          authzPath: 'state_blurred_fallback',
+          strictKey: String(strictContinuityItemKey || 'unknown'),
+          reattachKey: String(reattachItemKey || 'unknown'),
+          contextItemKey: String(getDiagItemKey(String(resolvedUrl || '')) || 'unknown'),
+          hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+          blurMode: 'hard40',
+          allowed: true,
+        });
       }
     }
+    const ownershipContextKeySnapshot = String(getDiagItemKey(String((contextData && contextData.src) || '')) || 'unknown');
+    emitAuditMarker('MW-AUDIT-OWNERSHIP-PROOF', {
+      nodeId: String(videoNodeId || 'none'),
+      strictKey: String(strictContinuityItemKey || 'unknown'),
+      reattachKey: String(reattachItemKey || 'unknown'),
+      contextKey: ownershipContextKeySnapshot,
+      hardKey: String(hardBlurItemKey || 'unknown'),
+      laneFlipSeen: !!laneFlipSeen,
+      nearbyShortsGuardSkippedNonShorts: !!nearbyShortsGuardSkippedNonShorts,
+      isHomeShortsShelfVideo: !!isHomeShortsShelfVideo,
+      proofType: classifyOwnershipProof({
+        strictKey: String(strictContinuityItemKey || 'unknown'),
+        reattachKey: String(reattachItemKey || 'unknown'),
+        contextKey: ownershipContextKeySnapshot,
+        hardKey: String(hardBlurItemKey || 'unknown'),
+      }),
+    });
     let activeVideoBlurred = hasAuthoritativeBlur || hasIncidentalBlur;
     const preexistingOverlayInDeadEnd = !!(
       isMainSurfaceUrl &&
@@ -4923,6 +5160,27 @@ export function generateModerationScript(config: InjectionConfig): string {
         nodeId: videoNodeId,
         overlayId: orphanOverlayId,
       });
+      emitAuditRevealAuthz({
+        nodeId: videoNodeId,
+        surfaceLane: surfaceLane,
+        action: 'remove',
+        authzPath: String(contextKind || 'none'),
+        overlayItemKey: String(overlayForItemKey || 'unknown'),
+        overlayNodeId: String(overlayNodeId || 'none'),
+        ownershipProof: classifyOwnershipProof({
+          strictKey: String(strictContinuityItemKey || 'unknown'),
+          reattachKey: String(reattachItemKey || 'unknown'),
+          contextKey: String(contextItemKey || 'unknown'),
+          hardKey: String(hardBlurItemKey || 'unknown'),
+        }),
+        identityCertainty: classifyIdentityCertainty({
+          strictKey: String(strictContinuityItemKey || 'unknown'),
+          reattachKey: String(reattachItemKey || 'unknown'),
+          contextKey: String(contextItemKey || 'unknown'),
+          hardKey: String(hardBlurItemKey || 'unknown'),
+        }),
+        allowed: false,
+      });
     } else if (keepOverlayDuringRegularUnresolvedChurn) {
       console.log(
         '[MW-MVP-REGULAR-THUMB-OVERLAY-HOLD-V1] keep_overlay_unresolved_churn_same_node',
@@ -4939,6 +5197,27 @@ export function generateModerationScript(config: InjectionConfig): string {
         overlayItemKey: String(overlayForItemKey || 'unknown'),
         cardOverlayCount: Number(cardOverlayCount || 0),
       });
+      emitAuditRevealAuthz({
+        nodeId: videoNodeId,
+        surfaceLane: surfaceLane,
+        action: 'hold',
+        authzPath: 'other',
+        overlayItemKey: String(overlayForItemKey || 'unknown'),
+        overlayNodeId: String(overlayNodeId || 'none'),
+        ownershipProof: classifyOwnershipProof({
+          strictKey: String(strictContinuityItemKey || 'unknown'),
+          reattachKey: String(reattachItemKey || 'unknown'),
+          contextKey: String(contextItemKey || 'unknown'),
+          hardKey: String(hardBlurItemKey || 'unknown'),
+        }),
+        identityCertainty: classifyIdentityCertainty({
+          strictKey: String(strictContinuityItemKey || 'unknown'),
+          reattachKey: String(reattachItemKey || 'unknown'),
+          contextKey: String(contextItemKey || 'unknown'),
+          hardKey: String(hardBlurItemKey || 'unknown'),
+        }),
+        allowed: true,
+      });
     } else if (nonShortsResolvedContextOverlayHold) {
       console.log(
         '[MW-MVP-REGULAR-THUMB-REVEAL-FALLBACK-V2] regular_non_shorts_overlay_remove_veto_context_resolved',
@@ -4953,6 +5232,27 @@ export function generateModerationScript(config: InjectionConfig): string {
         marker: 'MW-MVP-REGULAR-THUMB-REVEAL-FALLBACK-V2',
         contextKind: resolvedContextKind,
         overlayId: String((videoOverlay && videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown'),
+      });
+      emitAuditRevealAuthz({
+        nodeId: videoNodeId,
+        surfaceLane: surfaceLane,
+        action: 'hold',
+        authzPath: resolvedContextKind === 'itemkey_global' ? 'itemkey_global' : 'card_blurred_preserve',
+        overlayItemKey: String(overlayForItemKey || 'unknown'),
+        overlayNodeId: String(overlayNodeId || 'none'),
+        ownershipProof: classifyOwnershipProof({
+          strictKey: String(strictContinuityItemKey || 'unknown'),
+          reattachKey: String(reattachItemKey || 'unknown'),
+          contextKey: String(contextItemKey || 'unknown'),
+          hardKey: String(hardBlurItemKey || 'unknown'),
+        }),
+        identityCertainty: classifyIdentityCertainty({
+          strictKey: String(strictContinuityItemKey || 'unknown'),
+          reattachKey: String(reattachItemKey || 'unknown'),
+          contextKey: String(contextItemKey || 'unknown'),
+          hardKey: String(hardBlurItemKey || 'unknown'),
+        }),
+        allowed: true,
       });
     } else if (nonShortsCardBlurredContinuityOverlayHold) {
       console.log(
@@ -4972,6 +5272,27 @@ export function generateModerationScript(config: InjectionConfig): string {
         overlayItemKey: String(overlayForItemKey || 'unknown'),
         strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
         contextItemKey: String(contextItemKey || 'unknown'),
+      });
+      emitAuditRevealAuthz({
+        nodeId: videoNodeId,
+        surfaceLane: surfaceLane,
+        action: 'hold',
+        authzPath: 'card_blurred_preserve',
+        overlayItemKey: String(overlayForItemKey || 'unknown'),
+        overlayNodeId: String(overlayNodeId || 'none'),
+        ownershipProof: classifyOwnershipProof({
+          strictKey: String(strictContinuityItemKey || 'unknown'),
+          reattachKey: String(reattachItemKey || 'unknown'),
+          contextKey: String(contextItemKey || 'unknown'),
+          hardKey: String(hardBlurItemKey || 'unknown'),
+        }),
+        identityCertainty: classifyIdentityCertainty({
+          strictKey: String(strictContinuityItemKey || 'unknown'),
+          reattachKey: String(reattachItemKey || 'unknown'),
+          contextKey: String(contextItemKey || 'unknown'),
+          hardKey: String(hardBlurItemKey || 'unknown'),
+        }),
+        allowed: true,
       });
     } else if (nonShortsPendingRevealGuard && videoOverlay && videoOverlay.parentElement) {
       console.log(
@@ -5053,6 +5374,17 @@ export function generateModerationScript(config: InjectionConfig): string {
         markAuthoritativeHardBlur(videoNode, String((videoNode.dataset && videoNode.dataset.mwSrc) || ''));
         if (videoNode.dataset) videoNode.dataset.mwHardBlurItemKey = String(strictContinuityItemKey || 'unknown');
         mwDiagLog('[MW-FLICKER][NO-CONTEXT-HOLD] soft blur applied + authoritative stamp', 'nodeId=' + videoNodeId, 'key=' + String(strictContinuityItemKey || 'unknown'), 'hardBlurEpoch=' + String(CONFIG.pageEpoch));
+        emitAuditBlurAuthz({
+          nodeId: videoNodeId,
+          surfaceLane: surfaceLane,
+          authzPath: 'soft_no_context_hold',
+          strictKey: String(strictContinuityItemKey || 'unknown'),
+          reattachKey: String(reattachItemKey || 'unknown'),
+          contextItemKey: 'unknown',
+          hardBlurItemKey: String((videoNode.dataset && videoNode.dataset.mwHardBlurItemKey) || 'unknown'),
+          blurMode: 'soft8',
+          allowed: true,
+        });
       }
     }
     if (shouldApplyRevealFallback) {
@@ -5259,6 +5591,27 @@ export function generateModerationScript(config: InjectionConfig): string {
             'overlayId=' + String((candidateOverlay.dataset && candidateOverlay.dataset.mwOverlayId) || 'unknown'),
             'itemKey=' + reattachItemKey
           );
+          emitAuditRevealAuthz({
+            nodeId: videoNodeId,
+            surfaceLane: surfaceLane,
+            action: 'migrate',
+            authzPath: String(contextKind || 'other'),
+            overlayItemKey: String(overlayItemKey || 'unknown'),
+            overlayNodeId: String(videoNodeId || 'none'),
+            ownershipProof: classifyOwnershipProof({
+              strictKey: String(strictContinuityItemKey || 'unknown'),
+              reattachKey: String(reattachItemKey || 'unknown'),
+              contextKey: String(contextItemKey || 'unknown'),
+              hardKey: String(hardBlurItemKey || 'unknown'),
+            }),
+            identityCertainty: classifyIdentityCertainty({
+              strictKey: String(strictContinuityItemKey || 'unknown'),
+              reattachKey: String(reattachItemKey || 'unknown'),
+              contextKey: String(contextItemKey || 'unknown'),
+              hardKey: String(hardBlurItemKey || 'unknown'),
+            }),
+            allowed: true,
+          });
           break;
         }
       }
@@ -5287,6 +5640,27 @@ export function generateModerationScript(config: InjectionConfig): string {
         'itemId=' + String(overlayItemId || 'none'),
         'anchored=' + overlayAnchored
       );
+      emitAuditRevealAuthz({
+        nodeId: videoNodeId,
+        surfaceLane: surfaceLane,
+        action: 'create',
+        authzPath: String(contextKind || 'other'),
+        overlayItemKey: String(getDiagItemKey(String(overlayProbeSrc || '')) || 'unknown'),
+        overlayNodeId: String(videoNodeId || 'none'),
+        ownershipProof: classifyOwnershipProof({
+          strictKey: String(strictContinuityItemKey || 'unknown'),
+          reattachKey: String(reattachItemKey || 'unknown'),
+          contextKey: String(contextItemKey || 'unknown'),
+          hardKey: String(hardBlurItemKey || 'unknown'),
+        }),
+        identityCertainty: classifyIdentityCertainty({
+          strictKey: String(strictContinuityItemKey || 'unknown'),
+          reattachKey: String(reattachItemKey || 'unknown'),
+          contextKey: String(contextItemKey || 'unknown'),
+          hardKey: String(hardBlurItemKey || 'unknown'),
+        }),
+        allowed: true,
+      });
     }
     if (overlayAnchored) {
       console.log(
@@ -5301,6 +5675,33 @@ export function generateModerationScript(config: InjectionConfig): string {
         'nodeId=' + videoNodeId,
         'overlayId=' + String((videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown')
       );
+      emitAuditMarker('MW-AUDIT-CHURN-CLASS', {
+        nodeId: videoNodeId,
+        eventType: 'overlay_rebind',
+        isHomeShortsShelfVideo: !!isHomeShortsShelfVideo,
+        nearbyShortsGuardSkippedNonShorts: !!nearbyShortsGuardSkippedNonShorts,
+      });
+      emitAuditRevealAuthz({
+        nodeId: videoNodeId,
+        surfaceLane: surfaceLane,
+        action: 'rebind',
+        authzPath: String(contextKind || 'other'),
+        overlayItemKey: String(getDiagItemKey(String(overlayForSrc || overlayProbeSrc || '')) || 'unknown'),
+        overlayNodeId: String(videoNodeId || 'none'),
+        ownershipProof: classifyOwnershipProof({
+          strictKey: String(strictContinuityItemKey || 'unknown'),
+          reattachKey: String(reattachItemKey || 'unknown'),
+          contextKey: String(contextItemKey || 'unknown'),
+          hardKey: String(hardBlurItemKey || 'unknown'),
+        }),
+        identityCertainty: classifyIdentityCertainty({
+          strictKey: String(strictContinuityItemKey || 'unknown'),
+          reattachKey: String(reattachItemKey || 'unknown'),
+          contextKey: String(contextItemKey || 'unknown'),
+          hardKey: String(hardBlurItemKey || 'unknown'),
+        }),
+        allowed: true,
+      });
       console.log(
         '[DIAG][MVP_ITEM_CHAIN] stage=reattach_rebound',
         'itemId=' + reattachItemId,
@@ -5329,6 +5730,74 @@ export function generateModerationScript(config: InjectionConfig): string {
       overlayAnchored: !!overlayAnchored,
       overlayPresent: !!videoOverlay,
     });
+    const currentBlurAuthzPath = (function() {
+      if (!activeVideoBlurred && !contextData) return 'other';
+      if (String(contextKind || 'none') === 'card_blurred') return 'card_blurred_preserve';
+      if (String(contextKind || 'none') === 'itemkey_global') return 'itemkey_global';
+      if (String(contextKind || 'none') === 'regular_main_hard_src_continuity') return 'hard_src_continuity';
+      if (String(contextKind || 'none') === 'state_blurred_fallback') return 'state_blurred_fallback';
+      if (holdBlurDuringUnresolvedTransition) return 'latch';
+      return 'other';
+    })();
+    if (activeVideoBlurred) {
+      emitAuditBlurAuthz({
+        nodeId: videoNodeId,
+        surfaceLane: surfaceLane,
+        authzPath: currentBlurAuthzPath,
+        strictKey: String(strictContinuityItemKey || 'unknown'),
+        reattachKey: String(reattachItemKey || 'unknown'),
+        contextItemKey: String(contextItemKey || 'unknown'),
+        hardBlurItemKey: String((videoNode.dataset && videoNode.dataset.mwHardBlurItemKey) || 'unknown'),
+        blurMode: toAuditBlurMode(IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20)),
+        allowed: true,
+      });
+      const likelyNegativeBlur = !!(overlayProbeSrc && isSafeResolvedActive(overlayProbeSrc));
+      if (likelyNegativeBlur) {
+        emitAuditMarker('MW-AUDIT-NEGATIVE-VIOLATION', {
+          nodeId: String(videoNodeId || 'none'),
+          surfaceLane: String(surfaceLane || 'regular_video_card'),
+          violation: 'negative_gained_blur',
+          blurAuthzPath: String(currentBlurAuthzPath || 'other'),
+          revealAuthzPath: String(overlayAnchored ? 'rebind' : 'other'),
+          blurMode: toAuditBlurMode(IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20)),
+          ownershipProof: classifyOwnershipProof({
+            strictKey: String(strictContinuityItemKey || 'unknown'),
+            reattachKey: String(reattachItemKey || 'unknown'),
+            contextKey: String(contextItemKey || 'unknown'),
+            hardKey: String((videoNode.dataset && videoNode.dataset.mwHardBlurItemKey) || 'unknown'),
+          }),
+          identityCertainty: classifyIdentityCertainty({
+            strictKey: String(strictContinuityItemKey || 'unknown'),
+            reattachKey: String(reattachItemKey || 'unknown'),
+            contextKey: String(contextItemKey || 'unknown'),
+            hardKey: String((videoNode.dataset && videoNode.dataset.mwHardBlurItemKey) || 'unknown'),
+          }),
+        });
+      }
+    }
+    const likelyNegativeReveal = !!(overlayProbeSrc && isSafeResolvedActive(overlayProbeSrc));
+    if (likelyNegativeReveal && !!videoOverlay) {
+      emitAuditMarker('MW-AUDIT-NEGATIVE-VIOLATION', {
+        nodeId: String(videoNodeId || 'none'),
+        surfaceLane: String(surfaceLane || 'regular_video_card'),
+        violation: 'negative_gained_reveal',
+        blurAuthzPath: String(currentBlurAuthzPath || 'other'),
+        revealAuthzPath: String(overlayAnchored ? 'rebind' : 'other'),
+        blurMode: toAuditBlurMode(IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20)),
+        ownershipProof: classifyOwnershipProof({
+          strictKey: String(strictContinuityItemKey || 'unknown'),
+          reattachKey: String(reattachItemKey || 'unknown'),
+          contextKey: String(contextItemKey || 'unknown'),
+          hardKey: String((videoNode.dataset && videoNode.dataset.mwHardBlurItemKey) || 'unknown'),
+        }),
+        identityCertainty: classifyIdentityCertainty({
+          strictKey: String(strictContinuityItemKey || 'unknown'),
+          reattachKey: String(reattachItemKey || 'unknown'),
+          contextKey: String(contextItemKey || 'unknown'),
+          hardKey: String((videoNode.dataset && videoNode.dataset.mwHardBlurItemKey) || 'unknown'),
+        }),
+      });
+    }
 
     const reattachItemKeyKnown = !!(reattachItemKey && reattachItemKey !== 'unknown');
     const strictContinuityItemKeyKnown = !!(strictContinuityItemKey && strictContinuityItemKey !== 'unknown');
@@ -6980,9 +7449,11 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function removeRevealOverlay(node, src, reason) {
     if (!node || node.nodeType !== 1) return false;
+    const removeSurfaceLane = getAuditSurfaceLane(isYouTubeMainPageShortsShelfVideoNode(node));
     const overlay = findRevealOverlayForElement(node, src || node.dataset.mwSrc || '');
     if (overlay && overlay.parentElement) {
       const overlayId = overlay.dataset && overlay.dataset.mwOverlayId ? overlay.dataset.mwOverlayId : 'unknown';
+      const overlayItemKey = getDiagItemKey(String((overlay.dataset && overlay.dataset.mwFor) || src || ''));
       overlay.parentElement.removeChild(overlay);
       console.log(
         '[DIAG][REVEAL_UI] overlay_removed',
@@ -7001,6 +7472,27 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       node.dataset.mwHasOverlay = 'false';
       node.dataset.mwOverlayOwnerToken = '';
+      emitAuditRevealAuthz({
+        nodeId: getDiagNodeId(node),
+        surfaceLane: removeSurfaceLane,
+        action: 'remove',
+        authzPath: String(reason || 'other'),
+        overlayItemKey: String(overlayItemKey || 'unknown'),
+        overlayNodeId: String((overlay.dataset && overlay.dataset.mwNodeId) || 'none'),
+        ownershipProof: classifyOwnershipProof({
+          strictKey: String(getDiagItemKey(src || node.dataset.mwSrc || '') || 'unknown'),
+          reattachKey: String(getDiagItemKey(src || node.dataset.mwSrc || '') || 'unknown'),
+          contextKey: String(overlayItemKey || 'unknown'),
+          hardKey: String((node.dataset && node.dataset.mwHardBlurItemKey) || 'unknown'),
+        }),
+        identityCertainty: classifyIdentityCertainty({
+          strictKey: String(getDiagItemKey(src || node.dataset.mwSrc || '') || 'unknown'),
+          reattachKey: String(getDiagItemKey(src || node.dataset.mwSrc || '') || 'unknown'),
+          contextKey: String(overlayItemKey || 'unknown'),
+          hardKey: String((node.dataset && node.dataset.mwHardBlurItemKey) || 'unknown'),
+        }),
+        allowed: false,
+      });
       return true;
     }
     node.dataset.mwHasOverlay = 'false';
@@ -7839,6 +8331,19 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function createRevealOverlay(element, src, category, itemId, allowShortsReresolve) {
     const shortsMode = isShortsModeActive();
+    const revealSurfaceLane = getAuditSurfaceLane(isYouTubeMainPageShortsShelfVideoNode(element));
+    const revealOwnershipProof = classifyOwnershipProof({
+      strictKey: String(getDiagItemKey(src) || 'unknown'),
+      reattachKey: String(getDiagItemKey(src) || 'unknown'),
+      contextKey: String(getDiagItemKey(src) || 'unknown'),
+      hardKey: String((element && element.dataset && element.dataset.mwHardBlurItemKey) || 'unknown'),
+    });
+    const revealIdentityCertainty = classifyIdentityCertainty({
+      strictKey: String(getDiagItemKey(src) || 'unknown'),
+      reattachKey: String(getDiagItemKey(src) || 'unknown'),
+      contextKey: String(getDiagItemKey(src) || 'unknown'),
+      hardKey: String((element && element.dataset && element.dataset.mwHardBlurItemKey) || 'unknown'),
+    });
     if (!shortsMode && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
       console.log(
         '[DIAG][MVP_ITEM_CHAIN] stage=reveal_attempt',
@@ -7851,6 +8356,17 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (shouldDisableRevealUiForMvpMainPageSurface()) {
       removeRevealOverlay(element, src, 'mvp_main_page_reveal_ui_disabled');
       element.dataset.mwHasOverlay = 'false';
+      emitAuditRevealAuthz({
+        nodeId: getDiagNodeId(element),
+        surfaceLane: revealSurfaceLane,
+        action: 'create',
+        authzPath: 'other',
+        overlayItemKey: String(getDiagItemKey(src) || 'unknown'),
+        overlayNodeId: String(getDiagNodeId(element) || 'none'),
+        ownershipProof: revealOwnershipProof,
+        identityCertainty: revealIdentityCertainty,
+        allowed: false,
+      });
       console.log(
         '[DIAG][REVEAL_UI] suppressed_mvp_main_page_surface',
         'itemKey=' + getDiagItemKey(src),
@@ -8103,6 +8619,29 @@ export function generateModerationScript(config: InjectionConfig): string {
         }
       }
       enforceRevealOverlayVisibilityGuard(existingOverlay, element, 'createRevealOverlay_reuse');
+      emitAuditRevealAuthz({
+        nodeId: getDiagNodeId(element),
+        surfaceLane: revealSurfaceLane,
+        action: 'rebind',
+        authzPath: 'other',
+        overlayItemKey: String(getDiagItemKey(src) || 'unknown'),
+        overlayNodeId: String(getDiagNodeId(element) || 'none'),
+        ownershipProof: revealOwnershipProof,
+        identityCertainty: revealIdentityCertainty,
+        allowed: true,
+      });
+      if (isSafeResolvedActive(src)) {
+        emitAuditMarker('MW-AUDIT-NEGATIVE-VIOLATION', {
+          nodeId: String(getDiagNodeId(element) || 'none'),
+          surfaceLane: String(revealSurfaceLane || 'regular_video_card'),
+          violation: 'negative_gained_reveal',
+          blurAuthzPath: 'other',
+          revealAuthzPath: 'other',
+          blurMode: 'other',
+          ownershipProof: revealOwnershipProof,
+          identityCertainty: revealIdentityCertainty,
+        });
+      }
       return;
     }
     if (element.dataset.mwHasOverlay === 'true') {
@@ -8426,6 +8965,29 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     overlayParent.appendChild(overlay);
     element.dataset.mwHasOverlay = 'true';
+    emitAuditRevealAuthz({
+      nodeId: getDiagNodeId(element),
+      surfaceLane: revealSurfaceLane,
+      action: 'create',
+      authzPath: 'other',
+      overlayItemKey: String(getDiagItemKey(src) || 'unknown'),
+      overlayNodeId: String(getDiagNodeId(element) || 'none'),
+      ownershipProof: revealOwnershipProof,
+      identityCertainty: revealIdentityCertainty,
+      allowed: true,
+    });
+    if (isSafeResolvedActive(src)) {
+      emitAuditMarker('MW-AUDIT-NEGATIVE-VIOLATION', {
+        nodeId: String(getDiagNodeId(element) || 'none'),
+        surfaceLane: String(revealSurfaceLane || 'regular_video_card'),
+        violation: 'negative_gained_reveal',
+        blurAuthzPath: 'other',
+        revealAuthzPath: 'other',
+        blurMode: 'other',
+        ownershipProof: revealOwnershipProof,
+        identityCertainty: revealIdentityCertainty,
+      });
+    }
     if (!enforceRevealOverlayVisibilityGuard(overlay, element, 'createRevealOverlay_created')) {
       return;
     }
@@ -9152,6 +9714,32 @@ export function generateModerationScript(config: InjectionConfig): string {
             decisionReason: decisionReason,
           });
           // Apply strong blur
+          const freshSurfaceLane = getAuditSurfaceLane(isYouTubeMainPageShortsShelfVideoNode(element));
+          emitAuditBlurAuthz({
+            nodeId: getDiagNodeId(element),
+            surfaceLane: freshSurfaceLane,
+            authzPath: 'fresh',
+            strictKey: String(getDiagItemKey(src) || 'unknown'),
+            reattachKey: String(getDiagItemKey(src) || 'unknown'),
+            contextItemKey: String(getDiagItemKey(src) || 'unknown'),
+            hardBlurItemKey: String((element.dataset && element.dataset.mwHardBlurItemKey) || 'unknown'),
+            ownershipProof: 'strict_match',
+            identityCertainty: 'certain',
+            blurMode: 'hard40',
+            allowed: true,
+          });
+          if (isSafeResolvedActive(src)) {
+            emitAuditMarker('MW-AUDIT-NEGATIVE-VIOLATION', {
+              nodeId: String(getDiagNodeId(element) || 'none'),
+              surfaceLane: String(freshSurfaceLane || 'regular_video_card'),
+              violation: 'negative_gained_blur',
+              blurAuthzPath: 'fresh',
+              revealAuthzPath: 'other',
+              blurMode: 'hard40',
+              ownershipProof: 'strict_match',
+              identityCertainty: 'certain',
+            });
+          }
           applyBlur(element, src, predictedLabel || category || 'flagged', CONFIG.blurStrength, itemId);
         } else {
           if (preDecisionState === 'blurred' || element.classList.contains('mw-blurred') || preDecisionHasBlur) {
