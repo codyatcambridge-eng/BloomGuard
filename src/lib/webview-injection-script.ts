@@ -202,6 +202,8 @@ export function generateModerationScript(config: InjectionConfig): string {
   console.log('[MW] Nonce:', '${nonce.substring(0, 10)}...');
   console.log('[MW] URL:', window.location.href);
   console.log('[MW] ========================================');
+  setTimeout(function() { mwDiagLog('Test1112:[FlashShield][STARTUP_DIAG] test1111 ts=' + Date.now() + ' url=' + window.location.href.substring(0, 120)); }, 0);
+  setTimeout(function() { mwDiagLog('Codyok:[FlashShield][STARTUP_DIAG] codyok ts=' + Date.now() + ' url=' + window.location.href.substring(0, 120)); }, 0);
 
   const CONFIG = {
     sensitivity: ${config.sensitivity},
@@ -4698,9 +4700,15 @@ export function generateModerationScript(config: InjectionConfig): string {
       hardItemKeyKnown &&
       strictContinuityItemKey === hardBlurItemKey
     );
+    const graceStrictKeyAmbiguous = (
+      !strictContinuityItemKey ||
+      strictContinuityItemKey === 'unknown' ||
+      strictContinuityItemKey === hardBlurItemKey
+    );
     const preserveShortsHardBlurDuringGraceWindow = !!(
       isHomeShortsShelfVideo &&
-      shortsContinuityGraceActive
+      shortsContinuityGraceActive &&
+      graceStrictKeyAmbiguous
     );
     if (
       hasAuthoritativeBlur &&
@@ -4711,7 +4719,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       !preserveShortsHardBlurDuringResolvedContinuity &&
       !preserveShortsHardBlurDuringGraceWindow
     ) {
-      if (isNodeClassificationLocked(videoNode, reason)) {
+      const strictKeyIsUnknown = !strictContinuityItemKey || strictContinuityItemKey === 'unknown';
+      if (isNodeClassificationLocked(videoNode, reason) && !strictKeyIsUnknown) {
         mwDiagLog('[MW-PERSIST][PROVENANCE-BLOCKED] hard_blur_provenance_mismatch suppressed — classification locked',
           'reason=' + String(reason || 'unknown'),
           'node=' + videoNodeId,
@@ -4789,7 +4798,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       state.blurred.size > 0
     ) {
       const resolvedUrl = normalizedPoster || normalizedCurrent || String((videoNode.dataset && videoNode.dataset.mwSrc) || '');
-      if (resolvedUrl && state.blurred.has(resolvedUrl)) {
+      const strictKeyConfirmedForFallback = !!(strictContinuityItemKey && strictContinuityItemKey !== 'unknown');
+      if (resolvedUrl && state.blurred.has(resolvedUrl) && strictKeyConfirmedForFallback) {
         contextKind = 'state_blurred_fallback';
         contextData = {
           src: resolvedUrl,
@@ -4797,11 +4807,12 @@ export function generateModerationScript(config: InjectionConfig): string {
           itemId: String((videoNode.dataset && videoNode.dataset.mwItemId) || reattachItemId || ''),
           blurPx: IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20),
         };
-        console.log(
-          '[MW-FLICKER-STATE-BLURRED-FALLBACK-V1] state_blurred_fallback_hit',
-          'reason=' + String(reason || 'unknown'),
-          'nodeId=' + videoNodeId,
-          'resolvedUrl=' + String(resolvedUrl || '').substring(0, 180)
+        mwDiagLog(
+          '[MW-FLICKER-STATE-BLURRED-FALLBACK-V1] state_blurred_fallback_hit' +
+          ' reason=' + String(reason || 'unknown') +
+          ' nodeId=' + videoNodeId +
+          ' resolvedUrl=' + String(resolvedUrl || '').substring(0, 180) +
+          ' strictKey=' + String(strictContinuityItemKey || 'unknown')
         );
         postNonShortsTransitionDiag('state_blurred_fallback', {
           reason: String(reason || 'unknown'),
@@ -4852,6 +4863,34 @@ export function generateModerationScript(config: InjectionConfig): string {
         String((videoNode.dataset && videoNode.dataset.mwSrc) || normalizedPoster || normalizedCurrent || '')
       )
     );
+    if (isMainSurfaceUrl && isHomeShortsShelfVideo) {
+      const _holdProbeInlineFilter = String(videoNode.style.getPropertyValue('filter') || videoNode.style.filter || '').toLowerCase();
+      const _holdProbeInlineBackdrop = String(videoNode.style.getPropertyValue('backdrop-filter') || '').toLowerCase();
+      const _refreshedHasIncidentalBlur = (
+        _holdProbeInlineFilter.indexOf('blur(') !== -1 ||
+        _holdProbeInlineBackdrop.indexOf('blur(') !== -1
+      );
+      const _holdProbeHoldSrc = String((videoNode.dataset && videoNode.dataset.mwSrc) || normalizedPoster || normalizedCurrent || '');
+      const _holdProbeWouldFire = !!(
+        isMainSurfaceUrl && isHomeShortsShelfVideo && !contextData &&
+        strictContinuityItemKey && strictContinuityItemKey !== 'unknown' &&
+        shortsItemKeyLookupMiss && !hasAuthoritativeBlur && hasIncidentalBlur && !preexistingOverlayInDeadEnd
+      );
+      mwDiagLog(
+        '[MW-AUDIT-HOLD-PROBE]' +
+        ' reason=' + String(reason || 'unknown') +
+        ' nodeId=' + videoNodeId +
+        ' hasIncidentalBlur_stale=' + hasIncidentalBlur +
+        ' refreshedHasIncidentalBlur=' + _refreshedHasIncidentalBlur +
+        ' staleMismatch=' + (hasIncidentalBlur !== _refreshedHasIncidentalBlur) +
+        ' hasAuthoritativeBlur=' + hasAuthoritativeBlur +
+        ' contextData=' + !!contextData +
+        ' strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown') +
+        ' shortsItemKeyLookupMiss=' + shortsItemKeyLookupMiss +
+        ' probeIsSafeResolved=' + isSafeResolvedActive(_holdProbeHoldSrc) +
+        ' wouldFireHold=' + _holdProbeWouldFire
+      );
+    }
     const shortsNoContextLocalBlurHold = !!(
       isMainSurfaceUrl &&
       isHomeShortsShelfVideo &&
@@ -5622,6 +5661,23 @@ export function generateModerationScript(config: InjectionConfig): string {
       videoOverlay = normalizedOverlay.overlay;
       overlayAnchored = normalizedOverlay.anchored;
     }
+    if (isMainSurfaceUrl) {
+      mwDiagLog(
+        '[MW-AUDIT-OVERLAY-CREATE-GATE]' +
+        ' reason=' + String(reason || 'unknown') +
+        ' nodeId=' + videoNodeId +
+        ' surfaceLane=' + String(surfaceLane || 'unknown') +
+        ' isHomeShortsShelfVideo=' + isHomeShortsShelfVideo +
+        ' activeVideoBlurred=' + activeVideoBlurred +
+        ' hasAuthoritativeBlur=' + hasAuthoritativeBlur +
+        ' overlayAnchored=' + overlayAnchored +
+        ' contextData=' + !!contextData +
+        ' contextKind=' + String(contextKind || 'none') +
+        ' isSafeResolved=' + isSafeResolvedActive(String(overlayProbeSrc || '')) +
+        ' overlayProbeSrc=' + String(overlayProbeSrc || '').substring(0, 80) +
+        ' willCreate=' + !!((activeVideoBlurred || hasAuthoritativeBlur) && !overlayAnchored && !shouldDisableRevealUiForMvpMainPageSurface())
+      );
+    }
     if (
       (activeVideoBlurred || hasAuthoritativeBlur) &&
       !overlayAnchored &&
@@ -5799,6 +5855,37 @@ export function generateModerationScript(config: InjectionConfig): string {
       });
     }
 
+    if (isMainSurfaceUrl && !isHomeShortsShelfVideo) {
+      const _rcBlurSrc = (function() {
+        if (String(contextKind || '') === 'state_blurred_fallback') return 'state_blurred_fallback';
+        if (contextData) return 'applyBlur';
+        if (activeVideoBlurred && hasIncidentalBlur) return 'inline_soft';
+        return 'none';
+      })();
+      const _rcOverlayAction = (function() {
+        if (!overlayAnchored) return 'none';
+        if (contextData) return 'created_or_rebound';
+        return 'rebound';
+      })();
+      mwDiagLog(
+        '[MW-AUDIT-REGULAR-CARD-TRANSITION]' +
+        ' reason=' + String(reason || 'unknown') +
+        ' nodeId=' + videoNodeId +
+        ' surfaceLane=' + String(surfaceLane || 'unknown') +
+        ' contextKind=' + String(contextKind || 'none') +
+        ' authzPath=' + String(currentBlurAuthzPath || 'other') +
+        ' identityCertainty=' + classifyIdentityCertainty({
+          strictKey: String(strictContinuityItemKey || 'unknown'),
+          reattachKey: String(reattachItemKey || 'unknown'),
+          contextKey: String(contextItemKey || 'unknown'),
+          hardKey: String((videoNode.dataset && videoNode.dataset.mwHardBlurItemKey) || 'unknown'),
+        }) +
+        ' isSafeResolved=' + isSafeResolvedActive(String((videoNode.dataset && videoNode.dataset.mwSrc) || normalizedPoster || normalizedCurrent || '')) +
+        ' blurSrc=' + _rcBlurSrc +
+        ' overlayAction=' + _rcOverlayAction +
+        ' activeVideoBlurred=' + activeVideoBlurred
+      );
+    }
     const reattachItemKeyKnown = !!(reattachItemKey && reattachItemKey !== 'unknown');
     const strictContinuityItemKeyKnown = !!(strictContinuityItemKey && strictContinuityItemKey !== 'unknown');
     const contextFound = !!contextData;
