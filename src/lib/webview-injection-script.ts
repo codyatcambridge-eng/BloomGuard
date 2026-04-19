@@ -10965,6 +10965,18 @@ export function generateModerationScript(config: InjectionConfig): string {
       state.pendingRequests.clear();
       state.pending.forEach((_item, itemId) => clearPendingItem(itemId, 'spa_epoch_reset'));
       state.pendingBySrc.clear();
+      // Bound blur ownership to the active surface after SPA URL transitions.
+      // Without this, stale src-based blur memory can reattach onto unrelated cards.
+      cleanupExpiredSafeResolved();
+      state.safeResolved.clear();
+      state.safeResolvedAt.clear();
+      state.blurred.clear();
+      if (state.nonShortsReattachContext && typeof state.nonShortsReattachContext.clear === 'function') {
+        state.nonShortsReattachContext.clear();
+      }
+      if (state.regularMainCardBlurLatch && typeof state.regularMainCardBlurLatch.clear === 'function') {
+        state.regularMainCardBlurLatch.clear();
+      }
       // Clear scanned state for fresh scan
       state.scanned.clear();
       state.elements.clear();
