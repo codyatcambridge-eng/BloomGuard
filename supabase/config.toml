@@ -1,0 +1,22 @@
+project_id = "funrqbkfprdsgbnrcker"
+
+[functions.moderate-image]
+verify_jwt = false
+
+[functions.check-blocked-site]
+verify_jwt = false
+
+[functions.accountability]
+verify_jwt = false
+
+[functions.proxy-reader]
+verify_jwt = false
+
+[functions.web-search]
+verify_jwt = false
+
+[functions.moderation-labels]
+verify_jwt = true
+
+[functions.waiting-room-ai]
+verify_jwt = false

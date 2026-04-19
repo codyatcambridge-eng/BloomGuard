@@ -1,0 +1,14 @@
+{
+  "timestamp": "2026-04-19T13:12:00-04:00",
+  "git_sha": "9077a7cab5d7ff296f01fe32b181ee4c17a0ad73",
+  "backup_tag": "stable-miracleworker-1111-20260419-1312",
+  "backup_branch": "backup/stable-miracleworker-1111-20260419-1312",
+  "node_version": "v24.4.1",
+  "package_manager": "npm",
+  "package_manager_version": "11.4.2",
+  "commands": [
+    "npm ci",
+    "npm run build",
+    "npx cap sync ios"
+  ]
+}
