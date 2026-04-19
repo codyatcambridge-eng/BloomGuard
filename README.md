@@ -1,2 +1,2 @@
 # BloomGuard
-Bloom Guard
+My cognitive safety layer app
