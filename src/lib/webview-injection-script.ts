@@ -3782,6 +3782,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       reattachItemKey === 'unknown' &&
       strictContinuityItemKey !== 'unknown'
     );
+    let recentRegularToShortsFlip = false;
     if (isMainSurfaceUrl) {
       const currentLaneCandidate = (
         isHomeShortsShelfVideo
@@ -3840,6 +3841,9 @@ export function generateModerationScript(config: InjectionConfig): string {
         nextLane !== 'unknown' &&
         isShortWindowFlip
       ) {
+        if (previousLaneState.lane === 'regular' && nextLane === 'shorts') {
+          recentRegularToShortsFlip = true;
+        }
         postNonShortsTransitionDiag('lane_flip_same_node', {
           reason: String(reason || 'unknown'),
           nodeId: videoNodeId,
@@ -4347,6 +4351,16 @@ export function generateModerationScript(config: InjectionConfig): string {
       reasonText === 'event:playing' ||
       reasonText === 'event:play'
     );
+    const shortsRequiresPostFlipAuthoritativeRevalidation = !!(
+      isHomeShortsShelfVideo &&
+      recentRegularToShortsFlip &&
+      isTransitionChurnReason &&
+      hardKeyMatchesStrict
+    );
+    if (shortsRequiresPostFlipAuthoritativeRevalidation && hasAuthoritativeBlur) {
+      clearAuthoritativeHardBlur(videoNode);
+      hasAuthoritativeBlur = false;
+    }
     if (isHomeShortsShelfVideo && hasAuthoritativeBlur) {
       rememberShortsAuthoritativeBlurMoment(videoNode, continuityAnchorNode);
     }
@@ -4489,9 +4503,17 @@ export function generateModerationScript(config: InjectionConfig): string {
       hardItemKeyKnown &&
       strictContinuityItemKey === hardBlurItemKey
     );
+    const preserveShortsHardBlurOwnerAlignedOrUnknown = !!(
+      isHomeShortsShelfVideo &&
+      (
+        strictContinuityItemKey === 'unknown' ||
+        (hardItemKeyKnown && strictContinuityItemKey === hardBlurItemKey)
+      )
+    );
     const preserveShortsHardBlurDuringGraceWindow = !!(
       isHomeShortsShelfVideo &&
-      shortsContinuityGraceActive
+      shortsContinuityGraceActive &&
+      preserveShortsHardBlurOwnerAlignedOrUnknown
     );
     if (
       hasAuthoritativeBlur &&
@@ -4502,7 +4524,13 @@ export function generateModerationScript(config: InjectionConfig): string {
       !preserveShortsHardBlurDuringResolvedContinuity &&
       !preserveShortsHardBlurDuringGraceWindow
     ) {
-      if (isNodeClassificationLocked(videoNode, reason)) {
+      const regularUnknownOwnerMustClear = !!(
+        isMainSurfaceUrl &&
+        !isHomeShortsShelfVideo &&
+        regularPathQuarantinePassed &&
+        strictContinuityItemKey === 'unknown'
+      );
+      if (isNodeClassificationLocked(videoNode, reason) && !regularUnknownOwnerMustClear) {
         mwDiagLog('[MW-PERSIST][PROVENANCE-BLOCKED] hard_blur_provenance_mismatch suppressed — classification locked',
           'reason=' + String(reason || 'unknown'),
           'node=' + videoNodeId,
@@ -4511,6 +4539,52 @@ export function generateModerationScript(config: InjectionConfig): string {
           'classifiedEpoch=' + String((videoNode.dataset && videoNode.dataset.mwClassifiedEpoch) || '0'),
           'pageEpoch=' + String(CONFIG.pageEpoch)
         );
+        if (isMainSurfaceUrl && !isHomeShortsShelfVideo) {
+          const proofSrc = normalizeUrl(
+            normalizedPoster ||
+            normalizedCurrent ||
+            String((videoNode.dataset && videoNode.dataset.mwSrc) || '')
+          ) || String(
+            normalizedPoster ||
+            normalizedCurrent ||
+            (videoNode.dataset && videoNode.dataset.mwSrc) ||
+            ''
+          );
+          const safeResolvedNow = !!(proofSrc && isSafeResolvedActive(proofSrc));
+          const blurredNow = !!(proofSrc && state.blurred.has(proofSrc));
+          const shouldBlurResolvedNow = blurredNow ? true : (safeResolvedNow ? false : null);
+          const proofOverlay = findRevealOverlayForElement(videoNode, proofSrc);
+          const latestHostCategory = String(
+            (videoNode.dataset && videoNode.dataset.mwCategory) ||
+            (contextData && contextData.category) ||
+            ''
+          );
+          const latestHostDecision = String(
+            (videoNode.dataset && videoNode.dataset.mwDecisionReason) ||
+            (contextNode && contextNode.dataset && contextNode.dataset.mwDecisionReason) ||
+            ''
+          );
+          mwDiagLog(
+            '[MW-MVP-PROVENANCE-LOCK-NEGATIVE-PROOF-V1]',
+            'marker=MW-MVP-PROVENANCE-LOCK-NEGATIVE-PROOF-V1',
+            'nodeId=' + String(videoNodeId || 'none'),
+            'surfaceLane=regular',
+            'reason=' + String(reason || 'unknown'),
+            'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
+            'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown'),
+            'normalizedSrcOrPoster=' + String(proofSrc || '').substring(0, 220),
+            'shouldBlurResolved=' + String(shouldBlurResolvedNow),
+            'safeResolved=' + String(safeResolvedNow),
+            'blurred=' + String(blurredNow),
+            'latestHostCategory=' + (latestHostCategory || 'none'),
+            'latestHostDecision=' + (latestHostDecision || 'none'),
+            'activeVideoBlurred=' + String(!!activeVideoBlurred),
+            'authoritativeBlur=' + String(!!hasAuthoritativeBlur),
+            'overlayPresent=' + String(!!proofOverlay),
+            'classificationLocked=true',
+            'suppressingClear=true'
+          );
+        }
       } else {
       if (isMainSurfaceUrl && !isHomeShortsShelfVideo && regularPathQuarantinePassed) {
         postNonShortsTransitionDiag('regular_provenance_clear_source', {
@@ -4601,6 +4675,23 @@ export function generateModerationScript(config: InjectionConfig): string {
           resolvedUrl: String(resolvedUrl || '').substring(0, 180),
         });
       }
+    }
+    const shortsOwnershipMismatchWithoutAuthoritativeBlur = !!(
+      isMainSurfaceUrl &&
+      isHomeShortsShelfVideo &&
+      strictIdentityKnown &&
+      (!hardItemKeyKnown || strictContinuityItemKey !== hardBlurItemKey) &&
+      !hasAuthoritativeBlur
+    );
+    if (shortsOwnershipMismatchWithoutAuthoritativeBlur && hasIncidentalBlur) {
+      videoNode.style.removeProperty('filter');
+      videoNode.style.removeProperty('-webkit-filter');
+      videoNode.style.removeProperty('backdrop-filter');
+      videoNode.style.removeProperty('-webkit-backdrop-filter');
+      videoNode.classList.remove('mw-softblur');
+      videoNode.classList.remove('mw-blurred');
+      videoNode.dataset.mwModerated = 'safe';
+      hasIncidentalBlur = false;
     }
     let activeVideoBlurred = hasAuthoritativeBlur || hasIncidentalBlur;
     const preexistingOverlayInDeadEnd = !!(
@@ -4820,6 +4911,74 @@ export function generateModerationScript(config: InjectionConfig): string {
         ? card.querySelectorAll('.mw-reveal-overlay').length
         : 0
     );
+    const surfaceLane = isHomeShortsShelfVideo ? 'shorts' : 'regular';
+    const normalizedAuthzSrc = normalizeUrl(
+      overlayProbeSrc ||
+      normalizedPoster ||
+      normalizedCurrent ||
+      String((videoNode.dataset && videoNode.dataset.mwSrc) || '')
+    ) || String(
+      overlayProbeSrc ||
+      normalizedPoster ||
+      normalizedCurrent ||
+      String((videoNode.dataset && videoNode.dataset.mwSrc) || '')
+    );
+    const getAuthzTruthSnapshot = function() {
+      const safeResolved = !!(normalizedAuthzSrc && isSafeResolvedActive(normalizedAuthzSrc));
+      const blurredResolved = !!(normalizedAuthzSrc && state.blurred.has(normalizedAuthzSrc));
+      const shouldBlurResolved = blurredResolved ? true : (safeResolved ? false : null);
+      const shouldBlurSourceItemKey = (
+        shouldBlurResolved === true
+          ? String(
+              (hardBlurItemKey && hardBlurItemKey !== 'unknown')
+                ? hardBlurItemKey
+                : getDiagItemKey(normalizedAuthzSrc || '')
+            )
+          : 'unknown'
+      );
+      return {
+        safeResolved: safeResolved,
+        blurredResolved: blurredResolved,
+        shouldBlurResolved: shouldBlurResolved,
+        shouldBlurSourceItemKey: shouldBlurSourceItemKey,
+      };
+    };
+    const getIdentityCertainty = function() {
+      const strictKnown = !!(strictContinuityItemKey && strictContinuityItemKey !== 'unknown');
+      const reattachKnown = !!(reattachItemKey && reattachItemKey !== 'unknown');
+      const contextKnown = !!contextData;
+      if (strictKnown && contextKnown) return 'high';
+      if (strictKnown || contextKnown || reattachKnown) return 'medium';
+      return 'low';
+    };
+    let revealDecisionAction = 'skipped';
+    let revealDecisionPath = 'none';
+    const emitRevealDecisionAuthzDiag = function(action, authzPath) {
+      revealDecisionAction = String(action || 'skipped');
+      revealDecisionPath = String(authzPath || 'none');
+      const truth = getAuthzTruthSnapshot();
+      mwDiagLog(
+        '[MW-MVP-AUTHZ-REVEAL-DECISION-V1]',
+        'marker=MW-MVP-AUTHZ-REVEAL-DECISION-V1',
+        'nodeId=' + videoNodeId,
+        'surfaceLane=' + surfaceLane,
+        'reason=' + String(reason || 'unknown'),
+        'authzPath=' + revealDecisionPath,
+        'contextKind=' + String(contextKind || 'none'),
+        'identityCertainty=' + getIdentityCertainty(),
+        'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
+        'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown'),
+        'normalizedSrcOrPoster=' + String(normalizedAuthzSrc || '').substring(0, 220),
+        'safeResolved=' + String(!!truth.safeResolved),
+        'blurred=' + String(!!truth.blurredResolved),
+        'shouldBlur=' + String(truth.shouldBlurResolved),
+        'shouldBlurSourceItemKey=' + String(truth.shouldBlurSourceItemKey || 'unknown'),
+        'activeVideoBlurred=' + String(!!activeVideoBlurred),
+        'authoritativeBlur=' + String(!!hasAuthoritativeBlur),
+        'overlayPresent=' + String(!!videoOverlay),
+        'revealAction=' + revealDecisionAction
+      );
+    };
     const keepOverlayDuringRegularUnresolvedChurn = !!(
       regularPathQuarantinePassed &&
       !isHomeShortsShelfVideo &&
@@ -4923,6 +5082,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         nodeId: videoNodeId,
         overlayId: orphanOverlayId,
       });
+      emitRevealDecisionAuthzDiag('skipped', 'overlay_removed_no_blur');
     } else if (keepOverlayDuringRegularUnresolvedChurn) {
       console.log(
         '[MW-MVP-REGULAR-THUMB-OVERLAY-HOLD-V1] keep_overlay_unresolved_churn_same_node',
@@ -4939,6 +5099,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         overlayItemKey: String(overlayForItemKey || 'unknown'),
         cardOverlayCount: Number(cardOverlayCount || 0),
       });
+      emitRevealDecisionAuthzDiag('preserved', 'regular_main_keep_overlay_unresolved_churn_same_node');
     } else if (nonShortsResolvedContextOverlayHold) {
       console.log(
         '[MW-MVP-REGULAR-THUMB-REVEAL-FALLBACK-V2] regular_non_shorts_overlay_remove_veto_context_resolved',
@@ -4954,6 +5115,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         contextKind: resolvedContextKind,
         overlayId: String((videoOverlay && videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown'),
       });
+      emitRevealDecisionAuthzDiag('veto_preserved', 'regular_non_shorts_overlay_remove_veto_context_resolved');
     } else if (nonShortsCardBlurredContinuityOverlayHold) {
       console.log(
         '[MW-MVP-REGULAR-THUMB-CONTINUITY-GUARD-V2] overlay_remove_veto_card_blurred_nearby_shorts_guard',
@@ -4973,6 +5135,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
         contextItemKey: String(contextItemKey || 'unknown'),
       });
+      emitRevealDecisionAuthzDiag('veto_preserved', 'regular_main_overlay_remove_veto_card_blurred_nearby_shorts_guard');
     } else if (nonShortsPendingRevealGuard && videoOverlay && videoOverlay.parentElement) {
       console.log(
         '[MW-MVP-REGULAR-THUMB-REVEAL-FALLBACK-V1] overlay_remove_blocked_pending_reveal',
@@ -4986,6 +5149,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         marker: 'MW-MVP-REGULAR-THUMB-REVEAL-FALLBACK-V1',
         overlayId: String((videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown'),
       });
+      emitRevealDecisionAuthzDiag('preserved', 'overlay_remove_blocked_pending_reveal');
     } else if (nonShortsBlurInvariantOverlayHold && videoOverlay && videoOverlay.parentElement) {
       console.log(
         '[MW-MVP-REGULAR-THUMB-REVEAL-FALLBACK-V3] overlay_remove_veto_blur_invariant',
@@ -5007,6 +5171,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         residualBlurClass: !!hasResidualBlurClass,
         overlayId: String((videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown'),
       });
+      emitRevealDecisionAuthzDiag('veto_preserved', 'regular_non_shorts_overlay_remove_veto_blur_invariant');
     }
     const unresolvedOwnershipAtPlayIntent = !!(
       revealFallbackScopeEligible &&
@@ -5056,6 +5221,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
     }
     if (shouldApplyRevealFallback) {
+      emitRevealDecisionAuthzDiag('fallback_applied', 'reveal_fallback_regular_non_shorts');
       const hadOverlay = !!(videoOverlay && videoOverlay.parentElement);
       const changed = clearAllBlurAndOverlay(
         videoNode,
@@ -5090,6 +5256,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         });
       }
     } else if (!revealFallbackScopeEligible && isUserRevealIntentReason) {
+      emitRevealDecisionAuthzDiag('skipped', 'reveal_fallback_skipped_scope');
       postNonShortsTransitionDiag('reveal_fallback_skipped_scope', {
         reason: String(reason || 'unknown'),
         nodeId: videoNodeId,
@@ -5197,7 +5364,8 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (
       (activeVideoBlurred || hasAuthoritativeBlur) &&
       !overlayAnchored &&
-      !shouldDisableRevealUiForMvpMainPageSurface()
+      !shouldDisableRevealUiForMvpMainPageSurface() &&
+      allowShortsOverlayHealCreate
     ) {
       let migratedOverlay = null;
       if (card && typeof card.querySelectorAll === 'function') {
@@ -5269,12 +5437,19 @@ export function generateModerationScript(config: InjectionConfig): string {
       videoOverlay = normalizedOverlay.overlay;
       overlayAnchored = normalizedOverlay.anchored;
     }
+    const allowShortsOverlayHealCreate = !!(
+      !isHomeShortsShelfVideo ||
+      hasAuthoritativeBlur ||
+      preserveShortsHardBlurOwnerAlignedOrUnknown
+    );
     if (
       (activeVideoBlurred || hasAuthoritativeBlur) &&
       !overlayAnchored &&
-      !shouldDisableRevealUiForMvpMainPageSurface()
+      !shouldDisableRevealUiForMvpMainPageSurface() &&
+      allowShortsOverlayHealCreate
     ) {
       createRevealOverlay(videoNode, overlayProbeSrc, overlayCategory, overlayItemId);
+      emitRevealDecisionAuthzDiag('created', 'overlay_heal_create');
       videoOverlay = findRevealOverlayForElement(videoNode, overlayProbeSrc);
       normalizedOverlay = normalizeOverlayAnchor(videoOverlay, 'post_create');
       videoOverlay = normalizedOverlay.overlay;
@@ -5289,6 +5464,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       );
     }
     if (overlayAnchored) {
+      if (revealDecisionAction === 'skipped' || revealDecisionAction === 'none') {
+        emitRevealDecisionAuthzDiag('preserved', 'overlay_reanchored');
+      }
       console.log(
         '[DIAG][NON_SHORTS_REATTACH] overlay_reanchored',
         'reason=' + (reason || 'unknown'),
@@ -5316,6 +5494,59 @@ export function generateModerationScript(config: InjectionConfig): string {
         'itemKey=' + reattachItemKey,
         'reason=' + (reason || 'unknown'),
         'nodeId=' + videoNodeId
+      );
+    }
+    {
+      const truth = getAuthzTruthSnapshot();
+      mwDiagLog(
+        '[MW-MVP-AUTHZ-REVEAL-POSTSTATE-V1]',
+        'marker=MW-MVP-AUTHZ-REVEAL-POSTSTATE-V1',
+        'nodeId=' + videoNodeId,
+        'surfaceLane=' + surfaceLane,
+        'reason=' + String(reason || 'unknown'),
+        'authzPath=' + String(revealDecisionPath || 'none'),
+        'contextKind=' + String(contextKind || 'none'),
+        'identityCertainty=' + getIdentityCertainty(),
+        'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
+        'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown'),
+        'normalizedSrcOrPoster=' + String(normalizedAuthzSrc || '').substring(0, 220),
+        'safeResolved=' + String(!!truth.safeResolved),
+        'blurred=' + String(!!truth.blurredResolved),
+        'shouldBlur=' + String(truth.shouldBlurResolved),
+        'shouldBlurSourceItemKey=' + String(truth.shouldBlurSourceItemKey || 'unknown'),
+        'activeVideoBlurred=' + String(!!activeVideoBlurred),
+        'authoritativeBlur=' + String(!!hasAuthoritativeBlur),
+        'overlayPresent=' + String(!!videoOverlay),
+        'revealAction=' + String(revealDecisionAction || 'skipped')
+      );
+    }
+    {
+      const truth = getAuthzTruthSnapshot();
+      const blurAuthzPath = (
+        contextData
+          ? ('context_' + String(contextKind || 'none'))
+          : (surfaceLane === 'shorts' ? 'shorts_no_context' : 'regular_no_context')
+      );
+      mwDiagLog(
+        '[MW-MVP-AUTHZ-BLUR-DECISION-V1]',
+        'marker=MW-MVP-AUTHZ-BLUR-DECISION-V1',
+        'nodeId=' + videoNodeId,
+        'surfaceLane=' + surfaceLane,
+        'reason=' + String(reason || 'unknown'),
+        'authzPath=' + String(blurAuthzPath || 'none'),
+        'contextKind=' + String(contextKind || 'none'),
+        'identityCertainty=' + getIdentityCertainty(),
+        'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
+        'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown'),
+        'normalizedSrcOrPoster=' + String(normalizedAuthzSrc || '').substring(0, 220),
+        'safeResolved=' + String(!!truth.safeResolved),
+        'blurred=' + String(!!truth.blurredResolved),
+        'shouldBlur=' + String(truth.shouldBlurResolved),
+        'shouldBlurSourceItemKey=' + String(truth.shouldBlurSourceItemKey || 'unknown'),
+        'activeVideoBlurred=' + String(!!activeVideoBlurred),
+        'authoritativeBlur=' + String(!!hasAuthoritativeBlur),
+        'overlayPresent=' + String(!!videoOverlay),
+        'revealAction=' + String(revealDecisionAction || 'skipped')
       );
     }
     postNonShortsTransitionDiag('apply', {
