@@ -6155,6 +6155,10 @@ export function generateModerationScript(config: InjectionConfig): string {
    */
   function clearAllBlurAndOverlay(element, src, reason, nextModeratedState) {
     if (!element || element.nodeType !== 1) return false;
+    if (isNodeClassificationLocked(element, reason)) {
+      console.log('[MW-PERSIST] clearAllBlurAndOverlay blocked — classification locked', 'reason=' + String(reason || ''), 'node=' + getDiagNodeId(element));
+      return false;
+    }
     let changed = false;
     try {
       const beforeFilter = String(element.style.getPropertyValue('filter') || element.style.filter || '').toLowerCase();
@@ -6232,6 +6236,32 @@ export function generateModerationScript(config: InjectionConfig): string {
       node.dataset.mwHardBlurEpoch = '';
       node.dataset.mwHardBlurNav = '';
     } catch (e) {}
+  }
+
+  // Hard blur on a confirmed-unsafe node is terminal for the current page epoch.
+  // Only a user-reveal action or node destruction lifts the lock.
+  function isNodeClassificationLocked(element, reason) {
+    if (!element || !element.dataset) return false;
+    if (!element.isConnected) return false;
+    const isUserReveal = typeof reason === 'string' && (
+      reason.indexOf('reveal') !== -1 ||
+      reason.indexOf('user_intent') !== -1
+    );
+    if (isUserReveal) return false;
+    // Path A: fully classified via applyBlur (mwModerated=blurred + mwClassifiedEpoch stamp)
+    const moderatedState = String(element.dataset.mwModerated || '');
+    if (moderatedState === 'blurred') {
+      const classifiedEpoch = Number(element.dataset.mwClassifiedEpoch || 0);
+      if (classifiedEpoch > 0 && classifiedEpoch === CONFIG.pageEpoch) return true;
+    }
+    // Path B: authoritative hard blur stamp — covers nodes promoted via reattach normalize
+    // path without a full applyBlur call (mwHardBlur=1 + mwHardBlurEpoch stamp)
+    const hardBlur = String(element.dataset.mwHardBlur || '') === '1';
+    if (hardBlur) {
+      const hardBlurEpoch = Number(element.dataset.mwHardBlurEpoch || 0);
+      if (hardBlurEpoch > 0 && hardBlurEpoch === CONFIG.pageEpoch) return true;
+    }
+    return false;
   }
 
   function applySoftBlur(element, src, itemId) {
@@ -6521,6 +6551,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       element.style.setProperty('-webkit-backdrop-filter', 'blur(' + blurPx + 'px)', 'important');
       element.style.transition = 'filter 0.3s ease';
       element.dataset.mwModerated = 'blurred';
+      element.dataset.mwClassifiedEpoch = String(state.pageEpoch || 0);
       element.dataset.mwCategory = category || 'flagged';
       element.dataset.mwSrc = src;
       element.dataset.mwItemId = itemId || '';
