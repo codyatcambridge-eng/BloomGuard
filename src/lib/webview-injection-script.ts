@@ -4102,55 +4102,77 @@ export function generateModerationScript(config: InjectionConfig): string {
       !hardSrcMatchesCurrent &&
       !holdBlurDuringUnresolvedTransition
     ) {
-      videoNode.style.removeProperty('filter');
-      videoNode.style.removeProperty('-webkit-filter');
-      videoNode.style.removeProperty('backdrop-filter');
-      videoNode.style.removeProperty('-webkit-backdrop-filter');
-      videoNode.classList.remove('mw-softblur');
-      videoNode.classList.remove('mw-blurred');
-      videoNode.dataset.mwModerated = 'safe';
-      clearAuthoritativeHardBlur(videoNode);
-      hasAuthoritativeBlur = false;
-      console.log(
-        '[DIAG][NON_SHORTS_REATTACH] hard_blur_provenance_mismatch_cleared',
-        'reason=' + (reason || 'unknown'),
-        'nodeId=' + videoNodeId,
-        'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
-        'hardBlurItemKey=' + hardBlurItemKey,
-        'hardSrcMatchesCurrent=' + String(!!hardSrcMatchesCurrent)
-      );
-      postNonShortsTransitionDiag('hard_blur_provenance_mismatch_cleared', {
-        reason: String(reason || 'unknown'),
-        nodeId: videoNodeId,
-        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
-        hardBlurItemKey: hardBlurItemKey,
-        hardSrcMatchesCurrent: !!hardSrcMatchesCurrent,
-      });
+      if (isNodeClassificationLocked(videoNode, reason)) {
+        console.log(
+          '[MW-PERSIST][PROVENANCE-BLOCKED] hard_blur_provenance_mismatch suppressed — classification locked',
+          'reason=' + String(reason || 'unknown'),
+          'nodeId=' + videoNodeId,
+          'hardBlurItemKey=' + String(hardBlurItemKey || ''),
+          'strictContinuityItemKey=' + String(strictContinuityItemKey || ''),
+          'classifiedEpoch=' + String((videoNode.dataset && videoNode.dataset.mwClassifiedEpoch) || '0'),
+          'pageEpoch=' + String(CONFIG.pageEpoch)
+        );
+      } else {
+        videoNode.style.removeProperty('filter');
+        videoNode.style.removeProperty('-webkit-filter');
+        videoNode.style.removeProperty('backdrop-filter');
+        videoNode.style.removeProperty('-webkit-backdrop-filter');
+        videoNode.classList.remove('mw-softblur');
+        videoNode.classList.remove('mw-blurred');
+        videoNode.dataset.mwModerated = 'safe';
+        clearAuthoritativeHardBlur(videoNode);
+        hasAuthoritativeBlur = false;
+        console.log(
+          '[DIAG][NON_SHORTS_REATTACH] hard_blur_provenance_mismatch_cleared',
+          'reason=' + (reason || 'unknown'),
+          'nodeId=' + videoNodeId,
+          'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
+          'hardBlurItemKey=' + hardBlurItemKey,
+          'hardSrcMatchesCurrent=' + String(!!hardSrcMatchesCurrent)
+        );
+        postNonShortsTransitionDiag('hard_blur_provenance_mismatch_cleared', {
+          reason: String(reason || 'unknown'),
+          nodeId: videoNodeId,
+          strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+          hardBlurItemKey: hardBlurItemKey,
+          hardSrcMatchesCurrent: !!hardSrcMatchesCurrent,
+        });
+      }
     }
     let activeVideoBlurred = hasAuthoritativeBlur || hasIncidentalBlur;
     if (activeVideoBlurred && !hasAuthoritativeBlur && !contextData) {
-      videoNode.style.removeProperty('filter');
-      videoNode.style.removeProperty('-webkit-filter');
-      videoNode.style.removeProperty('backdrop-filter');
-      videoNode.style.removeProperty('-webkit-backdrop-filter');
-      videoNode.classList.remove('mw-softblur');
-      videoNode.classList.remove('mw-blurred');
-      videoNode.dataset.mwModerated = 'safe';
-      clearAuthoritativeHardBlur(videoNode);
-      activeVideoBlurred = false;
-      console.log(
-        '[DIAG][NON_SHORTS_REATTACH] incidental_blur_cleared',
-        'reason=' + (reason || 'unknown'),
-        'nodeId=' + videoNodeId,
-        'contextFound=false',
-        'contextKind=none'
-      );
-      postNonShortsTransitionDiag('incidental_blur_cleared', {
-        reason: String(reason || 'unknown'),
-        nodeId: videoNodeId,
-        contextFound: false,
-        contextKind: 'none',
-      });
+      if (isNodeClassificationLocked(videoNode, reason)) {
+        console.log(
+          '[MW-PERSIST][INCIDENTAL-BLOCKED] incidental_blur_clear suppressed — classification locked',
+          'reason=' + String(reason || 'unknown'),
+          'nodeId=' + videoNodeId,
+          'classifiedEpoch=' + String((videoNode.dataset && videoNode.dataset.mwClassifiedEpoch) || '0'),
+          'pageEpoch=' + String(CONFIG.pageEpoch)
+        );
+      } else {
+        videoNode.style.removeProperty('filter');
+        videoNode.style.removeProperty('-webkit-filter');
+        videoNode.style.removeProperty('backdrop-filter');
+        videoNode.style.removeProperty('-webkit-backdrop-filter');
+        videoNode.classList.remove('mw-softblur');
+        videoNode.classList.remove('mw-blurred');
+        videoNode.dataset.mwModerated = 'safe';
+        clearAuthoritativeHardBlur(videoNode);
+        activeVideoBlurred = false;
+        console.log(
+          '[DIAG][NON_SHORTS_REATTACH] incidental_blur_cleared',
+          'reason=' + (reason || 'unknown'),
+          'nodeId=' + videoNodeId,
+          'contextFound=false',
+          'contextKind=none'
+        );
+        postNonShortsTransitionDiag('incidental_blur_cleared', {
+          reason: String(reason || 'unknown'),
+          nodeId: videoNodeId,
+          contextFound: false,
+          contextKind: 'none',
+        });
+      }
     }
     if (activeVideoBlurred) {
       const expectedBlurPx = IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20);
