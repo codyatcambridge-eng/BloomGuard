@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   applyAnatomicalThresholdDecision,
   applyFailOpenAndModePolicyDecision,
+  shouldFailClosedPreserveBlurOnUnresolved,
+  shouldHoldTransitionBlurLease,
   shouldPreserveShortsContinuityBlur,
 } from '@/lib/webview-injection-script';
 
@@ -136,6 +138,58 @@ describe('shorts continuity grace policy', () => {
       hasTransientIdentityOrContextGap: true,
       elapsedSinceAuthoritativeBlurMs: 1800,
       graceWindowMs: 1200,
+    })).toBe(false);
+  });
+});
+
+describe('transition blur lease policy', () => {
+  it('holds blur during transition churn while lease is active and identity is unresolved', () => {
+    expect(shouldHoldTransitionBlurLease({
+      isTransitionChurnReason: true,
+      hasAuthoritativeBlur: true,
+      hasUnresolvedIdentityOrContextGap: true,
+      elapsedSinceBlurSetMs: 320,
+      leaseWindowMs: 650,
+    })).toBe(true);
+  });
+
+  it('does not hold when lease is expired or preconditions fail', () => {
+    expect(shouldHoldTransitionBlurLease({
+      isTransitionChurnReason: true,
+      hasAuthoritativeBlur: true,
+      hasUnresolvedIdentityOrContextGap: true,
+      elapsedSinceBlurSetMs: 900,
+      leaseWindowMs: 650,
+    })).toBe(false);
+    expect(shouldHoldTransitionBlurLease({
+      isTransitionChurnReason: false,
+      hasAuthoritativeBlur: true,
+      hasUnresolvedIdentityOrContextGap: true,
+      elapsedSinceBlurSetMs: 100,
+      leaseWindowMs: 650,
+    })).toBe(false);
+  });
+});
+
+describe('fail-closed unresolved ownership policy', () => {
+  it('preserves blur when identity is unresolved and state says blurred', () => {
+    expect(shouldFailClosedPreserveBlurOnUnresolved({
+      hasUnresolvedIdentityOrContextGap: true,
+      hasBlurredResolution: true,
+      hasSafeResolution: false,
+    })).toBe(true);
+  });
+
+  it('does not preserve when safe is resolved or unresolved precondition is false', () => {
+    expect(shouldFailClosedPreserveBlurOnUnresolved({
+      hasUnresolvedIdentityOrContextGap: true,
+      hasBlurredResolution: true,
+      hasSafeResolution: true,
+    })).toBe(false);
+    expect(shouldFailClosedPreserveBlurOnUnresolved({
+      hasUnresolvedIdentityOrContextGap: false,
+      hasBlurredResolution: true,
+      hasSafeResolution: false,
     })).toBe(false);
   });
 });

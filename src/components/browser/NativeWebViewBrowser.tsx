@@ -1526,12 +1526,15 @@ export const NativeWebViewBrowser = () => {
         isYouTubeShortsUrl(url) &&
         previousShortsId !== nextShortsId;
       const deferReason = `youtube_internal_nav_${previousFamily}_to_${nextFamily}`;
+      const shouldFailClosedHoldOnShortsFlip =
+        !!previousUrl &&
+        isRuntimeModerationEnabled &&
+        shortsIdChanged;
       const shouldDeferSafeReset =
         !!previousUrl &&
         isRuntimeModerationEnabled &&
         isYouTubeFamilyContext(previousFamily) &&
-        isYouTubeFamilyContext(nextFamily) &&
-        !shortsIdChanged;
+        isYouTubeFamilyContext(nextFamily);
       console.log('[Browser] ======= URL CHANGE =======');
       console.log('[Browser] New URL:', url);
       console.log('[DIAG][LOAD] stage=url_change url=' + toDiagUrl(url));
@@ -1570,9 +1573,12 @@ export const NativeWebViewBrowser = () => {
           armShortsLegacyFallbackProbe('shorts_url_change_uncertain', SHORTS_LEGACY_FALLBACK_ENTRY_PROBE_MS);
         }
       }
-      if (shouldDeferSafeReset) {
-        logSafeResetDiag('safe_reset_deferred', deferReason, url);
-        enterPendingReinject(deferReason, url);
+      if (shouldDeferSafeReset || shouldFailClosedHoldOnShortsFlip) {
+        const pendingReason = shouldFailClosedHoldOnShortsFlip
+          ? 'shorts_video_flip_fail_closed_hold'
+          : deferReason;
+        logSafeResetDiag('safe_reset_deferred', pendingReason, url);
+        enterPendingReinject(pendingReason, url);
         queueCurrentBlurState('url_change_safe_reset_deferred');
       } else {
         exitPendingReinject(`context_exit_${previousFamily}_to_${nextFamily}`, url);
