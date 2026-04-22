@@ -4486,7 +4486,6 @@ export function generateModerationScript(config: InjectionConfig): string {
     const shortsNodeMwSrc = String((videoNode.dataset && videoNode.dataset.mwSrc) || '');
     const shortsLaneFlipItemkeyBlocked = !!(
       isHomeShortsShelfVideo &&
-      recentShortsToRegularLaneFlip &&
       !!contextData &&
       String(contextKind || 'none') === 'itemkey_global' &&
       !!strictContinuityItemKey &&
