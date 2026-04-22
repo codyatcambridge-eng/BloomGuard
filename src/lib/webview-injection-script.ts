@@ -1106,6 +1106,15 @@ export function generateModerationScript(config: InjectionConfig): string {
     url: window.location.href,
     timestamp: Date.now(),
   });
+  postToHost({
+    type: 'MW_PATCH_MARKER',
+    marker: 'Eyes1',
+    navId: NAV_ID,
+    pageEpoch: CONFIG.pageEpoch,
+    url: window.location.href,
+    timestamp: Date.now(),
+  });
+  console.log('[MW][STARTUP] Eyes1 marker navId=' + NAV_ID + ' pageEpoch=' + CONFIG.pageEpoch);
   const timerState = {
     legacyResultsInterval: null,
     urlChangeInterval: null,
@@ -4469,6 +4478,28 @@ export function generateModerationScript(config: InjectionConfig): string {
         'nodeId=' + videoNodeId,
         'strictContinuityItemKey=' + String(strictContinuityItemKey || ''),
         'hardBlurItemKey=' + String(hardBlurItemKey || ''),
+        'contextKind=' + String(contextKind || 'none')
+      );
+      contextData = null;
+      contextKind = 'none';
+    }
+    const shortsNodeMwSrc = String((videoNode.dataset && videoNode.dataset.mwSrc) || '');
+    const shortsLaneFlipItemkeyBlocked = !!(
+      isHomeShortsShelfVideo &&
+      recentShortsToRegularLaneFlip &&
+      !!contextData &&
+      String(contextKind || 'none') === 'itemkey_global' &&
+      !!strictContinuityItemKey &&
+      strictContinuityItemKey !== 'unknown' &&
+      !!shortsNodeMwSrc &&
+      !shortsNodeMwSrc.includes(String(strictContinuityItemKey))
+    );
+    if (shortsLaneFlipItemkeyBlocked) {
+      mwDiagLog('[MW-DIAG][SHORTS-SHELF-LANE-FLIP-ITEMKEY-BLOCKED] itemkey_global context rejected — mwSrc does not contain strictContinuityItemKey',
+        'reason=' + String(reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'strictContinuityItemKey=' + String(strictContinuityItemKey || ''),
+        'mwSrc=' + shortsNodeMwSrc,
         'contextKind=' + String(contextKind || 'none')
       );
       contextData = null;
