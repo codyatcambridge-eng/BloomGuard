@@ -4404,13 +4404,11 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     const strictIdentityKnown = strictContinuityItemKey && strictContinuityItemKey !== 'unknown';
     const hardItemKeyKnown = hardBlurItemKey && hardBlurItemKey !== 'unknown';
-    const mwStoredSrc = String((videoNode.dataset && videoNode.dataset.mwSrc) || '');
     const hardSrcMatchesCurrentExact = !!(
       hardBlurSrc &&
       (
         (normalizedPoster && hardBlurSrc === normalizedPoster) ||
-        (normalizedCurrent && hardBlurSrc === normalizedCurrent) ||
-        (mwStoredSrc && hardBlurSrc === mwStoredSrc)
+        (normalizedCurrent && hardBlurSrc === normalizedCurrent)
       )
     );
     const hardKeyMatchesStrict = !!(
@@ -4602,6 +4600,12 @@ export function generateModerationScript(config: InjectionConfig): string {
       !preserveShortsHardBlurDuringResolvedContinuity &&
       !preserveShortsHardBlurDuringGraceWindow
     ) {
+      const mwStoredSrcForBypassCheck = String((videoNode.dataset && videoNode.dataset.mwSrc) || '');
+      const hardItemIdPresentInMwSrc = !!(
+        hardItemKeyKnown &&
+        mwStoredSrcForBypassCheck &&
+        mwStoredSrcForBypassCheck.includes(String(hardBlurItemKey))
+      );
       const bypassClassificationLockForUnresolvedRegularFlip = !!(
         isMainSurfaceUrl &&
         regularPathQuarantinePassed &&
@@ -4609,7 +4613,8 @@ export function generateModerationScript(config: InjectionConfig): string {
         isTransitionChurnReason &&
         !contextData &&
         (!strictContinuityItemKey || strictContinuityItemKey === 'unknown') &&
-        (cardNodeId === 'none' || recentShortsToRegularLaneFlip || hardItemKeyKnown)
+        (cardNodeId === 'none' || recentShortsToRegularLaneFlip || hardItemKeyKnown) &&
+        !hardItemIdPresentInMwSrc
       );
       if (isNodeClassificationLocked(videoNode, reason) && !bypassClassificationLockForUnresolvedRegularFlip) {
         mwDiagLog('[MW-PERSIST][PROVENANCE-BLOCKED] hard_blur_provenance_mismatch suppressed — classification locked',
