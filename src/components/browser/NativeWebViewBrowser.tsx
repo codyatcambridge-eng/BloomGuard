@@ -1122,6 +1122,14 @@ export const NativeWebViewBrowser = () => {
 
     injectionInFlightRef.current = true;
     console.log(
+      '[DIAG][STARTUP_MARKER_555]',
+      'marker=555',
+      'phase=host_inject_start',
+      'reason=' + reason,
+      'navId=' + navId,
+      'url=' + (targetUrl || 'unknown'),
+    );
+    console.log(
       '[DIAG][INJECT] start',
       'reason=' + reason,
       'navId=' + navId,

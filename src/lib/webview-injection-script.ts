@@ -786,7 +786,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       skippedMutationQueueCap: 0,
       staleEpochDiscarded: 0,
     },
-    nonShortsReattachContext: persistedNonShortsReattachContext, // key -> { cardKey, itemKey, src, category, itemId, blurPx, nodeId, cardNodeId, updatedAt }
+    nonShortsReattachContext: persistedNonShortsReattachContext, // key -> { cardKey, itemKey, src, category, itemId, blurPx, nodeId, cardNodeId, proven, updatedAt }
     regularMainCardBlurLatch: new Map(), // key -> { cardNodeId, navId, pageEpoch, hardBlurItemKey, hardBlurSrc, setAt, lastSeenAt, expiresAt }
   };
 
@@ -2891,6 +2891,41 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!container || container.nodeType !== 1 || !container.isConnected) return false;
     const context = shortsBlurContextByContainer.get(container);
     if (!context || !context.src) return false;
+    const contextShortsUrlId = String(context.shortsUrlId || '');
+    const currentShortsUrlId = String(getCurrentShortsUrlId() || '');
+    if (
+      !contextShortsUrlId ||
+      contextShortsUrlId === 'unknown' ||
+      !currentShortsUrlId ||
+      currentShortsUrlId === 'unknown'
+    ) {
+      clearShortsOwnedBlurAndOverlayByContext(context, 'shorts_swap_missing_strict_identity');
+      deleteShortsBlurContextEntry(container);
+      diagShortsSwapMarker(videoNode, reason || 'unknown', true, false, 'missing_strict_identity');
+      return false;
+    }
+    if (contextShortsUrlId !== currentShortsUrlId) {
+      clearShortsOwnedBlurAndOverlayByContext(context, 'shorts_swap_url_changed');
+      deleteShortsBlurContextEntry(container);
+      diagShortsSwapMarker(videoNode, reason || 'unknown', true, false, 'shorts_url_changed');
+      if (DIAG_YT_BLUR) {
+        diagShortsTimeline(
+          'shorts_swap_reattach_skip',
+          'reason=shorts_url_changed' +
+          ' contextShortsUrlId=' + contextShortsUrlId +
+          ' currentShortsUrlId=' + currentShortsUrlId +
+          ' containerNodeId=' + getDiagNodeId(container)
+        );
+      }
+      return false;
+    }
+    const contextSrcNormalized = normalizeUrl(String(context.src || '')) || '';
+    if (contextSrcNormalized && !doesShortsContainerMatchSrc(container, contextSrcNormalized)) {
+      clearShortsOwnedBlurAndOverlayByContext(context, 'shorts_swap_src_scope_mismatch');
+      deleteShortsBlurContextEntry(container);
+      diagShortsSwapMarker(videoNode, reason || 'unknown', true, false, 'src_scope_mismatch');
+      return false;
+    }
     if (isRevealedForSource(context.src, videoNode)) {
       diagShortsSwapMarker(videoNode, reason || 'unknown', true, false, 'revealed');
       return false;
@@ -2907,22 +2942,6 @@ export function generateModerationScript(config: InjectionConfig): string {
           ' ageMs=' + (now - context.updatedAt) +
           ' containerNodeId=' + getDiagNodeId(container) +
           ' src=' + String(context.src || '').substring(0, 180)
-        );
-      }
-      return false;
-    }
-    const currentShortsUrlId = getCurrentShortsUrlId();
-    if (context.shortsUrlId && currentShortsUrlId && context.shortsUrlId !== currentShortsUrlId) {
-      clearShortsOwnedBlurAndOverlayByContext(context, 'shorts_swap_url_changed');
-      deleteShortsBlurContextEntry(container);
-      diagShortsSwapMarker(videoNode, reason || 'unknown', true, false, 'shorts_url_changed');
-      if (DIAG_YT_BLUR) {
-        diagShortsTimeline(
-          'shorts_swap_reattach_skip',
-          'reason=shorts_url_changed' +
-          ' contextShortsUrlId=' + context.shortsUrlId +
-          ' currentShortsUrlId=' + currentShortsUrlId +
-          ' containerNodeId=' + getDiagNodeId(container)
         );
       }
       return false;
@@ -3057,6 +3076,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     'ytd-grid-video-renderer',
   ].join(',');
   const NON_SHORTS_REATTACH_CONTEXT_TTL_MS = 45000;
+  const NON_SHORTS_REATTACH_CONTEXT_PROVEN_TTL_MS = 240000;
   const NON_SHORTS_REATTACH_CONTEXT_MAX = 400;
   const NON_SHORTS_REATTACH_COOLDOWN_MS = 80;
   const NON_SHORTS_REVEAL_INTENT_TTL_MS = 1600;
@@ -3137,9 +3157,14 @@ export function generateModerationScript(config: InjectionConfig): string {
   function pruneNonShortsReattachContext(now) {
     const contextMap = state.nonShortsReattachContext;
     if (!contextMap || typeof contextMap.forEach !== 'function') return;
-    const cutoff = now - NON_SHORTS_REATTACH_CONTEXT_TTL_MS;
     contextMap.forEach(function(entry, key) {
       const updatedAt = Number(entry && entry.updatedAt ? entry.updatedAt : 0);
+      const ttlMs = (
+        entry && entry.proven
+          ? NON_SHORTS_REATTACH_CONTEXT_PROVEN_TTL_MS
+          : NON_SHORTS_REATTACH_CONTEXT_TTL_MS
+      );
+      const cutoff = now - ttlMs;
       if (!Number.isFinite(updatedAt) || updatedAt < cutoff) {
         contextMap.delete(key);
       }
@@ -3491,6 +3516,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       blurPx: Number.isFinite(blurPx) ? Number(blurPx) : (IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20)),
       nodeId: getDiagNodeId(node),
       cardNodeId: cardNode ? getDiagNodeId(cardNode) : 'none',
+      proven: !!isAuthoritativeHardBlur(node),
       updatedAt: now,
     };
     state.nonShortsReattachContext.set(buildNonShortsReattachContextKey(cardKey, itemKey), entry);
@@ -3782,6 +3808,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       reattachItemKey === 'unknown' &&
       strictContinuityItemKey !== 'unknown'
     );
+    let recentShortsToRegularLaneFlip = false;
     if (isMainSurfaceUrl) {
       const currentLaneCandidate = (
         isHomeShortsShelfVideo
@@ -3840,6 +3867,9 @@ export function generateModerationScript(config: InjectionConfig): string {
         nextLane !== 'unknown' &&
         isShortWindowFlip
       ) {
+        if (previousLaneState.lane === 'shorts' && nextLane === 'regular') {
+          recentShortsToRegularLaneFlip = true;
+        }
         postNonShortsTransitionDiag('lane_flip_same_node', {
           reason: String(reason || 'unknown'),
           nodeId: videoNodeId,
@@ -3901,6 +3931,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     let contextNode = null;
     let contextData = null;
     let contextKind = 'none';
+    let cardBlurredContextProven = false;
     let shortsItemKeyLookupMiss = false;
     let regularItemKeyLookupMiss = false;
     if (isMainSurfaceUrl && card && typeof card.querySelector === 'function') {
@@ -3934,6 +3965,7 @@ export function generateModerationScript(config: InjectionConfig): string {
             itemId: String((contextNode.dataset && contextNode.dataset.mwItemId) || reattachItemId || ''),
             blurPx: Number((contextNode.dataset && contextNode.dataset.mwBlurStrength) || '') || (IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20)),
           };
+          cardBlurredContextProven = !!isAuthoritativeHardBlur(contextNode);
           if (strictUnknownButCardAuthoritative) {
             strictContinuityItemKey = String(
               (contextItemKeyForCard && contextItemKeyForCard !== 'unknown')
@@ -3949,6 +3981,32 @@ export function generateModerationScript(config: InjectionConfig): string {
               'contextItemKey=' + String(contextItemKeyForCard || 'unknown'),
               'contextHardItemKey=' + String(cardContextHardItemKey || 'unknown')
             );
+          }
+          if (
+            !cardBlurredContextProven &&
+            strictContinuityItemKey &&
+            strictContinuityItemKey !== 'unknown' &&
+            cardNodeId !== 'none'
+          ) {
+            const rememberedProven = findNonShortsReattachContextByItemKey(strictContinuityItemKey, cardNodeId);
+            if (rememberedProven && rememberedProven.entry && rememberedProven.entry.proven) {
+              contextKind = 'card_blurred_proven_memory';
+              contextData = {
+                src: String((rememberedProven.entry && rememberedProven.entry.src) || contextData.src || ''),
+                category: String((rememberedProven.entry && rememberedProven.entry.category) || contextData.category || 'flagged'),
+                itemId: String((rememberedProven.entry && rememberedProven.entry.itemId) || contextData.itemId || reattachItemId || ''),
+                blurPx: Number((rememberedProven.entry && rememberedProven.entry.blurPx) || contextData.blurPx || (IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20))),
+              };
+              cardBlurredContextProven = true;
+              postNonShortsTransitionDiag('regular_main_card_blurred_promote_proven', {
+                reason: String(reason || 'unknown'),
+                nodeId: String(videoNodeId || 'none'),
+                marker: 'MW-MVP-REGULAR-THUMB-CONTINUITY-GUARD-V3',
+                strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+                cardNodeId: String(cardNodeId || 'none'),
+                sourceKind: String(rememberedProven.kind || 'unknown'),
+              });
+            }
           }
         } else {
           console.log(
@@ -4024,13 +4082,31 @@ export function generateModerationScript(config: InjectionConfig): string {
         );
       }
       if (remembered && remembered.entry) {
-        contextKind = remembered.kind;
-        contextData = {
-          src: String(remembered.entry.src || normalizedPoster || normalizedCurrent || ''),
-          category: String(remembered.entry.category || 'flagged'),
-          itemId: String(remembered.entry.itemId || reattachItemId || ''),
-          blurPx: Number(remembered.entry.blurPx || (IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20))),
-        };
+        const rememberedIsProven = !!(remembered.entry && remembered.entry.proven);
+        const allowShortsRemembered = !(
+          isMainSurfaceUrl &&
+          isHomeShortsShelfVideo &&
+          !rememberedIsProven
+        );
+        if (allowShortsRemembered) {
+          contextKind = remembered.kind;
+          contextData = {
+            src: String(remembered.entry.src || normalizedPoster || normalizedCurrent || ''),
+            category: String(remembered.entry.category || 'flagged'),
+            itemId: String(remembered.entry.itemId || reattachItemId || ''),
+            blurPx: Number(remembered.entry.blurPx || (IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20))),
+          };
+        } else {
+          postNonShortsTransitionDiag('shorts_itemkey_lookup_unproven_skip', {
+            reason: String(reason || 'unknown'),
+            nodeId: videoNodeId,
+            cardNodeId: cardNodeId,
+            marker: 'MW-MVP-SHORTS-PROVEN-REHYDRATE-V1',
+            strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+            nearbyShortsAnchorId: String(nearbyShortsAnchorId || 'unknown'),
+            contextKindCandidate: String(remembered.kind || 'unknown'),
+          });
+        }
       }
     }
     if (!contextNode && !contextData && cardNodeId !== 'none' && isHomeShortsShelfVideo) {
@@ -4049,7 +4125,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       const overlayContinuity = card
         ? getHomeShortsShelfOverlayContinuity(card, videoNode, fallbackItemKey)
         : null;
-      const allowCardFallback = !!strictItemKeyMatch;
+      const allowCardFallback = !!(strictItemKeyMatch && cardFallbackEntry && cardFallbackEntry.proven);
       if (usingDerivedStrictKey && !strictItemKeyMatch) {
         console.log(
           '[DIAG][HOME_SHORTS_KEY_DERIVE] strict_miss_fail_closed',
@@ -4340,6 +4416,28 @@ export function generateModerationScript(config: InjectionConfig): string {
       hardItemKeyKnown &&
       strictContinuityItemKey === hardBlurItemKey
     );
+    const unprovenCardBlurredContinuity = !!(
+      regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo &&
+      !!contextData &&
+      (String(contextKind || 'none') === 'card_blurred' || String(contextKind || 'none') === 'card_blurred_proven_memory') &&
+      nearbyShortsGuardSkippedNonShorts &&
+      !cardBlurredContextProven &&
+      !hardKeyMatchesStrict &&
+      !hardSrcMatchesCurrentExact
+    );
+    if (unprovenCardBlurredContinuity) {
+      postNonShortsTransitionDiag('regular_main_card_blurred_veto_unproven', {
+        reason: String(reason || 'unknown'),
+        nodeId: String(videoNodeId || 'none'),
+        marker: 'MW-MVP-REGULAR-THUMB-CONTINUITY-GUARD-V2',
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+        cardNodeId: String(cardNodeId || 'none'),
+      });
+      contextData = null;
+      contextKind = 'none';
+    }
     const isTransitionChurnReason = !!(
       reasonText.indexOf('attr:') === 0 ||
       reasonText.indexOf('mutation_added:') === 0 ||
@@ -4502,7 +4600,16 @@ export function generateModerationScript(config: InjectionConfig): string {
       !preserveShortsHardBlurDuringResolvedContinuity &&
       !preserveShortsHardBlurDuringGraceWindow
     ) {
-      if (isNodeClassificationLocked(videoNode, reason)) {
+      const bypassClassificationLockForUnresolvedRegularFlip = !!(
+        isMainSurfaceUrl &&
+        regularPathQuarantinePassed &&
+        !isHomeShortsShelfVideo &&
+        isTransitionChurnReason &&
+        !contextData &&
+        (!strictContinuityItemKey || strictContinuityItemKey === 'unknown') &&
+        (cardNodeId === 'none' || recentShortsToRegularLaneFlip || hardItemKeyKnown)
+      );
+      if (isNodeClassificationLocked(videoNode, reason) && !bypassClassificationLockForUnresolvedRegularFlip) {
         mwDiagLog('[MW-PERSIST][PROVENANCE-BLOCKED] hard_blur_provenance_mismatch suppressed — classification locked',
           'reason=' + String(reason || 'unknown'),
           'node=' + videoNodeId,
@@ -4512,6 +4619,23 @@ export function generateModerationScript(config: InjectionConfig): string {
           'pageEpoch=' + String(CONFIG.pageEpoch)
         );
       } else {
+      if (bypassClassificationLockForUnresolvedRegularFlip) {
+        postNonShortsTransitionDiag('regular_lock_bypass_unresolved_shorts_flip', {
+          reason: String(reason || 'unknown'),
+          nodeId: videoNodeId,
+          marker: 'MW-MVP-REGULAR-LOCK-BYPASS-V1',
+          cardNodeId: String(cardNodeId || 'none'),
+          strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+          hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+        });
+        mwDiagLog('[MW-PERSIST][LOCK-BYPASS] unresolved regular shorts-flip allows provenance clear',
+          'reason=' + String(reason || 'unknown'),
+          'node=' + videoNodeId,
+          'cardNodeId=' + String(cardNodeId || 'none'),
+          'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
+          'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown')
+        );
+      }
       if (isMainSurfaceUrl && !isHomeShortsShelfVideo && regularPathQuarantinePassed) {
         postNonShortsTransitionDiag('regular_provenance_clear_source', {
           reason: String(reason || 'unknown'),
@@ -4570,38 +4694,8 @@ export function generateModerationScript(config: InjectionConfig): string {
         graceAgeMs: Number.isFinite(shortsAuthoritativeBlurAgeMs) ? Math.round(shortsAuthoritativeBlurAgeMs) : -1,
       });
     }
-    if (
-      isMainSurfaceUrl &&
-      regularPathQuarantinePassed &&
-      !isHomeShortsShelfVideo &&
-      !contextData &&
-      !hasAuthoritativeBlur &&
-      state.blurred &&
-      state.blurred.size > 0
-    ) {
-      const resolvedUrl = normalizedPoster || normalizedCurrent || String((videoNode.dataset && videoNode.dataset.mwSrc) || '');
-      if (resolvedUrl && state.blurred.has(resolvedUrl)) {
-        contextKind = 'state_blurred_fallback';
-        contextData = {
-          src: resolvedUrl,
-          category: String((videoNode.dataset && videoNode.dataset.mwCategory) || 'flagged'),
-          itemId: String((videoNode.dataset && videoNode.dataset.mwItemId) || reattachItemId || ''),
-          blurPx: IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20),
-        };
-        console.log(
-          '[MW-FLICKER-STATE-BLURRED-FALLBACK-V1] state_blurred_fallback_hit',
-          'reason=' + String(reason || 'unknown'),
-          'nodeId=' + videoNodeId,
-          'resolvedUrl=' + String(resolvedUrl || '').substring(0, 180)
-        );
-        postNonShortsTransitionDiag('state_blurred_fallback', {
-          reason: String(reason || 'unknown'),
-          nodeId: videoNodeId,
-          marker: 'MW-FLICKER-STATE-BLURRED-FALLBACK-V1',
-          resolvedUrl: String(resolvedUrl || '').substring(0, 180),
-        });
-      }
-    }
+    // MVP freeze guard: never rehydrate non-shorts blur from src-only state memory.
+    // This fallback can blur unresolved negatives during thumbnail->preview churn.
     let activeVideoBlurred = hasAuthoritativeBlur || hasIncidentalBlur;
     const preexistingOverlayInDeadEnd = !!(
       isMainSurfaceUrl &&
@@ -5040,10 +5134,16 @@ export function generateModerationScript(config: InjectionConfig): string {
         overlayPresent: !!videoOverlay,
         contextSize: Number((state.nonShortsReattachContext && state.nonShortsReattachContext.size) || 0),
       });
-      // MVP: hold with soft blur while context is still resolving — prevents the
-      // ~600ms flash between first loadeddata (no context yet) and second loadeddata
-      // (authoritative context arrives). applyBlur() on the next event will replace this.
-      if (reasonText === 'event:loadeddata' && !activeVideoBlurred && videoNode.isConnected) {
+      const noContextHoldProvenPositive = !!(
+        strictContinuityItemKey &&
+        strictContinuityItemKey !== 'unknown' &&
+        hardItemKeyKnown &&
+        hardBlurItemKey === strictContinuityItemKey &&
+        hardSrcMatchesCurrent
+      );
+      // MVP freeze: only hold/stamp when continuity is already proven positive.
+      // Unproven no-context states must not synthesize blur, to prevent negative leakage.
+      if (reasonText === 'event:loadeddata' && !activeVideoBlurred && videoNode.isConnected && noContextHoldProvenPositive) {
         videoNode.style.filter = 'blur(' + CONFIG.softBlurStrength + 'px)';
         videoNode.style.webkitFilter = 'blur(' + CONFIG.softBlurStrength + 'px)';
         videoNode.classList.add('mw-softblur');
@@ -5053,6 +5153,25 @@ export function generateModerationScript(config: InjectionConfig): string {
         markAuthoritativeHardBlur(videoNode, String((videoNode.dataset && videoNode.dataset.mwSrc) || ''));
         if (videoNode.dataset) videoNode.dataset.mwHardBlurItemKey = String(strictContinuityItemKey || 'unknown');
         mwDiagLog('[MW-FLICKER][NO-CONTEXT-HOLD] soft blur applied + authoritative stamp', 'nodeId=' + videoNodeId, 'key=' + String(strictContinuityItemKey || 'unknown'), 'hardBlurEpoch=' + String(CONFIG.pageEpoch));
+        postNonShortsTransitionDiag('no_context_hold_applied_proven', {
+          reason: String(reason || 'unknown'),
+          nodeId: videoNodeId,
+          marker: 'MW-FLICKER-NO-CONTEXT-HOLD-GUARD-V1',
+          strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+          hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+          hardSrcMatchesCurrent: !!hardSrcMatchesCurrent,
+          graceWindow: !!preserveShortsHardBlurDuringGraceWindow,
+        });
+      } else if (reasonText === 'event:loadeddata' && !activeVideoBlurred && videoNode.isConnected) {
+        postNonShortsTransitionDiag('no_context_hold_skipped_unproven', {
+          reason: String(reason || 'unknown'),
+          nodeId: videoNodeId,
+          marker: 'MW-FLICKER-NO-CONTEXT-HOLD-GUARD-V1',
+          strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+          hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+          hardSrcMatchesCurrent: !!hardSrcMatchesCurrent,
+          graceWindow: !!preserveShortsHardBlurDuringGraceWindow,
+        });
       }
     }
     if (shouldApplyRevealFallback) {
@@ -7976,6 +8095,18 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       return;
     }
+    if (!isAuthoritativeHardBlur(element)) {
+      removeRevealOverlay(element, src, 'createRevealOverlay_not_authoritative');
+      if (DIAG_YT_BLUR) {
+        diagFailCaseLog(
+          'overlay_without_authoritative_blur',
+          element,
+          src,
+          'mwModerated=' + (element.dataset.mwModerated || 'none')
+        );
+      }
+      return;
+    }
     let shortsOwnerToken = '';
     if (shortsMode) {
       const activeContext = getShortsBlurContextForNode(element);
@@ -10270,24 +10401,8 @@ export function generateModerationScript(config: InjectionConfig): string {
             }
           }
           
-          // Privacy by Default: soft-blur img/video on DOM entry before scan completes.
-          // Prevents flash of unblurred content during the scan latency window.
-          // Skips nodes already classified, user-revealed, or in Shorts mode (handled separately).
-          if (
-            node.isConnected &&
-            node.nodeType === 1 &&
-            !isShortsModeActive() &&
-            isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)
-          ) {
-            const _tag = String(node.tagName || '').toLowerCase();
-            const _state = String((node.dataset && node.dataset.mwModerated) || '');
-            if ((_tag === 'img' || _tag === 'video') && _state === '' && _state !== 'revealed') {
-              node.style.filter = 'blur(' + CONFIG.softBlurStrength + 'px)';
-              node.style.webkitFilter = 'blur(' + CONFIG.softBlurStrength + 'px)';
-              node.classList.add('mw-softblur');
-              node.dataset.mwModerated = 'softblur';
-            }
-          }
+          // MVP freeze guard: skip broad non-shorts preblur on DOM entry.
+          // New nodes stay unblurred until we have authoritative moderation ownership.
           // Add to viewport observer for lazy scanning
           observeForViewport(node);
           queueMutationScan(node, 'mutation_added');
@@ -10312,31 +10427,6 @@ export function generateModerationScript(config: InjectionConfig): string {
               attr === 'hidden'
             )
           ) {
-            if (
-              (attr === 'src' || attr === 'poster') &&
-              state.blurred &&
-              state.blurred.size > 0
-            ) {
-              const prevSrc = normalizeUrl(
-                String(target.dataset.mwLastScanSrc || target.dataset.mwSrc || target.dataset.mwOrigSrc || '')
-              ) || '';
-              if (prevSrc && state.blurred.has(prevSrc)) {
-                const newAttrRaw = attr === 'src'
-                  ? String(target.src || target.getAttribute('src') || '')
-                  : String(target.getAttribute('poster') || '');
-                const newAttrSrc = normalizeUrl(newAttrRaw) || '';
-                if (newAttrSrc) {
-                  applySoftBlur(target, newAttrSrc, String((target.dataset && target.dataset.mwItemId) || ''));
-                  console.log(
-                    '[MW-FLICKER-VIDEO-PREBLUR-V1] pre_blur_on_attr_src',
-                    'attr=' + attr,
-                    'nodeId=' + getDiagNodeId(target),
-                    'prevSrc=' + String(prevSrc || '').substring(0, 100),
-                    'newSrc=' + String(newAttrSrc || '').substring(0, 100)
-                  );
-                }
-              }
-            }
             diagNonShortsReattach(target, 'attr:' + attr);
           }
           // Non-Shorts YouTube: when img src changes in-place, clear stale scan markers
@@ -10825,6 +10915,13 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   // Initial scan – run immediately to pre-blur anything already in the DOM.
+  console.log(
+    '[DIAG][STARTUP_MARKER_555]',
+    'marker=555',
+    'navId=' + String(NAV_ID || 'none'),
+    'pageEpoch=' + String(state.pageEpoch || 0),
+    'url=' + window.location.href
+  );
   scanFullPage();
   if (isYouTube()) {
     scheduleInitTimeout('initialYouTubeScan', scanYouTubeThumbnails, 200);
