@@ -4679,12 +4679,36 @@ export function generateModerationScript(config: InjectionConfig): string {
       isHomeShortsShelfVideo &&
       shortsContinuityGraceActive
     );
+    // Patch 9: hold blur on regular thumbnails when identity is unresolvable mid-transition
+    // but mwSrc on the node still confirms same-video ownership.
+    // Only fires when poster AND currentSrc are both empty (genuine transition gap).
+    // Does not create new blur — only prevents premature provenance clear.
+    const nodeCurrentSrcAvailable = !!(normalizedPoster || normalizedCurrent);
+    const mwSrcOwnershipHold = !!(
+      regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo &&
+      isTransitionChurnReason &&
+      !contextData &&
+      !nodeCurrentSrcAvailable &&
+      hardItemKeyKnown &&
+      !!hardBlurSrc &&
+      !!String((videoNode.dataset && videoNode.dataset.mwSrc) || '').includes(String(hardBlurItemKey))
+    );
+    if (mwSrcOwnershipHold) {
+      mwDiagLog('[MW-DIAG][REGULAR-THUMB-MWS-OWNERSHIP-HOLD] blur hold — mwSrc confirms ownership, src unresolvable',
+        'reason=' + String(reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'hardBlurItemKey=' + String(hardBlurItemKey || ''),
+        'cardNodeId=' + String(cardNodeId || 'none')
+      );
+    }
     if (
       hasAuthoritativeBlur &&
       !contextData &&
       !hardKeyMatchesStrict &&
       !hardSrcMatchesCurrent &&
       !holdBlurDuringUnresolvedTransition &&
+      !mwSrcOwnershipHold &&
       !preserveShortsHardBlurDuringResolvedContinuity &&
       !preserveShortsHardBlurDuringGraceWindow
     ) {
