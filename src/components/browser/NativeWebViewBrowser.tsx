@@ -1473,7 +1473,11 @@ export const NativeWebViewBrowser = () => {
       logLifecycleSnapshot('page_load_end', url, 'onLoadEnd');
       logHostLayerDiagnostics('load_end');
       setIsLoading(false);
-      setFlashGuardState?.(false, 'load_end');
+      if (pendingRequestsRef.current.size === 0) {
+        setFlashGuardState?.(false, 'load_end');
+      } else {
+        console.log('[FlashShield][DIAG] load_end disarm deferred pendingCount=' + pendingRequestsRef.current.size);
+      }
       if (!ENABLE_SIGNAL_PIPELINE) return;
       if (skipBootstrapLoadEnd) return;
       
