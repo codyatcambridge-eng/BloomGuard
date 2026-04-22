@@ -4438,6 +4438,24 @@ export function generateModerationScript(config: InjectionConfig): string {
       contextData = null;
       contextKind = 'none';
     }
+    const shortsShelfCardRecycleBlocked = !!(
+      isHomeShortsShelfVideo &&
+      !!contextData &&
+      (String(contextKind || 'none') === 'card_blurred' || String(contextKind || 'none') === 'card_blurred_proven_memory') &&
+      hardItemKeyKnown &&
+      !(String((videoNode.dataset && videoNode.dataset.mwSrc) || '').includes(String(hardBlurItemKey)))
+    );
+    if (shortsShelfCardRecycleBlocked) {
+      mwDiagLog('[MW-DIAG][SHORTS-SHELF-CARD-RECYCLE-BLOCKED] card_blurred context rejected — mwSrc does not contain hardBlurItemKey',
+        'reason=' + String(reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'hardBlurItemKey=' + String(hardBlurItemKey || ''),
+        'mwSrc=' + String((videoNode.dataset && videoNode.dataset.mwSrc) || ''),
+        'contextKind=' + String(contextKind || 'none')
+      );
+      contextData = null;
+      contextKind = 'none';
+    }
     const isTransitionChurnReason = !!(
       reasonText.indexOf('attr:') === 0 ||
       reasonText.indexOf('mutation_added:') === 0 ||
