@@ -4504,6 +4504,28 @@ export function generateModerationScript(config: InjectionConfig): string {
       contextData = null;
       contextKind = 'none';
     }
+    // Patch 8: Regular thumbnail itemkey_global ownership guard
+    const regularItemkeyGlobalBlocked = !!(
+      regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo &&
+      !!contextData &&
+      String(contextKind || 'none') === 'itemkey_global' &&
+      !!strictContinuityItemKey &&
+      strictContinuityItemKey !== 'unknown' &&
+      !!shortsNodeMwSrc &&
+      !shortsNodeMwSrc.includes(String(strictContinuityItemKey))
+    );
+    if (regularItemkeyGlobalBlocked) {
+      mwDiagLog('[MW-DIAG][REGULAR-THUMB-ITEMKEY-GLOBAL-BLOCKED] itemkey_global context rejected — mwSrc does not contain strictContinuityItemKey',
+        'reason=' + String(reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'strictContinuityItemKey=' + String(strictContinuityItemKey || ''),
+        'mwSrc=' + shortsNodeMwSrc,
+        'contextKind=' + String(contextKind || 'none')
+      );
+      contextData = null;
+      contextKind = 'none';
+    }
     const isTransitionChurnReason = !!(
       reasonText.indexOf('attr:') === 0 ||
       reasonText.indexOf('mutation_added:') === 0 ||
