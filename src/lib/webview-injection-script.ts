@@ -4404,11 +4404,13 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     const strictIdentityKnown = strictContinuityItemKey && strictContinuityItemKey !== 'unknown';
     const hardItemKeyKnown = hardBlurItemKey && hardBlurItemKey !== 'unknown';
+    const mwStoredSrc = String((videoNode.dataset && videoNode.dataset.mwSrc) || '');
     const hardSrcMatchesCurrentExact = !!(
       hardBlurSrc &&
       (
         (normalizedPoster && hardBlurSrc === normalizedPoster) ||
-        (normalizedCurrent && hardBlurSrc === normalizedCurrent)
+        (normalizedCurrent && hardBlurSrc === normalizedCurrent) ||
+        (mwStoredSrc && hardBlurSrc === mwStoredSrc)
       )
     );
     const hardKeyMatchesStrict = !!(
