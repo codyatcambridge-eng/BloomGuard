@@ -4456,6 +4456,24 @@ export function generateModerationScript(config: InjectionConfig): string {
       contextData = null;
       contextKind = 'none';
     }
+    const laneFlipCardBlurredBlocked = !!(
+      regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo &&
+      recentShortsToRegularLaneFlip &&
+      !!contextData &&
+      (String(contextKind || 'none') === 'card_blurred' || String(contextKind || 'none') === 'card_blurred_proven_memory')
+    );
+    if (laneFlipCardBlurredBlocked) {
+      mwDiagLog('[MW-DIAG][LANE-FLIP-CARD-BLURRED-BLOCKED] card_blurred context rejected — recentShortsToRegularLaneFlip',
+        'reason=' + String(reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'strictContinuityItemKey=' + String(strictContinuityItemKey || ''),
+        'hardBlurItemKey=' + String(hardBlurItemKey || ''),
+        'contextKind=' + String(contextKind || 'none')
+      );
+      contextData = null;
+      contextKind = 'none';
+    }
     const isTransitionChurnReason = !!(
       reasonText.indexOf('attr:') === 0 ||
       reasonText.indexOf('mutation_added:') === 0 ||
