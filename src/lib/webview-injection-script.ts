@@ -1138,10 +1138,37 @@ export function generateModerationScript(config: InjectionConfig): string {
     url: window.location.href,
     timestamp: Date.now(),
   });
+  postToHost({
+    type: 'MW_PATCH_MARKER',
+    marker: 'Dabs3',
+    navId: NAV_ID,
+    pageEpoch: CONFIG.pageEpoch,
+    url: window.location.href,
+    timestamp: Date.now(),
+  });
+  postToHost({
+    type: 'MW_PATCH_MARKER',
+    marker: 'Dabs4',
+    navId: NAV_ID,
+    pageEpoch: CONFIG.pageEpoch,
+    url: window.location.href,
+    timestamp: Date.now(),
+  });
+  postToHost({
+    type: 'MW_PATCH_MARKER',
+    marker: 'Dabs5',
+    navId: NAV_ID,
+    pageEpoch: CONFIG.pageEpoch,
+    url: window.location.href,
+    timestamp: Date.now(),
+  });
   console.log('[MW][STARTUP] Eyes1 marker navId=' + NAV_ID + ' pageEpoch=' + CONFIG.pageEpoch);
   console.log('[MW][STARTUP] 222 marker navId=' + NAV_ID + ' pageEpoch=' + CONFIG.pageEpoch);
   console.log('[MW][STARTUP] Dabs1 marker navId=' + NAV_ID + ' pageEpoch=' + CONFIG.pageEpoch);
   console.log('[MW][STARTUP] Dabs2 marker navId=' + NAV_ID + ' pageEpoch=' + CONFIG.pageEpoch);
+  console.log('[MW][STARTUP] Dabs3 marker navId=' + NAV_ID + ' pageEpoch=' + CONFIG.pageEpoch);
+  console.log('[MW][STARTUP] Dabs4 marker navId=' + NAV_ID + ' pageEpoch=' + CONFIG.pageEpoch);
+  console.log('[MW][STARTUP] Dabs5 marker navId=' + NAV_ID + ' pageEpoch=' + CONFIG.pageEpoch);
   const timerState = {
     legacyResultsInterval: null,
     urlChangeInterval: null,
@@ -5213,8 +5240,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       overlayForItemKey !== 'unknown' &&
       (
         (reattachItemKey !== 'unknown' && overlayForItemKey === reattachItemKey) ||
-        (strictContinuityItemKey && strictContinuityItemKey !== 'unknown' && overlayForItemKey === strictContinuityItemKey) ||
-        (cardOverlayCount === 1)
+        (strictContinuityItemKey && strictContinuityItemKey !== 'unknown' && overlayForItemKey === strictContinuityItemKey)
       )
     );
     const strictContinuityUnknown = !strictContinuityItemKey || strictContinuityItemKey === 'unknown';
@@ -5286,6 +5312,51 @@ export function generateModerationScript(config: InjectionConfig): string {
       (activeVideoBlurred || hasAuthoritativeBlur || hasResidualInlineBlur || hasResidualBlurClass) &&
       !provenOwnershipForFallbackHold
     );
+    const regularMissFailOpenCleanup = !!(
+      regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo &&
+      isTransitionChurnReason &&
+      !contextData &&
+      !provenOwnershipForFallbackHold &&
+      strictContinuityUnknown &&
+      (regularItemKeyLookupMiss || cardNodeId === 'none') &&
+      (!!videoOverlay || !!hasAuthoritativeBlur || !!hasResidualInlineBlur || !!hasResidualBlurClass)
+    );
+    if (regularMissFailOpenCleanup) {
+      const failOpenOverlayId = String((videoOverlay && videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'none');
+      if (videoOverlay && videoOverlay.parentElement) {
+        videoOverlay.parentElement.removeChild(videoOverlay);
+        videoOverlay = null;
+      }
+      videoNode.style.removeProperty('filter');
+      videoNode.style.removeProperty('-webkit-filter');
+      videoNode.style.removeProperty('backdrop-filter');
+      videoNode.style.removeProperty('-webkit-backdrop-filter');
+      videoNode.classList.remove('mw-softblur');
+      videoNode.classList.remove('mw-blurred');
+      videoNode.dataset.mwModerated = 'safe';
+      clearAuthoritativeHardBlur(videoNode);
+      hasAuthoritativeBlur = false;
+      activeVideoBlurred = false;
+      postNonShortsTransitionDiag('regular_context_lookup_miss_fail_open_cleanup', {
+        reason: String(reason || 'unknown'),
+        nodeId: videoNodeId,
+        marker: 'MW-MVP-REGULAR-NEGATIVE-FAILOPEN-V1',
+        cardNodeId: String(cardNodeId || 'none'),
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        reattachItemKey: String(reattachItemKey || 'unknown'),
+        overlayId: failOpenOverlayId,
+      });
+      console.log(
+        '[MW-MVP-REGULAR-NEGATIVE-FAILOPEN-V1] cleanup_applied',
+        'reason=' + String(reason || 'unknown'),
+        'nodeId=' + String(videoNodeId || 'none'),
+        'cardNodeId=' + String(cardNodeId || 'none'),
+        'overlayId=' + failOpenOverlayId,
+        'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
+        'reattachItemKey=' + String(reattachItemKey || 'unknown')
+      );
+    }
     if (
       !activeVideoBlurred &&
       !keepOverlayDuringRegularUnresolvedChurn &&
@@ -5764,6 +5835,54 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (contextItemKey && contextItemKey !== 'unknown') resolvedOwnershipKeys.add(String(contextItemKey));
     if (reattachItemKeyKnown) resolvedOwnershipKeys.add(String(reattachItemKey));
     const hasResolvedOwnership = resolvedOwnershipKeys.size > 0 || contextFound;
+    const regularUnresolvedFailClosedCleanup = !!(
+      regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo &&
+      !contextFound &&
+      !hasResolvedOwnership &&
+      !hasAuthoritativeBlur &&
+      (activeVideoBlurred || hasResidualInlineBlur || hasResidualBlurClass || !!videoOverlay)
+    );
+    if (regularUnresolvedFailClosedCleanup) {
+      const changed = clearAllBlurAndOverlay(
+        videoNode,
+        overlayProbeSrc || String((videoNode.dataset && videoNode.dataset.mwSrc) || ''),
+        'regular_main_unresolved_fail_closed_cleanup',
+        'safe'
+      );
+      let orphanRemoved = 0;
+      try {
+        const globalOverlays = document.querySelectorAll('.mw-reveal-overlay');
+        for (let i = 0; i < globalOverlays.length; i += 1) {
+          const overlay = globalOverlays[i];
+          if (!overlay || overlay.nodeType !== 1 || !overlay.isConnected || !overlay.parentElement) continue;
+          if (!isNonShortsOverlayGeometryAnchored(overlay, videoNode)) continue;
+          overlay.parentElement.removeChild(overlay);
+          orphanRemoved += 1;
+        }
+      } catch (e) {}
+      if (orphanRemoved > 0) {
+        try { videoNode.dataset.mwHasOverlay = 'false'; } catch (e) {}
+      }
+      if (changed || orphanRemoved > 0) {
+        console.warn(
+          '[MW-MVP-REGULAR-THUMB-NEGATIVE-LEAK-GUARD-V1] fail_closed_cleanup_applied',
+          'reason=' + (reason || 'unknown'),
+          'nodeId=' + videoNodeId,
+          'changed=' + String(!!changed),
+          'orphanRemoved=' + String(orphanRemoved)
+        );
+        postNonShortsTransitionDiag('regular_main_negative_leak_fail_closed_cleanup', {
+          reason: String(reason || 'unknown'),
+          nodeId: videoNodeId,
+          marker: 'MW-MVP-REGULAR-THUMB-NEGATIVE-LEAK-GUARD-V1',
+          changed: !!changed,
+          orphanRemoved: Number(orphanRemoved || 0),
+        });
+      }
+      activeVideoBlurred = false;
+      videoOverlay = null;
+    }
     const skipStaleSweepForUnresolvedNoise = !!(
       regularPathQuarantinePassed &&
       noisyAttrTransition &&
@@ -9996,7 +10115,8 @@ export function generateModerationScript(config: InjectionConfig): string {
     element.dataset.mwSourceType = sourceType || 'unknown';
     
     // On Shorts, avoid pre-blur before verdict to prevent false first-entry blur.
-    // We only blur once moderation returns a positive result.
+    // On non-Shorts main thumbnail surfaces, fail-closed by default: skip pre-blur
+    // unless this node already has authoritative ownership.
     const shortsMode = isShortsModeActive();
     if (shortsMode) {
       removeSoftBlur(element, url);
@@ -10010,8 +10130,21 @@ export function generateModerationScript(config: InjectionConfig): string {
         );
       }
     } else {
-      // Non-Shorts keeps pre-blur to minimize flashes.
-      applySoftBlur(element, url, itemId);
+      const isMainThumbnailSurface = isYouTubeMainPageThumbnailSurfaceUrl(window.location.href);
+      const hasAuthoritativeOwnership = isAuthoritativeHardBlur(element);
+      const shouldSkipUnprovenPreblur = !!(isMainThumbnailSurface && !hasAuthoritativeOwnership);
+      if (shouldSkipUnprovenPreblur) {
+        console.log(
+          '[DIAG][MVP_NON_SHORTS] skip_preblur_unproven_regular_main',
+          'itemId=' + itemId,
+          'sourceType=' + String(sourceType || 'unknown'),
+          'nodeId=' + getDiagNodeId(element),
+          'url=' + String(url || '').substring(0, 180)
+        );
+      } else {
+        // Preserve established positive ownership behavior.
+        applySoftBlur(element, url, itemId);
+      }
     }
     const blurTimer = null;
     
@@ -10736,7 +10869,7 @@ export function generateModerationScript(config: InjectionConfig): string {
             diagNonShortsReattach(target, 'attr:' + attr);
           }
           // Non-Shorts YouTube: when img src changes in-place, clear stale scan markers
-          // so the recycled node gets a fresh scan with soft blur applied immediately.
+          // and clear stale visual blur state before requeueing scan.
           if (
             isYouTube() &&
             !isShortsModeActive() &&
@@ -10756,6 +10889,32 @@ export function generateModerationScript(config: InjectionConfig): string {
                 'wasModerated=' + (target.dataset.mwModerated || 'none'),
                 'connected=' + target.isConnected
               );
+              const hadVisualBlur = !!(
+                String(target.style.getPropertyValue('filter') || target.style.filter || '').toLowerCase().indexOf('blur(') !== -1 ||
+                String(target.style.getPropertyValue('backdrop-filter') || '').toLowerCase().indexOf('blur(') !== -1 ||
+                target.classList.contains('mw-softblur') ||
+                target.classList.contains('mw-blurred') ||
+                String(target.dataset.mwModerated || '') === 'blurred' ||
+                String(target.dataset.mwModerated || '') === 'softblur'
+              );
+              removeRevealOverlay(target, lastScanSrc || target.dataset.mwSrc || '', 'attr_src_swap_reset');
+              target.style.removeProperty('filter');
+              target.style.removeProperty('-webkit-filter');
+              target.style.removeProperty('backdrop-filter');
+              target.style.removeProperty('-webkit-backdrop-filter');
+              target.classList.remove('mw-softblur');
+              target.classList.remove('mw-blurred');
+              clearAuthoritativeHardBlur(target);
+              target.dataset.mwHasOverlay = 'false';
+              target.dataset.mwOverlayOwnerToken = '';
+              if (hadVisualBlur) {
+                console.log(
+                  '[DIAG][MVP_NON_SHORTS] src_swap_stale_visual_blur_cleared',
+                  'nodeId=' + getDiagNodeId(target),
+                  'prevSrcKey=' + getDiagItemKey(lastScanSrc),
+                  'newSrcKey=' + getDiagItemKey(newSrc)
+                );
+              }
               target.dataset.mwScanned = 'false';
               target.dataset.mwLastScanSrc = '';
               target.dataset.mwPreblurClear = '';
