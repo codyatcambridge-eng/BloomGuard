@@ -3197,6 +3197,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   const SHORTS_CONTINUITY_GRACE_WINDOW_MS = 1200;
   const MAIN_SURFACE_LANE_FLIP_WINDOW_MS = 4000;
   const REGULAR_DESCENDANT_VIDEO_POSITIVE_HOLD_MS = 1200;
+  const REGULAR_ATTR_SRC_POSITIVE_HOLD_MS = 1200;
   const SHORTS_SHELF_LANE_FLIP_HOLD_MS = 1200;
 
   function isNonShortsYouTubeReattachContext() {
@@ -4938,6 +4939,36 @@ export function generateModerationScript(config: InjectionConfig): string {
         'hardBlurAgeMs=' + (Number.isFinite(hardBlurAgeMs) ? Math.round(hardBlurAgeMs) : -1)
       );
     }
+    const preserveRegularPositiveAttrSrcHold = !!(
+      regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo &&
+      reasonText === 'attr:src' &&
+      !contextData &&
+      String(cardNodeId || 'none') === 'none' &&
+      hasAuthoritativeBlur &&
+      hardItemKeyKnown &&
+      !!hardBlurSrc &&
+      (!strictContinuityItemKey || strictContinuityItemKey === 'unknown') &&
+      hardBlurAgeMs <= REGULAR_ATTR_SRC_POSITIVE_HOLD_MS
+    );
+    if (preserveRegularPositiveAttrSrcHold) {
+      postNonShortsTransitionDiag('regular_positive_attr_src_hold', {
+        reason: String(reason || 'unknown'),
+        nodeId: videoNodeId,
+        marker: 'MW-MVP-REGULAR-POSITIVE-ATTRSRC-HOLD-V1',
+        cardNodeId: String(cardNodeId || 'none'),
+        hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+        hardBlurAgeMs: Number.isFinite(hardBlurAgeMs) ? Math.round(hardBlurAgeMs) : -1,
+      });
+      console.log(
+        '[MW-MVP-REGULAR-POSITIVE-ATTRSRC-HOLD-V1] preserve_hard_blur',
+        'reason=' + String(reason || 'unknown'),
+        'nodeId=' + String(videoNodeId || 'none'),
+        'cardNodeId=' + String(cardNodeId || 'none'),
+        'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown'),
+        'hardBlurAgeMs=' + (Number.isFinite(hardBlurAgeMs) ? Math.round(hardBlurAgeMs) : -1)
+      );
+    }
     const shortsLaneFlipAtRaw = Number((videoNode.dataset && videoNode.dataset.mwShortsShelfLaneFlipAt) || '0');
     const shortsLaneFlipAgeMs = Number.isFinite(shortsLaneFlipAtRaw) && shortsLaneFlipAtRaw > 0
       ? Math.max(0, getMonotonicNowMs() - shortsLaneFlipAtRaw)
@@ -5031,6 +5062,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       !holdBlurDuringUnresolvedTransition &&
       !mwSrcOwnershipHold &&
       !preserveRegularPositiveDescendantVideoHold &&
+      !preserveRegularPositiveAttrSrcHold &&
       !preserveShortsShelfPositiveLaneFlipHold &&
       !regularShortsFlipSrcContinuityHold &&
       !preserveShortsHardBlurDuringResolvedContinuity &&
@@ -5512,6 +5544,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       !contextData &&
       !regularShortsFlipSrcContinuityHold &&
       !preserveRegularPositiveDescendantVideoHold &&
+      !preserveRegularPositiveAttrSrcHold &&
       !preserveShortsShelfPositiveLaneFlipHold &&
       !provenOwnershipForFallbackHold &&
       strictContinuityUnknown &&
@@ -5523,7 +5556,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       !isHomeShortsShelfVideo &&
       isTransitionChurnReason &&
       !contextData &&
-      (regularShortsFlipSrcContinuityHold || preserveRegularPositiveDescendantVideoHold || preserveShortsShelfPositiveLaneFlipHold) &&
+      (regularShortsFlipSrcContinuityHold || preserveRegularPositiveDescendantVideoHold || preserveRegularPositiveAttrSrcHold || preserveShortsShelfPositiveLaneFlipHold) &&
       (regularItemKeyLookupMiss || cardNodeId === 'none')
     ) {
       postNonShortsTransitionDiag('regular_failopen_cleanup_blocked_positive_hold', {
@@ -5532,6 +5565,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         marker: 'MW-MVP-REGULAR-POSITIVE-HOLD-BLOCK-FAILOPEN-V1',
         regularShortsFlipSrcContinuityHold: !!regularShortsFlipSrcContinuityHold,
         preserveRegularPositiveDescendantVideoHold: !!preserveRegularPositiveDescendantVideoHold,
+        preserveRegularPositiveAttrSrcHold: !!preserveRegularPositiveAttrSrcHold,
         preserveShortsShelfPositiveLaneFlipHold: !!preserveShortsShelfPositiveLaneFlipHold,
         strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
         cardNodeId: String(cardNodeId || 'none'),
@@ -11048,12 +11082,21 @@ export function generateModerationScript(config: InjectionConfig): string {
             }
           }
           if (isYouTube() && !isShortsModeActive()) {
+            const regularMainSurface = isYouTubeMainPageThumbnailSurfaceUrl(window.location.href);
             if (String(node.tagName || '').toUpperCase() === 'VIDEO') {
               diagNonShortsReattach(node, 'mutation_added:video');
+              if (regularMainSurface) {
+                try { node.dataset.mwViewportQueued = ''; } catch (e) {}
+                queueMutationScan(node, 'mutation_added:video_regular_main_rescan_nudge');
+              }
             }
             if (typeof node.querySelectorAll === 'function') {
               node.querySelectorAll('video').forEach(videoNode => {
                 diagNonShortsReattach(videoNode, 'mutation_added:descendant_video');
+                if (regularMainSurface) {
+                  try { videoNode.dataset.mwViewportQueued = ''; } catch (e) {}
+                  queueMutationScan(videoNode, 'mutation_added:descendant_video_regular_main_rescan_nudge');
+                }
               });
             }
           }
@@ -11085,6 +11128,10 @@ export function generateModerationScript(config: InjectionConfig): string {
             )
           ) {
             diagNonShortsReattach(target, 'attr:' + attr);
+            if (attr === 'src' && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
+              try { target.dataset.mwViewportQueued = ''; } catch (e) {}
+              queueMutationScan(target, 'attr:src_video_regular_main_rescan_nudge');
+            }
           }
           // Non-Shorts YouTube: when img src changes in-place, clear stale scan markers
           // and clear stale visual blur state before requeueing scan.
