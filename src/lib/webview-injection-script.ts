@@ -4542,6 +4542,53 @@ export function generateModerationScript(config: InjectionConfig): string {
       hardBlurSrcPresentInBlurredSet &&
       (hardSrcMatchesCurrentExact || hardBlurSrcMatchesNodeDatasetSrc)
     );
+    const contextDataItemKey = getDiagItemKey(String((contextData && contextData.src) || ''));
+    const contextDataItemKeyKnown = !!(contextDataItemKey && contextDataItemKey !== 'unknown');
+    const contextDataMatchesStrictKey = !!(
+      strictIdentityKnown &&
+      contextDataItemKeyKnown &&
+      String(strictContinuityItemKey || 'unknown') === String(contextDataItemKey || 'unknown')
+    );
+    const contextDataMatchesHardKey = !!(
+      hardItemKeyKnown &&
+      contextDataItemKeyKnown &&
+      String(hardBlurItemKey || 'unknown') === String(contextDataItemKey || 'unknown')
+    );
+    const regularContextFailClosedUnproven = !!(
+      regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo &&
+      !!contextData &&
+      !regularPositiveContinuitySignal &&
+      (
+        String(contextKind || 'none') === 'itemkey_global' ||
+        String(contextKind || 'none') === 'src_match'
+      ) &&
+      !contextDataMatchesStrictKey &&
+      !contextDataMatchesHardKey
+    );
+    if (regularContextFailClosedUnproven) {
+      console.log(
+        '[MW-MVP-REGULAR-NEGATIVE-FAIL-CLOSED-V1] context_blocked_unproven',
+        'reason=' + String(reason || 'unknown'),
+        'nodeId=' + String(videoNodeId || 'none'),
+        'contextKind=' + String(contextKind || 'none'),
+        'contextItemKey=' + String(contextDataItemKey || 'unknown'),
+        'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
+        'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown')
+      );
+      postNonShortsTransitionDiag('regular_context_fail_closed_unproven', {
+        reason: String(reason || 'unknown'),
+        nodeId: String(videoNodeId || 'none'),
+        marker: 'MW-MVP-REGULAR-NEGATIVE-FAIL-CLOSED-V1',
+        contextKind: String(contextKind || 'none'),
+        contextItemKey: String(contextDataItemKey || 'unknown'),
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+      });
+      contextData = null;
+      contextKind = 'none';
+      contextNode = null;
+    }
     const regularNuclearClearVetoByPositiveContinuity = !!(
       hasAuthoritativeBlur &&
       regularPositiveContinuitySignal
