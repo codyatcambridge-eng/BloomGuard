@@ -5712,6 +5712,89 @@ export function generateModerationScript(config: InjectionConfig): string {
         'nodeId=' + videoNodeId
       );
     }
+    const enforceRegularOverlayInvariant = !!(
+      regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo
+    );
+    if (enforceRegularOverlayInvariant) {
+      const shouldHaveSingleOverlay = !!(
+        (activeVideoBlurred || hasAuthoritativeBlur) &&
+        !shouldDisableRevealUiForMvpMainPageSurface()
+      );
+      if (!shouldHaveSingleOverlay) {
+        const removedByInvariant = removeRevealOverlay(
+          videoNode,
+          overlayProbeSrc || String((videoNode.dataset && videoNode.dataset.mwSrc) || ''),
+          'regular_main_overlay_invariant_no_blur'
+        );
+        if (removedByInvariant) {
+          videoOverlay = null;
+          overlayAnchored = false;
+          console.log(
+            '[MW-MVP-REGULAR-OVERLAY-INVARIANT-V1] removed_overlay_no_blur',
+            'reason=' + String(reason || 'unknown'),
+            'nodeId=' + videoNodeId
+          );
+          postNonShortsTransitionDiag('regular_main_overlay_invariant_removed_no_blur', {
+            reason: String(reason || 'unknown'),
+            nodeId: videoNodeId,
+            marker: 'MW-MVP-REGULAR-OVERLAY-INVARIANT-V1',
+          });
+        }
+      } else {
+        if (!videoOverlay || !videoOverlay.isConnected || !isOverlayNodeIdAnchored(videoOverlay)) {
+          createRevealOverlay(videoNode, overlayProbeSrc, overlayCategory, overlayItemId);
+          videoOverlay = findRevealOverlayForElement(videoNode, overlayProbeSrc);
+        }
+        if (videoOverlay && videoOverlay.isConnected) {
+          if (applyRegularNonShortsOverlayNormalization) {
+            normalizeNonShortsOverlayPresentation(videoOverlay);
+          }
+          normalizedOverlay = normalizeOverlayAnchor(videoOverlay, 'invariant_pass');
+          videoOverlay = normalizedOverlay.overlay;
+          overlayAnchored = normalizedOverlay.anchored;
+        }
+        let duplicateRemoved = 0;
+        if (card && typeof card.querySelectorAll === 'function') {
+          const overlaysInCard = card.querySelectorAll('.mw-reveal-overlay');
+          const anchoredForNode = [];
+          for (let i = 0; i < overlaysInCard.length; i += 1) {
+            const candidate = overlaysInCard[i];
+            if (!candidate || candidate.nodeType !== 1 || !candidate.isConnected) continue;
+            if (String((candidate.dataset && candidate.dataset.mwNodeId) || '') !== videoNodeId) continue;
+            anchoredForNode.push(candidate);
+          }
+          for (let i = 1; i < anchoredForNode.length; i += 1) {
+            const duplicate = anchoredForNode[i];
+            if (duplicate && duplicate.parentElement) {
+              duplicate.parentElement.removeChild(duplicate);
+              duplicateRemoved += 1;
+            }
+          }
+          if (anchoredForNode.length > 0) {
+            videoOverlay = anchoredForNode[0];
+            overlayAnchored = isOverlayNodeIdAnchored(videoOverlay);
+            if (applyRegularNonShortsOverlayNormalization) {
+              normalizeNonShortsOverlayPresentation(videoOverlay);
+            }
+          }
+        }
+        if (duplicateRemoved > 0) {
+          console.log(
+            '[MW-MVP-REGULAR-OVERLAY-INVARIANT-V1] deduped',
+            'reason=' + String(reason || 'unknown'),
+            'nodeId=' + videoNodeId,
+            'removed=' + String(duplicateRemoved)
+          );
+          postNonShortsTransitionDiag('regular_main_overlay_invariant_deduped', {
+            reason: String(reason || 'unknown'),
+            nodeId: videoNodeId,
+            marker: 'MW-MVP-REGULAR-OVERLAY-INVARIANT-V1',
+            removed: Number(duplicateRemoved || 0),
+          });
+        }
+      }
+    }
     postNonShortsTransitionDiag('apply', {
       reason: String(reason || 'unknown'),
       nodeId: videoNodeId,
