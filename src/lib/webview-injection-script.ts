@@ -5432,6 +5432,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       (pendingRevealActive || videoLikelyPlaying) &&
       !revealFallbackHasTrustedAutoIntent
     ) {
+      if (videoNode && videoNode.dataset && videoNode.dataset.mwPendingRevealUntil !== '0') {
+        videoNode.dataset.mwPendingRevealUntil = '0';
+      }
       console.log(
         '[MW-MVP-REGULAR-REVEAL-FALLBACK-BLOCKED-STALE-INTENT-V1] reveal_fallback_blocked_stale_intent',
         'reason=' + String(reason || 'unknown'),
@@ -5447,6 +5450,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         pendingRevealActive: !!pendingRevealActive,
         videoLikelyPlaying: !!videoLikelyPlaying,
         overlayAnchoredProof: !!revealFallbackHasAnchoredOverlayProof,
+        staleIntentCleared: true,
       });
     }
     if (shouldApplyRevealFallback) {
