@@ -380,6 +380,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   mwDiagLog('[Spoon1] startup_diag_marker');
+  mwDiagLog('[Sun22] startup_diag_marker');
 
   function readHostEventPayload(eventLike) {
     if (!eventLike || typeof eventLike !== 'object') return null;
@@ -4513,6 +4514,15 @@ export function generateModerationScript(config: InjectionConfig): string {
       hardItemKeyKnown &&
       (!strictIdentityKnown || strictContinuityItemKey === 'unknown')
     );
+    const regularVideoTransitionUnresolvedGhost = !!(
+      regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo &&
+      !contextData &&
+      (!strictIdentityKnown || strictContinuityItemKey === 'unknown') &&
+      isTransitionChurnReason &&
+      (String(cardNodeId || 'none') === 'none') &&
+      (hasAuthoritativeBlur || hasIncidentalBlur)
+    );
     const regularUnresolvedGhostState = !!(
       regularPathQuarantinePassed &&
       !isHomeShortsShelfVideo &&
@@ -4539,6 +4549,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       regularGhostSeenThisEpoch
     );
     let blockRegularFallbackNow = !!(
+      regularVideoTransitionUnresolvedGhost ||
       regularLaneFlipGhostQuarantineActive ||
       regularGhostEpochBypassActive
     );
@@ -4583,6 +4594,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     ) {
       if (
         isNodeClassificationLocked(videoNode, reason) &&
+        !regularVideoTransitionUnresolvedGhost &&
         !failClosedRegularLaneFlipGhostBlur &&
         !regularLaneFlipGhostQuarantineActive &&
         !regularGhostEpochBypassActive
@@ -4596,7 +4608,32 @@ export function generateModerationScript(config: InjectionConfig): string {
           'pageEpoch=' + String(CONFIG.pageEpoch)
         );
       } else {
-      if (failClosedRegularLaneFlipGhostBlur) {
+      if (regularVideoTransitionUnresolvedGhost) {
+        // Nuclear MVP guard for regular video-thumbnail transitions:
+        // if ownership is unresolved, force-clear stale blur carry-over immediately.
+        mwDiagLog(
+          '[MW-MVP-REGULAR-VIDEO-THUMB-NEGATIVE-NUCLEAR-V1] forcing_provenance_clear_unresolved_transition_ghost',
+          'reason=' + String(reason || 'unknown'),
+          'node=' + videoNodeId,
+          'cardNodeId=' + String(cardNodeId || 'none'),
+          'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown'),
+          'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown')
+        );
+        postNonShortsTransitionDiag('regular_video_thumb_negative_nuclear_provenance_clear', {
+          reason: String(reason || 'unknown'),
+          nodeId: videoNodeId,
+          marker: 'MW-MVP-REGULAR-VIDEO-THUMB-NEGATIVE-NUCLEAR-V1',
+          cardNodeId: String(cardNodeId || 'none'),
+          hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+          strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        });
+        if (videoNode && videoNode.dataset) {
+          videoNode.dataset.mwRegularLaneFlipGhostQuarantineUntil =
+            String(Date.now() + REGULAR_MAIN_LANE_FLIP_GHOST_QUARANTINE_MS);
+          videoNode.dataset.mwRegularGhostSeenEpoch = String(CONFIG.pageEpoch);
+        }
+        blockRegularFallbackNow = true;
+      } else if (failClosedRegularLaneFlipGhostBlur) {
         // Protect regular-main negatives from inheriting stale Shorts blur when the
         // same node flips lanes and strict identity is unresolved.
         mwDiagLog(
@@ -5041,6 +5078,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     const strictContinuityUnknown = !strictContinuityItemKey || strictContinuityItemKey === 'unknown';
     const nonShortsPendingRevealGuard = !!(
       revealFallbackScopeEligible &&
+      !blockRegularFallbackNow &&
       !contextData &&
       strictContinuityUnknown &&
       reattachItemKey === 'unknown' &&
@@ -5223,6 +5261,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     );
     const unresolvedOwnershipAtPlayIntent = !!(
       revealFallbackScopeEligible &&
+      !blockRegularFallbackNow &&
       !contextData &&
       strictContinuityUnknown &&
       (reattachItemKey === 'unknown') &&
@@ -7434,8 +7473,11 @@ export function generateModerationScript(config: InjectionConfig): string {
     );
     const isSafeDecontaminate = typeof reason === 'string' &&
       reason.indexOf('safe_decontaminate') !== -1;
+    const isRegularVideoThumbGhostDecontaminate = typeof reason === 'string' &&
+      reason.indexOf('regular_video_transition_ghost_decontaminate') !== -1;
     if (isUserReveal) return false; // user action always wins
     if (isSafeDecontaminate) return false; // safe mismatch cleanup must be allowed
+    if (isRegularVideoThumbGhostDecontaminate) return false; // unresolved regular-video ghost clear must be allowed
     // Path A: fully classified via applyBlur (mwModerated=blurred + epoch stamp)
     const state = String(element.dataset.mwModerated || '');
     // softblur is a provisional hold — scan result hasn't arrived yet. Never lock
