@@ -381,6 +381,7 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   mwDiagLog('[Spoon1] startup_diag_marker');
   mwDiagLog('[Sun22] startup_diag_marker');
+  mwDiagLog('[Jesus22] startup_diag_marker');
 
   function readHostEventPayload(eventLike) {
     if (!eventLike || typeof eventLike !== 'object') return null;
@@ -4253,11 +4254,21 @@ export function generateModerationScript(config: InjectionConfig): string {
     );
     const hardBlurItemKey = String((videoNode.dataset && videoNode.dataset.mwHardBlurItemKey) || 'unknown');
     const hardBlurSrc = normalizeUrl(String((videoNode.dataset && videoNode.dataset.mwHardBlurSrc) || '')) || '';
+    const normalizedNodeDatasetSrc = normalizeUrl(String((videoNode.dataset && videoNode.dataset.mwSrc) || '')) || '';
+    const hardBlurSrcPresentInBlurredSetEarly = !!(
+      hardBlurSrc &&
+      state.blurred &&
+      typeof state.blurred.has === 'function' &&
+      state.blurred.has(hardBlurSrc)
+    );
     if (
       regularPathQuarantinePassed &&
       !contextData &&
-      hasAuthoritativeBlur &&
       hardBlurSrc &&
+      (
+        hasAuthoritativeBlur ||
+        hardBlurSrcPresentInBlurredSetEarly
+      ) &&
       (
         (normalizedPoster && hardBlurSrc === normalizedPoster) ||
         (normalizedCurrent && hardBlurSrc === normalizedCurrent)
@@ -4514,6 +4525,27 @@ export function generateModerationScript(config: InjectionConfig): string {
       hardItemKeyKnown &&
       (!strictIdentityKnown || strictContinuityItemKey === 'unknown')
     );
+    const hardBlurSrcMatchesNodeDatasetSrc = !!(
+      hardBlurSrc &&
+      normalizedNodeDatasetSrc &&
+      hardBlurSrc === normalizedNodeDatasetSrc
+    );
+    const hardBlurSrcPresentInBlurredSet = !!(
+      hardBlurSrc &&
+      state.blurred &&
+      typeof state.blurred.has === 'function' &&
+      state.blurred.has(hardBlurSrc)
+    );
+    const regularPositiveContinuitySignal = !!(
+      regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo &&
+      hardBlurSrcPresentInBlurredSet &&
+      (hardSrcMatchesCurrentExact || hardBlurSrcMatchesNodeDatasetSrc)
+    );
+    const regularNuclearClearVetoByPositiveContinuity = !!(
+      hasAuthoritativeBlur &&
+      regularPositiveContinuitySignal
+    );
     const regularVideoTransitionUnresolvedGhost = !!(
       regularPathQuarantinePassed &&
       !isHomeShortsShelfVideo &&
@@ -4521,7 +4553,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       (!strictIdentityKnown || strictContinuityItemKey === 'unknown') &&
       isTransitionChurnReason &&
       (String(cardNodeId || 'none') === 'none') &&
-      (hasAuthoritativeBlur || hasIncidentalBlur)
+      (hasAuthoritativeBlur || hasIncidentalBlur) &&
+      !regularNuclearClearVetoByPositiveContinuity
     );
     const regularUnresolvedGhostState = !!(
       regularPathQuarantinePassed &&
@@ -4529,7 +4562,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       !contextData &&
       (!strictIdentityKnown || strictContinuityItemKey === 'unknown') &&
       String(cardNodeId || 'none') === 'none' &&
-      isTransitionChurnReason
+      isTransitionChurnReason &&
+      !regularNuclearClearVetoByPositiveContinuity
     );
     const regularGhostSeenEpoch = Number(
       (videoNode && videoNode.dataset && videoNode.dataset.mwRegularGhostSeenEpoch) || 0
@@ -4588,6 +4622,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       !contextData &&
       !hardKeyMatchesStrict &&
       !hardSrcMatchesCurrent &&
+      !regularPositiveContinuitySignal &&
       !holdBlurDuringUnresolvedTransition &&
       !preserveShortsHardBlurDuringResolvedContinuity &&
       !preserveShortsHardBlurDuringGraceWindow
@@ -4873,7 +4908,13 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       hasAuthoritativeBlur = isAuthoritativeHardBlur(videoNode);
       activeVideoBlurred = hasAuthoritativeBlur || hasIncidentalBlur;
-    } else if (activeVideoBlurred && !hasAuthoritativeBlur && !contextData && !preserveShortsHardBlurDuringGraceWindow) {
+    } else if (
+      activeVideoBlurred &&
+      !hasAuthoritativeBlur &&
+      !contextData &&
+      !preserveShortsHardBlurDuringGraceWindow &&
+      !regularPositiveContinuitySignal
+    ) {
       if (isMainSurfaceUrl && !isHomeShortsShelfVideo && regularPathQuarantinePassed) {
         postNonShortsTransitionDiag('regular_provenance_clear_source', {
           reason: String(reason || 'unknown'),
@@ -4909,13 +4950,38 @@ export function generateModerationScript(config: InjectionConfig): string {
         contextFound: false,
         contextKind: 'none',
       });
-    } else if (activeVideoBlurred && !hasAuthoritativeBlur && !contextData && preserveShortsHardBlurDuringGraceWindow) {
+    } else if (
+      activeVideoBlurred &&
+      !hasAuthoritativeBlur &&
+      !contextData &&
+      preserveShortsHardBlurDuringGraceWindow
+    ) {
       console.log(
         '[MW-MVP-SHORTS-CONTINUITY-GUARD-V1] preserve_incidental_blur_during_grace',
         'reason=' + String(reason || 'unknown'),
         'nodeId=' + String(videoNodeId || 'none'),
         'graceAgeMs=' + String(Math.round(shortsAuthoritativeBlurAgeMs || 0))
       );
+    } else if (
+      activeVideoBlurred &&
+      !hasAuthoritativeBlur &&
+      !contextData &&
+      regularPositiveContinuitySignal
+    ) {
+      console.log(
+        '[MW-MVP-REGULAR-THUMB-CONTINUITY-V2] preserve_incidental_blur_positive_continuity_signal',
+        'reason=' + String(reason || 'unknown'),
+        'nodeId=' + String(videoNodeId || 'none'),
+        'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown'),
+        'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown')
+      );
+      postNonShortsTransitionDiag('regular_main_preserve_incidental_blur_positive_continuity_signal', {
+        reason: String(reason || 'unknown'),
+        nodeId: videoNodeId,
+        marker: 'MW-MVP-REGULAR-THUMB-CONTINUITY-V2',
+        hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+      });
     }
     if (activeVideoBlurred && hasAuthoritativeBlur) {
       const expectedBlurPx = IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20);
@@ -5263,6 +5329,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       revealFallbackScopeEligible &&
       !blockRegularFallbackNow &&
       !contextData &&
+      !hasAuthoritativeBlur &&
+      !regularPositiveContinuitySignal &&
+      !isNodeClassificationLocked(videoNode, reason) &&
       strictContinuityUnknown &&
       (reattachItemKey === 'unknown') &&
       (revealFallbackHasExplicitUserIntent || revealFallbackHasTrustedAutoIntent)
@@ -7493,6 +7562,23 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (hardBlur) {
       const hardBlurEpoch = Number(element.dataset.mwHardBlurEpoch || 0);
       if (hardBlurEpoch > 0 && hardBlurEpoch === CONFIG.pageEpoch) return true;
+    }
+    // Same-nav continuity lock: protect proven-positive thumbnails during SPA epoch churn.
+    if (hardBlur) {
+      const hardBlurNav = String(element.dataset.mwHardBlurNav || 'none');
+      const currentNav = String(NAV_ID || 'none');
+      const hardBlurSrc = normalizeUrl(String(element.dataset.mwHardBlurSrc || '')) || '';
+      const nodeSrc = normalizeUrl(String(element.dataset.mwSrc || '')) || '';
+      const srcContinuity = !!(hardBlurSrc && nodeSrc && hardBlurSrc === nodeSrc);
+      const hardBlurSrcInBlurredSet = !!(
+        hardBlurSrc &&
+        state.blurred &&
+        typeof state.blurred.has === 'function' &&
+        state.blurred.has(hardBlurSrc)
+      );
+      if (hardBlurNav === currentNav && srcContinuity && hardBlurSrcInBlurredSet) {
+        return true;
+      }
     }
     return false;
   }
