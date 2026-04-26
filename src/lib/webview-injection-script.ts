@@ -67,6 +67,18 @@ export interface ShortsContinuityGraceInput {
   graceWindowMs: number;
 }
 
+export interface RecycleDecontaminateInput {
+  previousItemKey: string;
+  nextItemKey: string;
+}
+
+export interface NonShortsOverlaySrcFallbackInput {
+  authoritativeHardBlur: boolean;
+  overlayNodeIdMatches: boolean;
+  anchoredToTarget: boolean;
+  singleOverlayInParent: boolean;
+}
+
 const MVP_UNSAFE_CATEGORIES = new Set([
   'swimwear',
   'shirtless',
@@ -155,6 +167,22 @@ export function shouldPreserveShortsContinuityBlur(input: ShortsContinuityGraceI
   if (!Number.isFinite(elapsed) || elapsed < 0) return false;
   const graceWindowMs = Math.max(0, Number(input.graceWindowMs) || 0);
   return elapsed <= graceWindowMs;
+}
+
+export function shouldForceRecycleDecontaminateByItemKey(input: RecycleDecontaminateInput): boolean {
+  if (!input || typeof input !== 'object') return false;
+  const previous = String(input.previousItemKey || 'unknown');
+  const next = String(input.nextItemKey || 'unknown');
+  if (!previous || !next) return false;
+  if (previous === 'unknown' || next === 'unknown') return false;
+  return previous !== next;
+}
+
+export function shouldAllowNonShortsOverlaySrcFallbackReuse(input: NonShortsOverlaySrcFallbackInput): boolean {
+  if (!input || typeof input !== 'object') return false;
+  if (!input.authoritativeHardBlur) return false;
+  if (input.overlayNodeIdMatches) return true;
+  return !!(input.anchoredToTarget && input.singleOverlayInParent);
 }
 
 /**
@@ -384,6 +412,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   mwDiagLog('[Jesus22] startup_diag_marker');
   mwDiagLog('[Dabs420] startup_diag_marker');
   mwDiagLog('[FIX1] startup_diag_marker');
+  mwDiagLog('[Patch6] startup_diag_marker');
 
   function readHostEventPayload(eventLike) {
     if (!eventLike || typeof eventLike !== 'object') return null;
@@ -6131,6 +6160,21 @@ export function generateModerationScript(config: InjectionConfig): string {
     return String(normalized).substring(0, 220);
   }
 
+  function shouldForceRecycleDecontaminateByItemKeyLocal(previousItemKey, nextItemKey) {
+    const previous = String(previousItemKey || 'unknown');
+    const next = String(nextItemKey || 'unknown');
+    if (!previous || !next) return false;
+    if (previous === 'unknown' || next === 'unknown') return false;
+    return previous !== next;
+  }
+
+  function shouldAllowNonShortsOverlaySrcFallbackReuseLocal(input) {
+    if (!input || typeof input !== 'object') return false;
+    if (!input.authoritativeHardBlur) return false;
+    if (input.overlayNodeIdMatches) return true;
+    return !!(input.anchoredToTarget && input.singleOverlayInParent);
+  }
+
   function getDiagTargetDescriptor(target) {
     if (!target || target.nodeType !== 1) return 'unknown';
     const tag = String(target.tagName || 'unknown').toLowerCase();
@@ -7444,7 +7488,24 @@ export function generateModerationScript(config: InjectionConfig): string {
         const overlay = overlays[i];
         if (!overlay || !overlay.isConnected) continue;
         if (overlay.dataset.mwNodeId === nodeId) return overlay;
-        if (!shortsMode && src && overlay.dataset.mwFor === src && isAuthoritativeHardBlur(node)) return overlay;
+        if (!shortsMode && src && overlay.dataset.mwFor === src) {
+          const overlayNodeId = String((overlay.dataset && overlay.dataset.mwNodeId) || '');
+          const overlayNodeIdMatches = !!(overlayNodeId && overlayNodeId === nodeId);
+          const anchoredToTarget = isNonShortsOverlayGeometryAnchored(overlay, node);
+          const singleOverlayInParent = !!(
+            overlay.parentElement &&
+            typeof overlay.parentElement.querySelectorAll === 'function' &&
+            overlay.parentElement.querySelectorAll('.mw-reveal-overlay').length === 1
+          );
+          if (shouldAllowNonShortsOverlaySrcFallbackReuseLocal({
+            authoritativeHardBlur: isAuthoritativeHardBlur(node),
+            overlayNodeIdMatches: overlayNodeIdMatches,
+            anchoredToTarget: anchoredToTarget,
+            singleOverlayInParent: singleOverlayInParent,
+          })) {
+            return overlay;
+          }
+        }
       }
     }
     return null;
@@ -7800,8 +7861,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       element.dataset.mwPreblurClear = 'true';
       element.dataset.mwOverlayOwnerToken = '';
       element.dataset.mwShortsOwnerToken = '';
-      element.dataset.mwHardBlur = '0';
-      element.dataset.mwHardBlurItemKey = '';
+      clearAuthoritativeHardBlur(element);
       if (isShortsModeActive()) {
         clearShortsBlurContextForNode(element, reason || 'clear_all');
       }
@@ -10264,14 +10324,30 @@ export function generateModerationScript(config: InjectionConfig): string {
     // Node recycled with new content: clear stale moderation markers so the new src
     // gets a fresh scan and soft blur is not blocked by a prior safe decision.
     if (img.dataset.mwOrigSrc && img.dataset.mwOrigSrc !== src) {
+      const previousSrcNormalized = normalizeUrl(String(img.dataset.mwOrigSrc || img.dataset.mwLastScanSrc || '')) || '';
+      const nextSrcNormalized = normalizeUrl(String(src || '')) || '';
+      const previousItemKey = getDiagItemKey(previousSrcNormalized || String(img.dataset.mwOrigSrc || img.dataset.mwLastScanSrc || ''));
+      const nextItemKey = getDiagItemKey(nextSrcNormalized || String(src || ''));
+      const forceRecycleDecontaminate = shouldForceRecycleDecontaminateByItemKeyLocal(previousItemKey, nextItemKey);
       mwDiagLog(
         '[MW-FLICKER][RECYCLE] img node recycled - stale markers cleared',
         'node=' + getDiagNodeId(img),
         'prevSrc=' + img.dataset.mwOrigSrc.substring(0, 120),
         'newSrc=' + src.substring(0, 120),
         'wasModerated=' + (img.dataset.mwModerated || 'none'),
-        'wasScanned=' + (img.dataset.mwScanned || 'false')
+        'wasScanned=' + (img.dataset.mwScanned || 'false'),
+        'prevItemKey=' + String(previousItemKey || 'unknown'),
+        'nextItemKey=' + String(nextItemKey || 'unknown'),
+        'forceDecontaminate=' + String(!!forceRecycleDecontaminate)
       );
+      if (forceRecycleDecontaminate) {
+        clearAllBlurAndOverlay(
+          img,
+          nextSrcNormalized || src,
+          'img_recycle_safe_decontaminate_itemkey_changed',
+          ''
+        );
+      }
       img.dataset.mwModerated = '';
       img.dataset.mwScanned = 'false';
       img.dataset.mwPreblurClear = '';
@@ -10863,13 +10939,31 @@ export function generateModerationScript(config: InjectionConfig): string {
             !isShortsModeActive() &&
             isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)
           ) {
-            const _tag = String(node.tagName || '').toLowerCase();
-            const _state = String((node.dataset && node.dataset.mwModerated) || '');
-            if ((_tag === 'img' || _tag === 'video') && _state === '' && _state !== 'revealed') {
-              node.style.filter = 'blur(' + CONFIG.softBlurStrength + 'px)';
-              node.style.webkitFilter = 'blur(' + CONFIG.softBlurStrength + 'px)';
-              node.classList.add('mw-softblur');
-              node.dataset.mwModerated = 'softblur';
+            const applyEntrySoftBlurIfNeeded = function(target, isDescendant) {
+              if (!target || target.nodeType !== 1) return;
+              const tag = String(target.tagName || '').toLowerCase();
+              const stateValue = String((target.dataset && target.dataset.mwModerated) || '');
+              if ((tag === 'img' || tag === 'video') && stateValue === '') {
+                if (isDescendant && tag === 'img') {
+                  // Only soft-blur descendant imgs that are primary thumbnails (ytimg.com)
+                  // or have no src yet (not yet loaded). Excludes avatars (ggpht.com) and
+                  // other non-thumbnail images that would never receive a scan result.
+                  const src = String(target.src || target.getAttribute('src') || '');
+                  if (src && src.indexOf('ytimg.com') === -1) return;
+                }
+                target.style.filter = 'blur(' + CONFIG.softBlurStrength + 'px)';
+                target.style.webkitFilter = 'blur(' + CONFIG.softBlurStrength + 'px)';
+                target.classList.add('mw-softblur');
+                target.dataset.mwModerated = 'softblur';
+              }
+            };
+            applyEntrySoftBlurIfNeeded(node, false);
+            if (typeof node.querySelectorAll === 'function') {
+              const descendants = node.querySelectorAll('img,video');
+              const maxPreblurTargets = 24;
+              for (let i = 0; i < descendants.length && i < maxPreblurTargets; i += 1) {
+                applyEntrySoftBlurIfNeeded(descendants[i], true);
+              }
             }
           }
           // Add to viewport observer for lazy scanning
@@ -10936,14 +11030,30 @@ export function generateModerationScript(config: InjectionConfig): string {
             const newSrc = target.src || '';
             const lastScanSrc = target.dataset.mwLastScanSrc || '';
             if (newSrc && lastScanSrc && lastScanSrc !== newSrc) {
+              const prevSrcNormalized = normalizeUrl(String(lastScanSrc || target.dataset.mwOrigSrc || '')) || '';
+              const nextSrcNormalized = normalizeUrl(String(newSrc || '')) || '';
+              const prevItemKey = getDiagItemKey(prevSrcNormalized || String(lastScanSrc || target.dataset.mwOrigSrc || ''));
+              const nextItemKey = getDiagItemKey(nextSrcNormalized || String(newSrc || ''));
+              const forceDecontaminate = shouldForceRecycleDecontaminateByItemKeyLocal(prevItemKey, nextItemKey);
               mwDiagLog(
                 '[MW-FLICKER][SRC_SWAP] in-place img src changed - scan markers cleared',
                 'node=' + getDiagNodeId(target),
                 'prevSrc=' + lastScanSrc.substring(0, 120),
                 'newSrc=' + newSrc.substring(0, 120),
                 'wasModerated=' + (target.dataset.mwModerated || 'none'),
-                'connected=' + target.isConnected
+                'connected=' + target.isConnected,
+                'prevItemKey=' + String(prevItemKey || 'unknown'),
+                'nextItemKey=' + String(nextItemKey || 'unknown'),
+                'forceDecontaminate=' + String(!!forceDecontaminate)
               );
+              if (forceDecontaminate) {
+                clearAllBlurAndOverlay(
+                  target,
+                  nextSrcNormalized || newSrc,
+                  'img_attr_src_safe_decontaminate_itemkey_changed',
+                  ''
+                );
+              }
               target.dataset.mwScanned = 'false';
               target.dataset.mwLastScanSrc = '';
               target.dataset.mwPreblurClear = '';

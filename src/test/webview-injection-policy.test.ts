@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   applyAnatomicalThresholdDecision,
   applyFailOpenAndModePolicyDecision,
+  shouldAllowNonShortsOverlaySrcFallbackReuse,
+  shouldForceRecycleDecontaminateByItemKey,
   shouldPreserveShortsContinuityBlur,
 } from '@/lib/webview-injection-script';
 
@@ -136,6 +138,54 @@ describe('shorts continuity grace policy', () => {
       hasTransientIdentityOrContextGap: true,
       elapsedSinceAuthoritativeBlurMs: 1800,
       graceWindowMs: 1200,
+    })).toBe(false);
+  });
+});
+
+describe('non-shorts recycle and overlay safety policy', () => {
+  it('forces recycle decontaminate only when both item keys are known and different', () => {
+    expect(shouldForceRecycleDecontaminateByItemKey({
+      previousItemKey: 'abc123',
+      nextItemKey: 'xyz789',
+    })).toBe(true);
+    expect(shouldForceRecycleDecontaminateByItemKey({
+      previousItemKey: 'abc123',
+      nextItemKey: 'abc123',
+    })).toBe(false);
+    expect(shouldForceRecycleDecontaminateByItemKey({
+      previousItemKey: 'unknown',
+      nextItemKey: 'abc123',
+    })).toBe(false);
+    expect(shouldForceRecycleDecontaminateByItemKey({
+      previousItemKey: 'abc123',
+      nextItemKey: 'unknown',
+    })).toBe(false);
+  });
+
+  it('allows non-shorts overlay src fallback reuse only with authoritative ownership proof', () => {
+    expect(shouldAllowNonShortsOverlaySrcFallbackReuse({
+      authoritativeHardBlur: false,
+      overlayNodeIdMatches: true,
+      anchoredToTarget: true,
+      singleOverlayInParent: true,
+    })).toBe(false);
+    expect(shouldAllowNonShortsOverlaySrcFallbackReuse({
+      authoritativeHardBlur: true,
+      overlayNodeIdMatches: true,
+      anchoredToTarget: false,
+      singleOverlayInParent: false,
+    })).toBe(true);
+    expect(shouldAllowNonShortsOverlaySrcFallbackReuse({
+      authoritativeHardBlur: true,
+      overlayNodeIdMatches: false,
+      anchoredToTarget: true,
+      singleOverlayInParent: true,
+    })).toBe(true);
+    expect(shouldAllowNonShortsOverlaySrcFallbackReuse({
+      authoritativeHardBlur: true,
+      overlayNodeIdMatches: false,
+      anchoredToTarget: true,
+      singleOverlayInParent: false,
     })).toBe(false);
   });
 });
