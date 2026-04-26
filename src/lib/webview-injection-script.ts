@@ -414,6 +414,11 @@ export function generateModerationScript(config: InjectionConfig): string {
   mwDiagLog('[FIX1] startup_diag_marker');
   mwDiagLog('[Patch6] startup_diag_marker');
   mwDiagLog('[Patch33] startup_diag_marker');
+  mwDiagLog('[Patch89] startup_diag_marker');
+  mwDiagLog('[New11] startup_diag_marker');
+  mwDiagLog('[Patch10] startup_diag_marker');
+  mwDiagLog('[Tommy] startup_diag_marker');
+  mwDiagLog('[Cody11] startup_diag_marker');
 
   function readHostEventPayload(eventLike) {
     if (!eventLike || typeof eventLike !== 'object') return null;
@@ -821,6 +826,10 @@ export function generateModerationScript(config: InjectionConfig): string {
       skippedRateLimited: 0,
       skippedMutationQueueCap: 0,
       staleEpochDiscarded: 0,
+      negativeTransitionBlurApplied: 0,
+      positiveTransitionBlurDropped: 0,
+      overlayWithoutBlurRemoved: 0,
+      duplicateOverlayRemoved: 0,
     },
     nonShortsReattachContext: persistedNonShortsReattachContext, // key -> { cardKey, itemKey, src, category, itemId, blurPx, nodeId, cardNodeId, updatedAt }
     regularMainCardBlurLatch: new Map(), // key -> { cardNodeId, navId, pageEpoch, hardBlurItemKey, hardBlurSrc, setAt, lastSeenAt, expiresAt }
@@ -3167,6 +3176,20 @@ export function generateModerationScript(config: InjectionConfig): string {
     } catch (e) {}
   }
 
+  function incrementMvpTransitionCounter(counterKey, details) {
+    if (!counterKey) return;
+    if (!state || !state.stats) return;
+    const previous = Number(state.stats[counterKey] || 0);
+    const next = previous + 1;
+    state.stats[counterKey] = next;
+    console.log(
+      '[MW-MVP-REGULAR-TRANSITION-COUNTER]',
+      'counter=' + String(counterKey),
+      'count=' + String(next),
+      details || ''
+    );
+  }
+
   function buildNonShortsReattachContextKey(cardKey, itemKey) {
     return String(cardKey || 'none') + '|' + String(itemKey || 'unknown');
   }
@@ -4243,7 +4266,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       nearbyShortsGuardSkippedNonShorts &&
       cardNodeId !== 'none' &&
       !!contextData &&
-      String(contextKind || 'none') === 'card_blurred'
+      String(contextKind || 'none') === 'card_blurred' &&
+      reattachItemKey !== 'unknown'
     );
     if (preserveCardBlurContinuityAfterNearbyShortsGuard) {
       const cardContextItemKey = getDiagItemKey(String((contextData && contextData.src) || ''));
@@ -4557,22 +4581,26 @@ export function generateModerationScript(config: InjectionConfig): string {
       hardItemKeyKnown &&
       (!strictIdentityKnown || strictContinuityItemKey === 'unknown')
     );
-    const hardBlurSrcMatchesNodeDatasetSrc = !!(
-      hardBlurSrc &&
-      normalizedNodeDatasetSrc &&
-      hardBlurSrc === normalizedNodeDatasetSrc
-    );
     const hardBlurSrcPresentInBlurredSet = !!(
       hardBlurSrc &&
       state.blurred &&
       typeof state.blurred.has === 'function' &&
       state.blurred.has(hardBlurSrc)
     );
+    const regularPositiveContinuityLiveProof = !!(
+      (
+        reattachItemKey &&
+        reattachItemKey !== 'unknown' &&
+        hardItemKeyKnown &&
+        reattachItemKey === hardBlurItemKey
+      ) ||
+      hardSrcMatchesCurrentExact
+    );
     const regularPositiveContinuitySignal = !!(
       regularPathQuarantinePassed &&
       !isHomeShortsShelfVideo &&
       hardBlurSrcPresentInBlurredSet &&
-      (hardSrcMatchesCurrentExact || hardBlurSrcMatchesNodeDatasetSrc)
+      regularPositiveContinuityLiveProof
     );
     // Confirmed ghost: live src item key is known and differs from the hard blur item key.
     // This is direct evidence the node is showing a different video than what was blurred —
@@ -4601,6 +4629,13 @@ export function generateModerationScript(config: InjectionConfig): string {
       (!strictIdentityKnown || strictContinuityItemKey === 'unknown') &&
       !regularPositiveContinuitySignal
     );
+    const regularNoCardBoundaryUnknownIdentity = !!(
+      regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo &&
+      String(cardNodeId || 'none') === 'none' &&
+      reattachItemKey === 'unknown' &&
+      (!strictIdentityKnown || strictContinuityItemKey === 'unknown')
+    );
     const contextDataItemKey = getDiagItemKey(String((contextData && contextData.src) || ''));
     const contextDataItemKeyKnown = !!(contextDataItemKey && contextDataItemKey !== 'unknown');
     const contextDataMatchesStrictKey = !!(
@@ -4613,6 +4648,41 @@ export function generateModerationScript(config: InjectionConfig): string {
       contextDataItemKeyKnown &&
       String(hardBlurItemKey || 'unknown') === String(contextDataItemKey || 'unknown')
     );
+    const regularUnknownIdentityContextBlock = !!(
+      regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo &&
+      !!contextData &&
+      reattachItemKey === 'unknown' &&
+      (
+        String(contextKind || 'none') === 'card_blurred' ||
+        String(contextKind || 'none') === 'itemkey_global' ||
+        String(contextKind || 'none') === 'itemkey_card'
+      ) &&
+      !contextDataMatchesStrictKey &&
+      !contextDataMatchesHardKey &&
+      !hardSrcMatchesCurrentExact
+    );
+    if (regularUnknownIdentityContextBlock) {
+      console.log(
+        '[MW-MVP-REGULAR-NEGATIVE-FAIL-CLOSED-V2] context_blocked_unknown_live_identity',
+        'reason=' + String(reason || 'unknown'),
+        'nodeId=' + String(videoNodeId || 'none'),
+        'contextKind=' + String(contextKind || 'none'),
+        'reattachItemKey=' + String(reattachItemKey || 'unknown'),
+        'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown')
+      );
+      postNonShortsTransitionDiag('regular_context_fail_closed_unknown_live_identity', {
+        reason: String(reason || 'unknown'),
+        nodeId: String(videoNodeId || 'none'),
+        marker: 'MW-MVP-REGULAR-NEGATIVE-FAIL-CLOSED-V2',
+        contextKind: String(contextKind || 'none'),
+        reattachItemKey: String(reattachItemKey || 'unknown'),
+        hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+      });
+      contextData = null;
+      contextKind = 'none';
+      contextNode = null;
+    }
     const regularContextFailClosedUnproven = !!(
       regularPathQuarantinePassed &&
       !isHomeShortsShelfVideo &&
@@ -4732,6 +4802,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       !preserveShortsHardBlurDuringGraceWindow &&
       (
         confirmedLiveGhostByItemKey ||
+        regularNoCardBoundaryUnknownIdentity ||
         regularForceProvenanceClearOnLaneFlipUnknown ||
         (!hardKeyMatchesStrict && !hardSrcMatchesCurrent)
       )
@@ -4742,7 +4813,15 @@ export function generateModerationScript(config: InjectionConfig): string {
         !failClosedRegularLaneFlipGhostBlur &&
         !regularLaneFlipGhostQuarantineActive &&
         !regularGhostEpochBypassActive &&
-        !confirmedLiveGhostByItemKey
+        !confirmedLiveGhostByItemKey &&
+        !regularNoCardBoundaryUnknownIdentity &&
+        // Allow the lane-flip decontaminate to bypass the lock: the lock was stamped by the
+        // Shorts grace window when this node briefly classified as Shorts. When it flips back
+        // to regular with unknown identity and no card boundary, the stamp is illegitimate.
+        // Safe: regularForceProvenanceClearOnLaneFlipUnknown already requires
+        // !regularPositiveContinuitySignal, so real positives (src in state.blurred) are
+        // never cleared by this bypass.
+        !regularForceProvenanceClearOnLaneFlipUnknown
       ) {
         mwDiagLog('[MW-PERSIST][PROVENANCE-BLOCKED] hard_blur_provenance_mismatch suppressed — classification locked',
           'reason=' + String(reason || 'unknown'),
@@ -4767,6 +4846,25 @@ export function generateModerationScript(config: InjectionConfig): string {
           marker: 'Patch7-CONFIRMED-GHOST-LANE-FLIP',
           hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
           liveItemKey: String(liveItemKey || 'unknown'),
+        });
+        blockRegularFallbackNow = true;
+      } else if (regularNoCardBoundaryUnknownIdentity) {
+        mwDiagLog(
+          '[MW-MVP-REGULAR-NEGATIVE-DECONTAMINATE-V2] forcing_provenance_clear_no_card_boundary_unknown_identity',
+          'reason=' + String(reason || 'unknown'),
+          'node=' + videoNodeId,
+          'cardNodeId=' + String(cardNodeId || 'none'),
+          'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown'),
+          'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown')
+        );
+        postNonShortsTransitionDiag('regular_main_negative_decontaminate_no_card_boundary_unknown_identity', {
+          reason: String(reason || 'unknown'),
+          nodeId: videoNodeId,
+          marker: 'MW-MVP-REGULAR-NEGATIVE-DECONTAMINATE-V2',
+          cardNodeId: String(cardNodeId || 'none'),
+          hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+          strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+          reattachItemKey: String(reattachItemKey || 'unknown'),
         });
         blockRegularFallbackNow = true;
       } else if (regularForceProvenanceClearOnLaneFlipUnknown) {
@@ -5366,6 +5464,10 @@ export function generateModerationScript(config: InjectionConfig): string {
       const orphanOverlayId = String((videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown');
       videoOverlay.parentElement.removeChild(videoOverlay);
       videoOverlay = null;
+      incrementMvpTransitionCounter(
+        'overlayWithoutBlurRemoved',
+        'reason=' + String(reason || 'unknown') + ' nodeId=' + String(videoNodeId || 'none') + ' path=overlay_removed_no_blur'
+      );
       console.log(
         '[DIAG][NON_SHORTS_REATTACH] overlay_removed_no_blur',
         'reason=' + (reason || 'unknown'),
@@ -5510,19 +5612,71 @@ export function generateModerationScript(config: InjectionConfig): string {
         overlayPresent: !!videoOverlay,
         contextSize: Number((state.nonShortsReattachContext && state.nonShortsReattachContext.size) || 0),
       });
+      const noContextPositiveOwnershipProof = !!(
+        regularPositiveContinuitySignal ||
+        (
+          strictContinuityItemKey &&
+          strictContinuityItemKey !== 'unknown' &&
+          hardBlurItemKey &&
+          hardBlurItemKey !== 'unknown' &&
+          String(strictContinuityItemKey) === String(hardBlurItemKey)
+        ) ||
+        (
+          hardBlurSrc &&
+          (
+            (normalizedPoster && hardBlurSrc === normalizedPoster) ||
+            (normalizedCurrent && hardBlurSrc === normalizedCurrent)
+          )
+        )
+      );
       // MVP: hold with soft blur while context is still resolving — prevents the
       // ~600ms flash between first loadeddata (no context yet) and second loadeddata
       // (authoritative context arrives). applyBlur() on the next event will replace this.
       if (reasonText === 'event:loadeddata' && !activeVideoBlurred && videoNode.isConnected) {
-        videoNode.style.filter = 'blur(' + CONFIG.softBlurStrength + 'px)';
-        videoNode.style.webkitFilter = 'blur(' + CONFIG.softBlurStrength + 'px)';
-        videoNode.classList.add('mw-softblur');
-        if (videoNode.dataset) videoNode.dataset.mwModerated = 'softblur';
-        // Stamp authoritative hard blur so isNodeClassificationLocked can protect this
-        // node via the mwHardBlurEpoch path even without a full applyBlur() call.
-        markAuthoritativeHardBlur(videoNode, String((videoNode.dataset && videoNode.dataset.mwSrc) || ''));
-        if (videoNode.dataset) videoNode.dataset.mwHardBlurItemKey = String(strictContinuityItemKey || 'unknown');
-        mwDiagLog('[MW-FLICKER][NO-CONTEXT-HOLD] soft blur applied + authoritative stamp', 'nodeId=' + videoNodeId, 'key=' + String(strictContinuityItemKey || 'unknown'), 'hardBlurEpoch=' + String(CONFIG.pageEpoch));
+        if (noContextPositiveOwnershipProof) {
+          videoNode.style.filter = 'blur(' + CONFIG.softBlurStrength + 'px)';
+          videoNode.style.webkitFilter = 'blur(' + CONFIG.softBlurStrength + 'px)';
+          videoNode.classList.add('mw-softblur');
+          if (videoNode.dataset) videoNode.dataset.mwModerated = 'softblur';
+          // Stamp authoritative hard blur so isNodeClassificationLocked can protect this
+          // node via the mwHardBlurEpoch path even without a full applyBlur() call.
+          markAuthoritativeHardBlur(videoNode, String((videoNode.dataset && videoNode.dataset.mwSrc) || ''));
+          if (videoNode.dataset) videoNode.dataset.mwHardBlurItemKey = String(strictContinuityItemKey || 'unknown');
+          mwDiagLog('[MW-FLICKER][NO-CONTEXT-HOLD] soft blur applied + authoritative stamp', 'nodeId=' + videoNodeId, 'key=' + String(strictContinuityItemKey || 'unknown'), 'hardBlurEpoch=' + String(CONFIG.pageEpoch));
+          postNonShortsTransitionDiag('transition_decision', {
+            reason: String(reason || 'unknown'),
+            nodeId: videoNodeId,
+            itemKey: String(reattachItemKey || 'unknown'),
+            hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+            contextKind: String(contextKind || 'none'),
+            action: 'keep_blur',
+            marker: 'MW-MVP-REGULAR-NEGATIVE-TRANSITION-GUARD-V1',
+          });
+        } else {
+          const cleared = clearAllBlurAndOverlay(
+            videoNode,
+            normalizedCurrent || normalizedPoster || String((videoNode.dataset && videoNode.dataset.mwSrc) || ''),
+            'regular_video_transition_negative_no_proof_safe_decontaminate',
+            'safe'
+          );
+          if (cleared) {
+            incrementMvpTransitionCounter(
+              'negativeTransitionBlurApplied',
+              'reason=' + String(reason || 'unknown') + ' nodeId=' + String(videoNodeId || 'none') + ' blocked=true'
+            );
+          }
+          postNonShortsTransitionDiag('transition_decision', {
+            reason: String(reason || 'unknown'),
+            nodeId: videoNodeId,
+            itemKey: String(reattachItemKey || 'unknown'),
+            hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+            contextKind: String(contextKind || 'none'),
+            action: 'clear_blur',
+            marker: 'MW-MVP-REGULAR-NEGATIVE-TRANSITION-GUARD-V1',
+            blockedNoProof: true,
+            cleared: !!cleared,
+          });
+        }
       }
     }
     if (
@@ -5633,7 +5787,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (regularPathQuarantinePassed && (activeVideoBlurred || hasAuthoritativeBlur)) {
         const resolvedRegularOwnership = !!(contextData || hasAuthoritativeBlur);
         if (resolvedRegularOwnership) {
-          const isFreshOverlayPhase = phase === 'post_create' || phase === 'post_migrate';
+          // invariant_pass fires immediately after create — layout may not have settled yet,
+          // so treat it identically to post_create: defer removal rather than force-remove.
+          const isFreshOverlayPhase = phase === 'post_create' || phase === 'post_migrate' || phase === 'invariant_pass';
           if (isFreshOverlayPhase) {
             console.warn(
               '[MW-MVP-REGULAR-THUMB-OVERLAY-ANCHOR-V2] overlay_geometry_mismatch_defer_remove_fresh_overlay',
@@ -5836,6 +5992,10 @@ export function generateModerationScript(config: InjectionConfig): string {
         if (removedByInvariant) {
           videoOverlay = null;
           overlayAnchored = false;
+          incrementMvpTransitionCounter(
+            'overlayWithoutBlurRemoved',
+            'reason=' + String(reason || 'unknown') + ' nodeId=' + String(videoNodeId || 'none') + ' path=invariant_no_blur'
+          );
           console.log(
             '[MW-MVP-REGULAR-OVERLAY-INVARIANT-V1] removed_overlay_no_blur',
             'reason=' + String(reason || 'unknown'),
@@ -5886,6 +6046,10 @@ export function generateModerationScript(config: InjectionConfig): string {
           }
         }
         if (duplicateRemoved > 0) {
+          incrementMvpTransitionCounter(
+            'duplicateOverlayRemoved',
+            'reason=' + String(reason || 'unknown') + ' nodeId=' + String(videoNodeId || 'none') + ' removed=' + String(duplicateRemoved)
+          );
           console.log(
             '[MW-MVP-REGULAR-OVERLAY-INVARIANT-V1] deduped',
             'reason=' + String(reason || 'unknown'),
@@ -5912,6 +6076,24 @@ export function generateModerationScript(config: InjectionConfig): string {
       overlayAnchored: !!overlayAnchored,
       overlayPresent: !!videoOverlay,
     });
+    const mvpTransitionAction = contextData
+      ? 'apply_blur'
+      : ((activeVideoBlurred || hasAuthoritativeBlur) ? 'keep_blur' : 'clear_blur');
+    postNonShortsTransitionDiag('transition_decision', {
+      reason: String(reason || 'unknown'),
+      nodeId: videoNodeId,
+      itemKey: String(reattachItemKey || 'unknown'),
+      hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+      contextKind: String(contextKind || 'none'),
+      action: mvpTransitionAction,
+      marker: 'MW-MVP-REGULAR-TRANSITION-DECISION-V1',
+    });
+    if (regularPositiveContinuitySignal && !(activeVideoBlurred || hasAuthoritativeBlur)) {
+      incrementMvpTransitionCounter(
+        'positiveTransitionBlurDropped',
+        'reason=' + String(reason || 'unknown') + ' nodeId=' + String(videoNodeId || 'none') + ' itemKey=' + String(reattachItemKey || 'unknown')
+      );
+    }
 
     const reattachItemKeyKnown = !!(reattachItemKey && reattachItemKey !== 'unknown');
     const strictContinuityItemKeyKnown = !!(strictContinuityItemKey && strictContinuityItemKey !== 'unknown');
@@ -8604,7 +8786,11 @@ export function generateModerationScript(config: InjectionConfig): string {
       ' hasOverlay=' + (element.dataset.mwHasOverlay === 'true')
     );
     ensureRevealDocClickCapture();
-    if (element.dataset.mwModerated !== 'blurred') {
+    // Allow overlay creation for softblur+authoritative nodes (no_context_decision hold path):
+    // these have mwModerated='softblur' but isAuthoritativeHardBlur=true, meaning a known
+    // positive is held during Shorts shelf churn. Without this bypass, no overlay is ever
+    // created for the held node.
+    if (element.dataset.mwModerated !== 'blurred' && !isAuthoritativeHardBlur(element)) {
       removeRevealOverlay(element, src, 'createRevealOverlay_not_blurred');
       if (DIAG_YT_BLUR) {
         diagFailCaseLog(
@@ -8922,23 +9108,31 @@ export function generateModerationScript(config: InjectionConfig): string {
     });
     console.log('[DIAG][REVEAL_UI] bind_overlay', 'overlayId=' + overlayId);
     
-    btn.addEventListener('click', function(e) {
-      e.preventDefault();
-      e.stopPropagation();
+    let lastRevealActivationAt = 0;
+    const handleRevealActivation = function(e, channel) {
+      if (e && typeof e.preventDefault === 'function') e.preventDefault();
+      if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
+      if (e && typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+      const now = Date.now();
+      if (lastRevealActivationAt > 0 && (now - lastRevealActivationAt) < 220) {
+        return;
+      }
+      lastRevealActivationAt = now;
       console.log(
         '[DIAG][REVEAL_EVT] button_click',
         'overlayId=' + overlayId,
-        'target=' + getDiagTargetDescriptor(e.target)
+        'target=' + getDiagTargetDescriptor(e && e.target),
+        'channel=' + String(channel || 'click')
       );
       if (!shortsMode && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
         console.log(
           '[DIAG][MVP_REVEAL_PATH] tap_received',
-          'channel=button',
+          'channel=' + String(channel || 'button'),
           'overlayId=' + overlayId,
           'itemKey=' + itemKey
         );
       }
-      logRevealHittestSnapshot(overlay, btn, overlayId, 'button_click', e);
+      logRevealHittestSnapshot(overlay, btn, overlayId, 'button_click_' + String(channel || 'click'), e);
       const revealMeta = getRevealMetaForSource(src, element);
       const revealAllowed = !revealMeta.meta;
       const revealGateReason = revealAllowed ? 'not_revealed' : 'already_revealed_reblur_path';
@@ -9046,6 +9240,15 @@ export function generateModerationScript(config: InjectionConfig): string {
           showCorrectionOverlay(element, src, category, labelItemId);
         }
       }
+    };
+    btn.addEventListener('pointerdown', function(e) {
+      handleRevealActivation(e, 'pointerdown');
+    }, { capture: true });
+    btn.addEventListener('touchstart', function(e) {
+      handleRevealActivation(e, 'touchstart');
+    }, { capture: true, passive: false });
+    btn.addEventListener('click', function(e) {
+      handleRevealActivation(e, 'click');
     });
     console.log('[DIAG][REVEAL_UI] bind_button', 'overlayId=' + overlayId);
     overlay.dataset.mwRevealHandlersBound = 'true';
