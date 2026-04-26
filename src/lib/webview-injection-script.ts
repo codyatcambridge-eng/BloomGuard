@@ -382,6 +382,8 @@ export function generateModerationScript(config: InjectionConfig): string {
   mwDiagLog('[Spoon1] startup_diag_marker');
   mwDiagLog('[Sun22] startup_diag_marker');
   mwDiagLog('[Jesus22] startup_diag_marker');
+  mwDiagLog('[Dabs420] startup_diag_marker');
+  mwDiagLog('[FIX1] startup_diag_marker');
 
   function readHostEventPayload(eventLike) {
     if (!eventLike || typeof eventLike !== 'object') return null;
@@ -4542,6 +4544,17 @@ export function generateModerationScript(config: InjectionConfig): string {
       hardBlurSrcPresentInBlurredSet &&
       (hardSrcMatchesCurrentExact || hardBlurSrcMatchesNodeDatasetSrc)
     );
+    const regularForceProvenanceClearOnLaneFlipUnknown = !!(
+      regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo &&
+      laneFlipShortsToRegularUnknownIdentity &&
+      !contextData &&
+      isTransitionChurnReason &&
+      hasAuthoritativeBlur &&
+      String(cardNodeId || 'none') === 'none' &&
+      (!strictIdentityKnown || strictContinuityItemKey === 'unknown') &&
+      !regularPositiveContinuitySignal
+    );
     const contextDataItemKey = getDiagItemKey(String((contextData && contextData.src) || ''));
     const contextDataItemKeyKnown = !!(contextDataItemKey && contextDataItemKey !== 'unknown');
     const contextDataMatchesStrictKey = !!(
@@ -4667,12 +4680,14 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (
       hasAuthoritativeBlur &&
       !contextData &&
-      !hardKeyMatchesStrict &&
-      !hardSrcMatchesCurrent &&
       !regularPositiveContinuitySignal &&
       !holdBlurDuringUnresolvedTransition &&
       !preserveShortsHardBlurDuringResolvedContinuity &&
-      !preserveShortsHardBlurDuringGraceWindow
+      !preserveShortsHardBlurDuringGraceWindow &&
+      (
+        regularForceProvenanceClearOnLaneFlipUnknown ||
+        (!hardKeyMatchesStrict && !hardSrcMatchesCurrent)
+      )
     ) {
       if (
         isNodeClassificationLocked(videoNode, reason) &&
@@ -4690,7 +4705,30 @@ export function generateModerationScript(config: InjectionConfig): string {
           'pageEpoch=' + String(CONFIG.pageEpoch)
         );
       } else {
-      if (regularVideoTransitionUnresolvedGhost) {
+      if (regularForceProvenanceClearOnLaneFlipUnknown) {
+        mwDiagLog(
+          '[MW-MVP-REGULAR-NEGATIVE-DECONTAMINATE-V1] forcing_provenance_clear_lane_flip_unknown_identity',
+          'reason=' + String(reason || 'unknown'),
+          'node=' + videoNodeId,
+          'cardNodeId=' + String(cardNodeId || 'none'),
+          'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown'),
+          'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown')
+        );
+        postNonShortsTransitionDiag('regular_main_negative_decontaminate_lane_flip_unknown', {
+          reason: String(reason || 'unknown'),
+          nodeId: videoNodeId,
+          marker: 'MW-MVP-REGULAR-NEGATIVE-DECONTAMINATE-V1',
+          cardNodeId: String(cardNodeId || 'none'),
+          hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+          strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        });
+        if (videoNode && videoNode.dataset) {
+          videoNode.dataset.mwRegularLaneFlipGhostQuarantineUntil =
+            String(Date.now() + REGULAR_MAIN_LANE_FLIP_GHOST_QUARANTINE_MS);
+          videoNode.dataset.mwRegularGhostSeenEpoch = String(CONFIG.pageEpoch);
+        }
+        blockRegularFallbackNow = true;
+      } else if (regularVideoTransitionUnresolvedGhost) {
         // Nuclear MVP guard for regular video-thumbnail transitions:
         // if ownership is unresolved, force-clear stale blur carry-over immediately.
         mwDiagLog(
