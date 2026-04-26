@@ -413,6 +413,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   mwDiagLog('[Dabs420] startup_diag_marker');
   mwDiagLog('[FIX1] startup_diag_marker');
   mwDiagLog('[Patch6] startup_diag_marker');
+  mwDiagLog('[Patch33] startup_diag_marker');
 
   function readHostEventPayload(eventLike) {
     if (!eventLike || typeof eventLike !== 'object') return null;
