@@ -4573,6 +4573,22 @@ export function generateModerationScript(config: InjectionConfig): string {
       hardBlurSrcPresentInBlurredSet &&
       (hardSrcMatchesCurrentExact || hardBlurSrcMatchesNodeDatasetSrc)
     );
+    // Confirmed ghost: live src item key is known and differs from the hard blur item key.
+    // This is direct evidence the node is showing a different video than what was blurred —
+    // a Shorts ghost on a recycled regular node. Overrides regularPositiveContinuitySignal's
+    // false-positive when mwSrc still carries stale Shorts data.
+    // Safe: for a legitimate positive, liveItemKey === hardBlurItemKey, so this stays false.
+    const liveItemKey = getDiagItemKey(normalizedCurrent || normalizedPoster || '');
+    const confirmedLiveGhostByItemKey = !!(
+      regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo &&
+      laneFlipShortsToRegularUnknownIdentity &&
+      isTransitionChurnReason &&
+      hasAuthoritativeBlur &&
+      hardItemKeyKnown &&
+      liveItemKey && liveItemKey !== 'unknown' &&
+      liveItemKey !== hardBlurItemKey
+    );
     const regularForceProvenanceClearOnLaneFlipUnknown = !!(
       regularPathQuarantinePassed &&
       !isHomeShortsShelfVideo &&
@@ -4709,11 +4725,12 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (
       hasAuthoritativeBlur &&
       !contextData &&
-      !regularPositiveContinuitySignal &&
+      (!regularPositiveContinuitySignal || confirmedLiveGhostByItemKey) &&
       !holdBlurDuringUnresolvedTransition &&
       !preserveShortsHardBlurDuringResolvedContinuity &&
       !preserveShortsHardBlurDuringGraceWindow &&
       (
+        confirmedLiveGhostByItemKey ||
         regularForceProvenanceClearOnLaneFlipUnknown ||
         (!hardKeyMatchesStrict && !hardSrcMatchesCurrent)
       )
@@ -4723,7 +4740,8 @@ export function generateModerationScript(config: InjectionConfig): string {
         !regularVideoTransitionUnresolvedGhost &&
         !failClosedRegularLaneFlipGhostBlur &&
         !regularLaneFlipGhostQuarantineActive &&
-        !regularGhostEpochBypassActive
+        !regularGhostEpochBypassActive &&
+        !confirmedLiveGhostByItemKey
       ) {
         mwDiagLog('[MW-PERSIST][PROVENANCE-BLOCKED] hard_blur_provenance_mismatch suppressed — classification locked',
           'reason=' + String(reason || 'unknown'),
@@ -4734,7 +4752,23 @@ export function generateModerationScript(config: InjectionConfig): string {
           'pageEpoch=' + String(CONFIG.pageEpoch)
         );
       } else {
-      if (regularForceProvenanceClearOnLaneFlipUnknown) {
+      if (confirmedLiveGhostByItemKey) {
+        mwDiagLog(
+          '[Patch7][CONFIRMED-GHOST-LANE-FLIP] forcing_provenance_clear_confirmed_different_video',
+          'reason=' + String(reason || 'unknown'),
+          'node=' + videoNodeId,
+          'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown'),
+          'liveItemKey=' + String(liveItemKey || 'unknown')
+        );
+        postNonShortsTransitionDiag('confirmed_ghost_lane_flip_provenance_clear', {
+          reason: String(reason || 'unknown'),
+          nodeId: videoNodeId,
+          marker: 'Patch7-CONFIRMED-GHOST-LANE-FLIP',
+          hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+          liveItemKey: String(liveItemKey || 'unknown'),
+        });
+        blockRegularFallbackNow = true;
+      } else if (regularForceProvenanceClearOnLaneFlipUnknown) {
         mwDiagLog(
           '[MW-MVP-REGULAR-NEGATIVE-DECONTAMINATE-V1] forcing_provenance_clear_lane_flip_unknown_identity',
           'reason=' + String(reason || 'unknown'),
