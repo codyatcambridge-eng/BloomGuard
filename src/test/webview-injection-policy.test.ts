@@ -2,12 +2,28 @@ import { describe, it, expect } from 'vitest';
 import {
   applyAnatomicalThresholdDecision,
   applyFailOpenAndModePolicyDecision,
+  generateModerationScript,
   shouldAllowNonShortsOverlaySrcFallbackReuse,
   shouldForceRecycleDecontaminateByItemKey,
+  shouldHoldNonShortsTransitionClear,
   shouldPreserveShortsContinuityBlur,
 } from '@/lib/webview-injection-script';
 
 describe('webview injection blur policy', () => {
+  it('generated moderation script is syntactically valid for mvp config', () => {
+    const script = generateModerationScript({
+      sensitivity: 3,
+      blurStrength: 20,
+      enabled: true,
+      nonce: 'n_test_nonce',
+      blockingMode: 'mvp',
+      pageEpoch: 5,
+      diagYouTubeShorts: false,
+    });
+
+    expect(() => new Function(script)).not.toThrow();
+  });
+
   it('does not blur sexy when anatomical score is below threshold (fail-open)', () => {
     const anatomical = applyAnatomicalThresholdDecision({
       shouldApplyBlur: true,
@@ -186,6 +202,68 @@ describe('non-shorts recycle and overlay safety policy', () => {
       overlayNodeIdMatches: false,
       anchoredToTarget: true,
       singleOverlayInParent: false,
+    })).toBe(false);
+  });
+});
+
+describe('non-shorts unresolved transition clear hold policy', () => {
+  it('holds clear only for regular-main unresolved churn with blur + classification lock', () => {
+    expect(shouldHoldNonShortsTransitionClear({
+      isMainSurfaceUrl: true,
+      regularPathQuarantinePassed: true,
+      isHomeShortsShelfVideo: false,
+      isTransitionChurnReason: true,
+      strictContinuityItemKey: 'unknown',
+      reattachItemKey: 'unknown',
+      hasContextData: false,
+      hasAnyBlur: true,
+      classificationLocked: true,
+      hasOwnershipProof: true,
+    })).toBe(true);
+  });
+
+  it('does not hold clear for unresolved churn when classification is not locked', () => {
+    expect(shouldHoldNonShortsTransitionClear({
+      isMainSurfaceUrl: true,
+      regularPathQuarantinePassed: true,
+      isHomeShortsShelfVideo: false,
+      isTransitionChurnReason: true,
+      strictContinuityItemKey: 'unknown',
+      reattachItemKey: 'unknown',
+      hasContextData: false,
+      hasAnyBlur: true,
+      classificationLocked: false,
+      hasOwnershipProof: true,
+    })).toBe(false);
+  });
+
+  it('does not hold clear for shorts path', () => {
+    expect(shouldHoldNonShortsTransitionClear({
+      isMainSurfaceUrl: true,
+      regularPathQuarantinePassed: true,
+      isHomeShortsShelfVideo: true,
+      isTransitionChurnReason: true,
+      strictContinuityItemKey: 'unknown',
+      reattachItemKey: 'unknown',
+      hasContextData: false,
+      hasAnyBlur: true,
+      classificationLocked: true,
+      hasOwnershipProof: true,
+    })).toBe(false);
+  });
+
+  it('does not hold clear when ownership proof is missing', () => {
+    expect(shouldHoldNonShortsTransitionClear({
+      isMainSurfaceUrl: true,
+      regularPathQuarantinePassed: true,
+      isHomeShortsShelfVideo: false,
+      isTransitionChurnReason: true,
+      strictContinuityItemKey: 'unknown',
+      reattachItemKey: 'unknown',
+      hasContextData: false,
+      hasAnyBlur: true,
+      classificationLocked: true,
+      hasOwnershipProof: false,
     })).toBe(false);
   });
 });
