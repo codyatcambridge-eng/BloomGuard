@@ -3158,6 +3158,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   const NON_SHORTS_UNRESOLVED_CLEAR_HOLD_MS = 900;
   const NON_SHORTS_UNRESOLVED_CLEAR_VETO_MS = 650;
   const MAX_REGULAR_POSITIVE_HOLD_TOTAL_MS = 2400;
+  const REGULAR_MAIN_SAME_NODE_POSITIVE_SRC_GRACE_MS = 1400;
   const SHORTS_SHELF_POSITIVE_HOLD_MS = 900;
   const MAX_SHORTS_SHELF_POSITIVE_HOLD_TOTAL_MS = 2200;
 
@@ -5730,6 +5731,47 @@ export function generateModerationScript(config: InjectionConfig): string {
       state.blurred.size > 0
     ) {
       const resolvedUrl = normalizedPoster || normalizedCurrent || String((videoNode.dataset && videoNode.dataset.mwSrc) || '');
+      const fallbackProofNodeId = String((videoNode.dataset && videoNode.dataset.mwRegularPositiveProofNodeId) || 'none');
+      const fallbackProofSrc = normalizeUrl(String((videoNode.dataset && videoNode.dataset.mwRegularPositiveProofSrc) || '')) || '';
+      const fallbackProofNav = String((videoNode.dataset && videoNode.dataset.mwRegularPositiveProofNav) || 'none');
+      const fallbackProofPageEpoch = Number((videoNode.dataset && videoNode.dataset.mwRegularPositiveProofPageEpoch) || 0);
+      const fallbackPreviousAuthoritativePositive = String((videoNode.dataset && videoNode.dataset.mwRegularPositiveProof) || '') === '1';
+      const fallbackSameNavEpoch = !!(
+        fallbackPreviousAuthoritativePositive &&
+        fallbackProofNav === String(NAV_ID || 'none') &&
+        fallbackProofPageEpoch > 0 &&
+        fallbackProofPageEpoch === Number(state.pageEpoch || 0)
+      );
+      const fallbackSameDomNode = !!(
+        fallbackProofNodeId &&
+        fallbackProofNodeId !== 'none' &&
+        fallbackProofNodeId === String(videoNodeId || 'none')
+      );
+      const fallbackProofAt = Number((videoNode.dataset && videoNode.dataset.mwRegularPositiveProofAt) || 0);
+      const fallbackProofAgeMs = (
+        Number.isFinite(fallbackProofAt) && fallbackProofAt > 0
+          ? Math.max(0, Date.now() - fallbackProofAt)
+          : Number.POSITIVE_INFINITY
+      );
+      const fallbackKnownNegativeLocalNode = String((videoNode.dataset && videoNode.dataset.mwKnownNegativeForCardOrItem) || '') === '1';
+      const fallbackSameNodeRecentPositiveSrcContinuity = !!(
+        unresolvedRegularTransitionNow &&
+        regularNoCardBoundaryUnknownIdentity &&
+        fallbackPreviousAuthoritativePositive &&
+        fallbackSameNavEpoch &&
+        fallbackSameDomNode &&
+        !fallbackKnownNegativeLocalNode &&
+        fallbackProofSrc &&
+        resolvedUrl &&
+        fallbackProofSrc === resolvedUrl &&
+        Number.isFinite(fallbackProofAgeMs) &&
+        fallbackProofAgeMs <= REGULAR_MAIN_SAME_NODE_POSITIVE_SRC_GRACE_MS
+      );
+      const fallbackBlockedByUnknownIdentityNoProof = !!(
+        unresolvedRegularTransitionNow &&
+        regularNoCardBoundaryUnknownIdentity &&
+        !fallbackSameNodeRecentPositiveSrcContinuity
+      );
       const fallbackHasHardIdentityProof = !!(
         (
           strictIdentityKnown &&
@@ -5746,6 +5788,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         resolvedUrl &&
         state.blurred.has(resolvedUrl) &&
         fallbackHasHardIdentityProof &&
+        !fallbackBlockedByUnknownIdentityNoProof &&
         !blockRegularFallbackNow
       ) {
         contextKind = 'state_blurred_fallback';
@@ -5766,6 +5809,49 @@ export function generateModerationScript(config: InjectionConfig): string {
           nodeId: videoNodeId,
           marker: 'MW-FLICKER-STATE-BLURRED-FALLBACK-V1',
           resolvedUrl: String(resolvedUrl || '').substring(0, 180),
+          sameNodeRecentPositiveSrcContinuity: !!fallbackSameNodeRecentPositiveSrcContinuity,
+          proofAgeMs: Number.isFinite(fallbackProofAgeMs) ? Math.round(fallbackProofAgeMs) : -1,
+        });
+        if (fallbackSameNodeRecentPositiveSrcContinuity) {
+          postNonShortsTransitionDiag('state_blurred_fallback_allow_same_node_recent_positive_src', {
+            reason: String(reason || 'unknown'),
+            nodeId: videoNodeId,
+            marker: 'MW-MVP-REGULAR-STATE-FALLBACK-ALLOW-SAME-NODE-RECENT-POSITIVE-SRC-V1',
+            cardNodeId: String(cardNodeId || 'none'),
+            strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+            hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+            resolvedUrl: String(resolvedUrl || '').substring(0, 180),
+            proofAgeMs: Number.isFinite(fallbackProofAgeMs) ? Math.round(fallbackProofAgeMs) : -1,
+            action: 'apply_blur',
+          });
+        }
+      } else if (
+        resolvedUrl &&
+        state.blurred.has(resolvedUrl) &&
+        fallbackHasHardIdentityProof &&
+        fallbackBlockedByUnknownIdentityNoProof
+      ) {
+        console.log(
+          '[MW-MVP-REGULAR-STATE-FALLBACK-BLOCKED-UNKNOWN-IDENTITY-NO-PROOF-V1] state_blurred_fallback_blocked_unknown_identity_no_proof',
+          'reason=' + String(reason || 'unknown'),
+          'nodeId=' + videoNodeId,
+          'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
+          'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown'),
+          'resolvedUrl=' + String(resolvedUrl || '').substring(0, 180),
+          'sameNodeRecentPositiveSrcContinuity=' + String(!!fallbackSameNodeRecentPositiveSrcContinuity),
+          'proofAgeMs=' + String(Number.isFinite(fallbackProofAgeMs) ? Math.round(fallbackProofAgeMs) : -1)
+        );
+        postNonShortsTransitionDiag('state_blurred_fallback_blocked_unknown_identity_no_proof', {
+          reason: String(reason || 'unknown'),
+          nodeId: videoNodeId,
+          marker: 'MW-MVP-REGULAR-STATE-FALLBACK-BLOCKED-UNKNOWN-IDENTITY-NO-PROOF-V1',
+          cardNodeId: String(cardNodeId || 'none'),
+          strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+          hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+          resolvedUrl: String(resolvedUrl || '').substring(0, 180),
+          sameNodeRecentPositiveSrcContinuity: !!fallbackSameNodeRecentPositiveSrcContinuity,
+          proofAgeMs: Number.isFinite(fallbackProofAgeMs) ? Math.round(fallbackProofAgeMs) : -1,
+          action: 'block_fallback',
         });
       } else if (
         resolvedUrl &&
@@ -5815,6 +5901,12 @@ export function generateModerationScript(config: InjectionConfig): string {
     const regularProofCardNodeId = String((videoNode.dataset && videoNode.dataset.mwRegularPositiveProofCardNodeId) || 'none');
     const regularProofItemKey = String((videoNode.dataset && videoNode.dataset.mwRegularPositiveProofItemKey) || 'unknown');
     const regularProofSrc = normalizeUrl(String((videoNode.dataset && videoNode.dataset.mwRegularPositiveProofSrc) || '')) || '';
+    const regularProofAt = Number((videoNode.dataset && videoNode.dataset.mwRegularPositiveProofAt) || 0);
+    const regularProofAgeMs = (
+      Number.isFinite(regularProofAt) && regularProofAt > 0
+        ? Math.max(0, Date.now() - regularProofAt)
+        : Number.POSITIVE_INFINITY
+    );
     const regularProofNav = String((videoNode.dataset && videoNode.dataset.mwRegularPositiveProofNav) || 'none');
     const regularProofPageEpoch = Number((videoNode.dataset && videoNode.dataset.mwRegularPositiveProofPageEpoch) || 0);
     const previousAuthoritativePositive = String((videoNode.dataset && videoNode.dataset.mwRegularPositiveProof) || '') === '1';
@@ -5932,9 +6024,25 @@ export function generateModerationScript(config: InjectionConfig): string {
         (contextDataMatchesStrictKey || contextDataMatchesHardKey)
       )
     );
+    const regularSameNodeRecentPositiveSrcContinuity = !!(
+      unresolvedRegularTransitionNow &&
+      regularNoCardBoundaryUnknownIdentity &&
+      previousAuthoritativePositive &&
+      sameNavEpoch &&
+      sameDomNode &&
+      !cardBoundaryChanged &&
+      !knownNegativeForCardOrItem &&
+      !regularMainNegativeLatchRead.matched &&
+      regularProofSrc &&
+      currentResolvedSrcForProof &&
+      regularProofSrc === currentResolvedSrcForProof &&
+      Number.isFinite(regularProofAgeMs) &&
+      regularProofAgeMs <= REGULAR_MAIN_SAME_NODE_POSITIVE_SRC_GRACE_MS
+    );
     const regularSameLocalSrcCarryBlockedUnknownIdentity = !!(
       unresolvedRegularTransitionNow &&
-      regularNoCardBoundaryUnknownIdentity
+      regularNoCardBoundaryUnknownIdentity &&
+      !regularSameNodeRecentPositiveSrcContinuity
     );
     const regularPreVetoContinuityProof = !!(
       unresolvedRegularTransitionNow &&
@@ -6160,6 +6268,18 @@ export function generateModerationScript(config: InjectionConfig): string {
         hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
         unresolvedRegularTransitionNow: !!unresolvedRegularTransitionNow,
         action: 'clear_blur',
+      });
+    } else if (regularSameNodeRecentPositiveSrcContinuity) {
+      postNonShortsTransitionDiag('regular_same_node_recent_positive_src_continuity', {
+        reason: String(reason || 'unknown'),
+        nodeId: String(videoNodeId || 'none'),
+        marker: 'MW-MVP-REGULAR-SAME-NODE-RECENT-POSITIVE-SRC-CONTINUITY-V1',
+        cardNodeId: String(cardNodeId || 'none'),
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+        reattachItemKey: String(reattachItemKey || 'unknown'),
+        proofAgeMs: Number.isFinite(regularProofAgeMs) ? Math.round(regularProofAgeMs) : -1,
+        action: 'keep_blur',
       });
     }
     const regularTerminalKeepBlurByContinuity = !!(
@@ -6477,6 +6597,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         previousAuthoritativePositive: !!previousAuthoritativePositive,
         hasAnyNegativeProof: !!hasAnyNegativeProof,
         hasPositiveContinuityProofStrong: !!hasPositiveContinuityProofStrong,
+        sameNodeRecentPositiveSrcContinuity: !!regularSameNodeRecentPositiveSrcContinuity,
         clearAllowedByProof: !!regularClearAllowedByProof,
         action: 'clear_blur',
       });
@@ -8479,6 +8600,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         contextOwnedByCurrentNode: !!contextOwnedByCurrentNode,
         hasStrongOwnershipProof: !!regularKeepBlurStrongOwnershipProof,
         hasPositiveContinuityProofStrong: !!hasPositiveContinuityProofStrong,
+        sameNodeRecentPositiveSrcContinuity: !!regularSameNodeRecentPositiveSrcContinuity,
         action: 'clear_blur',
       });
     }
