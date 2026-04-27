@@ -267,3 +267,47 @@ describe('non-shorts unresolved transition clear hold policy', () => {
     })).toBe(false);
   });
 });
+
+describe('mvp transition stability regression markers', () => {
+  it('includes stale epoch guards for non-shorts transition ordering', () => {
+    const script = generateModerationScript({
+      sensitivity: 4,
+      blurStrength: 20,
+      enabled: true,
+      nonce: 'n_test_nonce',
+      blockingMode: 'mvp',
+      pageEpoch: 7,
+      diagYouTubeShorts: false,
+    });
+    expect(script.includes('transitionStaleEpochSkipped')).toBe(true);
+    expect(script.includes('scope=node_guard')).toBe(true);
+  });
+
+  it('includes unresolved positive same-src clear veto path', () => {
+    const script = generateModerationScript({
+      sensitivity: 4,
+      blurStrength: 20,
+      enabled: true,
+      nonce: 'n_test_nonce',
+      blockingMode: 'mvp',
+      pageEpoch: 7,
+      diagYouTubeShorts: false,
+    });
+    expect(script.includes('same_src_clear_veto')).toBe(true);
+    expect(script.includes('mwRegularClearVetoUntil')).toBe(true);
+  });
+
+  it('includes overlay removal veto while regular positive hold is active', () => {
+    const script = generateModerationScript({
+      sensitivity: 4,
+      blurStrength: 20,
+      enabled: true,
+      nonce: 'n_test_nonce',
+      blockingMode: 'mvp',
+      pageEpoch: 7,
+      diagYouTubeShorts: false,
+    });
+    expect(script.includes('regular_main_overlay_remove_veto_positive_hold')).toBe(true);
+    expect(script.includes('MW-MVP-REGULAR-THUMB-POSITIVE-HOLD-OVERLAY-VETO-V1')).toBe(true);
+  });
+});

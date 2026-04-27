@@ -449,6 +449,8 @@ export function generateModerationScript(config: InjectionConfig): string {
   mwDiagLog('[Patch10] startup_diag_marker');
   mwDiagLog('[Tommy] startup_diag_marker');
   mwDiagLog('[Cody11] startup_diag_marker');
+  mwDiagLog('[cassity1] startup_diag_marker');
+  mwDiagLog('[Faith1] startup_diag_marker');
 
   function readHostEventPayload(eventLike) {
     if (!eventLike || typeof eventLike !== 'object') return null;
@@ -858,8 +860,12 @@ export function generateModerationScript(config: InjectionConfig): string {
       staleEpochDiscarded: 0,
       negativeTransitionBlurApplied: 0,
       positiveTransitionBlurDropped: 0,
+      positiveTransitionBlurDroppedUnresolved: 0,
+      positiveTransitionBlurDroppedWithContext: 0,
       overlayWithoutBlurRemoved: 0,
       duplicateOverlayRemoved: 0,
+      overlayProvenanceVeto: 0,
+      transitionStaleEpochSkipped: 0,
     },
     nonShortsReattachContext: persistedNonShortsReattachContext, // key -> { cardKey, itemKey, src, category, itemId, blurPx, nodeId, cardNodeId, updatedAt }
     regularMainCardBlurLatch: new Map(), // key -> { cardNodeId, navId, pageEpoch, hardBlurItemKey, hardBlurSrc, setAt, lastSeenAt, expiresAt }
@@ -1560,6 +1566,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   const diagShortsBlurParentObserverByNode = new WeakMap();
   const diagShortsBlurredHtml5MainVideoNodeIds = new Set();
   const diagShortsLastBlurNodeIdBySrc = {};
+  const diagTransitionMaxEpochByNav = new Map();
   const shortsAuthoritativeBlurAtByNode = new WeakMap();
   const shortsAuthoritativeBlurAtByAnchor = new WeakMap();
   const SHORTS_STABLE_CONTAINER_SELECTORS = [
@@ -3147,7 +3154,10 @@ export function generateModerationScript(config: InjectionConfig): string {
   const MAIN_SURFACE_LANE_FLIP_WINDOW_MS = 4000;
   const REGULAR_MAIN_LANE_FLIP_GHOST_QUARANTINE_MS = 2600;
   const NON_SHORTS_UNRESOLVED_CLEAR_HOLD_MS = 900;
+  const NON_SHORTS_UNRESOLVED_CLEAR_VETO_MS = 650;
   const MAX_REGULAR_POSITIVE_HOLD_TOTAL_MS = 2400;
+  const SHORTS_SHELF_POSITIVE_HOLD_MS = 900;
+  const MAX_SHORTS_SHELF_POSITIVE_HOLD_TOTAL_MS = 2200;
 
   function isNonShortsYouTubeReattachContext() {
     return isYouTube() && !isShortsModeActive();
@@ -3532,6 +3542,36 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
   }
 
+  function stampShortsShelfAuthoritativePositiveProof(node, src, strictKey, reason) {
+    if (!node || node.nodeType !== 1 || !node.dataset) return;
+    if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
+    const shortsCardNode = (
+      typeof node.closest === 'function'
+        ? node.closest('ytm-shorts-lockup-view-model-v2, ytm-shorts-lockup-view-model, ytd-reel-item-renderer, ytd-reel-video-renderer, ytm-rich-item-renderer, ytd-rich-item-renderer')
+        : null
+    );
+    const cardNodeId = shortsCardNode ? getDiagNodeId(shortsCardNode) : 'none';
+    const normalizedSrc = normalizeUrl(String(src || (node.dataset && node.dataset.mwSrc) || '')) || '';
+    const srcItemKey = getDiagItemKey(normalizedSrc || String(src || (node.dataset && node.dataset.mwSrc) || ''));
+    const proofItemKey = (
+      strictKey && strictKey !== 'unknown'
+        ? String(strictKey)
+        : String(srcItemKey || 'unknown')
+    );
+    node.dataset.mwShortsShelfPositiveProof = '1';
+    node.dataset.mwShortsShelfPositiveProofNodeId = String(getDiagNodeId(node) || 'none');
+    node.dataset.mwShortsShelfPositiveProofCardNodeId = String(cardNodeId || 'none');
+    node.dataset.mwShortsShelfPositiveProofItemKey = String(proofItemKey || 'unknown');
+    node.dataset.mwShortsShelfPositiveProofSrc = String(normalizedSrc || '');
+    node.dataset.mwShortsShelfPositiveProofNav = String(NAV_ID || 'none');
+    node.dataset.mwShortsShelfPositiveProofPageEpoch = String(state.pageEpoch || 0);
+    node.dataset.mwShortsShelfPositiveProofAt = String(Date.now());
+    node.dataset.mwKnownNegativeForCardOrItem = '0';
+    if (reason) {
+      node.dataset.mwShortsShelfPositiveProofReason = String(reason || 'unknown');
+    }
+  }
+
   function stampRegularMainNegativeProof(node, src, reason) {
     if (!node || node.nodeType !== 1 || !node.dataset) return;
     if (isShortsModeActive()) return;
@@ -3824,13 +3864,65 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
   }
 
-  function diagNonShortsReattach(videoNode, reason) {
+  function diagNonShortsReattach(videoNode, reason, transitionEpoch) {
     if (!isNonShortsYouTubeReattachContext()) return;
     if (!videoNode || videoNode.nodeType !== 1) return;
     if (String(videoNode.tagName || '').toUpperCase() !== 'VIDEO') return;
     const currentUrl = window.location.href;
     const isMainSurfaceUrl = isYouTubeMainPageThumbnailSurfaceUrl(currentUrl);
     const reasonText = String(reason || 'unknown');
+    const navEpochKey = String(NAV_ID || 'none');
+    const transitionEpochNumber = Number(transitionEpoch);
+    const currentTransitionEpoch = (
+      Number.isFinite(transitionEpochNumber) && transitionEpochNumber > 0
+        ? transitionEpochNumber
+        : Number(state.pageEpoch || 0)
+    );
+    const nodeMaxEpoch = Number((videoNode.dataset && videoNode.dataset.mwTransitionMaxEpoch) || 0);
+    if (
+      Number.isFinite(currentTransitionEpoch) &&
+      currentTransitionEpoch > 0 &&
+      Number.isFinite(nodeMaxEpoch) &&
+      nodeMaxEpoch > 0 &&
+      currentTransitionEpoch < nodeMaxEpoch
+    ) {
+      incrementMvpTransitionCounter(
+        'transitionStaleEpochSkipped',
+        'reason=' + String(reason || 'unknown') +
+        ' navId=' + navEpochKey +
+        ' staleEpoch=' + String(currentTransitionEpoch) +
+        ' nodeMaxEpoch=' + String(nodeMaxEpoch) +
+        ' nodeId=' + String(getDiagNodeId(videoNode) || 'none') +
+        ' scope=node_guard'
+      );
+      return;
+    }
+    if (
+      Number.isFinite(currentTransitionEpoch) &&
+      currentTransitionEpoch > 0 &&
+      (!Number.isFinite(nodeMaxEpoch) || currentTransitionEpoch > nodeMaxEpoch) &&
+      videoNode &&
+      videoNode.dataset
+    ) {
+      videoNode.dataset.mwTransitionMaxEpoch = String(currentTransitionEpoch);
+    }
+    if (Number.isFinite(currentTransitionEpoch) && currentTransitionEpoch > 0) {
+      const previousMaxEpoch = Number(diagTransitionMaxEpochByNav.get(navEpochKey) || 0);
+      if (previousMaxEpoch > 0 && currentTransitionEpoch < previousMaxEpoch) {
+        incrementMvpTransitionCounter(
+          'transitionStaleEpochSkipped',
+          'reason=' + String(reason || 'unknown') +
+          ' navId=' + navEpochKey +
+          ' staleEpoch=' + String(currentTransitionEpoch) +
+          ' maxEpoch=' + String(previousMaxEpoch) +
+          ' nodeId=' + String(getDiagNodeId(videoNode) || 'none')
+        );
+        return;
+      }
+      if (currentTransitionEpoch > previousMaxEpoch) {
+        diagTransitionMaxEpochByNav.set(navEpochKey, currentTransitionEpoch);
+      }
+    }
     const reasonLooksTransition =
       reasonText.indexOf('event:') === 0 ||
       reasonText.indexOf('mutation_added') === 0 ||
@@ -3849,6 +3941,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       reason: String(reason || 'unknown'),
       isMainSurfaceUrl: !!isMainSurfaceUrl,
       contextSize: state.nonShortsReattachContext ? state.nonShortsReattachContext.size : 0,
+      transitionEpoch: Number.isFinite(currentTransitionEpoch) ? currentTransitionEpoch : 0,
     });
     const now = Date.now();
     const lastReattachAt = Number((videoNode.dataset && videoNode.dataset.mwNonShortsReattachAt) || '0');
@@ -4109,6 +4202,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       strictContinuityItemKey !== 'unknown'
     );
     let laneFlipShortsToRegularUnknownIdentity = false;
+    let laneFlipRegularToShortsNoCardIdentity = false;
     if (isMainSurfaceUrl) {
       const currentLaneCandidate = (
         isHomeShortsShelfVideo
@@ -4171,6 +4265,12 @@ export function generateModerationScript(config: InjectionConfig): string {
           previousLaneState.lane === 'shorts' &&
           nextLane === 'regular' &&
           (!strictContinuityItemKey || strictContinuityItemKey === 'unknown')
+        );
+        laneFlipRegularToShortsNoCardIdentity = !!(
+          previousLaneState.lane === 'regular' &&
+          nextLane === 'shorts' &&
+          String(cardNodeId || 'none') === 'none' &&
+          reattachItemKey === 'unknown'
         );
         postNonShortsTransitionDiag('lane_flip_same_node', {
           reason: String(reason || 'unknown'),
@@ -4703,6 +4803,12 @@ export function generateModerationScript(config: InjectionConfig): string {
     );
     if (isHomeShortsShelfVideo && hasAuthoritativeBlur) {
       rememberShortsAuthoritativeBlurMoment(videoNode, continuityAnchorNode);
+      stampShortsShelfAuthoritativePositiveProof(
+        videoNode,
+        String((videoNode.dataset && videoNode.dataset.mwSrc) || normalizedPoster || normalizedCurrent || ''),
+        String(strictContinuityItemKey || 'unknown'),
+        'shorts_shelf_authoritative'
+      );
     }
     const shortsAuthoritativeBlurAgeMs = isHomeShortsShelfVideo
       ? getShortsAuthoritativeBlurAgeMs(videoNode, continuityAnchorNode)
@@ -5076,6 +5182,78 @@ export function generateModerationScript(config: InjectionConfig): string {
         contextItemKey: String(contextDataItemKey || 'unknown'),
         strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
         hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+      });
+      contextData = null;
+      contextKind = 'none';
+      contextNode = null;
+    }
+    const shortsShelfGlobalContextBlockedOnLaneFlip = !!(
+      isMainSurfaceUrl &&
+      isHomeShortsShelfVideo &&
+      !!contextData &&
+      String(cardNodeId || 'none') === 'none' &&
+      reattachItemKey === 'unknown' &&
+      (
+        String(contextKind || 'none') === 'itemkey_global' ||
+        String(contextKind || 'none') === 'itemkey_card'
+      ) &&
+      laneFlipRegularToShortsNoCardIdentity
+    );
+    if (shortsShelfGlobalContextBlockedOnLaneFlip) {
+      console.log(
+        '[MW-MVP-SHORTS-SHELF-GLOBAL-CONTEXT-BLOCK-V1] context_blocked_lane_flip_no_card_identity',
+        'reason=' + String(reason || 'unknown'),
+        'nodeId=' + String(videoNodeId || 'none'),
+        'contextKind=' + String(contextKind || 'none'),
+        'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
+        'nearbyShortsAnchorId=' + String(nearbyShortsAnchorId || 'unknown'),
+        'reattachItemKey=' + String(reattachItemKey || 'unknown')
+      );
+      postNonShortsTransitionDiag('shorts_shelf_global_context_blocked_lane_flip_no_card_identity', {
+        reason: String(reason || 'unknown'),
+        nodeId: String(videoNodeId || 'none'),
+        marker: 'MW-MVP-SHORTS-SHELF-GLOBAL-CONTEXT-BLOCK-V1',
+        contextKind: String(contextKind || 'none'),
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        nearbyShortsAnchorId: String(nearbyShortsAnchorId || 'unknown'),
+        reattachItemKey: String(reattachItemKey || 'unknown'),
+      });
+      contextData = null;
+      contextKind = 'none';
+      contextNode = null;
+    }
+    const shortsShelfGlobalContextFailClosedUnresolved = !!(
+      isMainSurfaceUrl &&
+      isHomeShortsShelfVideo &&
+      !!contextData &&
+      String(cardNodeId || 'none') === 'none' &&
+      reattachItemKey === 'unknown' &&
+      (
+        String(contextKind || 'none') === 'itemkey_global' ||
+        String(contextKind || 'none') === 'itemkey_card'
+      ) &&
+      (!hardItemKeyKnown || String(hardBlurItemKey || 'unknown') === 'unknown')
+    );
+    if (shortsShelfGlobalContextFailClosedUnresolved) {
+      console.log(
+        '[MW-MVP-SHORTS-SHELF-GLOBAL-CONTEXT-FAIL-CLOSED-V1] context_blocked_unresolved_global_without_hard_proof',
+        'reason=' + String(reason || 'unknown'),
+        'nodeId=' + String(videoNodeId || 'none'),
+        'contextKind=' + String(contextKind || 'none'),
+        'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
+        'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown'),
+        'reattachItemKey=' + String(reattachItemKey || 'unknown'),
+        'cardNodeId=' + String(cardNodeId || 'none')
+      );
+      postNonShortsTransitionDiag('shorts_shelf_global_context_fail_closed_unresolved', {
+        reason: String(reason || 'unknown'),
+        nodeId: String(videoNodeId || 'none'),
+        marker: 'MW-MVP-SHORTS-SHELF-GLOBAL-CONTEXT-FAIL-CLOSED-V1',
+        contextKind: String(contextKind || 'none'),
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+        reattachItemKey: String(reattachItemKey || 'unknown'),
+        cardNodeId: String(cardNodeId || 'none'),
       });
       contextData = null;
       contextKind = 'none';
@@ -5553,6 +5731,28 @@ export function generateModerationScript(config: InjectionConfig): string {
       regularProofSrc === currentResolvedSrcForProof &&
       !cardBoundaryChanged
     );
+    const priorHardBlurProofSameCardItemKey = !!(
+      priorHardBlurProofSameCard &&
+      regularProofItemKey &&
+      regularProofItemKey !== 'unknown' &&
+      hardItemKeyKnown &&
+      regularProofItemKey === String(hardBlurItemKey || 'unknown')
+    );
+    const priorHardBlurProofSameCardReattachKey = !!(
+      priorHardBlurProofSameCard &&
+      regularProofItemKey &&
+      regularProofItemKey !== 'unknown' &&
+      reattachItemKey &&
+      reattachItemKey !== 'unknown' &&
+      regularProofItemKey === String(reattachItemKey || 'unknown')
+    );
+    const priorHardBlurProofSameCardLocalSrc = !!(
+      priorHardBlurProofSameCard &&
+      regularProofSrc &&
+      currentResolvedSrcForProof &&
+      regularProofSrc === currentResolvedSrcForProof &&
+      !cardBoundaryChanged
+    );
     const unresolvedRegularTransitionNow = !!(
       regularPathQuarantinePassed &&
       !isHomeShortsShelfVideo &&
@@ -5562,38 +5762,91 @@ export function generateModerationScript(config: InjectionConfig): string {
       (!strictIdentityKnown || strictContinuityItemKey === 'unknown')
     );
     const regularPositivePriorProof = !!(
-      priorHardBlurProofSameNode &&
       !knownNegativeForCardOrItem &&
       !cardBoundaryChanged &&
       (
-        priorHardBlurProofSameItemKey ||
-        priorHardBlurProofSameReattachKey ||
-        priorHardBlurProofSameLocalSrc ||
-        (previousAuthoritativePositive && sameNavEpoch && sameDomNode)
+        (
+          priorHardBlurProofSameNode &&
+          (
+            priorHardBlurProofSameItemKey ||
+            priorHardBlurProofSameReattachKey ||
+            priorHardBlurProofSameLocalSrc ||
+            (previousAuthoritativePositive && sameNavEpoch && sameDomNode)
+          )
+        ) ||
+        (
+          priorHardBlurProofSameCard &&
+          (
+            priorHardBlurProofSameCardItemKey ||
+            priorHardBlurProofSameCardReattachKey ||
+            priorHardBlurProofSameCardLocalSrc
+          )
+        )
       )
     );
     const regularPositiveHoldSafetyDenied = !!(
       confirmedLiveGhostByItemKey ||
       regularUnknownIdentityContextBlock ||
-      regularContextFailClosedUnproven
+      regularContextFailClosedUnproven ||
+      laneFlipShortsToRegularUnknownIdentity ||
+      regularLaneFlipGhostQuarantineActive ||
+      regularGhostEpochBypassActive
     );
     const regularPositiveHoldEligible = !!(
       unresolvedRegularTransitionNow &&
       regularPositivePriorProof &&
       !regularPositiveHoldSafetyDenied
     );
+    const unresolvedPositiveHoldPrecedenceStrong = !!(
+      unresolvedRegularTransitionNow &&
+      !regularPositiveHoldEligible &&
+      previousAuthoritativePositive &&
+      sameDomNode &&
+      !cardBoundaryChanged &&
+      !knownNegativeForCardOrItem &&
+      !regularMainNegativeLatchRead.matched &&
+      !confirmedLiveGhostByItemKey &&
+      regularProofSrc &&
+      currentResolvedSrcForProof &&
+      regularProofSrc === currentResolvedSrcForProof
+    );
+    const regularPositiveHoldEffectiveEligible = !!(
+      regularPositiveHoldEligible ||
+      unresolvedPositiveHoldPrecedenceStrong
+    );
     const wouldClearWithoutHold = !!(!contextData && !(activeVideoBlurred || hasAuthoritativeBlur));
     let regularPositiveHoldProofKind = 'none';
     if (priorHardBlurProofSameItemKey) regularPositiveHoldProofKind = 'same_item_key';
     else if (priorHardBlurProofSameReattachKey) regularPositiveHoldProofKind = 'same_reattach_key';
     else if (priorHardBlurProofSameLocalSrc) regularPositiveHoldProofKind = 'same_local_src';
+    else if (priorHardBlurProofSameCardItemKey) regularPositiveHoldProofKind = 'replacement_same_card_item_key';
+    else if (priorHardBlurProofSameCardReattachKey) regularPositiveHoldProofKind = 'replacement_same_card_reattach_key';
+    else if (priorHardBlurProofSameCardLocalSrc) regularPositiveHoldProofKind = 'replacement_same_card_local_src';
     else if (priorHardBlurProofSameNode) regularPositiveHoldProofKind = 'same_node_authoritative';
     else if (priorHardBlurProofSameCard) regularPositiveHoldProofKind = 'replacement_same_card';
+    if (regularPositiveHoldProofKind === 'none' && unresolvedPositiveHoldPrecedenceStrong) {
+      regularPositiveHoldProofKind = 'same_node_src_precedence';
+    }
     const holdNow = Date.now();
     let regularPositiveHoldStartedAt = Number((videoNode.dataset && videoNode.dataset.mwRegularPositiveHoldStartedAt) || 0);
     let regularPositiveHoldUntil = Number((videoNode.dataset && videoNode.dataset.mwRegularPositiveHoldUntil) || 0);
     let regularPositiveHoldTtlRemaining = 0;
-    if (regularPositiveHoldEligible) {
+    let regularClearVetoStartedAt = Number((videoNode.dataset && videoNode.dataset.mwRegularClearVetoStartedAt) || 0);
+    let regularClearVetoUntil = Number((videoNode.dataset && videoNode.dataset.mwRegularClearVetoUntil) || 0);
+    let regularClearVetoTtlRemaining = 0;
+    const regularClearVetoEligible = !!(
+      unresolvedRegularTransitionNow &&
+      !regularPositiveHoldEffectiveEligible &&
+      previousAuthoritativePositive &&
+      !knownNegativeForCardOrItem &&
+      !regularMainNegativeLatchRead.matched &&
+      !confirmedLiveGhostByItemKey &&
+      !cardBoundaryChanged &&
+      regularProofSrc &&
+      currentResolvedSrcForProof &&
+      regularProofSrc === currentResolvedSrcForProof
+    );
+    if (regularPositiveHoldEffectiveEligible) {
       if (!Number.isFinite(regularPositiveHoldStartedAt) || regularPositiveHoldStartedAt <= 0) {
         regularPositiveHoldStartedAt = holdNow;
       }
@@ -5616,10 +5869,79 @@ export function generateModerationScript(config: InjectionConfig): string {
       videoNode.dataset.mwRegularPositiveHoldStartedAt = '0';
       videoNode.dataset.mwRegularPositiveHoldUntil = '0';
     }
+    if (regularClearVetoEligible) {
+      if (!Number.isFinite(regularClearVetoStartedAt) || regularClearVetoStartedAt <= 0) {
+        regularClearVetoStartedAt = holdNow;
+      }
+      const vetoElapsed = holdNow - regularClearVetoStartedAt;
+      if (vetoElapsed <= MAX_REGULAR_POSITIVE_HOLD_TOTAL_MS) {
+        const vetoCappedUntil = regularClearVetoStartedAt + MAX_REGULAR_POSITIVE_HOLD_TOTAL_MS;
+        regularClearVetoUntil = Math.min(holdNow + NON_SHORTS_UNRESOLVED_CLEAR_VETO_MS, vetoCappedUntil);
+        if (videoNode && videoNode.dataset) {
+          videoNode.dataset.mwRegularClearVetoStartedAt = String(regularClearVetoStartedAt);
+          videoNode.dataset.mwRegularClearVetoUntil = String(regularClearVetoUntil);
+        }
+      } else {
+        regularClearVetoUntil = 0;
+        if (videoNode && videoNode.dataset) {
+          videoNode.dataset.mwRegularClearVetoStartedAt = '0';
+          videoNode.dataset.mwRegularClearVetoUntil = '0';
+        }
+      }
+    } else if (contextData && videoNode && videoNode.dataset) {
+      videoNode.dataset.mwRegularClearVetoStartedAt = '0';
+      videoNode.dataset.mwRegularClearVetoUntil = '0';
+    }
     regularPositiveHoldTtlRemaining = Math.max(0, regularPositiveHoldUntil - holdNow);
-    const regularPositiveHoldKeepBlur = !!(regularPositiveHoldEligible && regularPositiveHoldTtlRemaining > 0);
+    regularClearVetoTtlRemaining = Math.max(0, regularClearVetoUntil - holdNow);
+    const regularClearVetoKeepBlur = !!(regularClearVetoEligible && regularClearVetoTtlRemaining > 0);
+    const regularPositiveHoldKeepBlur = !!(
+      (regularPositiveHoldEffectiveEligible && regularPositiveHoldTtlRemaining > 0) ||
+      regularClearVetoKeepBlur
+    );
+    const hasAnyNegativeProof = !!(
+      knownNegativeForCardOrItem ||
+      regularMainNegativeLatchRead.matched ||
+      confirmedLiveGhostByItemKey
+    );
+    const hasPositiveContinuityProofStrong = !!(
+      unresolvedRegularTransitionNow &&
+      previousAuthoritativePositive &&
+      !cardBoundaryChanged &&
+      !hasAnyNegativeProof &&
+      (
+        (regularProofSrc && currentResolvedSrcForProof && regularProofSrc === currentResolvedSrcForProof) ||
+        (sameDomNode && sameNavEpoch) ||
+        priorHardBlurProofSameItemKey ||
+        priorHardBlurProofSameReattachKey ||
+        priorHardBlurProofSameLocalSrc
+      )
+    );
+    const regularClearAllowedByProof = !!(
+      unresolvedRegularTransitionNow &&
+      !regularPositiveHoldKeepBlur &&
+      !hasPositiveContinuityProofStrong &&
+      (
+        hasAnyNegativeProof ||
+        !previousAuthoritativePositive
+      )
+    );
+    const regularUnresolvedKeepBlurGate = !!(
+      unresolvedRegularTransitionNow &&
+      !regularClearAllowedByProof
+    );
+    const regularShouldKeepBlur = !!(
+      regularPositiveHoldKeepBlur ||
+      regularUnresolvedKeepBlurGate
+    );
+    if (regularPositiveHoldProofKind === 'none' && regularClearVetoKeepBlur) {
+      regularPositiveHoldProofKind = 'same_src_clear_veto';
+    }
+    if (regularPositiveHoldProofKind === 'none' && regularUnresolvedKeepBlurGate && hasPositiveContinuityProofStrong) {
+      regularPositiveHoldProofKind = 'continuity_fail_closed';
+    }
     if (unresolvedRegularTransitionNow) {
-      if (regularPositiveHoldEligible) {
+      if (regularPositiveHoldEffectiveEligible) {
         console.log(
           '[MW-MVP-REGULAR-POSITIVE-HOLD-ELIGIBLE-V1]',
           'nodeId=' + String(videoNodeId || 'none'),
@@ -5664,12 +5986,46 @@ export function generateModerationScript(config: InjectionConfig): string {
           'priorProof=' + String(!!regularPositivePriorProof),
           'wouldClearWithoutHold=' + String(!!wouldClearWithoutHold),
           'ttlRemaining=' + String(regularPositiveHoldTtlRemaining),
-          'action=clear_blur',
+          'action=' + String(regularClearAllowedByProof ? 'clear_blur' : 'keep_blur_fail_closed'),
           'srcLineage=' + String((regularProofSrc || currentResolvedSrcForProof || '')).substring(0, 180)
         );
       }
     }
-    if (regularPositiveHoldKeepBlur) {
+    if (unresolvedRegularTransitionNow && !regularClearAllowedByProof && hasPositiveContinuityProofStrong) {
+      postNonShortsTransitionDiag('regular_clear_blocked_positive_continuity', {
+        reason: String(reason || 'unknown'),
+        nodeId: String(videoNodeId || 'none'),
+        marker: 'MW-MVP-REGULAR-CLEAR-BLOCKED-POSITIVE-CONTINUITY-V1',
+        cardNodeId: String(cardNodeId || 'none'),
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+        reattachItemKey: String(reattachItemKey || 'unknown'),
+        proofKind: String(regularPositiveHoldProofKind || 'none'),
+        previousAuthoritativePositive: !!previousAuthoritativePositive,
+        sameDomNode: !!sameDomNode,
+        sameNavEpoch: !!sameNavEpoch,
+        hasAnyNegativeProof: !!hasAnyNegativeProof,
+        clearAllowedByProof: !!regularClearAllowedByProof,
+        action: 'keep_blur',
+        srcLineage: String((regularProofSrc || currentResolvedSrcForProof || '')).substring(0, 180),
+      });
+    } else if (regularClearAllowedByProof) {
+      postNonShortsTransitionDiag('regular_clear_allowed_negative_proof', {
+        reason: String(reason || 'unknown'),
+        nodeId: String(videoNodeId || 'none'),
+        marker: 'MW-MVP-REGULAR-CLEAR-ALLOWED-NEGATIVE-PROOF-V1',
+        cardNodeId: String(cardNodeId || 'none'),
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+        reattachItemKey: String(reattachItemKey || 'unknown'),
+        proofKind: String(regularPositiveHoldProofKind || 'none'),
+        previousAuthoritativePositive: !!previousAuthoritativePositive,
+        hasAnyNegativeProof: !!hasAnyNegativeProof,
+        clearAllowedByProof: !!regularClearAllowedByProof,
+        action: 'clear_blur',
+      });
+    }
+    if (regularShouldKeepBlur) {
       holdBlurDuringUnresolvedTransition = true;
       const holdBlurPx = IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20);
       videoNode.style.setProperty('filter', 'blur(' + holdBlurPx + 'px)', 'important');
@@ -5708,7 +6064,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         action: 'keep_blur',
         srcLineage: String((regularProofSrc || currentResolvedSrcForProof || '')).substring(0, 180),
       });
-    } else if (unresolvedRegularTransitionNow && !regularPositiveHoldEligible) {
+    } else if (regularClearAllowedByProof) {
       postNonShortsTransitionDiag('regular_positive_hold_clear_blur', {
         reason: String(reason || 'unknown'),
         nodeId: String(videoNodeId || 'none'),
@@ -5732,6 +6088,205 @@ export function generateModerationScript(config: InjectionConfig): string {
         ttlRemaining: Number(regularPositiveHoldTtlRemaining || 0),
         action: 'clear_blur',
         srcLineage: String((regularProofSrc || currentResolvedSrcForProof || '')).substring(0, 180),
+      });
+    }
+    const shortsProofNodeId = String((videoNode.dataset && videoNode.dataset.mwShortsShelfPositiveProofNodeId) || 'none');
+    const shortsProofCardNodeId = String((videoNode.dataset && videoNode.dataset.mwShortsShelfPositiveProofCardNodeId) || 'none');
+    const shortsProofItemKey = String((videoNode.dataset && videoNode.dataset.mwShortsShelfPositiveProofItemKey) || 'unknown');
+    const shortsProofSrc = normalizeUrl(String((videoNode.dataset && videoNode.dataset.mwShortsShelfPositiveProofSrc) || '')) || '';
+    const shortsProofNav = String((videoNode.dataset && videoNode.dataset.mwShortsShelfPositiveProofNav) || 'none');
+    const shortsProofPageEpoch = Number((videoNode.dataset && videoNode.dataset.mwShortsShelfPositiveProofPageEpoch) || 0);
+    const previousShortsAuthoritativePositive = String((videoNode.dataset && videoNode.dataset.mwShortsShelfPositiveProof) || '') === '1';
+    const shortsSameNavEpoch = !!(
+      previousShortsAuthoritativePositive &&
+      shortsProofNav === String(NAV_ID || 'none') &&
+      shortsProofPageEpoch > 0 &&
+      shortsProofPageEpoch === Number(state.pageEpoch || 0)
+    );
+    const shortsSameDomNode = !!(
+      shortsProofNodeId &&
+      shortsProofNodeId !== 'none' &&
+      shortsProofNodeId === String(videoNodeId || 'none')
+    );
+    const shortsReplacementNodeSameCard = !!(
+      !shortsSameDomNode &&
+      shortsProofCardNodeId &&
+      shortsProofCardNodeId !== 'none' &&
+      String(cardNodeId || 'none') !== 'none' &&
+      shortsProofCardNodeId === String(cardNodeId || 'none')
+    );
+    const shortsCardBoundaryChanged = !!(
+      shortsProofCardNodeId &&
+      shortsProofCardNodeId !== 'none' &&
+      String(cardNodeId || 'none') !== 'none' &&
+      shortsProofCardNodeId !== String(cardNodeId || 'none')
+    );
+    const shortsCurrentResolvedSrcForProof = normalizeUrl(
+      String(normalizedPoster || normalizedCurrent || (videoNode.dataset && videoNode.dataset.mwSrc) || '')
+    ) || '';
+    const shortsPriorProofSameItemKey = !!(
+      shortsProofItemKey &&
+      shortsProofItemKey !== 'unknown' &&
+      strictContinuityItemKey &&
+      strictContinuityItemKey !== 'unknown' &&
+      shortsProofItemKey === String(strictContinuityItemKey || 'unknown')
+    );
+    const shortsPriorProofSameLocalSrc = !!(
+      shortsProofSrc &&
+      shortsCurrentResolvedSrcForProof &&
+      shortsProofSrc === shortsCurrentResolvedSrcForProof
+    );
+    const unresolvedShortsShelfTransitionNow = !!(
+      isMainSurfaceUrl &&
+      isHomeShortsShelfVideo &&
+      isTransitionChurnReason &&
+      !contextData
+    );
+    const shortsShelfPriorProof = !!(
+      !knownNegativeForCardOrItem &&
+      !shortsCardBoundaryChanged &&
+      shortsSameNavEpoch &&
+      (
+        shortsSameDomNode ||
+        shortsReplacementNodeSameCard
+      ) &&
+      (
+        shortsPriorProofSameItemKey ||
+        shortsPriorProofSameLocalSrc
+      )
+    );
+    let shortsShelfProofKind = 'none';
+    if (shortsPriorProofSameItemKey) shortsShelfProofKind = 'same_item_key';
+    else if (shortsPriorProofSameLocalSrc) shortsShelfProofKind = 'same_local_src';
+    else if (shortsSameDomNode) shortsShelfProofKind = 'same_node_authoritative';
+    else if (shortsReplacementNodeSameCard) shortsShelfProofKind = 'replacement_same_card';
+    let shortsShelfHoldStartedAt = Number((videoNode.dataset && videoNode.dataset.mwShortsShelfPositiveHoldStartedAt) || 0);
+    let shortsShelfHoldUntil = Number((videoNode.dataset && videoNode.dataset.mwShortsShelfPositiveHoldUntil) || 0);
+    let shortsShelfHoldTtlRemaining = 0;
+    const shortsShelfHoldNow = Date.now();
+    if (unresolvedShortsShelfTransitionNow && shortsShelfPriorProof) {
+      if (!Number.isFinite(shortsShelfHoldStartedAt) || shortsShelfHoldStartedAt <= 0) {
+        shortsShelfHoldStartedAt = shortsShelfHoldNow;
+      }
+      const holdElapsed = shortsShelfHoldNow - shortsShelfHoldStartedAt;
+      if (holdElapsed <= MAX_SHORTS_SHELF_POSITIVE_HOLD_TOTAL_MS) {
+        const cappedUntil = shortsShelfHoldStartedAt + MAX_SHORTS_SHELF_POSITIVE_HOLD_TOTAL_MS;
+        shortsShelfHoldUntil = Math.min(shortsShelfHoldNow + SHORTS_SHELF_POSITIVE_HOLD_MS, cappedUntil);
+        if (videoNode && videoNode.dataset) {
+          videoNode.dataset.mwShortsShelfPositiveHoldStartedAt = String(shortsShelfHoldStartedAt);
+          videoNode.dataset.mwShortsShelfPositiveHoldUntil = String(shortsShelfHoldUntil);
+        }
+      } else {
+        shortsShelfHoldUntil = 0;
+        if (videoNode && videoNode.dataset) {
+          videoNode.dataset.mwShortsShelfPositiveHoldStartedAt = '0';
+          videoNode.dataset.mwShortsShelfPositiveHoldUntil = '0';
+        }
+      }
+    } else if (contextData && videoNode && videoNode.dataset) {
+      videoNode.dataset.mwShortsShelfPositiveHoldStartedAt = '0';
+      videoNode.dataset.mwShortsShelfPositiveHoldUntil = '0';
+    }
+    shortsShelfHoldTtlRemaining = Math.max(0, shortsShelfHoldUntil - shortsShelfHoldNow);
+    const shortsShelfHoldKeepBlur = !!(
+      unresolvedShortsShelfTransitionNow &&
+      shortsShelfPriorProof &&
+      shortsShelfHoldTtlRemaining > 0
+    );
+    if (unresolvedShortsShelfTransitionNow) {
+      postNonShortsTransitionDiag(
+        shortsShelfPriorProof
+          ? 'shorts_shelf_positive_hold_eligible'
+          : 'shorts_shelf_positive_hold_denied',
+        {
+          reason: String(reason || 'unknown'),
+          nodeId: String(videoNodeId || 'none'),
+          marker: shortsShelfPriorProof
+            ? 'MW-MVP-SHORTS-SHELF-POSITIVE-HOLD-ELIGIBLE-V1'
+            : 'MW-MVP-SHORTS-SHELF-POSITIVE-HOLD-DENIED-V1',
+          cardNodeId: String(cardNodeId || 'none'),
+          strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+          hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+          reattachItemKey: String(reattachItemKey || 'unknown'),
+          proofKind: String(shortsShelfProofKind || 'none'),
+          sameDomNode: !!shortsSameDomNode,
+          replacementNodeSameCard: !!shortsReplacementNodeSameCard,
+          previousAuthoritativePositive: !!previousShortsAuthoritativePositive,
+          sameNavEpoch: !!shortsSameNavEpoch,
+          cardBoundaryChanged: !!shortsCardBoundaryChanged,
+          knownNegativeForCardOrItem: !!knownNegativeForCardOrItem,
+          contextFound: !!contextData,
+          priorProof: !!shortsShelfPriorProof,
+          ttlRemaining: Number(shortsShelfHoldTtlRemaining || 0),
+          action: shortsShelfHoldKeepBlur ? 'keep_blur' : 'clear_blur',
+          srcLineage: String((shortsProofSrc || shortsCurrentResolvedSrcForProof || '')).substring(0, 180),
+        }
+      );
+    }
+    if (shortsShelfHoldKeepBlur) {
+      const holdBlurPx = IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20);
+      videoNode.style.setProperty('filter', 'blur(' + holdBlurPx + 'px)', 'important');
+      videoNode.style.setProperty('-webkit-filter', 'blur(' + holdBlurPx + 'px)', 'important');
+      videoNode.style.setProperty('backdrop-filter', 'blur(' + holdBlurPx + 'px)', 'important');
+      videoNode.style.setProperty('-webkit-backdrop-filter', 'blur(' + holdBlurPx + 'px)', 'important');
+      videoNode.classList.add('mw-blurred');
+      videoNode.dataset.mwModerated = 'blurred';
+      videoNode.dataset.mwClassifiedEpoch = String(CONFIG.pageEpoch);
+      markAuthoritativeHardBlur(videoNode, String((videoNode.dataset && videoNode.dataset.mwSrc) || shortsCurrentResolvedSrcForProof || ''));
+      if (strictContinuityItemKey && strictContinuityItemKey !== 'unknown') {
+        videoNode.dataset.mwHardBlurItemKey = String(strictContinuityItemKey || 'unknown');
+      }
+      stampShortsShelfAuthoritativePositiveProof(
+        videoNode,
+        String((videoNode.dataset && videoNode.dataset.mwSrc) || shortsCurrentResolvedSrcForProof || ''),
+        String(strictContinuityItemKey || 'unknown'),
+        'shorts_shelf_positive_hold_keep_blur'
+      );
+      hasAuthoritativeBlur = true;
+      hasIncidentalBlur = true;
+      activeVideoBlurred = true;
+      postNonShortsTransitionDiag('shorts_shelf_positive_hold_keep_blur', {
+        reason: String(reason || 'unknown'),
+        nodeId: String(videoNodeId || 'none'),
+        marker: 'MW-MVP-SHORTS-SHELF-POSITIVE-HOLD-KEEP-BLUR-V1',
+        cardNodeId: String(cardNodeId || 'none'),
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+        reattachItemKey: String(reattachItemKey || 'unknown'),
+        proofKind: String(shortsShelfProofKind || 'none'),
+        sameDomNode: !!shortsSameDomNode,
+        replacementNodeSameCard: !!shortsReplacementNodeSameCard,
+        previousAuthoritativePositive: !!previousShortsAuthoritativePositive,
+        sameNavEpoch: !!shortsSameNavEpoch,
+        cardBoundaryChanged: !!shortsCardBoundaryChanged,
+        knownNegativeForCardOrItem: !!knownNegativeForCardOrItem,
+        contextFound: !!contextData,
+        priorProof: !!shortsShelfPriorProof,
+        ttlRemaining: Number(shortsShelfHoldTtlRemaining || 0),
+        action: 'keep_blur',
+        srcLineage: String((shortsProofSrc || shortsCurrentResolvedSrcForProof || '')).substring(0, 180),
+      });
+    } else if (unresolvedShortsShelfTransitionNow && !shortsShelfPriorProof) {
+      postNonShortsTransitionDiag('shorts_shelf_positive_hold_clear_blur', {
+        reason: String(reason || 'unknown'),
+        nodeId: String(videoNodeId || 'none'),
+        marker: 'MW-MVP-SHORTS-SHELF-POSITIVE-HOLD-CLEAR-V1',
+        cardNodeId: String(cardNodeId || 'none'),
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+        reattachItemKey: String(reattachItemKey || 'unknown'),
+        proofKind: String(shortsShelfProofKind || 'none'),
+        sameDomNode: !!shortsSameDomNode,
+        replacementNodeSameCard: !!shortsReplacementNodeSameCard,
+        previousAuthoritativePositive: !!previousShortsAuthoritativePositive,
+        sameNavEpoch: !!shortsSameNavEpoch,
+        cardBoundaryChanged: !!shortsCardBoundaryChanged,
+        knownNegativeForCardOrItem: !!knownNegativeForCardOrItem,
+        contextFound: !!contextData,
+        priorProof: !!shortsShelfPriorProof,
+        ttlRemaining: Number(shortsShelfHoldTtlRemaining || 0),
+        action: 'clear_blur',
+        srcLineage: String((shortsProofSrc || shortsCurrentResolvedSrcForProof || '')).substring(0, 180),
       });
     }
     const preexistingOverlayInDeadEnd = !!(
@@ -5796,6 +6351,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       videoNode.dataset.mwModerated = 'safe';
       clearAuthoritativeHardBlur(videoNode);
       activeVideoBlurred = false;
+      hasIncidentalBlur = false;
       console.log(
         '[DIAG][NON_SHORTS_REATTACH] incidental_blur_cleared',
         'reason=' + (reason || 'unknown'),
@@ -5841,6 +6397,124 @@ export function generateModerationScript(config: InjectionConfig): string {
         hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
         strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
       });
+    }
+    const unresolvedLaneFlipNoIdentityNow = !!(
+      isMainSurfaceUrl &&
+      isTransitionChurnReason &&
+      (
+        laneFlipShortsToRegularUnknownIdentity ||
+        laneFlipRegularToShortsNoCardIdentity
+      ) &&
+      String(cardNodeId || 'none') === 'none' &&
+      reattachItemKey === 'unknown' &&
+      (!strictIdentityKnown || strictContinuityItemKey === 'unknown')
+    );
+    const currentNodeResolvedSrc = normalizeUrl(
+      String(normalizedPoster || normalizedCurrent || (videoNode.dataset && videoNode.dataset.mwSrc) || '')
+    ) || '';
+    const currentNodeResolvedItemKey = getDiagItemKey(currentNodeResolvedSrc || String((videoNode.dataset && videoNode.dataset.mwSrc) || ''));
+    const contextSourceForAdoption = normalizeUrl(
+      String((contextData && contextData.src) || (contextNode && contextNode.dataset && contextNode.dataset.mwSrc) || '')
+    ) || '';
+    const contextSourceItemKey = getDiagItemKey(contextSourceForAdoption || String((contextData && contextData.src) || ''));
+    const contextMatchesCurrentNodeIdentity = !!(
+      contextSourceForAdoption &&
+      currentNodeResolvedSrc &&
+      contextSourceForAdoption === currentNodeResolvedSrc
+    );
+    const contextMatchesResolvedItemKey = !!(
+      contextSourceItemKey &&
+      contextSourceItemKey !== 'unknown' &&
+      (
+        (reattachItemKey && reattachItemKey !== 'unknown' && contextSourceItemKey === String(reattachItemKey || 'unknown')) ||
+        (strictContinuityItemKey && strictContinuityItemKey !== 'unknown' && contextSourceItemKey === String(strictContinuityItemKey || 'unknown')) ||
+        (currentNodeResolvedItemKey && currentNodeResolvedItemKey !== 'unknown' && contextSourceItemKey === String(currentNodeResolvedItemKey || 'unknown'))
+      )
+    );
+    const contextOwnedByCurrentNode = !!(
+      contextData &&
+      (
+        contextNode === videoNode ||
+        contextMatchesCurrentNodeIdentity ||
+        contextMatchesResolvedItemKey
+      )
+    );
+    const unresolvedLaneFlipApplyBlurVeto = !!(
+      contextData &&
+      unresolvedLaneFlipNoIdentityNow &&
+      !contextOwnedByCurrentNode &&
+      !regularPositiveHoldEligible &&
+      !shortsShelfHoldKeepBlur &&
+      !regularPositiveContinuitySignal
+    );
+    if (unresolvedLaneFlipApplyBlurVeto) {
+      console.log(
+        '[MW-MVP-REGULAR-LANE-FLIP-APPLY-BLUR-VETO-V1] veto_apply_blur_unresolved_lane_flip_unknown_identity',
+        'reason=' + String(reason || 'unknown'),
+        'nodeId=' + String(videoNodeId || 'none'),
+        'contextKind=' + String(contextKind || 'none'),
+        'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
+        'reattachItemKey=' + String(reattachItemKey || 'unknown'),
+        'contextItemKey=' + String(contextSourceItemKey || 'unknown')
+      );
+      postNonShortsTransitionDiag('regular_main_lane_flip_apply_blur_veto', {
+        reason: String(reason || 'unknown'),
+        nodeId: videoNodeId,
+        marker: 'MW-MVP-REGULAR-LANE-FLIP-APPLY-BLUR-VETO-V1',
+        contextKind: String(contextKind || 'none'),
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        reattachItemKey: String(reattachItemKey || 'unknown'),
+        contextItemKey: String(contextSourceItemKey || 'unknown'),
+        laneFlipShortsToRegularUnknownIdentity: !!laneFlipShortsToRegularUnknownIdentity,
+        laneFlipRegularToShortsNoCardIdentity: !!laneFlipRegularToShortsNoCardIdentity,
+        contextOwnedByCurrentNode: !!contextOwnedByCurrentNode,
+      });
+      contextData = null;
+      contextKind = 'none';
+      contextNode = null;
+    }
+    const unresolvedContextAdoptionNoProof = !!(
+      contextData &&
+      isMainSurfaceUrl &&
+      isTransitionChurnReason &&
+      !contextOwnedByCurrentNode &&
+      String(cardNodeId || 'none') === 'none' &&
+      reattachItemKey === 'unknown' &&
+      (!strictIdentityKnown || strictContinuityItemKey === 'unknown') &&
+      (
+        String(contextKind || 'none') === 'itemkey_global' ||
+        String(contextKind || 'none') === 'itemkey_card'
+      ) &&
+      !activeVideoBlurred &&
+      !hasAuthoritativeBlur &&
+      !regularPositiveHoldEligible &&
+      !shortsShelfHoldKeepBlur &&
+      !regularPositiveContinuitySignal &&
+      !preserveShortsHardBlurDuringGraceWindow
+    );
+    if (unresolvedContextAdoptionNoProof) {
+      console.log(
+        '[MW-MVP-REGULAR-UNRESOLVED-ADOPTION-VETO-V1] veto_context_adoption_unresolved_no_local_proof',
+        'reason=' + String(reason || 'unknown'),
+        'nodeId=' + String(videoNodeId || 'none'),
+        'contextKind=' + String(contextKind || 'none'),
+        'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
+        'reattachItemKey=' + String(reattachItemKey || 'unknown'),
+        'contextItemKey=' + String(contextSourceItemKey || 'unknown')
+      );
+      postNonShortsTransitionDiag('regular_main_unresolved_context_adoption_veto', {
+        reason: String(reason || 'unknown'),
+        nodeId: videoNodeId,
+        marker: 'MW-MVP-REGULAR-UNRESOLVED-ADOPTION-VETO-V1',
+        contextKind: String(contextKind || 'none'),
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        reattachItemKey: String(reattachItemKey || 'unknown'),
+        contextItemKey: String(contextSourceItemKey || 'unknown'),
+        contextOwnedByCurrentNode: !!contextOwnedByCurrentNode,
+      });
+      contextData = null;
+      contextKind = 'none';
+      contextNode = null;
     }
     if (activeVideoBlurred && hasAuthoritativeBlur) {
       const expectedBlurPx = IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20);
@@ -6064,6 +6738,16 @@ export function generateModerationScript(config: InjectionConfig): string {
       !blockRegularFallbackNow &&
       (activeVideoBlurred || hasAuthoritativeBlur || hasResidualInlineBlur || hasResidualBlurClass)
     );
+    const nonShortsPositiveHoldOverlayHold = !!(
+      regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo &&
+      unresolvedRegularTransitionNow &&
+      regularPositiveHoldKeepBlur &&
+      !!videoOverlay &&
+      !!videoOverlay.isConnected &&
+      !!videoOverlay.parentElement &&
+      overlayNodeId === videoNodeId
+    );
     if (
       !activeVideoBlurred &&
       !keepOverlayDuringRegularUnresolvedChurn &&
@@ -6071,6 +6755,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       !nonShortsCardBlurredContinuityOverlayHold &&
       !nonShortsPendingRevealGuard &&
       !nonShortsBlurInvariantOverlayHold &&
+      !nonShortsPositiveHoldOverlayHold &&
       videoOverlay &&
       videoOverlay.parentElement
     ) {
@@ -6141,6 +6826,24 @@ export function generateModerationScript(config: InjectionConfig): string {
         overlayItemKey: String(overlayForItemKey || 'unknown'),
         strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
         contextItemKey: String(contextItemKey || 'unknown'),
+      });
+    } else if (nonShortsPositiveHoldOverlayHold && videoOverlay && videoOverlay.parentElement) {
+      console.log(
+        '[MW-MVP-REGULAR-THUMB-POSITIVE-HOLD-OVERLAY-VETO-V1] overlay_remove_veto_positive_hold',
+        'reason=' + (reason || 'unknown'),
+        'nodeId=' + videoNodeId,
+        'overlayId=' + String((videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown'),
+        'proofKind=' + String(regularPositiveHoldProofKind || 'none'),
+        'ttlRemaining=' + String(regularPositiveHoldTtlRemaining || 0),
+        'action=keep_overlay'
+      );
+      postNonShortsTransitionDiag('regular_main_overlay_remove_veto_positive_hold', {
+        reason: String(reason || 'unknown'),
+        nodeId: videoNodeId,
+        marker: 'MW-MVP-REGULAR-THUMB-POSITIVE-HOLD-OVERLAY-VETO-V1',
+        overlayId: String((videoOverlay.dataset && videoOverlay.dataset.mwOverlayId) || 'unknown'),
+        proofKind: String(regularPositiveHoldProofKind || 'none'),
+        ttlRemaining: Number(regularPositiveHoldTtlRemaining || 0),
       });
     } else if (nonShortsPendingRevealGuard && videoOverlay && videoOverlay.parentElement) {
       console.log(
@@ -6689,9 +7392,20 @@ export function generateModerationScript(config: InjectionConfig): string {
       overlayAnchored: !!overlayAnchored,
       overlayPresent: !!videoOverlay,
     });
-    const mvpTransitionAction = contextData
+    const unresolvedGlobalContextDecisionVeto = !!(
+      isMainSurfaceUrl &&
+      isHomeShortsShelfVideo &&
+      String(contextKind || 'none') === 'itemkey_global' &&
+      String(cardNodeId || 'none') === 'none' &&
+      reattachItemKey === 'unknown' &&
+      (!hardItemKeyKnown || String(hardBlurItemKey || 'unknown') === 'unknown')
+    );
+    let mvpTransitionAction = contextData
       ? 'apply_blur'
       : ((activeVideoBlurred || hasAuthoritativeBlur) ? 'keep_blur' : 'clear_blur');
+    if (unresolvedGlobalContextDecisionVeto) {
+      mvpTransitionAction = 'clear_blur';
+    }
     postNonShortsTransitionDiag('transition_decision', {
       reason: String(reason || 'unknown'),
       nodeId: videoNodeId,
@@ -6700,12 +7414,37 @@ export function generateModerationScript(config: InjectionConfig): string {
       contextKind: String(contextKind || 'none'),
       action: mvpTransitionAction,
       marker: 'MW-MVP-REGULAR-TRANSITION-DECISION-V1',
+      unresolvedGlobalContextDecisionVeto: !!unresolvedGlobalContextDecisionVeto,
     });
     if (regularPositiveContinuitySignal && !(activeVideoBlurred || hasAuthoritativeBlur)) {
       incrementMvpTransitionCounter(
         'positiveTransitionBlurDropped',
-        'reason=' + String(reason || 'unknown') + ' nodeId=' + String(videoNodeId || 'none') + ' itemKey=' + String(reattachItemKey || 'unknown')
+        'reason=' + String(reason || 'unknown') +
+        ' nodeId=' + String(videoNodeId || 'none') +
+        ' itemKey=' + String(reattachItemKey || 'unknown') +
+        ' contextKind=' + String(contextKind || 'none')
       );
+      const positiveDropUnresolved = !!(
+        unresolvedRegularTransitionNow ||
+        unresolvedShortsShelfTransitionNow ||
+        unresolvedLaneFlipNoIdentityNow
+      );
+      if (positiveDropUnresolved) {
+        incrementMvpTransitionCounter(
+          'positiveTransitionBlurDroppedUnresolved',
+          'reason=' + String(reason || 'unknown') +
+          ' nodeId=' + String(videoNodeId || 'none') +
+          ' contextKind=' + String(contextKind || 'none')
+        );
+      }
+      if (contextData) {
+        incrementMvpTransitionCounter(
+          'positiveTransitionBlurDroppedWithContext',
+          'reason=' + String(reason || 'unknown') +
+          ' nodeId=' + String(videoNodeId || 'none') +
+          ' contextKind=' + String(contextKind || 'none')
+        );
+      }
     }
 
     const reattachItemKeyKnown = !!(reattachItemKey && reattachItemKey !== 'unknown');
@@ -6928,7 +7667,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       const target = event && event.target;
       if (!target || target.nodeType !== 1) return;
       if (String(target.tagName || '').toUpperCase() !== 'VIDEO') return;
-      diagNonShortsReattach(target, 'event:' + String(event.type || 'unknown'));
+      const eventEpoch = Number(state.pageEpoch || 0);
+      diagNonShortsReattach(target, 'event:' + String(event.type || 'unknown'), eventEpoch);
     };
     document.addEventListener('play', onVideoLifecycleEvent, true);
     document.addEventListener('playing', onVideoLifecycleEvent, true);
@@ -9425,6 +10165,46 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       return;
     }
+    const nonShortsMainSurfaceOverlayProvenanceVeto = !!(
+      !shortsMode &&
+      isYouTubeMainPageThumbnailSurfaceUrl(window.location.href) &&
+      isAuthoritativeHardBlur(element)
+    );
+    if (nonShortsMainSurfaceOverlayProvenanceVeto) {
+      const resolvedOverlaySrc = normalizeUrl(String(src || (element.dataset && element.dataset.mwSrc) || '')) || '';
+      const resolvedOverlayItemKey = getDiagItemKey(resolvedOverlaySrc || String(src || (element.dataset && element.dataset.mwSrc) || ''));
+      const hardBlurSrc = normalizeUrl(String((element.dataset && element.dataset.mwHardBlurSrc) || '')) || '';
+      const hardBlurItemKey = String((element.dataset && element.dataset.mwHardBlurItemKey) || 'unknown');
+      const provenanceMatch = !!(
+        (resolvedOverlaySrc && hardBlurSrc && resolvedOverlaySrc === hardBlurSrc) ||
+        (
+          resolvedOverlayItemKey &&
+          resolvedOverlayItemKey !== 'unknown' &&
+          hardBlurItemKey &&
+          hardBlurItemKey !== 'unknown' &&
+          resolvedOverlayItemKey === hardBlurItemKey
+        )
+      );
+      if (!provenanceMatch) {
+        incrementMvpTransitionCounter(
+          'overlayProvenanceVeto',
+          'reason=' + String((element && element.dataset && element.dataset.mwTransitionReason) || 'unknown') +
+          ' nodeId=' + String(getDiagNodeId(element) || 'none') +
+          ' overlayItemKey=' + String(resolvedOverlayItemKey || 'unknown') +
+          ' hardBlurItemKey=' + String(hardBlurItemKey || 'unknown')
+        );
+        removeRevealOverlay(element, src, 'createRevealOverlay_provenance_veto');
+        console.log(
+          '[MW-MVP-REGULAR-OVERLAY-PROVENANCE-VETO-V1] overlay_create_veto_provenance_mismatch',
+          'nodeId=' + String(getDiagNodeId(element) || 'none'),
+          'overlayItemKey=' + String(resolvedOverlayItemKey || 'unknown'),
+          'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown'),
+          'overlaySrc=' + String(resolvedOverlaySrc || '').substring(0, 180),
+          'hardBlurSrc=' + String(hardBlurSrc || '').substring(0, 180)
+        );
+        return;
+      }
+    }
     let shortsOwnerToken = '';
     if (shortsMode) {
       const activeContext = getShortsBlurContextForNode(element);
@@ -10559,6 +11339,8 @@ export function generateModerationScript(config: InjectionConfig): string {
         );
       }
       const dims = element ? getElementDimensions(element) : { width: 0, height: 0 };
+      const normalizedResultSrc = normalizeUrl(String(src || '')) || '';
+      const resultItemKey = getDiagItemKey(normalizedResultSrc || String(src || ''));
       
       if (element && element.isConnected) {
         try {
@@ -10594,6 +11376,33 @@ export function generateModerationScript(config: InjectionConfig): string {
             'pageEpoch=' + state.pageEpoch,
             'navId=' + NAV_ID
           );
+        }
+        if (mvpMainSurface && finalBlur) {
+          const resultCardNode = findNonShortsStrongCardNode(element) || findRegularMainCardFallbackNode(element);
+          const resultCardNodeId = resultCardNode ? getDiagNodeId(resultCardNode) : 'none';
+          const localKnownNegative = String((element.dataset && element.dataset.mwKnownNegativeForCardOrItem) || '') === '1';
+          const negativeLatchRead = readRegularMainCardNegativeLatch(
+            String(resultCardNodeId || 'none'),
+            String(resultItemKey || 'unknown'),
+            String(normalizedResultSrc || '')
+          );
+          const negativeProofVeto = !!(localKnownNegative || negativeLatchRead.matched);
+          if (negativeProofVeto) {
+            finalBlur = false;
+            decisionReason = (decisionReason ? decisionReason + '/' : '') + 'regular_negative_latch_veto';
+            console.log(
+              '[MW-MVP-REGULAR-NEGATIVE-LATCH-VETO-V1]',
+              'itemId=' + String(itemId || 'none'),
+              'nodeId=' + getDiagNodeId(element),
+              'cardNodeId=' + String(resultCardNodeId || 'none'),
+              'itemKey=' + String(resultItemKey || 'unknown'),
+              'localKnownNegative=' + String(!!localKnownNegative),
+              'latchMatch=' + String(!!negativeLatchRead.matched),
+              'latchReason=' + String(negativeLatchRead.reason || 'none'),
+              'src=' + String(normalizedResultSrc || '').substring(0, 180),
+              'action=clear_blur'
+            );
+          }
         }
         if (finalBlur) {
           diagLogApplyByItemId(
@@ -10735,6 +11544,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       let fanoutRecycled = 0;
       let fanoutNewlyDiscovered = 0;
       let fanoutBlockedByCard = 0;
+      let fanoutBlockedByNegativeProof = 0;
+      const normalizedFanoutSrc = normalizeUrl(String(src || '')) || '';
+      const fanoutItemKey = getDiagItemKey(normalizedFanoutSrc || String(src || ''));
       const trackFanoutNode = function(node) {
         if (!node || node.nodeType !== 1) return;
         fanoutCandidates += 1;
@@ -10748,12 +11560,28 @@ export function generateModerationScript(config: InjectionConfig): string {
           diagApplySeenNodes.add(node);
         }
       };
+      const shouldBlockByNegativeProof = function(node) {
+        if (!regularMainSurface || !node || node.nodeType !== 1) return false;
+        const localKnownNegative = String((node.dataset && node.dataset.mwKnownNegativeForCardOrItem) || '') === '1';
+        const nodeCard = findNonShortsStrongCardNode(node) || findRegularMainCardFallbackNode(node);
+        const nodeCardNodeId = nodeCard ? getDiagNodeId(nodeCard) : 'none';
+        const negativeLatchRead = readRegularMainCardNegativeLatch(
+          String(nodeCardNodeId || 'none'),
+          String(fanoutItemKey || 'unknown'),
+          String(normalizedFanoutSrc || '')
+        );
+        return !!(localKnownNegative || negativeLatchRead.matched);
+      };
 
       // Images
       document.querySelectorAll('img').forEach(img => {
         if ((img.src === src || img.dataset.mwOrigSrc === src) && !isRevealedForSource(src, img)) {
           if (!shouldAllowFanoutNode(img)) {
             fanoutBlockedByCard += 1;
+            return;
+          }
+          if (shouldBlockByNegativeProof(img)) {
+            fanoutBlockedByNegativeProof += 1;
             return;
           }
           trackFanoutNode(img);
@@ -10777,6 +11605,10 @@ export function generateModerationScript(config: InjectionConfig): string {
             fanoutBlockedByCard += 1;
             return;
           }
+          if (shouldBlockByNegativeProof(video)) {
+            fanoutBlockedByNegativeProof += 1;
+            return;
+          }
           trackFanoutNode(video);
           if (video.dataset.mwModerated === 'blurred' && !isRevealedForSource(src, video) && isShortsModeActive()) {
             if (!findRevealOverlayForElement(video, src) && video.isConnected) {
@@ -10796,6 +11628,10 @@ export function generateModerationScript(config: InjectionConfig): string {
         if (el.dataset.mwBgSrc === src && !isRevealedForSource(src, el)) {
           if (!shouldAllowFanoutNode(el)) {
             fanoutBlockedByCard += 1;
+            return;
+          }
+          if (shouldBlockByNegativeProof(el)) {
+            fanoutBlockedByNegativeProof += 1;
             return;
           }
           trackFanoutNode(el);
@@ -10821,6 +11657,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         'fanoutCandidates=' + fanoutCandidates,
         'fanoutApplied=' + fanoutApplied,
         'fanoutBlockedByCard=' + fanoutBlockedByCard,
+        'fanoutBlockedByNegativeProof=' + fanoutBlockedByNegativeProof,
         'fanoutRecycled=' + fanoutRecycled,
         'fanoutNewlyDiscovered=' + fanoutNewlyDiscovered,
         'originCardNodeId=' + String(originCardNodeId || 'none'),
@@ -11767,6 +12604,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     const observer = new MutationObserver(mutations => {
       if (timerState.paused) return;
       if (!CONFIG.enabled || CONFIG.sensitivity === 0) return;
+      const observerEpochSnapshot = Number(state.pageEpoch || 0);
       
       let hasYouTubeChanges = false;
       shortsAttrMode = reevaluateShortsObserverMode('mutation_batch', window.location.href).mode;
@@ -11821,11 +12659,11 @@ export function generateModerationScript(config: InjectionConfig): string {
           }
           if (isYouTube() && !isShortsModeActive()) {
             if (String(node.tagName || '').toUpperCase() === 'VIDEO') {
-              diagNonShortsReattach(node, 'mutation_added:video');
+              diagNonShortsReattach(node, 'mutation_added:video', observerEpochSnapshot);
             }
             if (typeof node.querySelectorAll === 'function') {
               node.querySelectorAll('video').forEach(videoNode => {
-                diagNonShortsReattach(videoNode, 'mutation_added:descendant_video');
+                diagNonShortsReattach(videoNode, 'mutation_added:descendant_video', observerEpochSnapshot);
               });
             }
           }
@@ -11915,7 +12753,7 @@ export function generateModerationScript(config: InjectionConfig): string {
                 }
               }
             }
-            diagNonShortsReattach(target, 'attr:' + attr);
+            diagNonShortsReattach(target, 'attr:' + attr, observerEpochSnapshot);
           }
           // Non-Shorts YouTube: when img src changes in-place, clear stale scan markers
           // so the recycled node gets a fresh scan with soft blur applied immediately.
@@ -12438,21 +13276,21 @@ export function generateModerationScript(config: InjectionConfig): string {
     diagLogLifecycleSnapshot('page_load_end', 'document_ready_complete', lastUrl, window.location.href);
   }
 
-  // Periodic rescans (more aggressive for YouTube)
+  // Startup rescans (trimmed to reduce homepage jank while keeping coverage for late mounts)
   const isYT = isYouTube();
   scheduleInitTimeout('initialFullScan', scanFullPage, 500);
-  scheduleInitTimeout('initialFullScan', scanFullPage, 1500);
-  scheduleInitTimeout('initialFullScan', scanFullPage, 3000);
+  scheduleInitTimeout('initialFullScan', scanFullPage, 1800);
   
   if (isYT) {
-    scheduleInitTimeout('initialYouTubeScan', scanYouTubeThumbnails, 800);
-    scheduleInitTimeout('initialYouTubeScan', scanYouTubeThumbnails, 2000);
-    scheduleInitTimeout('initialYouTubeScan', scanYouTubeThumbnails, 4000);
-    scheduleInitTimeout('initialYouTubeScan', scanYouTubeThumbnails, 6000);
+    scheduleInitTimeout('initialYouTubeScan', scanYouTubeThumbnails, 1000);
+    scheduleInitTimeout('initialYouTubeScan', scanYouTubeThumbnails, 2600);
   }
 
   function startYouTubePeriodicScan(reason) {
     if (!isYT || timerState.paused || timerState.youtubePeriodicInterval) return;
+    // Regular homepage already has mutation + scroll + startup scans; skip this heavy
+    // periodic sweep outside Shorts to reduce steady-state jank.
+    if (!isShortsModeActive()) return;
     timerState.youtubePeriodicInterval = setInterval(scanYouTubeThumbnails, 5000);
     timerLog('start', 'youtubePeriodicInterval:' + reason);
   }
@@ -12463,11 +13301,12 @@ export function generateModerationScript(config: InjectionConfig): string {
     scheduleShortsRevealOverlayReposition('main_scroll');
     clearNamedTimeout('mainScrollTimeout', 'reschedule');
     timerState.mainScrollTimeout = setTimeout(() => {
-      scanFullPage();
       if (isYouTube()) {
         scanYouTubeThumbnails();
+      } else {
+        scanFullPage();
       }
-    }, 150);
+    }, 260);
     timerLog('start', 'mainScrollTimeout');
   };
   window.addEventListener('scroll', timerState.mainScrollHandler, { passive: true });
