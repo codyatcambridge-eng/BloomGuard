@@ -8115,6 +8115,68 @@ export function generateModerationScript(config: InjectionConfig): string {
             noContextPositiveOwnershipProof &&
             regularNoContextHoldBlockedUnknownIdentity
           );
+          const blockedUnknownIdentityStrongPositiveContinuity = !!(
+            blockedUnknownIdentity &&
+            previousAuthoritativePositive &&
+            sameNavEpoch &&
+            (
+              sameDomNode ||
+              replacementNodeSameCard ||
+              regularSameNodeRecentPositiveSrcContinuity ||
+              regularPositiveHoldEffectiveEligible ||
+              unresolvedPositiveHoldPrecedenceStrong
+            ) &&
+            !knownNegativeForCardOrItem &&
+            !regularMainNegativeLatchRead.matched &&
+            !confirmedLiveGhostByItemKey
+          );
+          if (blockedUnknownIdentityStrongPositiveContinuity && videoNode && videoNode.isConnected) {
+            videoNode.style.filter = 'blur(' + CONFIG.softBlurStrength + 'px)';
+            videoNode.style.webkitFilter = 'blur(' + CONFIG.softBlurStrength + 'px)';
+            videoNode.classList.add('mw-softblur');
+            if (videoNode.dataset) videoNode.dataset.mwModerated = 'softblur';
+            markAuthoritativeHardBlur(videoNode, String((videoNode.dataset && videoNode.dataset.mwSrc) || normalizedCurrent || normalizedPoster || ''));
+            if (videoNode.dataset) {
+              videoNode.dataset.mwHardBlurItemKey = String(hardBlurItemKey || strictContinuityItemKey || 'unknown');
+            }
+            console.log(
+              '[MW-MVP-REGULAR-NOCONTEXT-HOLD-POSITIVE-CONTINUITY-V1] keep_blur_blocked_unknown_identity_with_positive_continuity',
+              'reason=' + String(reason || 'unknown'),
+              'nodeId=' + String(videoNodeId || 'none'),
+              'cardNodeId=' + String(cardNodeId || 'none'),
+              'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
+              'reattachItemKey=' + String(reattachItemKey || 'unknown'),
+              'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown'),
+              'sameDomNode=' + String(!!sameDomNode),
+              'replacementNodeSameCard=' + String(!!replacementNodeSameCard),
+              'regularSameNodeRecentPositiveSrcContinuity=' + String(!!regularSameNodeRecentPositiveSrcContinuity)
+            );
+            postNonShortsTransitionDiag('regular_no_context_hold_keep_blur_positive_continuity', {
+              reason: String(reason || 'unknown'),
+              nodeId: videoNodeId,
+              marker: 'MW-MVP-REGULAR-NOCONTEXT-HOLD-POSITIVE-CONTINUITY-V1',
+              cardNodeId: String(cardNodeId || 'none'),
+              strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+              reattachItemKey: String(reattachItemKey || 'unknown'),
+              hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+              sameDomNode: !!sameDomNode,
+              replacementNodeSameCard: !!replacementNodeSameCard,
+              regularSameNodeRecentPositiveSrcContinuity: !!regularSameNodeRecentPositiveSrcContinuity,
+              action: 'keep_blur',
+            });
+            postNonShortsTransitionDiag('transition_decision', {
+              reason: String(reason || 'unknown'),
+              nodeId: videoNodeId,
+              itemKey: String(reattachItemKey || 'unknown'),
+              hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+              contextKind: String(contextKind || 'none'),
+              action: 'keep_blur',
+              marker: 'MW-MVP-REGULAR-NEGATIVE-TRANSITION-GUARD-V1',
+              blockedUnknownIdentity: true,
+              blockedUnknownIdentityStrongPositiveContinuity: true,
+            });
+            return;
+          }
           if (blockedUnknownIdentity) {
             console.log(
               '[MW-MVP-REGULAR-NOCONTEXT-HOLD-BLOCKED-UNKNOWN-IDENTITY-V1] fail_closed_no_context_hold_unknown_identity',
@@ -13194,6 +13256,55 @@ export function generateModerationScript(config: InjectionConfig): string {
   /**
    * Set up IntersectionObserver to only scan images currently visible
    */
+  function getViewportQueueSignature(element) {
+    if (!element || element.nodeType !== 1) return '';
+    const tag = String(element.tagName || '').toUpperCase();
+    const srcFields = getDiagSourceFields(element);
+    const normalizedCurrent = normalizeUrl(String(srcFields.currentSrc || element.getAttribute('src') || '')) || '';
+    const normalizedPoster = normalizeUrl(String(srcFields.poster || element.getAttribute('poster') || '')) || '';
+    if (tag === 'IMG') {
+      return 'IMG|' + String(
+        normalizedCurrent ||
+        normalizeUrl(String((element.dataset && (element.dataset.mwLastScanSrc || element.dataset.mwOrigSrc || element.dataset.mwSrc || '')) || '')) ||
+        ''
+      );
+    }
+    if (tag === 'VIDEO') {
+      return 'VIDEO|' + String(normalizedPoster || '') + '|' + String(normalizedCurrent || '');
+    }
+    return tag + '|' + String(
+      normalizeUrl(String((element.dataset && (element.dataset.mwLastScanSrc || element.dataset.mwSrc || element.dataset.mwOrigSrc || element.dataset.mwLastPoster || '')) || '')) || ''
+    );
+  }
+
+  function shouldQueueViewportIntersection(element) {
+    if (!element || element.nodeType !== 1) {
+      return { queue: false, reason: 'invalid_target', signature: '', previousSignature: '', ageMs: 0 };
+    }
+    const signature = getViewportQueueSignature(element);
+    const previousSignature = String((element.dataset && element.dataset.mwViewportLastQueueSig) || '');
+    const alreadyQueued = String((element.dataset && element.dataset.mwViewportQueued) || '') === 'true';
+    if (!alreadyQueued) {
+      return { queue: true, reason: 'first_entry', signature: signature, previousSignature: previousSignature, ageMs: 0 };
+    }
+    if (
+      signature &&
+      previousSignature &&
+      signature !== previousSignature
+    ) {
+      return { queue: true, reason: 'signature_changed', signature: signature, previousSignature: previousSignature, ageMs: 0 };
+    }
+    const lastQueuedAt = Number((element.dataset && element.dataset.mwViewportLastQueueAt) || 0);
+    if (!Number.isFinite(lastQueuedAt) || lastQueuedAt <= 0) {
+      return { queue: true, reason: 'missing_timestamp', signature: signature, previousSignature: previousSignature, ageMs: 0 };
+    }
+    const ageMs = Math.max(0, Date.now() - lastQueuedAt);
+    if (ageMs >= 1400) {
+      return { queue: true, reason: 'ttl_expired', signature: signature, previousSignature: previousSignature, ageMs: ageMs };
+    }
+    return { queue: false, reason: 'guard_blocked', signature: signature, previousSignature: previousSignature, ageMs: ageMs };
+  }
+
   function setupViewportObserver() {
     if (!('IntersectionObserver' in window)) return null;
     
@@ -13202,11 +13313,28 @@ export function generateModerationScript(config: InjectionConfig): string {
         if (entry.isIntersecting) {
           // Element is now visible - scan it
           const element = entry.target;
-          if (element.dataset.mwViewportQueued !== 'true') {
+          const decision = shouldQueueViewportIntersection(element);
+          if (decision.queue) {
             element.dataset.mwViewportQueued = 'true';
-            queueMutationScan(element, 'viewport_intersection');
+            element.dataset.mwViewportLastQueueSig = String(decision.signature || '');
+            element.dataset.mwViewportLastQueueAt = String(Date.now());
+            queueMutationScan(
+              element,
+              decision.reason === 'first_entry'
+                ? 'viewport_intersection'
+                : ('viewport_intersection_' + String(decision.reason || 'reentry'))
+            );
           } else {
-            mwDiagLog('[MW-FLICKER][VIEWPORT] re-entry blocked by mwViewportQueued guard — node=' + (element.dataset.mwNodeId || element.tagName || 'unknown') + ' src=' + String(element.src || element.dataset.mwLastScanSrc || '').substring(0, 80));
+            const tag = String((element && element.tagName) || '').toUpperCase();
+            if (tag === 'IMG' || tag === 'VIDEO') {
+              mwDiagLog(
+                '[MW-FLICKER][VIEWPORT] re-entry blocked by mwViewportQueued guard — node=' +
+                (element.dataset.mwNodeId || element.tagName || 'unknown') +
+                ' src=' + String(element.src || element.dataset.mwLastScanSrc || '').substring(0, 80) +
+                ' ageMs=' + String(Number(decision.ageMs || 0)) +
+                ' sig=' + String(decision.signature || '').substring(0, 180)
+              );
+            }
           }
         }
       });
