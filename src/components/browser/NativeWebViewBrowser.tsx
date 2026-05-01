@@ -1197,11 +1197,20 @@ export const NativeWebViewBrowser = () => {
       exitPendingReinject('epoch_sync_success', targetUrl);
       return;
     }
+    const diagMvpAssert = (() => {
+      try {
+        if (window.localStorage && window.localStorage.getItem('MW_MVP_ASSERT') === '1') return true;
+      } catch {
+        // ignore storage errors
+      }
+      return false;
+    })();
     const config = {
       ...getModerationConfig(),
       enabled: isRuntimeModerationEnabled,
       pageEpoch: webViewPageEpochRef.current,
       diagYouTubeShorts: localSettings.diag_youtube_shorts === true && isYouTubeUrl(targetUrl),
+      diagMvpAssert: diagMvpAssert,
     };
     console.log(
       '[MW-Inject][Config]',
@@ -2662,6 +2671,7 @@ export const NativeWebViewBrowser = () => {
     }> = [];
     
     // Process each item using the moderation bridge
+    let shortsUncertainStreak = 0;
     for (const item of items) {
       if (hardKillStaleRequest('scan_loop_pre_item:' + String(item.itemId || 'none'))) {
         return;
@@ -2679,7 +2689,13 @@ export const NativeWebViewBrowser = () => {
           const decisionReason = scanResult.decisionReason || scanResult.reason;
           const isActiveShortsVideoFrame = stickyShortsMode && item.sourceType === 'video-frame';
           const isUnknownInputNoPixels = decisionReason === 'unknown_input_no_pixels' || scanResult.reason === 'unknown_input';
-          const forceShortsUncertainBlur = isActiveShortsVideoFrame && isUnknownInputNoPixels;
+          const shouldTrackUncertainShorts = isActiveShortsVideoFrame && isUnknownInputNoPixels;
+          if (shouldTrackUncertainShorts) {
+            shortsUncertainStreak += 1;
+          } else {
+            shortsUncertainStreak = 0;
+          }
+          const forceShortsUncertainBlur = shouldTrackUncertainShorts && shortsUncertainStreak >= 2;
           const categoryConfidence = Object.entries(scanResult.predictions || {}).reduce((matched, [label, value]) => {
             if (matched >= 0) return matched;
             return label.toLowerCase() === scanResult.category.toLowerCase() ? value : -1;
@@ -2708,6 +2724,7 @@ export const NativeWebViewBrowser = () => {
               'sourceType=' + String(item.sourceType || 'unknown'),
               'reason=' + String(decisionReason || 'unknown'),
               'action=force_blur',
+              'uncertainStreak=' + String(shortsUncertainStreak),
             );
           }
           results.push({
@@ -2732,20 +2749,32 @@ export const NativeWebViewBrowser = () => {
           });
           console.log('[MW-Host] scan result', item.itemId, ':', finalCategory, 'blur=' + finalShouldBlur, 'conf=' + finalConfidence.toFixed(3));
         } else {
-          const forceShortsUncertainBlur = stickyShortsMode && item.sourceType === 'video-frame';
+          const shouldTrackUncertainShorts = stickyShortsMode && item.sourceType === 'video-frame';
+          if (shouldTrackUncertainShorts) {
+            shortsUncertainStreak += 1;
+          } else {
+            shortsUncertainStreak = 0;
+          }
+          const forceShortsUncertainBlur = shouldTrackUncertainShorts && shortsUncertainStreak >= 2;
           const shouldBlurOnFailure = localSettings.fail_closed === true;
           const finalShouldBlur = forceShortsUncertainBlur ? true : shouldBlurOnFailure;
           const finalCategory = forceShortsUncertainBlur
             ? 'shorts_scan_miss_uncertain'
+            : shouldTrackUncertainShorts
+              ? 'shorts_scan_miss_uncertain_hold'
             : (shouldBlurOnFailure ? 'error_fail_closed' : 'error');
           const finalConfidence = forceShortsUncertainBlur
             ? 0.35
             : (shouldBlurOnFailure ? 1 : 0);
           const finalSeverity: ModerationSeverity = forceShortsUncertainBlur
             ? 'soft'
+            : shouldTrackUncertainShorts
+              ? 'safe'
             : (shouldBlurOnFailure ? 'hard' : 'safe');
           const finalDecisionReason = forceShortsUncertainBlur
             ? 'shorts_uncertain_input_force_blur:no_scan_result'
+            : shouldTrackUncertainShorts
+              ? 'shorts_uncertain_input_wait_for_repeat:no_scan_result'
             : undefined;
           if (forceShortsUncertainBlur) {
             console.log(
@@ -2754,6 +2783,7 @@ export const NativeWebViewBrowser = () => {
               'sourceType=' + String(item.sourceType || 'unknown'),
               'reason=no_scan_result',
               'action=force_blur',
+              'uncertainStreak=' + String(shortsUncertainStreak),
             );
           }
           results.push({
@@ -2772,20 +2802,32 @@ export const NativeWebViewBrowser = () => {
           return;
         }
       } catch (error) {
-        const forceShortsUncertainBlur = stickyShortsMode && item.sourceType === 'video-frame';
+        const shouldTrackUncertainShorts = stickyShortsMode && item.sourceType === 'video-frame';
+        if (shouldTrackUncertainShorts) {
+          shortsUncertainStreak += 1;
+        } else {
+          shortsUncertainStreak = 0;
+        }
+        const forceShortsUncertainBlur = shouldTrackUncertainShorts && shortsUncertainStreak >= 2;
         const shouldBlurOnFailure = localSettings.fail_closed === true;
         const finalShouldBlur = forceShortsUncertainBlur ? true : shouldBlurOnFailure;
         const finalCategory = forceShortsUncertainBlur
           ? 'shorts_scan_error_uncertain'
+          : shouldTrackUncertainShorts
+            ? 'shorts_scan_error_uncertain_hold'
           : (shouldBlurOnFailure ? 'error_fail_closed' : 'error');
         const finalConfidence = forceShortsUncertainBlur
           ? 0.35
           : (shouldBlurOnFailure ? 1 : 0);
         const finalSeverity: ModerationSeverity = forceShortsUncertainBlur
           ? 'soft'
+          : shouldTrackUncertainShorts
+            ? 'safe'
           : (shouldBlurOnFailure ? 'hard' : 'safe');
         const finalDecisionReason = forceShortsUncertainBlur
           ? 'shorts_uncertain_input_force_blur:scan_error'
+          : shouldTrackUncertainShorts
+            ? 'shorts_uncertain_input_wait_for_repeat:scan_error'
           : undefined;
         console.log('[MW-Host] scan error', item.itemId, ':', error);
         if (forceShortsUncertainBlur) {
@@ -2795,6 +2837,7 @@ export const NativeWebViewBrowser = () => {
             'sourceType=' + String(item.sourceType || 'unknown'),
             'reason=scan_error',
             'action=force_blur',
+            'uncertainStreak=' + String(shortsUncertainStreak),
           );
         }
         results.push({
@@ -2893,7 +2936,7 @@ export const NativeWebViewBrowser = () => {
     const hardLowHits = hardResults.filter(item => item.confidence >= modePolicy.hardMultiConfFloor);
     const hardUnsafeMaxConf = hardResults.reduce((max, item) => Math.max(max, item.confidence), 0);
     const shortsAnyShouldBlurHit = stickyShortsMode && eligibleResults.some(item => item.shouldBlur);
-    const nonShortsMainThumbAnyShouldBlurHit = (() => {
+    const nonShortsMainThumbUnsafeHit = (() => {
       if (stickyShortsMode) return false;
       try {
         const parsed = new URL(currentUrl || '');
@@ -2905,11 +2948,19 @@ export const NativeWebViewBrowser = () => {
       } catch {
         return false;
       }
-      return eligibleResults.some(item => {
+      const mainThumbHits = eligibleResults.filter(item => {
         if (!item.shouldBlur) return false;
         const sourceType = String(item.sourceType || '').toLowerCase();
         return sourceType === '' || sourceType === 'img' || sourceType === 'video-poster';
       });
+      if (mainThumbHits.length === 0) return false;
+      const mainThumbVeryHighConfThreshold = Math.max(hardConfThreshold, 0.93);
+      const mainThumbVeryHighConfHits = mainThumbHits.filter(item => item.confidence >= mainThumbVeryHighConfThreshold);
+      const mainThumbQualifiedHits = mainThumbHits.filter(item => item.confidence >= modePolicy.hardMultiConfFloor);
+      return (
+        mainThumbVeryHighConfHits.length >= 1 ||
+        mainThumbQualifiedHits.length >= modePolicy.hardMultiMinHits
+      );
     })();
 
     const softResults = eligibleResults.filter(item => item.shouldBlur && item.severity === 'soft');
@@ -2936,8 +2987,8 @@ export const NativeWebViewBrowser = () => {
     } else if (shortsAnyShouldBlurHit) {
       overlayDecision = true;
       decisionReason = 'shorts_item_blur_hit';
-    } else if (nonShortsMainThumbAnyShouldBlurHit) {
-      decisionReason = 'main_page_item_blur_hit';
+    } else if (nonShortsMainThumbUnsafeHit) {
+      decisionReason = 'main_page_item_blur_hit_qualified';
     }
 
     const shouldDebugScanSummary = isDebugMode || localSettings.prototype_mode || localSettings.show_scan_notifications;
@@ -2954,14 +3005,14 @@ export const NativeWebViewBrowser = () => {
       );
     }
 
-    const shouldTreatAsUnsafe = hardOverlayDecision || shortsAnyShouldBlurHit || nonShortsMainThumbAnyShouldBlurHit;
+    const shouldTreatAsUnsafe = hardOverlayDecision || shortsAnyShouldBlurHit || nonShortsMainThumbUnsafeHit;
     // Preserve existing hard-only behavior outside Shorts; Shorts treat any shouldBlur hit as unsafe.
     if (shouldTreatAsUnsafe) {
       const unsafeReason = hardOverlayDecision
         ? `moderation_request_hard:${decisionReason}`
         : (shortsAnyShouldBlurHit
           ? 'moderation_request_shorts_item_blur'
-          : 'moderation_request_main_page_item_blur');
+          : 'moderation_request_main_page_item_blur_qualified');
       processModerationSafetySignal(true, unsafeReason);
     } else {
       processModerationSafetySignal(false, 'moderation_request_no_hard');
@@ -2984,7 +3035,7 @@ export const NativeWebViewBrowser = () => {
       'hardStrong=' + hardStrongHits.length,
       'hardLow=' + hardLowHits.length,
       'softQualified=' + softQualifiedHits.length,
-      'mainThumbAnyShouldBlur=' + nonShortsMainThumbAnyShouldBlurHit,
+      'mainThumbUnsafe=' + nonShortsMainThumbUnsafeHit,
       'domOverlay=' + (ENABLE_DOM_BLUR ? 'on' : 'off'),
       'epoch=' + (requestEpoch ?? activeEpoch),
     );
@@ -3340,6 +3391,43 @@ export const NativeWebViewBrowser = () => {
           ? JSON.stringify(typedMessage.details)
           : '{}';
         console.warn('[MW-DIAG][TRANSITION]', 'stage=' + stage, 'navId=' + navId, 'pageEpoch=' + pageEpoch, 'details=' + details);
+        return;
+      }
+
+      if (typedMessage.type === 'MW_MVP_ASSERT_EVENT') {
+        const eventType = String((typedMessage.event && typedMessage.event.type) || 'unknown');
+        if (eventType === 'unknown') return;
+        console.warn('[MW-MVP-ASSERT][EVENT]', eventType);
+        return;
+      }
+
+      if (typedMessage.type === 'MW_MVP_ASSERT_FAILURE') {
+        const code = String((typedMessage.failure && typedMessage.failure.code) || 'unknown');
+        const details = typedMessage.failure && typeof typedMessage.failure.details === 'object'
+          ? JSON.stringify(typedMessage.failure.details)
+          : '{}';
+        console.error('[MW-MVP-ASSERT][FAIL]', 'code=' + code, 'details=' + details);
+        return;
+      }
+
+      if (typedMessage.type === 'MW_MVP_ASSERT_REPORT') {
+        const report = typedMessage;
+        const reports = ((window as unknown as { __MW_MVP_ASSERT_REPORTS__?: unknown[] }).__MW_MVP_ASSERT_REPORTS__ || []);
+        reports.push(report);
+        if (reports.length > 20) reports.splice(0, reports.length - 20);
+        (window as unknown as { __MW_MVP_ASSERT_REPORTS__?: unknown[] }).__MW_MVP_ASSERT_REPORTS__ = reports;
+        try {
+          const stamp = new Date().toISOString();
+          window.localStorage?.setItem('MW_MVP_ASSERT_LAST_REPORT', JSON.stringify({ at: stamp, report }));
+        } catch {
+          // ignore storage errors
+        }
+        console.warn(
+          '[MW-MVP-ASSERT][REPORT]',
+          'pass=' + String(!!(report.summary && report.summary.pass)),
+          'eventCount=' + String((report.summary && report.summary.eventCount) || 0),
+          'failureCount=' + String((report.summary && report.summary.failureCount) || 0),
+        );
         return;
       }
       
