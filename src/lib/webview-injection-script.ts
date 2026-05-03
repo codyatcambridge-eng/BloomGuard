@@ -6370,8 +6370,19 @@ export function generateModerationScript(config: InjectionConfig): string {
         )
       )
     );
+    const regularUnknownIdentitySameLocalSrcOnlyBlock = !!(
+      unresolvedRegularTransitionNow &&
+      previousAuthoritativePositive &&
+      !hasAnyNegativeProof &&
+      String(cardNodeId || 'none') === 'none' &&
+      (!strictContinuityItemKey || strictContinuityItemKey === 'unknown') &&
+      (!reattachItemKey || reattachItemKey === 'unknown') &&
+      !contextData &&
+      String(regularPositiveHoldProofKind || 'none') === 'same_local_src'
+    );
     const regularClearAllowedByProof = !!(
       unresolvedRegularTransitionNow &&
+      !regularUnknownIdentitySameLocalSrcOnlyBlock &&
       !regularPositiveHoldKeepBlur &&
       !hasPositiveContinuityProofStrong &&
       (
@@ -6470,6 +6481,19 @@ export function generateModerationScript(config: InjectionConfig): string {
         clearAllowedByProof: !!regularClearAllowedByProof,
         action: 'keep_blur',
         srcLineage: String((regularProofSrc || currentResolvedSrcForProof || '')).substring(0, 180),
+      });
+    } else if (regularUnknownIdentitySameLocalSrcOnlyBlock) {
+      postNonShortsTransitionDiag('regular_clear_proof_blocked_unknown_identity', {
+        reason: String(reason || 'unknown'),
+        nodeId: String(videoNodeId || 'none'),
+        marker: 'MW-MVP-REGULAR-CLEAR-PROOF-BLOCKED-UNKNOWN-IDENTITY-V1',
+        cardNodeId: String(cardNodeId || 'none'),
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        reattachItemKey: String(reattachItemKey || 'unknown'),
+        proofKind: String(regularPositiveHoldProofKind || 'none'),
+        previousAuthoritativePositive: !!previousAuthoritativePositive,
+        clearAllowedByProof: !!regularClearAllowedByProof,
+        action: 'keep_blur_fail_closed',
       });
     } else if (regularClearAllowedByProof) {
       postNonShortsTransitionDiag('regular_clear_allowed_negative_proof', {
