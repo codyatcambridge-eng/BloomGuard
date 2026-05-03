@@ -6108,6 +6108,63 @@ export function generateModerationScript(config: InjectionConfig): string {
         String(strictContinuityItemKey || 'unknown') === String(hardBlurItemKey || 'unknown')
       )
     );
+    const regularNuclearAPositiveProofVeto = !!(
+      previousAuthoritativePositive &&
+      sameNavEpoch &&
+      !knownNegativeForCardOrItem &&
+      (
+        priorHardBlurProofSameNode ||
+        priorHardBlurProofSameCard ||
+        priorHardBlurProofSameItemKey ||
+        priorHardBlurProofSameReattachKey ||
+        priorHardBlurProofSameLocalSrc ||
+        priorHardBlurProofSameCardItemKey ||
+        priorHardBlurProofSameCardReattachKey ||
+        priorHardBlurProofSameCardLocalSrc
+      )
+    );
+    const regularNuclearAUnknownIdentityNoBlur = !!(
+      regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo &&
+      isMainSurfaceUrl &&
+      isTransitionChurnReason &&
+      !contextData &&
+      String(cardNodeId || 'none') === 'none' &&
+      (!strictContinuityItemKey || strictContinuityItemKey === 'unknown') &&
+      (!reattachItemKey || reattachItemKey === 'unknown') &&
+      !regularUnknownIdentityHardProof &&
+      !regularNuclearAPositiveProofVeto
+    );
+    if (regularNuclearAUnknownIdentityNoBlur) {
+      const nuclearACleared = clearAllBlurAndOverlay(
+        videoNode,
+        currentResolvedSrcForProof || String((videoNode.dataset && videoNode.dataset.mwSrc) || ''),
+        'regular_main_nuclear_a_unknown_identity_no_blur',
+        'safe'
+      );
+      if (videoNode && videoNode.dataset) {
+        videoNode.dataset.mwPendingRevealUntil = '0';
+        videoNode.dataset.mwRegularPositiveHoldStartedAt = '0';
+        videoNode.dataset.mwRegularPositiveHoldUntil = '0';
+        videoNode.dataset.mwRegularClearVetoStartedAt = '0';
+        videoNode.dataset.mwRegularClearVetoUntil = '0';
+      }
+      holdBlurDuringUnresolvedTransition = false;
+      hasAuthoritativeBlur = false;
+      hasIncidentalBlur = false;
+      activeVideoBlurred = false;
+      postNonShortsTransitionDiag('regular_main_nuclear_a_unknown_identity_no_blur', {
+        reason: String(reason || 'unknown'),
+        nodeId: String(videoNodeId || 'none'),
+        marker: 'MW-MVP-REGULAR-NEGATIVE-NUCLEAR-A-NO-BLUR-V1',
+        action: 'clear_blur',
+        cardNodeId: String(cardNodeId || 'none'),
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        reattachItemKey: String(reattachItemKey || 'unknown'),
+        hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+        cleared: !!nuclearACleared,
+      });
+    }
     const regularPositivePriorProof = !!(
       !knownNegativeForCardOrItem &&
       !cardBoundaryChanged &&
