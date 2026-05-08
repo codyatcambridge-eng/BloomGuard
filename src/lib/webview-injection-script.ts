@@ -3764,6 +3764,14 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (reason) {
       node.dataset.mwRegularPositiveProofReason = String(reason || 'unknown');
     }
+    if (cardNode && cardNodeId !== 'none' && cardNode.dataset) {
+      cardNode.dataset.mwCardPositiveProof = '1';
+      cardNode.dataset.mwCardPositiveProofAt = String(Date.now());
+      cardNode.dataset.mwCardPositiveProofPageEpoch = String(state.pageEpoch || 0);
+      cardNode.dataset.mwCardPositiveProofNav = String(NAV_ID || 'none');
+      cardNode.dataset.mwCardPositiveProofItemKey = String(itemKey || 'unknown');
+      cardNode.dataset.mwCardPositiveProofSrc = String(normalizedSrc || '');
+    }
   }
 
   function stampShortsShelfAuthoritativePositiveProof(node, src, strictKey, reason) {
@@ -4292,6 +4300,118 @@ export function generateModerationScript(config: InjectionConfig): string {
         'nodeId=' + videoNodeId,
         'cardNodeId=' + cardNodeId
       );
+    }
+    if (regularPathQuarantinePassed && !card && !nearestRegularCardNode && reasonLooksTransition) {
+      // Phase 2C diagnostic-only: confirmed portal/detached video. No blur applied here.
+      try {
+        const probeRect = (
+          videoNode.isConnected && typeof videoNode.getBoundingClientRect === 'function'
+            ? videoNode.getBoundingClientRect() : null
+        );
+        const probeCx = probeRect ? (probeRect.left + probeRect.width / 2) : -1;
+        const probeCy = probeRect ? (probeRect.top + probeRect.height / 2) : -1;
+        const ancestorParts = [];
+        let ancestorCursor = videoNode.parentElement;
+        for (let ai = 0; ai < 20 && ancestorCursor; ai += 1) {
+          if (ancestorCursor === document.body || ancestorCursor === document.documentElement) break;
+          ancestorParts.push(
+            String(ancestorCursor.tagName || '?').toLowerCase() +
+            (ancestorCursor.id ? '#' + String(ancestorCursor.id || '').substring(0, 24) : '') +
+            (ancestorCursor.dataset && ancestorCursor.dataset.mwModerated ? '[mwMod=' + ancestorCursor.dataset.mwModerated + ']' : '')
+          );
+          ancestorCursor = ancestorCursor.parentElement;
+        }
+        const hasEFP = typeof document.elementsFromPoint === 'function';
+        let probeStack = [];
+        if (hasEFP && probeCx >= 0 && probeCy >= 0) {
+          try { probeStack = document.elementsFromPoint(probeCx, probeCy) || []; } catch (efpErr) {}
+        }
+        const stackItems = [];
+        let probePositiveCardCount = 0;
+        for (let si = 0; si < Math.min(probeStack.length, 20); si += 1) {
+          const se = probeStack[si];
+          if (!se || se.nodeType !== 1) continue;
+          const seIsCard = !!(typeof se.matches === 'function' && se.matches(NON_SHORTS_REATTACH_STRONG_CARD_SELECTOR));
+          const seCardProof = String((se.dataset && se.dataset.mwCardPositiveProof) || '');
+          const seMwMod = String((se.dataset && se.dataset.mwModerated) || '');
+          if (seIsCard && seCardProof === '1') probePositiveCardCount += 1;
+          stackItems.push(
+            String(se.tagName || '?').toLowerCase() +
+            (se.id ? '#' + String(se.id || '').substring(0, 24) : '') +
+            (seMwMod ? '[mwMod=' + seMwMod + ']' : '') +
+            (seCardProof ? '[cardProof=' + seCardProof + ']' : '') +
+            (seIsCard ? '[IS_CARD]' : '')
+          );
+        }
+        postNonShortsTransitionDiag('portal_video_geometry_probe', {
+          reason: String(reason || 'unknown'),
+          nodeId: String(videoNodeId || 'none'),
+          marker: 'MW-MVP-PORTAL-VIDEO-GEOMETRY-PROBE-V1',
+          tagName: String(videoNode.tagName || '?').toLowerCase(),
+          className: String(videoNode.className || '').substring(0, 60),
+          videoSrc: String(videoNode.src || '').substring(0, 80),
+          currentSrc: String(videoNode.currentSrc || '').substring(0, 80),
+          poster: String(videoNode.poster || '').substring(0, 80),
+          isConnected: !!videoNode.isConnected,
+          videoRect: probeRect
+            ? 'l=' + Math.round(probeRect.left) + ',t=' + Math.round(probeRect.top) + ',w=' + Math.round(probeRect.width) + ',h=' + Math.round(probeRect.height)
+            : 'null',
+          centerX: Math.round(probeCx),
+          centerY: Math.round(probeCy),
+          ancestorChain: ancestorParts.join(' > ').substring(0, 300),
+          stackSummary: stackItems.join(' | ').substring(0, 500),
+          hasElementsFromPoint: !!hasEFP,
+          stackDepth: probeStack.length,
+          positiveProofCardsInStack: probePositiveCardCount,
+          pageEpoch: Number(state.pageEpoch || 0),
+          navId: String(NAV_ID || 'none'),
+        });
+        for (let si = 0; si < Math.min(probeStack.length, 20); si += 1) {
+          const se = probeStack[si];
+          if (!se || se.nodeType !== 1) continue;
+          const seIsCard = !!(typeof se.matches === 'function' && se.matches(NON_SHORTS_REATTACH_STRONG_CARD_SELECTOR));
+          if (!seIsCard) continue;
+          const seCardProof = String((se.dataset && se.dataset.mwCardPositiveProof) || '');
+          if (seCardProof !== '1') continue;
+          const proofAt = Number((se.dataset && se.dataset.mwCardPositiveProofAt) || 0);
+          const candidateOverlapRatio = (function() {
+            if (!probeRect || typeof se.getBoundingClientRect !== 'function') return -1;
+            try {
+              const cr = se.getBoundingClientRect();
+              const iw = Math.max(0, Math.min(probeRect.right, cr.right) - Math.max(probeRect.left, cr.left));
+              const ih = Math.max(0, Math.min(probeRect.bottom, cr.bottom) - Math.max(probeRect.top, cr.top));
+              const va = probeRect.width * probeRect.height;
+              return va > 0 ? Math.round(iw * ih / va * 100) / 100 : 0;
+            } catch (e) { return -1; }
+          })();
+          postNonShortsTransitionDiag('portal_positive_card_candidate', {
+            reason: String(reason || 'unknown'),
+            nodeId: String(videoNodeId || 'none'),
+            marker: 'MW-MVP-PORTAL-POSITIVE-CARD-CANDIDATE-V1',
+            candidateCardNodeId: String(getDiagNodeId(se) || 'none'),
+            candidateProofItemKey: String((se.dataset && se.dataset.mwCardPositiveProofItemKey) || 'unknown'),
+            candidateProofSrc: String((se.dataset && se.dataset.mwCardPositiveProofSrc) || '').substring(0, 80),
+            proofAgeMs: Date.now() - proofAt,
+            candidatePageEpochMatch: String((se.dataset && se.dataset.mwCardPositiveProofPageEpoch) || '0') === String(state.pageEpoch || 0),
+            candidateNavMatch: String((se.dataset && se.dataset.mwCardPositiveProofNav) || 'none') === String(NAV_ID || 'none'),
+            candidateHasBlurredThumb: !!(typeof se.querySelector === 'function' && se.querySelector('[data-mw-moderated="blurred"]')),
+            candidateOverlapRatio: candidateOverlapRatio,
+          });
+        }
+        postNonShortsTransitionDiag('portal_positive_bridge_blocked', {
+          reason: String(reason || 'unknown'),
+          nodeId: String(videoNodeId || 'none'),
+          marker: 'MW-MVP-PORTAL-POSITIVE-BRIDGE-BLOCKED-V1',
+          blockReason: probePositiveCardCount === 0
+            ? 'no_positive_proof_card_in_stack'
+            : probePositiveCardCount > 1
+              ? 'ambiguous_multiple_positive_cards'
+              : 'diagnostic_only_bridge_not_yet_implemented',
+          positiveProofCardCount: probePositiveCardCount,
+          stackDepth: probeStack.length,
+          action: 'diagnostic_only_no_blur_applied',
+        });
+      } catch (e) {}
     }
     if (isRegularMainSurfaceNonShortsVideo && !regularPathQuarantinePassed) {
       console.log(
@@ -10601,6 +10721,14 @@ export function generateModerationScript(config: InjectionConfig): string {
       element.dataset.mwOverlayOwnerToken = '';
       element.dataset.mwShortsOwnerToken = '';
       clearAuthoritativeHardBlur(element);
+      if (!isShortsModeActive() && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
+        try {
+          const revokeCardNode = findNonShortsStrongCardNode(element) || findRegularMainCardFallbackNode(element);
+          if (revokeCardNode && revokeCardNode.dataset && String(revokeCardNode.dataset.mwCardPositiveProof || '') === '1') {
+            revokeCardNode.dataset.mwCardPositiveProof = '0';
+          }
+        } catch (e) {}
+      }
       if (isShortsModeActive()) {
         clearShortsBlurContextForNode(element, reason || 'clear_all');
       }
