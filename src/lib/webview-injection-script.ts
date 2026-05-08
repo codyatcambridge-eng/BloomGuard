@@ -1232,6 +1232,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     youtubeScrollHandler: null,
     youtubeMutationScanTimeout: null,
     revealOverlayRepositionRaf: null,
+    regularCardOverlayRepositionRaf: null,
     revealOverlayRetryTimeout: null,
     revealOverlayLastReason: '',
     revealOverlayScrollHandler: null,
@@ -3771,6 +3772,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       cardNode.dataset.mwCardPositiveProofNav = String(NAV_ID || 'none');
       cardNode.dataset.mwCardPositiveProofItemKey = String(itemKey || 'unknown');
       cardNode.dataset.mwCardPositiveProofSrc = String(normalizedSrc || '');
+      // Store direct ref so clearAllBlurAndOverlay can revoke proof even when
+      // the element is a detached portal video with no card ancestor in its DOM.
+      node.__mwRegularCardNodeRef = cardNode;
     }
   }
 
@@ -10098,6 +10102,100 @@ export function generateModerationScript(config: InjectionConfig): string {
     return true;
   }
 
+  // ── Portal card shield (regular homepage cards) ──────────────────────────
+  // Positions the reveal overlay over the stable card-node rect so it remains
+  // visible when YouTube swaps in a blob/portal preview video on top of the
+  // thumbnail.  Mirrors positionShortsRevealOverlay but anchors to the outer
+  // card wrapper rather than the video element.
+  function positionPortalCardOverlay(overlay, reason) {
+    if (!overlay) return false;
+    const cardNode = overlay.__mwPortalCardNode;
+    if (!cardNode || !cardNode.isConnected || typeof cardNode.getBoundingClientRect !== 'function') {
+      overlay.style.display = 'none';
+      return false;
+    }
+    // Validate proof is still current (epoch + nav guard against recycled cards)
+    const proofEpoch = String((cardNode.dataset && cardNode.dataset.mwCardPositiveProofPageEpoch) || '0');
+    const proofNav = String((cardNode.dataset && cardNode.dataset.mwCardPositiveProofNav) || 'none');
+    if (
+      String((cardNode.dataset && cardNode.dataset.mwCardPositiveProof) || '') !== '1' ||
+      proofEpoch !== String(state.pageEpoch || 0) ||
+      proofNav !== String(NAV_ID || 'none')
+    ) {
+      if (overlay.parentElement) overlay.parentElement.removeChild(overlay);
+      console.log(
+        '[MW-MVP-SHIELD-REGULAR-POSITIVE-REMOVED-V1]',
+        'proof_revoked',
+        'cardId=' + getDiagNodeId(cardNode),
+        'reason=' + String(reason || 'unknown')
+      );
+      return false;
+    }
+    let rect = null;
+    try { rect = cardNode.getBoundingClientRect(); } catch (e) {}
+    if (!rect) { overlay.style.display = 'none'; return false; }
+    const viewportWidth = Math.max(window.innerWidth || 0, 1);
+    const viewportHeight = Math.max(window.innerHeight || 0, 1);
+    const visibleRect = getVisibleViewportRect(rect, viewportWidth, viewportHeight);
+    if (visibleRect.width < 16 || visibleRect.height < 16) {
+      overlay.style.display = 'none';
+      return false;
+    }
+    overlay.style.display = 'flex';
+    overlay.style.left = Math.round(visibleRect.left) + 'px';
+    overlay.style.top = Math.round(visibleRect.top) + 'px';
+    overlay.style.width = Math.round(visibleRect.width) + 'px';
+    overlay.style.height = Math.round(visibleRect.height) + 'px';
+    const badge = overlay.querySelector ? overlay.querySelector('span') : null;
+    const btn = overlay.querySelector ? overlay.querySelector('.mw-reveal-btn') : null;
+    const centerX = Math.max(24, Math.min(viewportWidth - 24, Math.round(visibleRect.left + (visibleRect.width / 2))));
+    const centerY = Math.max(28, Math.min(viewportHeight - 28, Math.round(visibleRect.top + (visibleRect.height / 2))));
+    if (badge && badge.nodeType === 1) {
+      badge.style.position = 'fixed';
+      badge.style.left = Math.max(8, Math.min(viewportWidth - 100, Math.round(visibleRect.left + 8))) + 'px';
+      badge.style.top = Math.max(8, Math.min(viewportHeight - 28, Math.round(visibleRect.top + 8))) + 'px';
+      badge.style.right = '';
+      badge.style.bottom = '';
+    }
+    if (btn && btn.nodeType === 1) {
+      btn.style.position = 'fixed';
+      btn.style.left = centerX + 'px';
+      btn.style.top = centerY + 'px';
+      btn.style.transform = 'translate(-50%, -50%)';
+      btn.style.right = '';
+      btn.style.bottom = '';
+    }
+    console.log(
+      '[MW-MVP-SHIELD-REGULAR-POSITIVE-UPDATED-V1]',
+      'cardId=' + getDiagNodeId(cardNode),
+      'rect=' + Math.round(rect.left) + ',' + Math.round(rect.top) + ' ' + Math.round(rect.width) + 'x' + Math.round(rect.height),
+      'reason=' + String(reason || 'unknown')
+    );
+    return true;
+  }
+
+  function repositionAllPortalCardOverlays(reason) {
+    const portal = document.getElementById(REVEAL_PORTAL_ID);
+    if (!portal || typeof portal.querySelectorAll !== 'function') return;
+    const overlays = portal.querySelectorAll('.mw-reveal-overlay[data-mw-portal-card-shield="1"]');
+    for (let i = 0; i < overlays.length; i++) {
+      const overlay = overlays[i];
+      if (!overlay || !overlay.isConnected) continue;
+      positionPortalCardOverlay(overlay, reason || 'reposition');
+    }
+  }
+
+  function schedulePortalCardOverlayReposition(reason) {
+    if (timerState.paused || timerState.teardownDone) return;
+    if (timerState.regularCardOverlayRepositionRaf) return;
+    if (typeof window.requestAnimationFrame !== 'function') return;
+    timerState.regularCardOverlayRepositionRaf = window.requestAnimationFrame(function() {
+      timerState.regularCardOverlayRepositionRaf = null;
+      repositionAllPortalCardOverlays(reason || 'raf');
+    });
+  }
+  // ── end portal card shield ────────────────────────────────────────────────
+
   function repositionAllShortsRevealOverlays(reason) {
     if (!isShortsModeActive()) return;
     const portal = document.getElementById(REVEAL_PORTAL_ID);
@@ -10198,9 +10296,11 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (timerState.revealOverlayScrollHandler && timerState.revealOverlayResizeHandler) return;
     timerState.revealOverlayScrollHandler = function() {
       scheduleShortsRevealOverlayReposition('window_scroll');
+      schedulePortalCardOverlayReposition('window_scroll');
     };
     timerState.revealOverlayResizeHandler = function() {
       scheduleShortsRevealOverlayReposition('window_resize');
+      schedulePortalCardOverlayReposition('window_resize');
     };
     window.addEventListener('scroll', timerState.revealOverlayScrollHandler, { passive: true });
     window.addEventListener('resize', timerState.revealOverlayResizeHandler, { passive: true });
@@ -10291,6 +10391,19 @@ export function generateModerationScript(config: InjectionConfig): string {
         const overlays = portal.querySelectorAll('.mw-reveal-overlay');
         for (let i = 0; i < overlays.length; i += 1) {
           const overlay = overlays[i];
+          if (!overlay || !overlay.isConnected) continue;
+          if (overlay.dataset.mwNodeId === nodeId) return overlay;
+          if (src && overlay.dataset.mwFor === src) return overlay;
+        }
+      }
+    }
+    // Also search portal for regular-card portal shields (non-Shorts homepage)
+    if (!shortsMode && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
+      const portal = document.getElementById(REVEAL_PORTAL_ID);
+      if (portal && typeof portal.querySelectorAll === 'function') {
+        const portalOverlays = portal.querySelectorAll('.mw-reveal-overlay[data-mw-portal-card-shield="1"]');
+        for (let i = 0; i < portalOverlays.length; i++) {
+          const overlay = portalOverlays[i];
           if (!overlay || !overlay.isConnected) continue;
           if (overlay.dataset.mwNodeId === nodeId) return overlay;
           if (src && overlay.dataset.mwFor === src) return overlay;
@@ -10723,7 +10836,12 @@ export function generateModerationScript(config: InjectionConfig): string {
       clearAuthoritativeHardBlur(element);
       if (!isShortsModeActive() && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
         try {
-          const revokeCardNode = findNonShortsStrongCardNode(element) || findRegularMainCardFallbackNode(element);
+          let revokeCardNode = findNonShortsStrongCardNode(element) || findRegularMainCardFallbackNode(element);
+          // Fallback: portal video nodes have no card ancestor in their DOM subtree.
+          // Use the direct reference stamped by stampRegularMainAuthoritativePositiveProof.
+          if (!revokeCardNode && element.__mwRegularCardNodeRef && element.__mwRegularCardNodeRef.nodeType === 1) {
+            revokeCardNode = element.__mwRegularCardNodeRef;
+          }
           if (revokeCardNode && revokeCardNode.dataset && String(revokeCardNode.dataset.mwCardPositiveProof || '') === '1') {
             revokeCardNode.dataset.mwCardPositiveProof = '0';
           }
@@ -11382,6 +11500,27 @@ export function generateModerationScript(config: InjectionConfig): string {
     const nonShortsMainSurface = !shortsMode && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href);
     const nonShortsAuthority = nonShortsMainSurface ? resolveRegularMainCardAuthorityForNode(element, src) : null;
     const nonShortsAuthorityToken = nonShortsAuthority ? String(nonShortsAuthority.token || '') : '';
+    // Resolve card node for portal shield (regular homepage non-Shorts cards only)
+    const portalCardNode = (!shortsMode && nonShortsMainSurface && !isYouTubeMainPageShortsShelfVideoNode(element))
+      ? (findNonShortsStrongCardNode(element) || findRegularMainCardFallbackNode(element))
+      : null;
+    const portalCardShieldActive = !!(
+      portalCardNode &&
+      portalCardNode.dataset &&
+      String(portalCardNode.dataset.mwCardPositiveProof || '') === '1' &&
+      String(portalCardNode.dataset.mwCardPositiveProofPageEpoch || '0') === String(state.pageEpoch || 0) &&
+      String(portalCardNode.dataset.mwCardPositiveProofNav || 'none') === String(NAV_ID || 'none')
+    );
+    if (!portalCardShieldActive && nonShortsMainSurface && !shortsMode && !isYouTubeMainPageShortsShelfVideoNode(element)) {
+      console.log(
+        '[MW-MVP-SHIELD-REGULAR-POSITIVE-BLOCKED-V1]',
+        'nodeId=' + getDiagNodeId(element),
+        'cardId=' + getDiagNodeId(portalCardNode),
+        'cardProof=' + String((portalCardNode && portalCardNode.dataset && portalCardNode.dataset.mwCardPositiveProof) || '0'),
+        'epochMatch=' + String(!!(portalCardNode && String((portalCardNode.dataset && portalCardNode.dataset.mwCardPositiveProofPageEpoch) || '0') === String(state.pageEpoch || 0))),
+        'navMatch=' + String(!!(portalCardNode && String((portalCardNode.dataset && portalCardNode.dataset.mwCardPositiveProofNav) || 'none') === String(NAV_ID || 'none')))
+      );
+    }
     if (!shortsMode && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
       console.log(
         '[DIAG][MVP_ITEM_CHAIN] stage=reveal_attempt',
@@ -11676,6 +11815,38 @@ export function generateModerationScript(config: InjectionConfig): string {
         positionShortsRevealOverlay(existingOverlay, element, 'existing_overlay');
         scheduleShortsRevealOverlayReposition('existing_overlay');
         console.log('[DIAG][REVEAL_UI] portal_update', 'itemKey=' + getDiagItemKey(src));
+      } else if (portalCardShieldActive && portalCardNode) {
+        // Portal shield path — migrate existing overlay into the portal and
+        // re-position over the stable card rect.
+        existingOverlay.dataset.mwPortalCardShield = '1';
+        existingOverlay.__mwPortalCardNode = portalCardNode;
+        const shieldPortal = ensureRevealPortal();
+        if (shieldPortal && existingOverlay.parentElement !== shieldPortal) {
+          shieldPortal.appendChild(existingOverlay);
+        }
+        existingOverlay.style.cssText = [
+          'position: fixed',
+          'display: flex',
+          'align-items: center',
+          'justify-content: center',
+          'background: rgba(0, 0, 0, 0.3)',
+          'z-index: 2147483647',
+          'cursor: default',
+          'pointer-events: none',
+        ].join(';');
+        const existingButton = existingOverlay.querySelector ? existingOverlay.querySelector('.mw-reveal-btn') : null;
+        if (existingButton && existingButton.nodeType === 1) {
+          existingButton.style.pointerEvents = 'auto';
+        }
+        setRevealOverlayAnchorTarget(existingOverlay, element, 'existing_overlay_portal');
+        positionPortalCardOverlay(existingOverlay, 'existing_overlay_portal');
+        schedulePortalCardOverlayReposition('existing_overlay');
+        console.log(
+          '[MW-MVP-SHIELD-REGULAR-POSITIVE-UPDATED-V1]',
+          'existing_overlay_portal',
+          'cardId=' + getDiagNodeId(portalCardNode),
+          'overlayId=' + String((existingOverlay.dataset && existingOverlay.dataset.mwOverlayId) || 'unknown')
+        );
       } else {
         const nonShortsOverlayParent = resolveNonShortsRevealOverlayParent(element) || element.parentElement;
         if (nonShortsOverlayParent) {
@@ -11759,7 +11930,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       );
       return;
     }
-    const overlayParent = shortsMode ? ensureRevealPortal() : (resolveNonShortsRevealOverlayParent(element) || parent);
+    const overlayParent = shortsMode
+      ? ensureRevealPortal()
+      : (portalCardShieldActive ? ensureRevealPortal() : (resolveNonShortsRevealOverlayParent(element) || parent));
     if (!overlayParent) return;
     const overlayCountBefore = document.querySelectorAll('.mw-reveal-overlay').length;
     const itemKey = getDiagItemKey(src);
@@ -11804,17 +11977,29 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     overlay.dataset.mwOverlayId = overlayId;
     setRevealOverlayAnchorTarget(overlay, element, 'overlay_created');
-    overlay.style.cssText = [
-      shortsMode ? 'position: fixed' : 'position: absolute',
-      'inset: 0',
-      'display: flex',
-      'align-items: center',
-      'justify-content: center',
-      shortsMode ? 'background: transparent' : 'background: rgba(0, 0, 0, 0.3)',
-      shortsMode ? 'z-index: 2147483647' : 'z-index: 9998',
-      'cursor: default',
-      'pointer-events: none',
-    ].join(';');
+    const usePortalLayout = shortsMode || portalCardShieldActive;
+    overlay.style.cssText = usePortalLayout
+      ? [
+          'position: fixed',
+          'display: flex',
+          'align-items: center',
+          'justify-content: center',
+          shortsMode ? 'background: transparent' : 'background: rgba(0, 0, 0, 0.3)',
+          'z-index: 2147483647',
+          'cursor: default',
+          'pointer-events: none',
+        ].join(';')
+      : [
+          'position: absolute',
+          'inset: 0',
+          'display: flex',
+          'align-items: center',
+          'justify-content: center',
+          'background: rgba(0, 0, 0, 0.3)',
+          'z-index: 9998',
+          'cursor: default',
+          'pointer-events: none',
+        ].join(';');
     console.log(
       '[DIAG][REVEAL_UI] created',
       'overlayId=' + overlayId,
@@ -12056,6 +12241,20 @@ export function generateModerationScript(config: InjectionConfig): string {
       console.log('[DIAG][REVEAL_UI] portal_update', 'itemKey=' + itemKey);
     }
     overlayParent.appendChild(overlay);
+    // Portal card shield: stamp, store card ref, and position immediately.
+    if (portalCardShieldActive && portalCardNode) {
+      overlay.dataset.mwPortalCardShield = '1';
+      overlay.__mwPortalCardNode = portalCardNode;
+      positionPortalCardOverlay(overlay, 'overlay_created');
+      schedulePortalCardOverlayReposition('overlay_created');
+      console.log(
+        '[MW-MVP-SHIELD-REGULAR-POSITIVE-ARMED-V1]',
+        'overlayId=' + overlayId,
+        'cardId=' + getDiagNodeId(portalCardNode),
+        'itemKey=' + getDiagItemKey(src),
+        'pageEpoch=' + state.pageEpoch
+      );
+    }
     if (nonShortsMainSurface) {
       mvpAssertRecordEvent('OVERLAY_CREATE', {
         overlayId: String(overlayId || 'unknown'),
@@ -14278,6 +14477,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       
       enforceRevealOverlayVisibilityGuardGlobal('mutation_batch');
+      if (hasYouTubeChanges) {
+        schedulePortalCardOverlayReposition('mutation');
+      }
       if (shortsAttrMode && hasYouTubeChanges) {
         scheduleShortsRevealOverlayReposition('mutation');
         scheduleYouTubeScan('mutation');
@@ -14321,6 +14523,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     timerState.youtubeScrollHandler = () => {
       if (timerState.paused) return;
       scheduleShortsRevealOverlayReposition('youtube_scroll');
+      schedulePortalCardOverlayReposition('youtube_scroll');
       const currentScrollY = window.scrollY;
       const scrollDelta = Math.abs(currentScrollY - lastScrollY);
       
