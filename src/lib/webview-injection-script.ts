@@ -5762,7 +5762,15 @@ export function generateModerationScript(config: InjectionConfig): string {
       !contextData &&
       (!strictIdentityKnown || strictContinuityItemKey === 'unknown')
     );
+    const cardIdentityUnresolved = !!(
+      cardNodeId === 'none' &&
+      strictContinuityItemKey === 'unknown' &&
+      reattachItemKey === 'unknown' &&
+      !contextData &&
+      regularMainNegativeLatchRead.reason === 'missing_card_identity'
+    );
     const regularPositivePriorProof = !!(
+      !cardIdentityUnresolved &&
       !knownNegativeForCardOrItem &&
       !cardBoundaryChanged &&
       (
@@ -5799,6 +5807,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       !regularPositiveHoldSafetyDenied
     );
     const unresolvedPositiveHoldPrecedenceStrong = !!(
+      !cardIdentityUnresolved &&
       unresolvedRegularTransitionNow &&
       !regularPositiveHoldEligible &&
       previousAuthoritativePositive &&
@@ -5924,7 +5933,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       !hasPositiveContinuityProofStrong &&
       (
         hasAnyNegativeProof ||
-        !previousAuthoritativePositive
+        !previousAuthoritativePositive ||
+        cardIdentityUnresolved
       )
     );
     const regularUnresolvedKeepBlurGate = !!(
@@ -6023,6 +6033,40 @@ export function generateModerationScript(config: InjectionConfig): string {
         previousAuthoritativePositive: !!previousAuthoritativePositive,
         hasAnyNegativeProof: !!hasAnyNegativeProof,
         clearAllowedByProof: !!regularClearAllowedByProof,
+        action: 'clear_blur',
+      });
+    }
+    if (cardIdentityUnresolved && regularClearAllowedByProof) {
+      console.log(
+        '[MW-MVP-NEGATIVE-PURITY-CARD-IDENTITY-UNRESOLVED-CLEAR-V1]',
+        'nodeId=' + String(videoNodeId || 'none'),
+        'reason=' + String(reason || 'unknown'),
+        'cardNodeId=none',
+        'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
+        'reattachItemKey=' + String(reattachItemKey || 'unknown'),
+        'contextFound=false',
+        'previousAuthoritativePositive=' + String(!!previousAuthoritativePositive),
+        'sameDomNode=' + String(!!sameDomNode),
+        'sameNavEpoch=' + String(!!sameNavEpoch),
+        'proofKind=' + String(regularPositiveHoldProofKind || 'none'),
+        'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown'),
+        'negativeLatchReason=' + String(regularMainNegativeLatchRead.reason || 'none'),
+        'action=clear_blur'
+      );
+      postNonShortsTransitionDiag('negative_purity_card_identity_unresolved_clear', {
+        reason: String(reason || 'unknown'),
+        nodeId: String(videoNodeId || 'none'),
+        marker: 'MW-MVP-NEGATIVE-PURITY-CARD-IDENTITY-UNRESOLVED-CLEAR-V1',
+        cardNodeId: String(cardNodeId || 'none'),
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        reattachItemKey: String(reattachItemKey || 'unknown'),
+        contextFound: false,
+        previousAuthoritativePositive: !!previousAuthoritativePositive,
+        sameDomNode: !!sameDomNode,
+        sameNavEpoch: !!sameNavEpoch,
+        proofKind: String(regularPositiveHoldProofKind || 'none'),
+        hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+        negativeLatchReason: String(regularMainNegativeLatchRead.reason || 'none'),
         action: 'clear_blur',
       });
     }
