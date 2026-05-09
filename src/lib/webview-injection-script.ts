@@ -4356,7 +4356,8 @@ export function generateModerationScript(config: InjectionConfig): string {
           (!strictContinuityItemKey || strictContinuityItemKey === 'unknown') &&
           isAuthoritativeHardBlur(contextNode) &&
           cardContextHardItemKey !== 'unknown' &&
-          cardContextHardSrc
+          cardContextHardSrc &&
+          String((videoNode.dataset && videoNode.dataset.mwKnownNegativeForCardOrItem) || '') !== '1'
         );
         if (strictCardMatch || strictUnknownButCardAuthoritative) {
           contextKind = 'card_blurred';
