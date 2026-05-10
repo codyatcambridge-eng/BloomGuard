@@ -3252,7 +3252,7 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function mwTraceContamination(tag, payload, includeStack) {
     try {
-      const stack = includeStack ? String((new Error().stack || '')).split('\n').slice(0, 6).join(' | ') : '';
+      const stack = includeStack ? String((new Error().stack || '')).split('\\n').slice(0, 6).join(' | ') : '';
       mwTrace('MW-TRACE-CONTAMINATION-SUSPECT-V1', Object.assign({
         tag: String(tag || 'unknown'),
         decision: 'contamination_suspect',
@@ -5991,7 +5991,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       unresolvedRegularTransitionNow &&
       !regularClearAllowedByProof
     );
-    const regularShouldKeepBlur = !!(
+    let regularShouldKeepBlur = !!(
       regularPositiveHoldKeepBlur ||
       regularUnresolvedKeepBlurGate
     );
@@ -6000,6 +6000,65 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     if (regularPositiveHoldProofKind === 'none' && regularUnresolvedKeepBlurGate && hasPositiveContinuityProofStrong) {
       regularPositiveHoldProofKind = 'continuity_fail_closed';
+    }
+    const weakRegularProofKindOnly = !!(
+      String(regularPositiveHoldProofKind || 'none') === 'same_src_clear_veto' ||
+      String(regularPositiveHoldProofKind || 'none') === 'same_local_src' ||
+      String(regularPositiveHoldProofKind || 'none') === 'same_item_key'
+    );
+    const noCardCustodyForRegularPositiveHold = !!(
+      unresolvedRegularTransitionNow &&
+      regularShouldKeepBlur &&
+      String(cardNodeId || 'none') === 'none' &&
+      !contextData &&
+      String(strictContinuityItemKey || 'unknown') === 'unknown' &&
+      String(reattachItemKey || 'unknown') === 'unknown' &&
+      Number(regularPositiveHoldTtlRemaining || 0) <= 0 &&
+      (
+        weakRegularProofKindOnly ||
+        String(regularPositiveHoldProofKind || 'none') === 'none'
+      )
+    );
+    if (noCardCustodyForRegularPositiveHold) {
+      regularShouldKeepBlur = false;
+      console.warn(
+        '[MW-MVP-REGULAR-POSITIVE-HOLD-BLOCKED-NO-CARD-CUSTODY-V1]',
+        'reason=' + String(reason || 'unknown'),
+        'nodeId=' + String(videoNodeId || 'none'),
+        'cardNodeId=' + String(cardNodeId || 'none'),
+        'contextFound=' + String(!!contextData),
+        'contextKind=' + String(contextKind || 'none'),
+        'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown'),
+        'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
+        'reattachItemKey=' + String(reattachItemKey || 'unknown'),
+        'previousAuthoritativePositive=' + String(!!previousAuthoritativePositive),
+        'proofKind=' + String(regularPositiveHoldProofKind || 'none'),
+        'sameDomNode=' + String(!!sameDomNode),
+        'sameNavEpoch=' + String(!!sameNavEpoch),
+        'ttlRemaining=' + String(Number(regularPositiveHoldTtlRemaining || 0)),
+        'negativeLatchReason=' + String(regularMainNegativeLatchRead.reason || 'none'),
+        'action=block_keep_blur',
+        'whyBlocked=no_card_custody_and_unknown_identity_with_expired_ttl'
+      );
+      postNonShortsTransitionDiag('regular_positive_hold_blocked_no_card_custody', {
+        reason: String(reason || 'unknown'),
+        nodeId: String(videoNodeId || 'none'),
+        marker: 'MW-MVP-REGULAR-POSITIVE-HOLD-BLOCKED-NO-CARD-CUSTODY-V1',
+        cardNodeId: String(cardNodeId || 'none'),
+        contextFound: !!contextData,
+        contextKind: String(contextKind || 'none'),
+        hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        reattachItemKey: String(reattachItemKey || 'unknown'),
+        previousAuthoritativePositive: !!previousAuthoritativePositive,
+        proofKind: String(regularPositiveHoldProofKind || 'none'),
+        sameDomNode: !!sameDomNode,
+        sameNavEpoch: !!sameNavEpoch,
+        ttlRemaining: Number(regularPositiveHoldTtlRemaining || 0),
+        negativeLatchReason: String(regularMainNegativeLatchRead.reason || 'none'),
+        action: 'block_keep_blur',
+        whyBlocked: 'no_card_custody_and_unknown_identity_with_expired_ttl',
+      });
     }
     if (unresolvedRegularTransitionNow) {
       if (regularPositiveHoldEffectiveEligible) {
@@ -6159,6 +6218,24 @@ export function generateModerationScript(config: InjectionConfig): string {
         action: 'keep_blur',
         srcLineage: String((regularProofSrc || currentResolvedSrcForProof || '')).substring(0, 180),
       });
+      postNonShortsTransitionDiag('regular_custody_bypass_patch_poststate', {
+        reason: String(reason || 'unknown'),
+        nodeId: String(videoNodeId || 'none'),
+        marker: 'MW-MVP-REGULAR-CUSTODY-BYPASS-PATCH-POSTSTATE-V1',
+        cardNodeId: String(cardNodeId || 'none'),
+        contextFound: !!contextData,
+        contextKind: String(contextKind || 'none'),
+        hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        reattachItemKey: String(reattachItemKey || 'unknown'),
+        previousAuthoritativePositive: !!previousAuthoritativePositive,
+        proofKind: String(regularPositiveHoldProofKind || 'none'),
+        sameDomNode: !!sameDomNode,
+        sameNavEpoch: !!sameNavEpoch,
+        ttlRemaining: Number(regularPositiveHoldTtlRemaining || 0),
+        negativeLatchReason: String(regularMainNegativeLatchRead.reason || 'none'),
+        action: 'keep_blur',
+      });
     } else if (regularClearAllowedByProof) {
       postNonShortsTransitionDiag('regular_positive_hold_clear_blur', {
         reason: String(reason || 'unknown'),
@@ -6183,6 +6260,43 @@ export function generateModerationScript(config: InjectionConfig): string {
         ttlRemaining: Number(regularPositiveHoldTtlRemaining || 0),
         action: 'clear_blur',
         srcLineage: String((regularProofSrc || currentResolvedSrcForProof || '')).substring(0, 180),
+      });
+      postNonShortsTransitionDiag('regular_custody_bypass_patch_poststate', {
+        reason: String(reason || 'unknown'),
+        nodeId: String(videoNodeId || 'none'),
+        marker: 'MW-MVP-REGULAR-CUSTODY-BYPASS-PATCH-POSTSTATE-V1',
+        cardNodeId: String(cardNodeId || 'none'),
+        contextFound: !!contextData,
+        contextKind: String(contextKind || 'none'),
+        hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        reattachItemKey: String(reattachItemKey || 'unknown'),
+        previousAuthoritativePositive: !!previousAuthoritativePositive,
+        proofKind: String(regularPositiveHoldProofKind || 'none'),
+        sameDomNode: !!sameDomNode,
+        sameNavEpoch: !!sameNavEpoch,
+        ttlRemaining: Number(regularPositiveHoldTtlRemaining || 0),
+        negativeLatchReason: String(regularMainNegativeLatchRead.reason || 'none'),
+        action: 'clear_blur',
+      });
+    } else if (unresolvedRegularTransitionNow) {
+      postNonShortsTransitionDiag('regular_custody_bypass_patch_poststate', {
+        reason: String(reason || 'unknown'),
+        nodeId: String(videoNodeId || 'none'),
+        marker: 'MW-MVP-REGULAR-CUSTODY-BYPASS-PATCH-POSTSTATE-V1',
+        cardNodeId: String(cardNodeId || 'none'),
+        contextFound: !!contextData,
+        contextKind: String(contextKind || 'none'),
+        hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+        strictContinuityItemKey: String(strictContinuityItemKey || 'unknown'),
+        reattachItemKey: String(reattachItemKey || 'unknown'),
+        previousAuthoritativePositive: !!previousAuthoritativePositive,
+        proofKind: String(regularPositiveHoldProofKind || 'none'),
+        sameDomNode: !!sameDomNode,
+        sameNavEpoch: !!sameNavEpoch,
+        ttlRemaining: Number(regularPositiveHoldTtlRemaining || 0),
+        negativeLatchReason: String(regularMainNegativeLatchRead.reason || 'none'),
+        action: 'no_keep_blur_no_clear_blur',
       });
     }
     const shortsProofNodeId = String((videoNode.dataset && videoNode.dataset.mwShortsShelfPositiveProofNodeId) || 'none');
