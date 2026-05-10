@@ -5059,6 +5059,8 @@ export function generateModerationScript(config: InjectionConfig): string {
             hasAuthoritativeBlur = false;
             hasIncidentalBlur = false;
             holdBlurDuringUnresolvedTransition = false;
+            blockRegularFallbackNow = true;
+            videoNode.dataset.mwNonShortsUnresolvedNoProofSince = '0';
             postNonShortsTransitionDiag('regular_main_unresolved_no_proof_decontaminate', {
               reason: String(reason || 'unknown'),
               nodeId: String(videoNodeId || 'none'),
