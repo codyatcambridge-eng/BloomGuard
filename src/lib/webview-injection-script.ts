@@ -3238,6 +3238,28 @@ export function generateModerationScript(config: InjectionConfig): string {
     } catch (e) {}
   }
 
+  function mwTrace(marker, payload) {
+    try {
+      const event = Object.assign({
+        marker: String(marker || 'unknown'),
+        t: Number((typeof performance !== 'undefined' && performance.now) ? performance.now() : 0),
+        pageEpoch: Number(state.pageEpoch || 0),
+        navId: String(NAV_ID || 'none'),
+      }, payload || {});
+      console.log(String(marker || 'MW-TRACE-UNKNOWN'), JSON.stringify(event));
+    } catch (_e) {}
+  }
+
+  function mwTraceContamination(tag, payload, includeStack) {
+    try {
+      const stack = includeStack ? String((new Error().stack || '')).split('\n').slice(0, 6).join(' | ') : '';
+      mwTrace('MW-TRACE-CONTAMINATION-SUSPECT-V1', Object.assign({
+        tag: String(tag || 'unknown'),
+        decision: 'contamination_suspect',
+      }, payload || {}, stack ? { stack: stack } : {}));
+    } catch (_e) {}
+  }
+
   function incrementMvpTransitionCounter(counterKey, details) {
     if (!counterKey) return;
     if (!state || !state.stats) return;
@@ -3878,6 +3900,24 @@ export function generateModerationScript(config: InjectionConfig): string {
         ? transitionEpochNumber
         : Number(state.pageEpoch || 0)
     );
+    mwTrace('MW-TRACE-REATTACH-DECISION-V1', {
+      surface: isMainSurfaceUrl ? 'regular' : 'unknown',
+      reason: String(reason || 'unknown'),
+      eventSource: (
+        reasonText.indexOf('mutation_added') === 0 ? 'mutation' :
+        reasonText.indexOf('attr:') === 0 ? 'attr' :
+        reasonText === 'event:loadeddata' ? 'loadeddata' :
+        reasonText === 'event:playing' ? 'playing' : 'unknown'
+      ),
+      itemKey: String(getDiagItemKey(String(videoNode.currentSrc || videoNode.poster || (videoNode.dataset && videoNode.dataset.mwSrc) || '')) || 'unknown'),
+      strictContinuityItemKey: String((videoNode.dataset && videoNode.dataset.mwHardBlurItemKey) || 'unknown'),
+      hardBlurItemKey: String((videoNode.dataset && videoNode.dataset.mwHardBlurItemKey) || 'unknown'),
+      contextFound: false,
+      contextKind: 'none',
+      decision: 'reattach_evaluate',
+      cardBoundary: String((findNonShortsStrongCardNode(videoNode) || findRegularMainCardFallbackNode(videoNode)) ? getDiagNodeId(findNonShortsStrongCardNode(videoNode) || findRegularMainCardFallbackNode(videoNode)) : 'none'),
+      nodeId: String(getDiagNodeId(videoNode) || 'none'),
+    });
     const nodeMaxEpoch = Number((videoNode.dataset && videoNode.dataset.mwTransitionMaxEpoch) || 0);
     if (
       Number.isFinite(currentTransitionEpoch) &&
@@ -3895,6 +3935,14 @@ export function generateModerationScript(config: InjectionConfig): string {
         ' nodeId=' + String(getDiagNodeId(videoNode) || 'none') +
         ' scope=node_guard'
       );
+      mwTrace('MW-TRACE-REATTACH-BLOCKED-V1', {
+        surface: isMainSurfaceUrl ? 'regular' : 'unknown',
+        reason: 'stale_transition_epoch_node_guard',
+        eventSource: 'unknown',
+        itemKey: String(getDiagItemKey(String(videoNode.currentSrc || videoNode.poster || (videoNode.dataset && videoNode.dataset.mwSrc) || '')) || 'unknown'),
+        decision: 'block_blur',
+        nodeId: String(getDiagNodeId(videoNode) || 'none'),
+      });
       return;
     }
     if (
@@ -6240,6 +6288,17 @@ export function generateModerationScript(config: InjectionConfig): string {
       shortsShelfPriorProof &&
       shortsShelfHoldTtlRemaining > 0
     );
+    const authzEarlyContinuityMismatch = !!(
+      String(strictContinuityItemKey || 'unknown') !== 'unknown' &&
+      String(hardBlurItemKey || 'unknown') !== 'unknown' &&
+      String(strictContinuityItemKey || 'unknown') !== String(hardBlurItemKey || 'unknown')
+    );
+    const authzEarlyCurrentPositive = !!(
+      !knownNegativeForCardOrItem &&
+      String(cardNodeId || 'none') !== 'none' &&
+      String(strictContinuityItemKey || 'unknown') !== 'unknown' &&
+      (shortsShelfPriorProof || regularPositivePriorProof)
+    );
     if (unresolvedShortsShelfTransitionNow) {
       postNonShortsTransitionDiag(
         shortsShelfPriorProof
@@ -6270,7 +6329,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         }
       );
     }
-    if (shortsShelfHoldKeepBlur) {
+    if (shortsShelfHoldKeepBlur && authzEarlyCurrentPositive && !authzEarlyContinuityMismatch) {
       const holdBlurPx = IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20);
       videoNode.style.setProperty('filter', 'blur(' + holdBlurPx + 'px)', 'important');
       videoNode.style.setProperty('-webkit-filter', 'blur(' + holdBlurPx + 'px)', 'important');
@@ -6313,6 +6372,20 @@ export function generateModerationScript(config: InjectionConfig): string {
         action: 'keep_blur',
         srcLineage: String((shortsProofSrc || shortsCurrentResolvedSrcForProof || '')).substring(0, 180),
       });
+    } else if (shortsShelfHoldKeepBlur && (!authzEarlyCurrentPositive || authzEarlyContinuityMismatch)) {
+      console.log(
+        '[MW-MVP-AUTHZ-BLOCKED-NEGATIVE-OR-UNKNOWN-V2]',
+        'surface=shorts',
+        'polarity=' + String(knownNegativeForCardOrItem ? 'negative' : 'unknown'),
+        'itemKey=' + String(reattachItemKey || 'unknown'),
+        'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
+        'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown'),
+        'contextKind=' + String(contextKind || 'none'),
+        'reason=' + String(reason || 'unknown'),
+        'allowed=false',
+        'blocked=true',
+        'cardBoundary=' + String(cardNodeId || 'none')
+      );
     } else if (unresolvedShortsShelfTransitionNow && !shortsShelfPriorProof) {
       postNonShortsTransitionDiag('shorts_shelf_positive_hold_clear_blur', {
         reason: String(reason || 'unknown'),
@@ -6359,7 +6432,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       hasIncidentalBlur &&
       !preexistingOverlayInDeadEnd
     );
-    if (shortsNoContextLocalBlurHold) {
+    if (shortsNoContextLocalBlurHold && authzEarlyCurrentPositive && !authzEarlyContinuityMismatch) {
       markAuthoritativeHardBlur(
         videoNode,
         String((videoNode.dataset && videoNode.dataset.mwSrc) || normalizedPoster || normalizedCurrent || '')
@@ -6369,6 +6442,20 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       hasAuthoritativeBlur = isAuthoritativeHardBlur(videoNode);
       activeVideoBlurred = hasAuthoritativeBlur || hasIncidentalBlur;
+    } else if (shortsNoContextLocalBlurHold && (!authzEarlyCurrentPositive || authzEarlyContinuityMismatch)) {
+      console.log(
+        '[MW-MVP-AUTHZ-BLOCKED-NEGATIVE-OR-UNKNOWN-V2]',
+        'surface=shorts',
+        'polarity=' + String(knownNegativeForCardOrItem ? 'negative' : 'unknown'),
+        'itemKey=' + String(reattachItemKey || 'unknown'),
+        'strictContinuityItemKey=' + String(strictContinuityItemKey || 'unknown'),
+        'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown'),
+        'contextKind=' + String(contextKind || 'none'),
+        'reason=' + String(reason || 'unknown'),
+        'allowed=false',
+        'blocked=true',
+        'cardBoundary=' + String(cardNodeId || 'none')
+      );
     } else if (
       activeVideoBlurred &&
       !hasAuthoritativeBlur &&
@@ -6486,6 +6573,286 @@ export function generateModerationScript(config: InjectionConfig): string {
         contextMatchesResolvedItemKey
       )
     );
+    const contextItemKeyForAuthz = String(contextSourceItemKey || 'unknown');
+    const strictItemKeyForAuthz = String(strictContinuityItemKey || 'unknown');
+    const hardItemKeyForAuthz = String(hardBlurItemKey || 'unknown');
+    const cardBoundaryIdForAuthz = String(cardNodeId || 'none');
+    const polarityForAuthz = knownNegativeForCardOrItem ? 'negative' : 'unknown';
+    const continuityMismatch = !!(
+      strictItemKeyForAuthz !== 'unknown' &&
+      hardItemKeyForAuthz !== 'unknown' &&
+      strictItemKeyForAuthz !== hardItemKeyForAuthz
+    );
+    const contextPositiveAuthz = !!(
+      contextData &&
+      !knownNegativeForCardOrItem &&
+      cardBoundaryIdForAuthz !== 'none' &&
+      strictItemKeyForAuthz !== 'unknown' &&
+      contextItemKeyForAuthz !== 'unknown' &&
+      strictItemKeyForAuthz === contextItemKeyForAuthz &&
+      String(contextKind || 'none') !== 'src_match'
+    );
+    const priorPositiveAuthz = !!(
+      !isHomeShortsShelfVideo &&
+      !knownNegativeForCardOrItem &&
+      cardBoundaryIdForAuthz !== 'none' &&
+      strictItemKeyForAuthz !== 'unknown' &&
+      regularPositivePriorProof
+    );
+    const shortsPositiveAuthz = !!(
+      isHomeShortsShelfVideo &&
+      !knownNegativeForCardOrItem &&
+      cardBoundaryIdForAuthz !== 'none' &&
+      strictItemKeyForAuthz !== 'unknown' &&
+      shortsShelfPriorProof
+    );
+    const currentPositiveAuthz = !!(contextPositiveAuthz || priorPositiveAuthz || shortsPositiveAuthz);
+    if (
+      String(contextKind || 'none') === 'src_match' &&
+      (
+        String(contextItemKeyForAuthz || 'unknown') === 'unknown' ||
+        String(strictItemKeyForAuthz || 'unknown') === 'unknown' ||
+        String(contextItemKeyForAuthz || 'unknown') !== String(strictItemKeyForAuthz || 'unknown')
+      )
+    ) {
+      mwTraceContamination('src_match_without_strict_identity', {
+        surface: isHomeShortsShelfVideo ? 'shorts' : 'regular',
+        itemKey: String(currentNodeResolvedItemKey || 'unknown'),
+        strictContinuityItemKey: String(strictItemKeyForAuthz || 'unknown'),
+        hardBlurItemKey: String(hardItemKeyForAuthz || 'unknown'),
+        contextKind: String(contextKind || 'none'),
+        contextFound: !!contextData,
+        decision: 'block_blur',
+        freshAuthorization: !!currentPositiveAuthz,
+        cardBoundary: String(cardBoundaryIdForAuthz || 'none'),
+      }, true);
+    }
+    const logAuthzDecision = function(marker, lane, reasonText, allowed, blocked) {
+      console.log(
+        marker,
+        'surface=' + String(lane || 'regular'),
+        'polarity=' + String(knownNegativeForCardOrItem ? 'negative' : (currentPositiveAuthz ? 'positive_proven' : polarityForAuthz)),
+        'itemKey=' + String(currentNodeResolvedItemKey || 'unknown'),
+        'strictContinuityItemKey=' + strictItemKeyForAuthz,
+        'hardBlurItemKey=' + hardItemKeyForAuthz,
+        'contextKind=' + String(contextKind || 'none'),
+        'reason=' + String(reasonText || reason || 'unknown'),
+        'allowed=' + String(!!allowed),
+        'blocked=' + String(!!blocked),
+        'cardBoundary=' + cardBoundaryIdForAuthz
+      );
+    };
+    const cardBoundaryFingerprintForCustody = String(cardBoundaryIdForAuthz || 'none');
+    const currentSurfaceForCustody = isHomeShortsShelfVideo ? 'shorts' : 'regular';
+    const crossSurfaceMismatchForCustody = !!(
+      (currentSurfaceForCustody === 'shorts' && (
+        String(contextKind || 'none').indexOf('regular_main_') === 0 ||
+        String(contextKind || 'none') === 'state_blurred_fallback' ||
+        String(contextKind || 'none') === 'card_blurred'
+      )) ||
+      (currentSurfaceForCustody === 'regular' && (
+        String(contextKind || 'none').indexOf('card_latest_home_shorts') === 0 ||
+        String(contextKind || 'none').indexOf('shorts') === 0
+      ))
+    );
+    const currentItemKeyForCustody = String(currentNodeResolvedItemKey || 'unknown');
+    const strictMatchesCurrentItemForCustody = !!(
+      strictItemKeyForAuthz !== 'unknown' &&
+      currentItemKeyForCustody !== 'unknown' &&
+      strictItemKeyForAuthz === currentItemKeyForCustody
+    );
+    const continuityGraceUsed = !!(
+      !contextPositiveAuthz &&
+      (priorPositiveAuthz || shortsPositiveAuthz)
+    );
+    const hasFreshPositiveAuthorization = !!currentPositiveAuthz;
+    const custodyGuardDecision = (function() {
+      let allow = false;
+      let reason = 'unknown';
+      let mismatchReason = 'none';
+      if (knownNegativeForCardOrItem) {
+        reason = 'negative_classification';
+      } else if (crossSurfaceMismatchForCustody) {
+        reason = 'cross_surface_mismatch';
+        mismatchReason = 'surface_context_kind_mismatch';
+      } else if (continuityMismatch) {
+        reason = 'continuity_mismatch';
+        mismatchReason = 'strict_hard_itemkey_mismatch';
+      } else if (hasFreshPositiveAuthorization && cardBoundaryFingerprintForCustody !== 'none') {
+        allow = true;
+        reason = continuityGraceUsed ? 'positive_continuity_grace' : 'positive_fresh';
+      } else {
+        reason = 'unknown_or_unproven';
+      }
+      if (allow && strictItemKeyForAuthz !== 'unknown' && currentItemKeyForCustody !== 'unknown' && !strictMatchesCurrentItemForCustody) {
+        allow = false;
+        reason = 'itemkey_mismatch';
+        mismatchReason = 'strict_vs_current_itemkey_mismatch';
+      }
+      return {
+        allow: !!allow,
+        blockReason: String(reason || 'unknown'),
+        surface: currentSurfaceForCustody,
+        itemKey: currentItemKeyForCustody,
+        strictContinuityItemKey: String(strictItemKeyForAuthz || 'unknown'),
+        hardBlurItemKey: String(hardItemKeyForAuthz || 'unknown'),
+        cardBoundaryFingerprint: cardBoundaryFingerprintForCustody,
+        classification: knownNegativeForCardOrItem ? 'negative' : (hasFreshPositiveAuthorization ? 'positive' : 'unknown'),
+        freshPositiveAuthorization: !!hasFreshPositiveAuthorization,
+        continuityGraceUsed: !!continuityGraceUsed,
+        mismatchReason: String(mismatchReason || 'none'),
+      };
+    })();
+    mwTrace('MW-HOMEPAGE-CUSTODY-GUARD-V1', {
+      surface: custodyGuardDecision.surface,
+      reason: String(reason || 'unknown'),
+      itemKey: custodyGuardDecision.itemKey,
+      strictContinuityItemKey: custodyGuardDecision.strictContinuityItemKey,
+      hardBlurItemKey: custodyGuardDecision.hardBlurItemKey,
+      cardBoundary: custodyGuardDecision.cardBoundaryFingerprint,
+      classification: custodyGuardDecision.classification,
+      freshPositiveAuthorization: !!custodyGuardDecision.freshPositiveAuthorization,
+      continuityGraceUsed: !!custodyGuardDecision.continuityGraceUsed,
+      overlayCount: Number(card && typeof card.querySelectorAll === 'function' ? card.querySelectorAll('.mw-reveal-overlay').length : 0),
+      blurExistsBefore: !!(activeVideoBlurred || hasAuthoritativeBlur || hasIncidentalBlur),
+      revealExistsBefore: false,
+      allow: !!custodyGuardDecision.allow,
+      blocked: !custodyGuardDecision.allow,
+      mismatchReason: custodyGuardDecision.mismatchReason,
+    });
+    if (custodyGuardDecision.allow) {
+      mwTrace(
+        continuityGraceUsed ? 'MW-HOMEPAGE-CUSTODY-ALLOW-GRACE-V1' : 'MW-HOMEPAGE-CUSTODY-ALLOW-POSITIVE-V1',
+        {
+          surface: custodyGuardDecision.surface,
+          reason: custodyGuardDecision.blockReason,
+          itemKey: custodyGuardDecision.itemKey,
+          strictContinuityItemKey: custodyGuardDecision.strictContinuityItemKey,
+          hardBlurItemKey: custodyGuardDecision.hardBlurItemKey,
+          cardBoundary: custodyGuardDecision.cardBoundaryFingerprint,
+          classification: custodyGuardDecision.classification,
+          freshPositiveAuthorization: !!custodyGuardDecision.freshPositiveAuthorization,
+          continuityGraceUsed: !!custodyGuardDecision.continuityGraceUsed,
+          allow: true,
+          blocked: false,
+        }
+      );
+    } else {
+      const blockMarker = (
+        custodyGuardDecision.blockReason === 'negative_classification'
+          ? 'MW-HOMEPAGE-CUSTODY-BLOCK-NEGATIVE-V1'
+          : custodyGuardDecision.blockReason === 'cross_surface_mismatch'
+            ? 'MW-HOMEPAGE-CUSTODY-BLOCK-CROSS-SURFACE-V1'
+            : custodyGuardDecision.blockReason === 'itemkey_mismatch'
+              ? 'MW-HOMEPAGE-CUSTODY-BLOCK-ITEMKEY-MISMATCH-V1'
+              : custodyGuardDecision.blockReason === 'continuity_mismatch'
+                ? 'MW-HOMEPAGE-CUSTODY-BLOCK-BOUNDARY-MISMATCH-V1'
+                : custodyGuardDecision.cardBoundaryFingerprint === 'none'
+                  ? 'MW-HOMEPAGE-CUSTODY-BLOCK-BOUNDARY-MISMATCH-V1'
+                  : 'MW-HOMEPAGE-CUSTODY-BLOCK-UNKNOWN-V1'
+      );
+      mwTrace(blockMarker, {
+        surface: custodyGuardDecision.surface,
+        reason: custodyGuardDecision.blockReason,
+        itemKey: custodyGuardDecision.itemKey,
+        strictContinuityItemKey: custodyGuardDecision.strictContinuityItemKey,
+        hardBlurItemKey: custodyGuardDecision.hardBlurItemKey,
+        cardBoundary: custodyGuardDecision.cardBoundaryFingerprint,
+        classification: custodyGuardDecision.classification,
+        freshPositiveAuthorization: !!custodyGuardDecision.freshPositiveAuthorization,
+        continuityGraceUsed: !!custodyGuardDecision.continuityGraceUsed,
+        allow: false,
+        blocked: true,
+        mismatchReason: custodyGuardDecision.mismatchReason,
+      });
+    }
+    logAuthzDecision(
+      '[MW-MVP-AUTHZ-BLUR-DECISION-V2]',
+      isHomeShortsShelfVideo ? 'shorts' : 'regular',
+      reason,
+      currentPositiveAuthz,
+      !currentPositiveAuthz
+    );
+    mwTrace('MW-TRACE-REATTACH-DECISION-V1', {
+      surface: isHomeShortsShelfVideo ? 'shorts' : 'regular',
+      reason: String(reason || 'unknown'),
+      eventSource: (
+        reasonText.indexOf('mutation_added') === 0 ? 'mutation' :
+        reasonText.indexOf('attr:') === 0 ? 'attr' :
+        reasonText === 'event:loadeddata' ? 'loadeddata' :
+        reasonText === 'event:playing' ? 'playing' : 'unknown'
+      ),
+      itemKey: String(currentNodeResolvedItemKey || 'unknown'),
+      strictContinuityItemKey: String(strictItemKeyForAuthz || 'unknown'),
+      hardBlurItemKey: String(hardItemKeyForAuthz || 'unknown'),
+      contextFound: !!contextData,
+      contextKind: String(contextKind || 'none'),
+      polarity: knownNegativeForCardOrItem ? 'negative' : (currentPositiveAuthz ? 'positive' : 'unknown'),
+      decision: currentPositiveAuthz ? 'allow_blur' : 'block_blur',
+      freshAuthorization: !!currentPositiveAuthz,
+      cardBoundary: String(cardBoundaryIdForAuthz || 'none'),
+      nodeId: String(videoNodeId || 'none'),
+    });
+    if (continuityMismatch) {
+      logAuthzDecision(
+        '[MW-MVP-AUTHZ-CONTINUITY-MISMATCH-V2]',
+        isHomeShortsShelfVideo ? 'shorts' : 'regular',
+        reason,
+        false,
+        true
+      );
+      mwTrace('MW-TRACE-REATTACH-BLOCKED-V1', {
+        surface: isHomeShortsShelfVideo ? 'shorts' : 'regular',
+        reason: 'continuity_mismatch',
+        itemKey: String(currentNodeResolvedItemKey || 'unknown'),
+        strictContinuityItemKey: String(strictItemKeyForAuthz || 'unknown'),
+        hardBlurItemKey: String(hardItemKeyForAuthz || 'unknown'),
+        contextFound: !!contextData,
+        contextKind: String(contextKind || 'none'),
+        decision: 'block_blur',
+        freshAuthorization: false,
+        cardBoundary: String(cardBoundaryIdForAuthz || 'none'),
+      });
+    }
+    if (
+      isHomeShortsShelfVideo &&
+      (
+        String(contextKind || 'none').indexOf('regular_main_') === 0 ||
+        String(contextKind || 'none') === 'state_blurred_fallback' ||
+        String(contextKind || 'none') === 'card_blurred'
+      )
+    ) {
+      mwTraceContamination('shorts_received_regular_state', {
+        surface: 'shorts',
+        itemKey: String(currentNodeResolvedItemKey || 'unknown'),
+        strictContinuityItemKey: String(strictItemKeyForAuthz || 'unknown'),
+        hardBlurItemKey: String(hardItemKeyForAuthz || 'unknown'),
+        contextKind: String(contextKind || 'none'),
+        contextFound: !!contextData,
+        decision: 'block_blur',
+        freshAuthorization: !!currentPositiveAuthz,
+        cardBoundary: String(cardBoundaryIdForAuthz || 'none'),
+      }, true);
+    }
+    if (
+      !isHomeShortsShelfVideo &&
+      (
+        String(contextKind || 'none').indexOf('card_latest_home_shorts') === 0 ||
+        String(contextKind || 'none').indexOf('shorts') === 0
+      )
+    ) {
+      mwTraceContamination('regular_received_shorts_state', {
+        surface: 'regular',
+        itemKey: String(currentNodeResolvedItemKey || 'unknown'),
+        strictContinuityItemKey: String(strictItemKeyForAuthz || 'unknown'),
+        hardBlurItemKey: String(hardItemKeyForAuthz || 'unknown'),
+        contextKind: String(contextKind || 'none'),
+        contextFound: !!contextData,
+        decision: 'block_blur',
+        freshAuthorization: !!currentPositiveAuthz,
+        cardBoundary: String(cardBoundaryIdForAuthz || 'none'),
+      }, true);
+    }
     const unresolvedLaneFlipApplyBlurVeto = !!(
       contextData &&
       unresolvedLaneFlipNoIdentityNow &&
@@ -6563,7 +6930,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       contextKind = 'none';
       contextNode = null;
     }
-    if (activeVideoBlurred && hasAuthoritativeBlur) {
+    if (activeVideoBlurred && hasAuthoritativeBlur && custodyGuardDecision.allow) {
       const expectedBlurPx = IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20);
       const expectedBlurToken = 'blur(' + expectedBlurPx + 'px)';
       const hasExpectedBlur = (
@@ -6605,7 +6972,45 @@ export function generateModerationScript(config: InjectionConfig): string {
         'nodeId=' + videoNodeId,
         'mode=already_blurred'
       );
+    } else if (activeVideoBlurred && hasAuthoritativeBlur && !custodyGuardDecision.allow) {
+      logAuthzDecision(
+        '[MW-MVP-AUTHZ-BLOCKED-NEGATIVE-OR-UNKNOWN-V2]',
+        isHomeShortsShelfVideo ? 'shorts' : 'regular',
+        reason,
+        false,
+        true
+      );
+      clearAllBlurAndOverlay(
+        videoNode,
+        currentNodeResolvedSrc || String((videoNode.dataset && videoNode.dataset.mwSrc) || ''),
+        'authz_blocked_negative_or_unknown',
+        'safe'
+      );
+      hasAuthoritativeBlur = false;
+      hasIncidentalBlur = false;
+      activeVideoBlurred = false;
     } else if (contextData) {
+      const blurAllowedByAuthz = !!custodyGuardDecision.allow;
+      logAuthzDecision(
+        '[MW-MVP-AUTHZ-BLUR-DECISION-V2]',
+        isHomeShortsShelfVideo ? 'shorts' : 'regular',
+        reason,
+        blurAllowedByAuthz,
+        !blurAllowedByAuthz
+      );
+      if (!blurAllowedByAuthz) {
+        logAuthzDecision(
+          '[MW-MVP-AUTHZ-BLOCKED-NEGATIVE-OR-UNKNOWN-V2]',
+          isHomeShortsShelfVideo ? 'shorts' : 'regular',
+          reason,
+          false,
+          true
+        );
+        contextData = null;
+        contextKind = 'none';
+      }
+    }
+    if (contextData) {
       const contextSrc = String(contextData.src || '') || normalizedPoster || normalizedCurrent || '';
       const contextCategory = String(contextData.category || '') || 'flagged';
       const contextItemId = String(contextData.itemId || '');
@@ -6693,6 +7098,32 @@ export function generateModerationScript(config: InjectionConfig): string {
     const overlayNodeId = String((videoOverlay && videoOverlay.dataset && videoOverlay.dataset.mwNodeId) || '');
     const overlayForSrc = String((videoOverlay && videoOverlay.dataset && videoOverlay.dataset.mwFor) || '');
     const overlayForItemKey = getDiagItemKey(overlayForSrc);
+    const revealAllowedByAuthz = !!custodyGuardDecision.allow;
+    logAuthzDecision(
+      '[MW-MVP-AUTHZ-REVEAL-DECISION-V2]',
+      isHomeShortsShelfVideo ? 'shorts' : 'regular',
+      reason,
+      revealAllowedByAuthz,
+      !revealAllowedByAuthz
+    );
+    mwTrace('MW-TRACE-OVERLAY-HEAL-DECISION-V1', {
+      surface: isHomeShortsShelfVideo ? 'shorts' : 'regular',
+      reason: String(reason || 'unknown'),
+      eventSource: (
+        reasonText.indexOf('mutation_added') === 0 ? 'mutation' :
+        reasonText.indexOf('attr:') === 0 ? 'attr' :
+        reasonText === 'event:loadeddata' ? 'loadeddata' :
+        reasonText === 'event:playing' ? 'playing' : 'unknown'
+      ),
+      itemKey: String(currentNodeResolvedItemKey || 'unknown'),
+      strictContinuityItemKey: String(strictItemKeyForAuthz || 'unknown'),
+      hardBlurItemKey: String(hardItemKeyForAuthz || 'unknown'),
+      contextFound: !!contextData,
+      contextKind: String(contextKind || 'none'),
+      decision: revealAllowedByAuthz ? 'heal_overlay' : 'block_heal',
+      freshAuthorization: !!revealAllowedByAuthz,
+      cardBoundary: String(cardBoundaryIdForAuthz || 'none'),
+    });
     const overlayWithinCard = !!(
       card &&
       videoOverlay &&
@@ -6795,6 +7226,62 @@ export function generateModerationScript(config: InjectionConfig): string {
       !!videoOverlay.parentElement &&
       overlayNodeId === videoNodeId
     );
+    const overlayCountInCardNow = card && typeof card.querySelectorAll === 'function'
+      ? card.querySelectorAll('.mw-reveal-overlay').length
+      : 0;
+    if ((knownNegativeForCardOrItem || !currentPositiveAuthz) && (activeVideoBlurred || hasAuthoritativeBlur || hasResidualInlineBlur || hasResidualBlurClass)) {
+      mwTraceContamination('negative_or_unknown_has_blur', {
+        surface: isHomeShortsShelfVideo ? 'shorts' : 'regular',
+        itemKey: String(currentNodeResolvedItemKey || 'unknown'),
+        strictContinuityItemKey: String(strictItemKeyForAuthz || 'unknown'),
+        hardBlurItemKey: String(hardItemKeyForAuthz || 'unknown'),
+        contextKind: String(contextKind || 'none'),
+        contextFound: !!contextData,
+        decision: 'block_blur',
+        freshAuthorization: !!currentPositiveAuthz,
+        cardBoundary: String(cardBoundaryIdForAuthz || 'none'),
+      }, true);
+    }
+    if ((knownNegativeForCardOrItem || !currentPositiveAuthz) && !!videoOverlay && !!videoOverlay.parentElement) {
+      mwTraceContamination('negative_or_unknown_has_overlay', {
+        surface: isHomeShortsShelfVideo ? 'shorts' : 'regular',
+        itemKey: String(currentNodeResolvedItemKey || 'unknown'),
+        strictContinuityItemKey: String(strictItemKeyForAuthz || 'unknown'),
+        hardBlurItemKey: String(hardItemKeyForAuthz || 'unknown'),
+        contextKind: String(contextKind || 'none'),
+        contextFound: !!contextData,
+        overlayCountInCard: Number(overlayCountInCardNow || 0),
+        decision: 'block_reveal',
+        freshAuthorization: !!currentPositiveAuthz,
+        cardBoundary: String(cardBoundaryIdForAuthz || 'none'),
+      }, true);
+    }
+    if (overlayCountInCardNow > 1) {
+      mwTraceContamination('duplicate_overlay_in_card', {
+        surface: isHomeShortsShelfVideo ? 'shorts' : 'regular',
+        itemKey: String(currentNodeResolvedItemKey || 'unknown'),
+        overlayCountInCard: Number(overlayCountInCardNow || 0),
+        cardBoundary: String(cardBoundaryIdForAuthz || 'none'),
+      }, true);
+    }
+    if (
+      strictItemKeyForAuthz !== 'unknown' &&
+      currentNodeResolvedItemKey &&
+      currentNodeResolvedItemKey !== 'unknown' &&
+      strictItemKeyForAuthz !== String(currentNodeResolvedItemKey || 'unknown') &&
+      (activeVideoBlurred || hasAuthoritativeBlur || !!videoOverlay)
+    ) {
+      mwTraceContamination('strict_key_mismatch_with_state', {
+        surface: isHomeShortsShelfVideo ? 'shorts' : 'regular',
+        itemKey: String(currentNodeResolvedItemKey || 'unknown'),
+        strictContinuityItemKey: String(strictItemKeyForAuthz || 'unknown'),
+        hardBlurItemKey: String(hardItemKeyForAuthz || 'unknown'),
+        contextKind: String(contextKind || 'none'),
+        decision: !!videoOverlay ? 'block_heal' : 'block_blur',
+        freshAuthorization: !!currentPositiveAuthz,
+        cardBoundary: String(cardBoundaryIdForAuthz || 'none'),
+      }, true);
+    }
     if (
       !activeVideoBlurred &&
       !keepOverlayDuringRegularUnresolvedChurn &&
@@ -6996,7 +7483,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       // ~600ms flash between first loadeddata (no context yet) and second loadeddata
       // (authoritative context arrives). applyBlur() on the next event will replace this.
       if (reasonText === 'event:loadeddata' && !activeVideoBlurred && videoNode.isConnected) {
-        if (noContextPositiveOwnershipProof) {
+        if (noContextPositiveOwnershipProof && custodyGuardDecision.allow) {
           videoNode.style.filter = 'blur(' + CONFIG.softBlurStrength + 'px)';
           videoNode.style.webkitFilter = 'blur(' + CONFIG.softBlurStrength + 'px)';
           videoNode.classList.add('mw-softblur');
@@ -7015,6 +7502,14 @@ export function generateModerationScript(config: InjectionConfig): string {
             action: 'keep_blur',
             marker: 'MW-MVP-REGULAR-NEGATIVE-TRANSITION-GUARD-V1',
           });
+        } else if (noContextPositiveOwnershipProof && !custodyGuardDecision.allow) {
+          logAuthzDecision(
+            '[MW-MVP-AUTHZ-BLOCKED-NEGATIVE-OR-UNKNOWN-V2]',
+            isHomeShortsShelfVideo ? 'shorts' : 'regular',
+            reason,
+            false,
+            true
+          );
         } else {
           const cleared = clearAllBlurAndOverlay(
             videoNode,
@@ -7215,6 +7710,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     let overlayAnchored = normalizedOverlay.anchored;
     if (
       (activeVideoBlurred || hasAuthoritativeBlur) &&
+      revealAllowedByAuthz &&
       !overlayAnchored &&
       !shouldDisableRevealUiForMvpMainPageSurface()
     ) {
@@ -7228,7 +7724,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           const overlayItemKey = getDiagItemKey(overlayFor);
           const matchesReattachKey = reattachItemKey !== 'unknown' && overlayItemKey === reattachItemKey;
           const matchesContextKey = contextItemKey !== 'unknown' && overlayItemKey === contextItemKey;
-          const allowSingleOverlayCardFallback = overlaysInCard.length === 1 && contextKind !== 'none';
+          const allowSingleOverlayCardFallback = false;
           if (!matchesReattachKey && !matchesContextKey && !allowSingleOverlayCardFallback) continue;
           const anchorNodeId = String((candidateOverlay.dataset && candidateOverlay.dataset.mwNodeId) || '');
           if (anchorNodeId === videoNodeId) {
@@ -7290,6 +7786,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     if (
       (activeVideoBlurred || hasAuthoritativeBlur) &&
+      revealAllowedByAuthz &&
       !overlayAnchored &&
       !shouldDisableRevealUiForMvpMainPageSurface()
     ) {
@@ -7306,6 +7803,26 @@ export function generateModerationScript(config: InjectionConfig): string {
         'itemId=' + String(overlayItemId || 'none'),
         'anchored=' + overlayAnchored
       );
+    } else if ((activeVideoBlurred || hasAuthoritativeBlur) && !revealAllowedByAuthz) {
+      logAuthzDecision(
+        '[MW-MVP-AUTHZ-BLOCKED-NEGATIVE-OR-UNKNOWN-V2]',
+        isHomeShortsShelfVideo ? 'shorts' : 'regular',
+        reason,
+        false,
+        true
+      );
+      mwTrace('MW-TRACE-OVERLAY-HEAL-BLOCKED-V1', {
+        surface: isHomeShortsShelfVideo ? 'shorts' : 'regular',
+        reason: String(reason || 'unknown'),
+        itemKey: String(currentNodeResolvedItemKey || 'unknown'),
+        strictContinuityItemKey: String(strictItemKeyForAuthz || 'unknown'),
+        hardBlurItemKey: String(hardItemKeyForAuthz || 'unknown'),
+        contextFound: !!contextData,
+        contextKind: String(contextKind || 'none'),
+        decision: 'block_heal',
+        freshAuthorization: false,
+        cardBoundary: String(cardBoundaryIdForAuthz || 'none'),
+      });
     }
     if (overlayAnchored) {
       console.log(
@@ -7343,6 +7860,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     );
     if (enforceRegularOverlayInvariant) {
       const shouldHaveSingleOverlay = !!(
+        revealAllowedByAuthz &&
         (activeVideoBlurred || hasAuthoritativeBlur) &&
         !shouldDisableRevealUiForMvpMainPageSurface()
       );
@@ -7495,6 +8013,50 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
 
     const reattachItemKeyKnown = !!(reattachItemKey && reattachItemKey !== 'unknown');
+    mwTrace('MW-TRACE-POSTSTATE-V1', {
+      surface: isHomeShortsShelfVideo ? 'shorts' : 'regular',
+      reason: String(reason || 'unknown'),
+      eventSource: (
+        reasonText.indexOf('mutation_added') === 0 ? 'mutation' :
+        reasonText.indexOf('attr:') === 0 ? 'attr' :
+        reasonText === 'event:loadeddata' ? 'loadeddata' :
+        reasonText === 'event:playing' ? 'playing' : 'unknown'
+      ),
+      itemKey: String(currentNodeResolvedItemKey || 'unknown'),
+      strictContinuityItemKey: String(strictItemKeyForAuthz || 'unknown'),
+      hardBlurItemKey: String(hardItemKeyForAuthz || 'unknown'),
+      contextFound: !!contextData,
+      contextKind: String(contextKind || 'none'),
+      blurredClass: !!(videoNode.classList && (videoNode.classList.contains('mw-softblur') || videoNode.classList.contains('mw-blurred'))),
+      overlayPresent: !!(videoOverlay && videoOverlay.isConnected),
+      overlayCountInCard: Number((card && typeof card.querySelectorAll === 'function') ? card.querySelectorAll('.mw-reveal-overlay').length : 0),
+      decision: (activeVideoBlurred || hasAuthoritativeBlur) ? 'allow_blur' : 'block_blur',
+      freshAuthorization: !!custodyGuardDecision.allow,
+      cardBoundary: String(cardBoundaryIdForAuthz || 'none'),
+      nodeId: String(videoNodeId || 'none'),
+      continuityGraceUsed: !!custodyGuardDecision.continuityGraceUsed,
+      allow: !!custodyGuardDecision.allow,
+      blocked: !custodyGuardDecision.allow,
+    });
+    mwTrace('MW-HOMEPAGE-CUSTODY-POSTSTATE-V1', {
+      surface: custodyGuardDecision.surface,
+      reason: String(reason || 'unknown'),
+      itemKey: custodyGuardDecision.itemKey,
+      strictContinuityItemKey: custodyGuardDecision.strictContinuityItemKey,
+      hardBlurItemKey: custodyGuardDecision.hardBlurItemKey,
+      cardBoundary: custodyGuardDecision.cardBoundaryFingerprint,
+      classification: custodyGuardDecision.classification,
+      freshPositiveAuthorization: !!custodyGuardDecision.freshPositiveAuthorization,
+      continuityGraceUsed: !!custodyGuardDecision.continuityGraceUsed,
+      overlayCount: Number(card && typeof card.querySelectorAll === 'function' ? card.querySelectorAll('.mw-reveal-overlay').length : 0),
+      blurExistsBefore: false,
+      blurExistsAfter: !!(activeVideoBlurred || hasAuthoritativeBlur || hasIncidentalBlur),
+      revealExistsBefore: false,
+      revealExistsAfter: !!(videoOverlay && videoOverlay.parentElement),
+      allow: !!custodyGuardDecision.allow,
+      blocked: !custodyGuardDecision.allow,
+      mismatchReason: custodyGuardDecision.mismatchReason,
+    });
     const strictContinuityItemKeyKnown = !!(strictContinuityItemKey && strictContinuityItemKey !== 'unknown');
     const contextFound = !!contextData;
     const noisyAttrTransition = reasonText.indexOf('attr:') === 0;
@@ -9204,6 +9766,17 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       node.dataset.mwHasOverlay = 'false';
       node.dataset.mwOverlayOwnerToken = '';
+      mwTrace('MW-TRACE-REVEAL-DECISION-V1', {
+        surface: isShortsModeActive() ? 'shorts' : (isYouTubeMainPageThumbnailSurfaceUrl(window.location.href) ? 'regular' : 'unknown'),
+        reason: String(reason || 'unknown'),
+        eventSource: 'manual',
+        itemKey: String(getDiagItemKey(src || (node.dataset && node.dataset.mwSrc) || '') || 'unknown'),
+        strictContinuityItemKey: 'unknown',
+        hardBlurItemKey: String((node.dataset && node.dataset.mwHardBlurItemKey) || 'unknown'),
+        contextFound: false,
+        contextKind: 'none',
+        decision: 'remove_overlay',
+      });
       return true;
     }
     node.dataset.mwHasOverlay = 'false';
@@ -10071,6 +10644,17 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function createRevealOverlay(element, src, category, itemId, allowShortsReresolve) {
     const shortsMode = isShortsModeActive();
+    mwTrace('MW-TRACE-REVEAL-DECISION-V1', {
+      surface: shortsMode ? 'shorts' : (isYouTubeMainPageThumbnailSurfaceUrl(window.location.href) ? 'regular' : 'unknown'),
+      reason: 'createRevealOverlay_enter',
+      eventSource: 'manual',
+      itemKey: String(getDiagItemKey(src) || 'unknown'),
+      strictContinuityItemKey: 'unknown',
+      hardBlurItemKey: String((element && element.dataset && element.dataset.mwHardBlurItemKey) || 'unknown'),
+      contextFound: false,
+      contextKind: 'none',
+      decision: 'allow_reveal',
+    });
     if (!shortsMode && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
       console.log(
         '[DIAG][MVP_ITEM_CHAIN] stage=reveal_attempt',
@@ -10201,6 +10785,14 @@ export function generateModerationScript(config: InjectionConfig): string {
     // positive is held during Shorts shelf churn. Without this bypass, no overlay is ever
     // created for the held node.
     if (element.dataset.mwModerated !== 'blurred' && !isAuthoritativeHardBlur(element)) {
+      mwTrace('MW-TRACE-REVEAL-BLOCKED-V1', {
+        surface: shortsMode ? 'shorts' : (isYouTubeMainPageThumbnailSurfaceUrl(window.location.href) ? 'regular' : 'unknown'),
+        reason: 'createRevealOverlay_not_blurred',
+        eventSource: 'manual',
+        itemKey: String(getDiagItemKey(src) || 'unknown'),
+        hardBlurItemKey: String((element && element.dataset && element.dataset.mwHardBlurItemKey) || 'unknown'),
+        decision: 'block_reveal',
+      });
       removeRevealOverlay(element, src, 'createRevealOverlay_not_blurred');
       if (DIAG_YT_BLUR) {
         diagFailCaseLog(
@@ -10233,6 +10825,16 @@ export function generateModerationScript(config: InjectionConfig): string {
         )
       );
       if (!provenanceMatch) {
+        mwTrace('MW-TRACE-REVEAL-BLOCKED-V1', {
+          surface: 'regular',
+          reason: 'createRevealOverlay_provenance_veto',
+          eventSource: 'manual',
+          itemKey: String(resolvedOverlayItemKey || 'unknown'),
+          hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+          contextFound: false,
+          contextKind: 'none',
+          decision: 'block_reveal',
+        });
         incrementMvpTransitionCounter(
           'overlayProvenanceVeto',
           'reason=' + String((element && element.dataset && element.dataset.mwTransitionReason) || 'unknown') +
@@ -10465,6 +11067,16 @@ export function generateModerationScript(config: InjectionConfig): string {
       element.dataset.mwOverlayOwnerToken = shortsOwnerToken;
     }
     overlay.dataset.mwOverlayId = overlayId;
+    mwTrace('MW-TRACE-REVEAL-CREATED-V1', {
+      surface: shortsMode ? 'shorts' : (isYouTubeMainPageThumbnailSurfaceUrl(window.location.href) ? 'regular' : 'unknown'),
+      reason: 'createRevealOverlay_created',
+      eventSource: 'manual',
+      itemKey: String(getDiagItemKey(src) || 'unknown'),
+      hardBlurItemKey: String((element && element.dataset && element.dataset.mwHardBlurItemKey) || 'unknown'),
+      decision: 'allow_reveal',
+      overlayId: String(overlayId || 'unknown'),
+      cardBoundary: String((findNonShortsStrongCardNode(element) || findRegularMainCardFallbackNode(element)) ? getDiagNodeId(findNonShortsStrongCardNode(element) || findRegularMainCardFallbackNode(element)) : 'none'),
+    });
     setRevealOverlayAnchorTarget(overlay, element, 'overlay_created');
     overlay.style.cssText = [
       shortsMode ? 'position: fixed' : 'position: absolute',
@@ -11388,6 +12000,20 @@ export function generateModerationScript(config: InjectionConfig): string {
       const dims = element ? getElementDimensions(element) : { width: 0, height: 0 };
       const normalizedResultSrc = normalizeUrl(String(src || '')) || '';
       const resultItemKey = getDiagItemKey(normalizedResultSrc || String(src || ''));
+      mwTrace('MW-TRACE-CLASSIFICATION-V1', {
+        surface: isShortsModeActive() ? 'shorts' : (isYouTubeMainPageThumbnailSurfaceUrl(window.location.href) ? 'regular' : 'unknown'),
+        reason: String(decisionReason || 'none'),
+        source: 'moderation_result',
+        itemKey: String(resultItemKey || 'unknown'),
+        strictContinuityItemKey: 'unknown',
+        hardBlurItemKey: String((element && element.dataset && element.dataset.mwHardBlurItemKey) || 'unknown'),
+        contextFound: false,
+        contextKind: 'none',
+        polarity: finalBlur ? 'positive' : 'negative',
+        decision: finalBlur ? 'allow_blur' : 'block_blur',
+        freshAuthorization: !!finalBlur,
+        src: String(normalizedResultSrc || '').substring(0, 180),
+      });
       
       if (element && element.isConnected) {
         try {
@@ -11452,6 +12078,21 @@ export function generateModerationScript(config: InjectionConfig): string {
           }
         }
         if (finalBlur) {
+          mwTrace('MW-TRACE-BLUR-DECISION-V1', {
+            surface: mvpMainSurface ? 'regular' : (isShortsModeActive() ? 'shorts' : 'unknown'),
+            reason: String(decisionReason || 'none'),
+            eventSource: 'manual',
+            itemKey: String(resultItemKey || 'unknown'),
+            strictContinuityItemKey: 'unknown',
+            hardBlurItemKey: String((element && element.dataset && element.dataset.mwHardBlurItemKey) || 'unknown'),
+            contextFound: false,
+            contextKind: 'none',
+            polarity: 'positive',
+            decision: 'allow_blur',
+            allowed: true,
+            blocked: false,
+            cardBoundary: String((findNonShortsStrongCardNode(element) || findRegularMainCardFallbackNode(element)) ? getDiagNodeId(findNonShortsStrongCardNode(element) || findRegularMainCardFallbackNode(element)) : 'none'),
+          });
           diagLogApplyByItemId(
             itemId,
             src,
@@ -11475,7 +12116,36 @@ export function generateModerationScript(config: InjectionConfig): string {
           });
           // Apply strong blur
           applyBlur(element, src, predictedLabel || category || 'flagged', CONFIG.blurStrength, itemId);
+          mwTrace('MW-TRACE-BLUR-APPLIED-V1', {
+            surface: mvpMainSurface ? 'regular' : (isShortsModeActive() ? 'shorts' : 'unknown'),
+            reason: String(decisionReason || 'none'),
+            eventSource: 'manual',
+            itemKey: String(resultItemKey || 'unknown'),
+            decision: 'allow_blur',
+            src: String(normalizedResultSrc || '').substring(0, 180),
+          });
         } else {
+          mwTrace('MW-TRACE-BLUR-DECISION-V1', {
+            surface: mvpMainSurface ? 'regular' : (isShortsModeActive() ? 'shorts' : 'unknown'),
+            reason: String(decisionReason || 'none'),
+            eventSource: 'manual',
+            itemKey: String(resultItemKey || 'unknown'),
+            strictContinuityItemKey: 'unknown',
+            hardBlurItemKey: String((element && element.dataset && element.dataset.mwHardBlurItemKey) || 'unknown'),
+            contextFound: false,
+            contextKind: 'none',
+            polarity: 'negative',
+            decision: 'block_blur',
+            allowed: false,
+            blocked: true,
+          });
+          mwTrace('MW-TRACE-BLUR-BLOCKED-V1', {
+            surface: mvpMainSurface ? 'regular' : (isShortsModeActive() ? 'shorts' : 'unknown'),
+            reason: String(decisionReason || 'none'),
+            eventSource: 'manual',
+            itemKey: String(resultItemKey || 'unknown'),
+            decision: 'block_blur',
+          });
           if (preDecisionState === 'blurred' || element.classList.contains('mw-blurred') || preDecisionHasBlur) {
             console.log(
               '[MW][JSBlur][SafeOnPreviouslyBlurred]',
@@ -12820,6 +13490,24 @@ export function generateModerationScript(config: InjectionConfig): string {
               const prevItemKey = getDiagItemKey(prevSrcNormalized || String(lastScanSrc || target.dataset.mwOrigSrc || ''));
               const nextItemKey = getDiagItemKey(nextSrcNormalized || String(newSrc || ''));
               const forceDecontaminate = shouldForceRecycleDecontaminateByItemKeyLocal(prevItemKey, nextItemKey);
+              if (
+                String((target.dataset && target.dataset.mwHardBlurItemKey) || 'unknown') !== 'unknown' &&
+                nextItemKey &&
+                nextItemKey !== 'unknown' &&
+                String((target.dataset && target.dataset.mwHardBlurItemKey) || 'unknown') !== String(nextItemKey || 'unknown')
+              ) {
+                mwTraceContamination('img_src_swap_hardBlurItemKey_mismatch', {
+                  surface: isShortsModeActive() ? 'shorts' : 'regular',
+                  itemKey: String(nextItemKey || 'unknown'),
+                  previousItemKey: String(prevItemKey || 'unknown'),
+                  strictContinuityItemKey: 'unknown',
+                  hardBlurItemKey: String((target.dataset && target.dataset.mwHardBlurItemKey) || 'unknown'),
+                  contextKind: 'none',
+                  decision: 'block_blur',
+                  freshAuthorization: false,
+                  cardBoundary: String((findNonShortsStrongCardNode(target) || findRegularMainCardFallbackNode(target)) ? getDiagNodeId(findNonShortsStrongCardNode(target) || findRegularMainCardFallbackNode(target)) : 'none'),
+                }, true);
+              }
               mwDiagLog(
                 '[MW-FLICKER][SRC_SWAP] in-place img src changed - scan markers cleared',
                 'node=' + getDiagNodeId(target),
