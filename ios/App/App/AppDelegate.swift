@@ -9,6 +9,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     var window: UIWindow?
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+        print("[MW-HOME1] app_boot_startup_diag build=\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") ?? "?") bundle=\(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") ?? "?") time=\(Date())")
+        print("[MW-THERAPY1] app_boot_startup_diag build=\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") ?? "?") bundle=\(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") ?? "?") time=\(Date())")
         // Restore InAppBrowser lifecycle bridge so native plugins can observe the active WKWebView.
         InAppBrowserLifecycleBridge.installIfNeeded()
         return true

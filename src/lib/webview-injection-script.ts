@@ -4196,6 +4196,34 @@ export function generateModerationScript(config: InjectionConfig): string {
         hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
       });
     }
+    const holdForRegularTransitionProvenance = !!(
+      regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo &&
+      hasAuthoritativeBlur &&
+      hardItemKeyKnown &&
+      isTransitionChurnReason &&
+      !strictIdentityKnown &&
+      !contextData &&
+      (
+        !normalizedPoster ||
+        getDiagItemKey(normalizedPoster) === hardBlurItemKey
+      )
+    );
+    if (holdForRegularTransitionProvenance) {
+      console.log(
+        '[MW-MVP-REGULAR-TRANSITION-PROVENANCE-HOLD-V1] blur_held_during_transition_churn',
+        'reason=' + String(reason || 'unknown'),
+        'nodeId=' + String(videoNodeId || 'none'),
+        'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown'),
+        'normalizedPoster=' + String(normalizedPoster || '').substring(0, 180)
+      );
+      postNonShortsTransitionDiag('regular_main_transition_provenance_hold', {
+        reason: String(reason || 'unknown'),
+        nodeId: String(videoNodeId || 'none'),
+        marker: 'MW-MVP-REGULAR-TRANSITION-PROVENANCE-HOLD-V1',
+        hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+      });
+    }
     if (
       hasAuthoritativeBlur &&
       !contextData &&
@@ -4203,7 +4231,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       !hardSrcMatchesCurrent &&
       !holdBlurDuringUnresolvedTransition &&
       !preserveShortsHardBlurDuringResolvedContinuity &&
-      !regularPositiveProvenByOverlay
+      !regularPositiveProvenByOverlay &&
+      !holdForRegularTransitionProvenance
     ) {
       videoNode.style.removeProperty('filter');
       videoNode.style.removeProperty('-webkit-filter');
@@ -4342,6 +4371,39 @@ export function generateModerationScript(config: InjectionConfig): string {
         'mode=heal_apply_blur',
         'contextKind=' + contextKind
       );
+      if (
+        regularPathQuarantinePassed &&
+        !isHomeShortsShelfVideo &&
+        cardNodeId !== 'none' &&
+        hasAuthoritativeBlur
+      ) {
+        const postApplyItemKey = String((videoNode.dataset && videoNode.dataset.mwHardBlurItemKey) || 'unknown');
+        const postApplyHardBlurSrc = String((videoNode.dataset && videoNode.dataset.mwHardBlurSrc) || '');
+        writeRegularMainCardBlurLatch(
+          String(cardNodeId || 'none'),
+          postApplyItemKey,
+          postApplyHardBlurSrc,
+          'post_context_apply_' + String(reason || 'unknown'),
+          String(videoNodeId || 'none')
+        );
+        console.log(
+          '[MW-MVP-REGULAR-POST-APPLY-LATCH-WRITE-V1] latch_written_after_context_apply',
+          'reason=' + String(reason || 'unknown'),
+          'nodeId=' + String(videoNodeId || 'none'),
+          'cardNodeId=' + String(cardNodeId || 'none'),
+          'contextKind=' + String(contextKind || 'none'),
+          'postApplyItemKey=' + postApplyItemKey,
+          'postApplyHardBlurSrc=' + String(postApplyHardBlurSrc || '').substring(0, 180)
+        );
+        postNonShortsTransitionDiag('regular_main_post_apply_latch_written', {
+          reason: String(reason || 'unknown'),
+          nodeId: String(videoNodeId || 'none'),
+          cardNodeId: String(cardNodeId || 'none'),
+          marker: 'MW-MVP-REGULAR-POST-APPLY-LATCH-WRITE-V1',
+          contextKind: String(contextKind || 'none'),
+          postApplyItemKey: postApplyItemKey,
+        });
+      }
       if (shouldDisableRevealUiForMvpMainPageSurface()) {
         removeRevealOverlay(videoNode, contextSrc, 'non_shorts_reattach_mvp_suppress');
         console.log(
