@@ -1066,6 +1066,20 @@ export function generateModerationScript(config: InjectionConfig): string {
     url: window.location.href,
     timestamp: Date.now(),
   });
+  postToHost({
+    type: 'MW_PATCH_MARKER',
+    marker: 'HOME1',
+    navId: NAV_ID,
+    pageEpoch: CONFIG.pageEpoch,
+    url: window.location.href,
+    timestamp: Date.now(),
+  });
+  console.log(
+    '[MW-HOME1] startup_diag_marker',
+    'navId=' + NAV_ID,
+    'pageEpoch=' + CONFIG.pageEpoch,
+    'url=' + window.location.href,
+  );
   const timerState = {
     legacyResultsInterval: null,
     urlChangeInterval: null,
@@ -4138,13 +4152,58 @@ export function generateModerationScript(config: InjectionConfig): string {
       hardItemKeyKnown &&
       strictContinuityItemKey === hardBlurItemKey
     );
+    const regularMainEarlyOverlay = (function() {
+      if (!regularPathQuarantinePassed || isHomeShortsShelfVideo) return null;
+      if (!card || typeof card.querySelectorAll !== 'function') return null;
+      const overlays = card.querySelectorAll('.mw-reveal-overlay');
+      for (let i = 0; i < overlays.length; i++) {
+        const o = overlays[i];
+        if (!o || !o.isConnected || !o.parentElement) continue;
+        if (String(o.dataset.mwNodeId || '') === videoNodeId) return o;
+      }
+      return null;
+    })();
+    const regularPositiveProvenByOverlay = !!(
+      regularPathQuarantinePassed &&
+      !isHomeShortsShelfVideo &&
+      isTransitionChurnReason &&
+      hasAuthoritativeBlur &&
+      !contextData &&
+      !hardSrcMatchesCurrent &&
+      regularMainEarlyOverlay &&
+      hardItemKeyKnown &&
+      getDiagItemKey(String(regularMainEarlyOverlay.dataset.mwFor || '')) === hardBlurItemKey
+    );
+    if (regularPositiveProvenByOverlay) {
+      writeRegularMainCardBlurLatch(
+        String(cardNodeId || 'none'),
+        String(hardBlurItemKey || 'unknown'),
+        String(hardBlurSrc || ''),
+        'overlay_proven_positive',
+        String(videoNodeId || 'none')
+      );
+      console.log(
+        '[MW-MVP-REGULAR-THUMB-OVERLAY-PROVEN-V1] blur_preserved_by_overlay_identity',
+        'reason=' + String(reason || 'unknown'),
+        'nodeId=' + String(videoNodeId || 'none'),
+        'hardBlurItemKey=' + String(hardBlurItemKey || 'unknown'),
+        'overlayFor=' + String(((regularMainEarlyOverlay && regularMainEarlyOverlay.dataset.mwFor) || '').substring(0, 180))
+      );
+      postNonShortsTransitionDiag('regular_main_blur_preserved_by_overlay', {
+        reason: String(reason || 'unknown'),
+        nodeId: String(videoNodeId || 'none'),
+        marker: 'MW-MVP-REGULAR-THUMB-OVERLAY-PROVEN-V1',
+        hardBlurItemKey: String(hardBlurItemKey || 'unknown'),
+      });
+    }
     if (
       hasAuthoritativeBlur &&
       !contextData &&
       !hardKeyMatchesStrict &&
       !hardSrcMatchesCurrent &&
       !holdBlurDuringUnresolvedTransition &&
-      !preserveShortsHardBlurDuringResolvedContinuity
+      !preserveShortsHardBlurDuringResolvedContinuity &&
+      !regularPositiveProvenByOverlay
     ) {
       videoNode.style.removeProperty('filter');
       videoNode.style.removeProperty('-webkit-filter');
