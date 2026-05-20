@@ -205,6 +205,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     batchSize: 5,
     batchDelay: 100,
     requestTimeout: 8000,
+    mvpPositiveCardOwnershipV1: true,
   };
 
   // Threshold mappings for blur dial levels.
@@ -748,6 +749,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     },
     nonShortsReattachContext: persistedNonShortsReattachContext, // key -> { cardKey, itemKey, src, category, itemId, blurPx, nodeId, cardNodeId, updatedAt }
     regularMainCardBlurLatch: new Map(), // key -> { cardNodeId, navId, pageEpoch, hardBlurItemKey, hardBlurSrc, setAt, lastSeenAt, expiresAt }
+    mvpCardObservers: new WeakMap(),
   };
 
   // Keep reveal stable for the current Shorts video (keyed by shorts:<videoId>).
@@ -3079,6 +3081,119 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     return null;
   }
+
+  // ==================== MVP POSITIVE CARD OWNERSHIP KERNEL ====================
+
+  function getMvpCardHrefItemKey(card) {
+    if (!card || card.nodeType !== 1 || typeof card.querySelector !== 'function') return 'unknown';
+    try {
+      const anchor = card.querySelector('a[href*="/watch"]');
+      if (!anchor) return 'unknown';
+      const href = String(anchor.getAttribute ? anchor.getAttribute('href') : (anchor.href || ''));
+      if (!href) return 'unknown';
+      const match = href.match(/[?&]v=([^&/#]+)/);
+      if (match && match[1]) return String(match[1]);
+    } catch (e) {}
+    return 'unknown';
+  }
+
+  function isMvpStreamingUrlSrc(src) {
+    if (!src) return false;
+    try {
+      const parsed = new URL(String(src), window.location.href);
+      return String(parsed.hostname || '').toLowerCase().indexOf('googlevideo.com') !== -1;
+    } catch (e) { return false; }
+  }
+
+  function isMvpPositiveCardOwned(card, hrefKey, itemKey) {
+    if (!card || card.nodeType !== 1) return false;
+    if (card.dataset.mwMvpPositiveOwned !== '1') return false;
+    if (String(card.dataset.mwMvpPositiveEpoch || '0') !== String(state.pageEpoch || 0)) return false;
+    if (card.dataset.mwMvpPositiveHrefKey !== hrefKey) return false;
+    if (card.dataset.mwMvpPositiveItemKey !== itemKey) return false;
+    return true;
+  }
+
+  function stampMvpPositiveCardOwnership(card, itemKey, hrefKey, epoch, reason) {
+    if (!card || card.nodeType !== 1) return;
+    try {
+      card.dataset.mwMvpPositiveOwned = '1';
+      card.dataset.mwMvpPositiveItemKey = String(itemKey || 'unknown');
+      card.dataset.mwMvpPositiveHrefKey = String(hrefKey || 'unknown');
+      card.dataset.mwMvpPositiveEpoch = String(epoch || 0);
+      card.dataset.mwMvpPositiveAt = String(Date.now());
+      console.log(
+        '[MW-MVP-POSITIVE-CARD-STAMPED]',
+        'cardNodeId=' + getDiagNodeId(card),
+        'itemKey=' + String(itemKey || 'unknown'),
+        'hrefKey=' + String(hrefKey || 'unknown'),
+        'epoch=' + String(epoch || 0),
+        'reason=' + String(reason || 'unknown')
+      );
+    } catch (e) {}
+  }
+
+  function clearMvpPositiveCardOwnershipFromCard(card, reason) {
+    if (!card || card.nodeType !== 1) return;
+    try {
+      const cardNodeId = getDiagNodeId(card);
+      const storedItemKey = String((card.dataset && card.dataset.mwMvpPositiveItemKey) || 'unknown');
+      const storedHrefKey = String((card.dataset && card.dataset.mwMvpPositiveHrefKey) || 'unknown');
+      card.dataset.mwMvpPositiveOwned = '';
+      card.dataset.mwMvpPositiveItemKey = '';
+      card.dataset.mwMvpPositiveHrefKey = '';
+      card.dataset.mwMvpPositiveEpoch = '';
+      card.dataset.mwMvpPositiveAt = '';
+      if (typeof card.querySelectorAll === 'function') {
+        const blurredChildren = card.querySelectorAll('[data-mw-moderated="blurred"]');
+        for (let i = 0; i < blurredChildren.length; i++) {
+          const child = blurredChildren[i];
+          if (child && child.nodeType === 1) {
+            clearAllBlurAndOverlay(child, String((child.dataset && child.dataset.mwSrc) || ''), reason || 'mvp_ownership_cleared', 'safe');
+          }
+        }
+      }
+      console.log(
+        '[MW-MVP-POSITIVE-CARD-HREF-MISMATCH-CLEAR]',
+        'cardNodeId=' + cardNodeId,
+        'storedItemKey=' + storedItemKey,
+        'storedHrefKey=' + storedHrefKey,
+        'reason=' + String(reason || 'unknown')
+      );
+    } catch (e) {}
+  }
+
+  function installMvpCardObserver(card) {
+    if (!card || card.nodeType !== 1) return;
+    if (state.mvpCardObservers.has(card)) return;
+    const cardNodeId = getDiagNodeId(card);
+    const obs = new MutationObserver(function() {
+      if ((card.dataset && card.dataset.mwMvpPositiveOwned) !== '1') return;
+      const currentHrefKey = getMvpCardHrefItemKey(card);
+      const storedHrefKey = String((card.dataset && card.dataset.mwMvpPositiveHrefKey) || 'unknown');
+      if (currentHrefKey !== storedHrefKey) {
+        console.log(
+          '[MW-MVP-OBSERVER-HREF-CHANGE]',
+          'cardNodeId=' + cardNodeId,
+          'stored=' + storedHrefKey,
+          'current=' + currentHrefKey
+        );
+        clearMvpPositiveCardOwnershipFromCard(card, 'observer_href_change');
+        obs.disconnect();
+        state.mvpCardObservers.delete(card);
+        console.log('[MW-MVP-OBSERVER-DISCONNECT]', 'cardNodeId=' + cardNodeId);
+      }
+    });
+    obs.observe(card, { subtree: true, attributes: true, attributeFilter: ['href'] });
+    state.mvpCardObservers.set(card, obs);
+    console.log(
+      '[MW-MVP-OBSERVER-INSTALL]',
+      'cardNodeId=' + cardNodeId,
+      'hrefKey=' + String((card.dataset && card.dataset.mwMvpPositiveHrefKey) || 'unknown')
+    );
+  }
+
+  // ==================== END MVP POSITIVE CARD OWNERSHIP KERNEL ====================
 
   function buildRegularMainCardBlurLatchKey(navId, pageEpoch, cardNodeId) {
     return String(navId || 'none') + '|' + String(pageEpoch || 0) + '|' + String(cardNodeId || 'none');
@@ -6953,14 +7068,83 @@ export function generateModerationScript(config: InjectionConfig): string {
     return { shouldBlur: true, reason: null };
   }
 
+  function isMvpBlurAuthorized(element, src, itemKey, mvpProof, callerContext) {
+    if (!CONFIG.mvpPositiveCardOwnershipV1) return true;
+    if (isShortsModeActive()) return true;
+    if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return true;
+    const diagCtx = String(callerContext || 'unknown');
+    const diagNodeId = getDiagNodeId(element);
+    const deny = function(reason) {
+      console.log(
+        '[MW-MVP-AUTHZ-BLUR-DENY]',
+        'reason=' + reason,
+        'caller=' + diagCtx,
+        'nodeId=' + diagNodeId,
+        'itemKey=' + String(itemKey || 'unknown'),
+        'src=' + String(src || '').substring(0, 120)
+      );
+      return false;
+    };
+    const allow = function(reason) {
+      console.log(
+        '[MW-MVP-AUTHZ-BLUR-ALLOW]',
+        'reason=' + reason,
+        'caller=' + diagCtx,
+        'nodeId=' + diagNodeId,
+        'itemKey=' + String(itemKey || 'unknown'),
+        'src=' + String(src || '').substring(0, 120)
+      );
+      return true;
+    };
+    if (isMvpStreamingUrlSrc(src)) {
+      console.log(
+        '[MW-MVP-STREAMING-IDENTITY-REJECTED]',
+        'caller=' + diagCtx,
+        'nodeId=' + diagNodeId,
+        'src=' + String(src || '').substring(0, 120)
+      );
+      return deny('streaming_url');
+    }
+    const card = (typeof element.closest === 'function')
+      ? (element.closest(NON_SHORTS_REATTACH_STRONG_CARD_SELECTOR) || element.closest(NON_SHORTS_REATTACH_CARD_SELECTOR))
+      : null;
+    if (!card) return deny('no_card_boundary');
+    const hrefKey = getMvpCardHrefItemKey(card);
+    if (hrefKey === 'unknown') return deny('href_key_unknown');
+    if (!itemKey || itemKey === 'unknown') return deny('item_key_unknown');
+    if (itemKey !== hrefKey) {
+      console.log(
+        '[MW-MVP-NEGATIVE-PROTECTED]',
+        'caller=' + diagCtx,
+        'nodeId=' + diagNodeId,
+        'cardNodeId=' + getDiagNodeId(card),
+        'hrefKey=' + hrefKey,
+        'itemKey=' + String(itemKey || 'unknown')
+      );
+      return deny('item_href_mismatch');
+    }
+    if (isMvpPositiveCardOwned(card, hrefKey, itemKey)) return allow('owned_card');
+    if (mvpProof === 'classifier_positive') return allow('classifier_positive');
+    console.log(
+      '[MW-MVP-NEGATIVE-PROTECTED]',
+      'caller=' + diagCtx,
+      'nodeId=' + diagNodeId,
+      'cardNodeId=' + getDiagNodeId(card),
+      'hrefKey=' + hrefKey,
+      'itemKey=' + String(itemKey || 'unknown'),
+      'proof=' + String(mvpProof || 'none')
+    );
+    return deny('no_ownership_no_proof');
+  }
+
   /**
    * Apply hard blur (for unsafe content)
    * Uses !important to override site styles on iOS
    */
-  function applyBlur(element, src, category, blurStrengthPx, itemId) {
+  function applyBlur(element, src, category, blurStrengthPx, itemId, _mvpProof) {
     // Check persistence
     if (isRevealedForSource(src, element)) return;
-    
+    if (!isMvpBlurAuthorized(element, src, getDiagItemKey(src), _mvpProof || 'none', 'applyBlur')) return;
     const shortsMode = isShortsModeActive();
     let shortsStableSelectorUsed = '';
     if (shortsMode) {
@@ -7050,6 +7234,19 @@ export function generateModerationScript(config: InjectionConfig): string {
       element.dataset.mwSrc = src;
       element.dataset.mwItemId = itemId || '';
       markAuthoritativeHardBlur(element, src);
+      if (CONFIG.mvpPositiveCardOwnershipV1 && (_mvpProof === 'classifier_positive') && !shortsMode && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
+        const _mvpCard = typeof element.closest === 'function'
+          ? (element.closest(NON_SHORTS_REATTACH_STRONG_CARD_SELECTOR) || element.closest(NON_SHORTS_REATTACH_CARD_SELECTOR))
+          : null;
+        if (_mvpCard) {
+          const _mvpHrefKey = getMvpCardHrefItemKey(_mvpCard);
+          const _mvpItemKey = getDiagItemKey(src);
+          if (_mvpHrefKey !== 'unknown' && _mvpHrefKey === _mvpItemKey) {
+            stampMvpPositiveCardOwnership(_mvpCard, _mvpItemKey, _mvpHrefKey, state.pageEpoch, 'applyBlur_classifier_positive');
+            installMvpCardObserver(_mvpCard);
+          }
+        }
+      }
       element.classList.remove('mw-softblur');
       element.classList.add('mw-blurred');
       rememberNonShortsReattachContext(
@@ -7311,6 +7508,11 @@ export function generateModerationScript(config: InjectionConfig): string {
       const stableTarget = stableResolution && stableResolution.target ? stableResolution.target : null;
       if (stableTarget && stableTarget !== element && stableTarget.isConnected) {
         createRevealOverlay(stableTarget, src, category, itemId, false);
+        return;
+      }
+    }
+    if (!shortsMode && CONFIG.mvpPositiveCardOwnershipV1 && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
+      if (!isMvpBlurAuthorized(element, src, getDiagItemKey(src), 'none', 'createRevealOverlay')) {
         return;
       }
     }
@@ -8566,7 +8768,7 @@ export function generateModerationScript(config: InjectionConfig): string {
             decisionReason: decisionReason,
           });
           // Apply strong blur
-          applyBlur(element, src, predictedLabel || category || 'flagged', CONFIG.blurStrength, itemId);
+          applyBlur(element, src, predictedLabel || category || 'flagged', CONFIG.blurStrength, itemId, 'classifier_positive');
         } else {
           if (preDecisionState === 'blurred' || element.classList.contains('mw-blurred') || preDecisionHasBlur) {
             console.log(
@@ -9886,7 +10088,7 @@ export function generateModerationScript(config: InjectionConfig): string {
             el,
             'applyPath=item_identity_legacy sourceType=' + (pending.sourceType || 'unknown')
           );
-          applyBlur(el, src, category, blurStrengthPx, itemId);
+          applyBlur(el, src, category, blurStrengthPx, itemId, 'classifier_positive');
           clearSafeResolved(src);
       }
         clearPendingItem(itemId, 'legacy_result');
