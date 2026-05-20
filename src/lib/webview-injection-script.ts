@@ -3087,13 +3087,30 @@ export function generateModerationScript(config: InjectionConfig): string {
   function getMvpCardHrefItemKey(card) {
     if (!card || card.nodeType !== 1 || typeof card.querySelector !== 'function') return 'unknown';
     try {
-      const anchor = card.querySelector('a[href*="/watch"]');
-      if (!anchor) return 'unknown';
-      const href = String(anchor.getAttribute ? anchor.getAttribute('href') : (anchor.href || ''));
-      if (!href) return 'unknown';
-      const match = href.match(/[?&]v=([^&/#]+)/);
-      if (match && match[1]) return String(match[1]);
+      const inner = card.querySelector('a[href*="/watch"]');
+      if (inner) {
+        const href = String(inner.getAttribute ? inner.getAttribute('href') : (inner.href || ''));
+        if (href) {
+          const match = href.match(/[?&]v=([^&/#]+)/);
+          if (match && match[1]) {
+            console.log('[MW-MVP-HREF-KEY-DESCENDANT-HIT]', 'cardNodeId=' + getDiagNodeId(card), 'key=' + String(match[1]));
+            return String(match[1]);
+          }
+        }
+      }
+      const outer = (typeof card.closest === 'function') ? card.closest('a[href*="/watch"]') : null;
+      if (outer) {
+        const href = String(outer.getAttribute ? outer.getAttribute('href') : (outer.href || ''));
+        if (href) {
+          const match = href.match(/[?&]v=([^&/#]+)/);
+          if (match && match[1]) {
+            console.log('[MW-MVP-HREF-KEY-ANCESTOR-HIT]', 'cardNodeId=' + getDiagNodeId(card), 'key=' + String(match[1]));
+            return String(match[1]);
+          }
+        }
+      }
     } catch (e) {}
+    console.log('[MW-MVP-HREF-KEY-UNKNOWN]', 'cardNodeId=' + getDiagNodeId(card));
     return 'unknown';
   }
 
