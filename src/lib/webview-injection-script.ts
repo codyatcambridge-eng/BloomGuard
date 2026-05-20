@@ -4393,7 +4393,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           ? contextBlurStrengthRaw
           : (CONFIG.blurStrength || 30)
       );
-      applyBlur(videoNode, contextSrc, contextCategory, contextBlurStrength, contextItemId);
+      applyBlur(videoNode, contextSrc, contextCategory, contextBlurStrength, contextItemId, contextKind === 'card_blurred' ? 'card_blurred' : 'none');
       if (strictContinuityItemKey && strictContinuityItemKey !== 'unknown') {
         videoNode.dataset.mwHardBlurItemKey = strictContinuityItemKey;
       }
@@ -7142,6 +7142,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     if (isMvpPositiveCardOwned(card, hrefKey, itemKey)) return allow('owned_card');
     if (mvpProof === 'classifier_positive') return allow('classifier_positive');
+    if (mvpProof === 'card_blurred') return allow('card_blurred_continuity');
     console.log(
       '[MW-MVP-NEGATIVE-PROTECTED]',
       'caller=' + diagCtx,
