@@ -7142,7 +7142,13 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     if (isMvpPositiveCardOwned(card, hrefKey, itemKey)) return allow('owned_card');
     if (mvpProof === 'classifier_positive') return allow('classifier_positive');
-    if (mvpProof === 'card_blurred') return allow('card_blurred_continuity');
+    if (mvpProof === 'card_blurred') {
+      if (isMvpStreamingUrlSrc(src)) return deny('card_blurred_streaming_src');
+      if (!itemKey || itemKey === 'unknown') return deny('card_blurred_unknown_item');
+      if (hrefKey === 'unknown') return deny('card_blurred_unknown_href');
+      if (itemKey !== hrefKey) return deny('card_blurred_key_mismatch');
+      return allow('card_blurred_continuity');
+    }
     console.log(
       '[MW-MVP-NEGATIVE-PROTECTED]',
       'caller=' + diagCtx,
