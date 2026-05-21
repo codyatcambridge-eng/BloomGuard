@@ -3210,6 +3210,81 @@ export function generateModerationScript(config: InjectionConfig): string {
     );
   }
 
+  // ==================== SHORTS SHELF LOCKUP OWNERSHIP ====================
+
+  const shortsShelfObservers = new WeakMap();
+
+  function clearShortsShelfLockupOwnership(lockup, reason) {
+    if (!lockup || lockup.nodeType !== 1) return;
+    try {
+      const lockupNodeId = getDiagNodeId(lockup);
+      lockup.dataset.mwShortsShelfOwned = '';
+      lockup.dataset.mwShortsShelfItemKey = '';
+      lockup.dataset.mwShortsShelfAt = '';
+      if (typeof lockup.querySelectorAll === 'function') {
+        const blurredChildren = lockup.querySelectorAll('[data-mw-moderated="blurred"]');
+        for (let i = 0; i < blurredChildren.length; i++) {
+          const child = blurredChildren[i];
+          if (child && child.nodeType === 1) {
+            clearAllBlurAndOverlay(
+              child,
+              String((child.dataset && child.dataset.mwSrc) || ''),
+              reason || 'shorts_shelf_ownership_cleared',
+              'safe'
+            );
+          }
+        }
+        const staleOverlays = lockup.querySelectorAll('.mw-reveal-overlay');
+        for (let i = 0; i < staleOverlays.length; i++) {
+          const ov = staleOverlays[i];
+          if (ov && ov.parentElement) ov.parentElement.removeChild(ov);
+        }
+      }
+      console.log(
+        '[MW-MVP-SHORTS-SHELF-HREF-CHANGE-CLEAR]',
+        'lockupNodeId=' + lockupNodeId,
+        'reason=' + String(reason || 'unknown')
+      );
+    } catch (e) {}
+  }
+
+  function installShortsShelfLockupObserver(lockup) {
+    if (!lockup || lockup.nodeType !== 1) return;
+    if (shortsShelfObservers.has(lockup)) return;
+    const lockupNodeId = getDiagNodeId(lockup);
+    const getShelfId = function() {
+      const anchor = typeof lockup.querySelector === 'function'
+        ? lockup.querySelector('a[href^="/shorts/"]')
+        : null;
+      const rawHref = String(
+        (anchor && anchor.getAttribute && anchor.getAttribute('href')) || ''
+      );
+      const m = rawHref.match(/\\/shorts\\/([^/?#]+)/);
+      return m ? m[1] : 'unknown';
+    };
+    let lastKnownId = getShelfId();
+    const obs = new MutationObserver(function() {
+      const storedItemKey = String((lockup.dataset && lockup.dataset.mwShortsShelfItemKey) || 'unknown');
+      if (storedItemKey === 'unknown') return;
+      const currentId = getShelfId();
+      if (currentId !== lastKnownId || (currentId !== 'unknown' && currentId !== storedItemKey)) {
+        console.log(
+          '[MW-MVP-SHORTS-SHELF-HREF-CHANGE-CLEAR]',
+          'lockupNodeId=' + lockupNodeId,
+          'storedItemKey=' + storedItemKey,
+          'lastKnownId=' + lastKnownId,
+          'currentId=' + currentId
+        );
+        lastKnownId = currentId;
+        clearShortsShelfLockupOwnership(lockup, 'observer_href_change');
+        obs.disconnect();
+        shortsShelfObservers.delete(lockup);
+      }
+    });
+    obs.observe(lockup, { subtree: true, attributes: true, attributeFilter: ['href'] });
+    shortsShelfObservers.set(lockup, obs);
+  }
+
   // ==================== END MVP POSITIVE CARD OWNERSHIP KERNEL ====================
 
   function buildRegularMainCardBlurLatchKey(navId, pageEpoch, cardNodeId) {
@@ -7122,6 +7197,57 @@ export function generateModerationScript(config: InjectionConfig): string {
       );
       return deny('streaming_url');
     }
+    // ---- Shorts shelf branch ------------------------------------------------
+    // Handles img elements inside ytm-shorts-lockup-view-model on the main feed.
+    // Active Shorts (isShortsModeActive=true) already exited above.
+    // Regular cards do not have ytm-shorts-lockup-view-model as an ancestor.
+    const shortsShelfLockup = (
+      !isShortsModeActive() &&
+      typeof element.closest === 'function'
+    ) ? element.closest('ytm-shorts-lockup-view-model') : null;
+    if (shortsShelfLockup) {
+      const shelfAnchor = typeof shortsShelfLockup.querySelector === 'function'
+        ? shortsShelfLockup.querySelector('a[href^="/shorts/"]')
+        : null;
+      const shelfRawHref = String(
+        (shelfAnchor && shelfAnchor.getAttribute && shelfAnchor.getAttribute('href')) || ''
+      );
+      const shelfHrefMatch = shelfRawHref.match(/\\/shorts\\/([^/?#]+)/);
+      const shelfId = shelfHrefMatch ? shelfHrefMatch[1] : 'unknown';
+      if (!itemKey || itemKey === 'unknown') {
+        console.log('[MW-MVP-SHORTS-SHELF-AUTHZ-DENY] item_key_unknown',
+          'caller=' + diagCtx, 'nodeId=' + diagNodeId);
+        return deny('shorts_shelf_item_key_unknown');
+      }
+      if (shelfId === 'unknown') {
+        console.log('[MW-MVP-SHORTS-SHELF-AUTHZ-DENY] href_unknown',
+          'caller=' + diagCtx, 'nodeId=' + diagNodeId, 'lockupNodeId=' + getDiagNodeId(shortsShelfLockup));
+        return deny('shorts_shelf_href_unknown');
+      }
+      if (itemKey !== shelfId) {
+        console.log('[MW-MVP-SHORTS-SHELF-AUTHZ-DENY] id_mismatch',
+          'caller=' + diagCtx, 'nodeId=' + diagNodeId,
+          'itemKey=' + String(itemKey || 'unknown'), 'shelfId=' + shelfId);
+        return deny('shorts_shelf_id_mismatch');
+      }
+      if (mvpProof === 'classifier_positive') {
+        console.log('[MW-MVP-SHORTS-SHELF-AUTHZ-ALLOW] classifier_positive',
+          'caller=' + diagCtx, 'nodeId=' + diagNodeId, 'itemKey=' + String(itemKey || 'unknown'));
+        return allow('shorts_shelf_classifier_positive');
+      }
+      const shelfOwned = !!(
+        shortsShelfLockup.dataset &&
+        shortsShelfLockup.dataset.mwShortsShelfOwned === '1' &&
+        shortsShelfLockup.dataset.mwShortsShelfItemKey === itemKey
+      );
+      if (shelfOwned) {
+        console.log('[MW-MVP-SHORTS-SHELF-AUTHZ-ALLOW] owned',
+          'caller=' + diagCtx, 'nodeId=' + diagNodeId, 'itemKey=' + String(itemKey || 'unknown'));
+        return allow('shorts_shelf_owned');
+      }
+      return deny('shorts_shelf_no_proof');
+    }
+    // ---- end Shorts shelf branch --------------------------------------------
     const card = (typeof element.closest === 'function')
       ? (element.closest(NON_SHORTS_REATTACH_STRONG_CARD_SELECTOR) || element.closest(NON_SHORTS_REATTACH_CARD_SELECTOR))
       : null;
@@ -7270,6 +7396,23 @@ export function generateModerationScript(config: InjectionConfig): string {
             installMvpCardObserver(_mvpCard);
           }
         }
+        // Shorts shelf ownership stamp — must happen before createRevealOverlay
+        const _shelfLockup = typeof element.closest === 'function'
+          ? element.closest('ytm-shorts-lockup-view-model')
+          : null;
+        if (_shelfLockup) {
+          const _shelfItemKey = getDiagItemKey(src);
+          _shelfLockup.dataset.mwShortsShelfOwned = '1';
+          _shelfLockup.dataset.mwShortsShelfItemKey = _shelfItemKey;
+          _shelfLockup.dataset.mwShortsShelfAt = String(Date.now());
+          installShortsShelfLockupObserver(_shelfLockup);
+          console.log(
+            '[MW-MVP-SHORTS-SHELF-STAMPED]',
+            'nodeId=' + getDiagNodeId(element),
+            'lockupNodeId=' + getDiagNodeId(_shelfLockup),
+            'itemKey=' + _shelfItemKey
+          );
+        }
       }
       element.classList.remove('mw-softblur');
       element.classList.add('mw-blurred');
@@ -7326,6 +7469,20 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       
       createRevealOverlay(element, src, category, itemId);
+      if (!shortsMode && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
+        const _shelfLockupForDiag = typeof element.closest === 'function'
+          ? element.closest('ytm-shorts-lockup-view-model')
+          : null;
+        if (_shelfLockupForDiag) {
+          const overlayAfterCreate = findRevealOverlayForElement(element, src);
+          console.log(
+            '[MW-MVP-SHORTS-SHELF-OVERLAY-CREATED]',
+            'nodeId=' + getDiagNodeId(element),
+            'overlayPresent=' + String(!!overlayAfterCreate),
+            'itemKey=' + getDiagItemKey(src)
+          );
+        }
+      }
       if (shortsMode && element.isConnected && !findRevealOverlayForElement(element, src)) {
         createRevealOverlay(element, src, category, itemId, false);
       }
