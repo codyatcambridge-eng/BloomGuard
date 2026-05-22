@@ -3141,6 +3141,11 @@ export function generateModerationScript(config: InjectionConfig): string {
       node.closest('ytd-rich-shelf-renderer') ||
       node.closest('ytm-item-section-renderer') ||
       node.closest('ytd-item-section-renderer') ||
+      node.closest('ytm-rich-section-renderer') ||
+      node.closest('ytd-rich-section-renderer') ||
+      node.closest('ytm-rich-grid-renderer') ||
+      node.closest('ytd-rich-grid-renderer') ||
+      node.closest('ytm-rich-grid-media') ||
       node.closest('ytd-rich-grid-media') ||
       node.closest('ytd-rich-item-renderer') ||
       node.closest('ytd-video-renderer') ||
@@ -3165,6 +3170,21 @@ export function generateModerationScript(config: InjectionConfig): string {
         'ytm-rich-shelf-renderer,' +
         'ytd-rich-shelf-renderer'
       );
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function isHomepageTopOwnedCard(card) {
+    if (!card || card.nodeType !== 1) return false;
+    if (isShortsModeActive()) return false;
+    if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return false;
+    if (typeof card.getBoundingClientRect !== 'function') return false;
+    try {
+      const rect = card.getBoundingClientRect();
+      const viewportH = Math.max(0, Number(window.innerHeight || 0));
+      if (viewportH < 1) return false;
+      return Number(rect.top || 0) <= (viewportH * 1.35);
     } catch (e) {
       return false;
     }
@@ -3209,6 +3229,13 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (isShortsShelfOwnedCard(card)) {
       console.log(
         '[MW-SHORTS-SHELF] owned_safe',
+        'cardNodeId=' + getDiagNodeId(card),
+        'reason=' + String(reason || 'unknown')
+      );
+    }
+    if (isHomepageTopOwnedCard(card)) {
+      console.log(
+        '[MW-HOMEPAGE-TOP] owned_safe',
         'cardNodeId=' + getDiagNodeId(card),
         'reason=' + String(reason || 'unknown')
       );
@@ -3261,6 +3288,63 @@ export function generateModerationScript(config: InjectionConfig): string {
       const ownedCards = node.querySelectorAll('.' + OWNED_POSITIVE_CARD_CLASS);
       for (let i = 0; i < ownedCards.length; i += 1) {
         reapplyOwnedContainerBlur(ownedCards[i], reason + ':descendant');
+      }
+    }
+  }
+
+  function restampHomepageTopSafeCards(reason) {
+    if (isShortsModeActive()) return;
+    if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
+    const topCardSelector = [
+      'ytm-rich-item-renderer',
+      'ytd-rich-item-renderer',
+      'ytd-rich-grid-media',
+      'ytm-rich-grid-media',
+      'ytd-video-renderer',
+      'ytm-video-with-context-renderer',
+      'ytm-compact-video-renderer',
+      'ytm-rich-section-renderer',
+      'ytd-rich-section-renderer',
+    ].join(',');
+    const cards = document.querySelectorAll(topCardSelector);
+    const limit = Math.min(cards.length, 28);
+    for (let i = 0; i < limit; i += 1) {
+      const card = cards[i];
+      if (!card || card.nodeType !== 1) continue;
+      if (!isHomepageTopOwnedCard(card)) continue;
+      const mediaNodes = (typeof card.querySelectorAll === 'function')
+        ? card.querySelectorAll('[data-mw-src],img,video')
+        : [];
+      let hasKnownSafe = false;
+      let hasKnownUnsafe = false;
+      for (let j = 0; j < mediaNodes.length; j += 1) {
+        const node = mediaNodes[j];
+        if (!node || node.nodeType !== 1) continue;
+        const src = normalizeUrl(String((node.dataset && node.dataset.mwSrc) || node.currentSrc || node.src || '')) || '';
+        if (!src) continue;
+        if (isSafeResolvedActive(src)) {
+          hasKnownSafe = true;
+          continue;
+        }
+        if (String((node.dataset && node.dataset.mwModerated) || '') === 'blurred') {
+          hasKnownUnsafe = true;
+        }
+      }
+      if (!hasKnownSafe || hasKnownUnsafe) continue;
+      const wasPositive = !!(card.classList && card.classList.contains(OWNED_POSITIVE_CARD_CLASS));
+      applyOwnedSafeCardClass(card, 'homepage_top_restamp:' + String(reason || 'unknown'));
+      if (wasPositive) {
+        console.log(
+          '[MW-HOMEPAGE-TOP] corrected_stale_positive_to_safe',
+          'cardNodeId=' + getDiagNodeId(card),
+          'reason=' + String(reason || 'unknown')
+        );
+      } else {
+        console.log(
+          '[MW-HOMEPAGE-TOP] restamp_safe',
+          'cardNodeId=' + getDiagNodeId(card),
+          'reason=' + String(reason || 'unknown')
+        );
       }
     }
   }
@@ -10741,12 +10825,21 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
   // Also rescan on load to catch late resources without delaying first blur.
   if (document.readyState !== 'complete') {
+    const onDomContentLoadedScan = () => {
+      if (timerState.teardownDone) return;
+      restampHomepageTopSafeCards('domcontentloaded');
+      scheduleInitTimeout('homepageTopSafeRestamp', function() {
+        restampHomepageTopSafeCards('domcontentloaded_delayed');
+      }, 180);
+    };
+    document.addEventListener('DOMContentLoaded', onDomContentLoadedScan, { once: true });
     const onLoadScan = () => {
       if (timerState.teardownDone) return;
       diagLogLifecycleSnapshot('page_load_end', 'window_load_event', lastUrl, window.location.href);
       scanFullPage();
       if (isYouTube()) {
         scheduleInitTimeout('loadYouTubeScan', scanYouTubeThumbnails, 200);
+        restampHomepageTopSafeCards('window_load');
         const shelfOwnedCards = document.querySelectorAll('.' + OWNED_POSITIVE_CARD_CLASS);
         for (let i = 0; i < shelfOwnedCards.length; i += 1) {
           const card = shelfOwnedCards[i];
@@ -10764,6 +10857,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     window.addEventListener('load', onLoadScan);
   } else {
     diagLogLifecycleSnapshot('page_load_end', 'document_ready_complete', lastUrl, window.location.href);
+    restampHomepageTopSafeCards('document_ready_complete');
+    scheduleInitTimeout('homepageTopSafeRestamp', function() {
+      restampHomepageTopSafeCards('document_ready_complete_delayed');
+    }, 180);
   }
 
   // Periodic rescans (more aggressive for YouTube)
