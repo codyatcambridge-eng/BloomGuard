@@ -3132,6 +3132,15 @@ export function generateModerationScript(config: InjectionConfig): string {
   function getOwnedCardContainerFromNode(node) {
     if (!node || node.nodeType !== 1 || typeof node.closest !== 'function') return null;
     return (
+      node.closest('ytm-shorts-lockup-view-model') ||
+      node.closest('ytd-reel-item-renderer') ||
+      node.closest('ytm-shorts-shelf-renderer') ||
+      node.closest('ytd-shorts-shelf-renderer') ||
+      node.closest('ytd-reel-shelf-renderer') ||
+      node.closest('ytm-rich-shelf-renderer') ||
+      node.closest('ytd-rich-shelf-renderer') ||
+      node.closest('ytm-item-section-renderer') ||
+      node.closest('ytd-item-section-renderer') ||
       node.closest('ytd-rich-grid-media') ||
       node.closest('ytd-rich-item-renderer') ||
       node.closest('ytd-video-renderer') ||
@@ -3142,6 +3151,23 @@ export function generateModerationScript(config: InjectionConfig): string {
       node.closest(NON_SHORTS_REATTACH_STRONG_CARD_SELECTOR) ||
       node.closest(NON_SHORTS_REATTACH_CARD_SELECTOR)
     );
+  }
+
+  function isShortsShelfOwnedCard(card) {
+    if (!card || card.nodeType !== 1 || typeof card.matches !== 'function') return false;
+    try {
+      return !!card.matches(
+        'ytm-shorts-lockup-view-model,' +
+        'ytd-reel-item-renderer,' +
+        'ytm-shorts-shelf-renderer,' +
+        'ytd-shorts-shelf-renderer,' +
+        'ytd-reel-shelf-renderer,' +
+        'ytm-rich-shelf-renderer,' +
+        'ytd-rich-shelf-renderer'
+      );
+    } catch (e) {
+      return false;
+    }
   }
 
   function applyOwnedPositiveCardClass(card, itemKey, reason) {
@@ -3157,6 +3183,14 @@ export function generateModerationScript(config: InjectionConfig): string {
       card.dataset.mwOwnedPositiveAt = String(Date.now());
       card.dataset.mwOwnedPositiveReason = String(reason || 'unknown');
     }
+    if (isShortsShelfOwnedCard(card)) {
+      console.log(
+        '[MW-SHORTS-SHELF] owned_positive',
+        'cardNodeId=' + getDiagNodeId(card),
+        'itemKey=' + String(itemKey || 'unknown'),
+        'reason=' + String(reason || 'unknown')
+      );
+    }
   }
 
   function applyOwnedSafeCardClass(card, reason) {
@@ -3171,6 +3205,13 @@ export function generateModerationScript(config: InjectionConfig): string {
       card.dataset.mwOwnedPositiveItemKey = '';
       card.dataset.mwOwnedPositiveAt = '';
       card.dataset.mwOwnedPositiveReason = String(reason || 'unknown');
+    }
+    if (isShortsShelfOwnedCard(card)) {
+      console.log(
+        '[MW-SHORTS-SHELF] owned_safe',
+        'cardNodeId=' + getDiagNodeId(card),
+        'reason=' + String(reason || 'unknown')
+      );
     }
   }
 
@@ -3198,6 +3239,14 @@ export function generateModerationScript(config: InjectionConfig): string {
       'reason=' + String(reason || 'unknown'),
       'mediaCount=' + String(nodeList.length)
     );
+    if (isShortsShelfOwnedCard(card)) {
+      console.log(
+        '[MW-SHORTS-SHELF] reapply_owned_blur',
+        'cardNodeId=' + getDiagNodeId(card),
+        'reason=' + String(reason || 'unknown'),
+        'mediaCount=' + String(nodeList.length)
+      );
+    }
   }
 
   function reapplyOwnedContainerBlurFromMutationNode(node, reason) {
@@ -3214,6 +3263,22 @@ export function generateModerationScript(config: InjectionConfig): string {
         reapplyOwnedContainerBlur(ownedCards[i], reason + ':descendant');
       }
     }
+  }
+
+  function reapplyOwnedShortsShelfBlurFromLifecycleEvent(node, reason) {
+    if (!node || node.nodeType !== 1) return;
+    if (isShortsModeActive()) return;
+    if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
+    const ownedCard = getOwnedCardContainerFromNode(node);
+    if (!ownedCard || !isShortsShelfOwnedCard(ownedCard)) return;
+    if (!ownedCard.classList || !ownedCard.classList.contains(OWNED_POSITIVE_CARD_CLASS)) return;
+    reapplyOwnedContainerBlur(ownedCard, reason || 'shorts_shelf_lifecycle_event');
+    console.log(
+      '[MW-SHORTS-SHELF] lifecycle_reapply',
+      'event=' + String(reason || 'unknown'),
+      'cardNodeId=' + getDiagNodeId(ownedCard),
+      'sourceNodeId=' + getDiagNodeId(node)
+    );
   }
 
   // ==================== MVP POSITIVE CARD OWNERSHIP KERNEL ====================
@@ -3354,6 +3419,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!lockup || lockup.nodeType !== 1) return;
     try {
       const lockupNodeId = getDiagNodeId(lockup);
+      applyOwnedSafeCardClass(lockup, reason || 'shorts_shelf_ownership_cleared');
       lockup.dataset.mwShortsShelfOwned = '';
       lockup.dataset.mwShortsShelfItemKey = '';
       lockup.dataset.mwShortsShelfAt = '';
@@ -5393,6 +5459,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       const target = event && event.target;
       if (!target || target.nodeType !== 1) return;
       if (String(target.tagName || '').toUpperCase() !== 'VIDEO') return;
+      reapplyOwnedShortsShelfBlurFromLifecycleEvent(target, 'event:' + String(event.type || 'unknown'));
       diagNonShortsReattach(target, 'event:' + String(event.type || 'unknown'));
     };
     document.addEventListener('play', onVideoLifecycleEvent, true);
@@ -10680,6 +10747,18 @@ export function generateModerationScript(config: InjectionConfig): string {
       scanFullPage();
       if (isYouTube()) {
         scheduleInitTimeout('loadYouTubeScan', scanYouTubeThumbnails, 200);
+        const shelfOwnedCards = document.querySelectorAll('.' + OWNED_POSITIVE_CARD_CLASS);
+        for (let i = 0; i < shelfOwnedCards.length; i += 1) {
+          const card = shelfOwnedCards[i];
+          if (!card || card.nodeType !== 1) continue;
+          if (!isShortsShelfOwnedCard(card)) continue;
+          reapplyOwnedContainerBlur(card, 'event:load');
+          console.log(
+            '[MW-SHORTS-SHELF] lifecycle_reapply',
+            'event=load',
+            'cardNodeId=' + getDiagNodeId(card)
+          );
+        }
       }
     };
     window.addEventListener('load', onLoadScan);
