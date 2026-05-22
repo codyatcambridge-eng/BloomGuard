@@ -468,6 +468,9 @@ export function generateModerationScript(config: InjectionConfig): string {
   };
   const SENSITIVITY_TOGGLE_ID = 'mw-sensitivity-toggle';
   const SENSITIVITY_TOGGLE_STYLE_ID = 'mw-sensitivity-toggle-style';
+  const OWNED_CARD_STYLE_ID = 'mw-owned-card-style';
+  const OWNED_POSITIVE_CARD_CLASS = 'mw-owned-positive-card';
+  const OWNED_SAFE_CARD_CLASS = 'mw-owned-safe-card';
 
   function getSensitivityLabel(level) {
     return SENSITIVITY_LABELS[level] || 'Moderate';
@@ -515,6 +518,50 @@ export function generateModerationScript(config: InjectionConfig): string {
       " } " +
       "#".concat(SENSITIVITY_TOGGLE_ID, " .mw-sensitivity-icon { font-size: 16px; line-height: 1; } ") +
       "#".concat(SENSITIVITY_TOGGLE_ID, " .mw-sensitivity-label { color: #E0E0E0; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; } ");
+    (document.head || document.documentElement || document.body || document.documentElement).appendChild(style);
+  }
+
+  function ensureOwnedCardStyle() {
+    if (document.getElementById(OWNED_CARD_STYLE_ID)) return;
+    const style = document.createElement('style');
+    style.id = OWNED_CARD_STYLE_ID;
+    style.textContent = [
+      '.' + OWNED_POSITIVE_CARD_CLASS + ' { position: relative !important; }',
+      '.' + OWNED_POSITIVE_CARD_CLASS + ' img,',
+      '.' + OWNED_POSITIVE_CARD_CLASS + ' video,',
+      '.' + OWNED_POSITIVE_CARD_CLASS + ' yt-image img,',
+      '.' + OWNED_POSITIVE_CARD_CLASS + ' yt-img-shadow img,',
+      '.' + OWNED_POSITIVE_CARD_CLASS + ' .yt-core-image,',
+      '.' + OWNED_POSITIVE_CARD_CLASS + ' [style*="background-image"] {',
+      'filter: blur(40px) !important;',
+      '-webkit-filter: blur(40px) !important;',
+      'backdrop-filter: blur(40px) !important;',
+      '-webkit-backdrop-filter: blur(40px) !important;',
+      '}',
+      '.' + OWNED_POSITIVE_CARD_CLASS + '::after {',
+      'content: "" !important;',
+      'position: absolute !important;',
+      'inset: 0 !important;',
+      'pointer-events: none !important;',
+      'background: rgba(0,0,0,0.08) !important;',
+      'z-index: 2 !important;',
+      '}',
+      '.' + OWNED_SAFE_CARD_CLASS + ',',
+      '.' + OWNED_SAFE_CARD_CLASS + '::after {',
+      'background: transparent !important;',
+      '}',
+      '.' + OWNED_SAFE_CARD_CLASS + ' img,',
+      '.' + OWNED_SAFE_CARD_CLASS + ' video,',
+      '.' + OWNED_SAFE_CARD_CLASS + ' yt-image img,',
+      '.' + OWNED_SAFE_CARD_CLASS + ' yt-img-shadow img,',
+      '.' + OWNED_SAFE_CARD_CLASS + ' .yt-core-image,',
+      '.' + OWNED_SAFE_CARD_CLASS + ' [style*="background-image"] {',
+      'filter: none !important;',
+      '-webkit-filter: none !important;',
+      'backdrop-filter: none !important;',
+      '-webkit-backdrop-filter: none !important;',
+      '}',
+    ].join('');
     (document.head || document.documentElement || document.body || document.documentElement).appendChild(style);
   }
 
@@ -3082,6 +3129,93 @@ export function generateModerationScript(config: InjectionConfig): string {
     return null;
   }
 
+  function getOwnedCardContainerFromNode(node) {
+    if (!node || node.nodeType !== 1 || typeof node.closest !== 'function') return null;
+    return (
+      node.closest('ytd-rich-grid-media') ||
+      node.closest('ytd-rich-item-renderer') ||
+      node.closest('ytd-video-renderer') ||
+      node.closest('ytm-rich-item-renderer') ||
+      node.closest('ytm-video-with-context-renderer') ||
+      node.closest('ytm-compact-video-renderer') ||
+      node.closest('ytd-thumbnail') ||
+      node.closest(NON_SHORTS_REATTACH_STRONG_CARD_SELECTOR) ||
+      node.closest(NON_SHORTS_REATTACH_CARD_SELECTOR)
+    );
+  }
+
+  function applyOwnedPositiveCardClass(card, itemKey, reason) {
+    if (!card || card.nodeType !== 1) return;
+    if (isShortsModeActive()) return;
+    if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
+    ensureOwnedCardStyle();
+    card.classList.add(OWNED_POSITIVE_CARD_CLASS);
+    card.classList.remove(OWNED_SAFE_CARD_CLASS);
+    if (card.dataset) {
+      card.dataset.mwOwnedPositive = '1';
+      card.dataset.mwOwnedPositiveItemKey = String(itemKey || 'unknown');
+      card.dataset.mwOwnedPositiveAt = String(Date.now());
+      card.dataset.mwOwnedPositiveReason = String(reason || 'unknown');
+    }
+  }
+
+  function applyOwnedSafeCardClass(card, reason) {
+    if (!card || card.nodeType !== 1) return;
+    if (isShortsModeActive()) return;
+    if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
+    ensureOwnedCardStyle();
+    card.classList.remove(OWNED_POSITIVE_CARD_CLASS);
+    card.classList.add(OWNED_SAFE_CARD_CLASS);
+    if (card.dataset) {
+      card.dataset.mwOwnedPositive = '0';
+      card.dataset.mwOwnedPositiveItemKey = '';
+      card.dataset.mwOwnedPositiveAt = '';
+      card.dataset.mwOwnedPositiveReason = String(reason || 'unknown');
+    }
+  }
+
+  function reapplyOwnedContainerBlur(card, reason) {
+    if (!card || card.nodeType !== 1) return;
+    if (isShortsModeActive()) return;
+    if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
+    if (!card.classList || !card.classList.contains(OWNED_POSITIVE_CARD_CLASS)) return;
+    const mediaNodes = card.querySelectorAll('img,video,yt-image img,yt-img-shadow img,.yt-core-image');
+    const nodeList = [];
+    for (let i = 0; i < mediaNodes.length; i += 1) nodeList.push(mediaNodes[i]);
+    for (let i = 0; i < nodeList.length; i += 1) {
+      const media = nodeList[i];
+      try {
+        media.style.setProperty('filter', 'blur(40px)', 'important');
+        media.style.setProperty('-webkit-filter', 'blur(40px)', 'important');
+        media.style.setProperty('backdrop-filter', 'blur(40px)', 'important');
+        media.style.setProperty('-webkit-backdrop-filter', 'blur(40px)', 'important');
+        media.dataset.mwModerated = 'blurred';
+      } catch (e) {}
+    }
+    console.log(
+      '[MW-OWNED-CARD-BLUR-REAPPLY]',
+      'cardNodeId=' + getDiagNodeId(card),
+      'reason=' + String(reason || 'unknown'),
+      'mediaCount=' + String(nodeList.length)
+    );
+  }
+
+  function reapplyOwnedContainerBlurFromMutationNode(node, reason) {
+    if (!node || node.nodeType !== 1) return;
+    if (isShortsModeActive()) return;
+    if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
+    const directCard = getOwnedCardContainerFromNode(node);
+    if (directCard) {
+      reapplyOwnedContainerBlur(directCard, reason + ':closest');
+    }
+    if (typeof node.querySelectorAll === 'function') {
+      const ownedCards = node.querySelectorAll('.' + OWNED_POSITIVE_CARD_CLASS);
+      for (let i = 0; i < ownedCards.length; i += 1) {
+        reapplyOwnedContainerBlur(ownedCards[i], reason + ':descendant');
+      }
+    }
+  }
+
   // ==================== MVP POSITIVE CARD OWNERSHIP KERNEL ====================
 
   function getMvpCardHrefItemKey(card) {
@@ -3139,6 +3273,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       card.dataset.mwMvpPositiveHrefKey = String(hrefKey || 'unknown');
       card.dataset.mwMvpPositiveEpoch = String(epoch || 0);
       card.dataset.mwMvpPositiveAt = String(Date.now());
+      applyOwnedPositiveCardClass(card, itemKey, reason || 'stamp_positive');
       console.log(
         '[MW-MVP-POSITIVE-CARD-STAMPED]',
         'cardNodeId=' + getDiagNodeId(card),
@@ -3161,6 +3296,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       card.dataset.mwMvpPositiveHrefKey = '';
       card.dataset.mwMvpPositiveEpoch = '';
       card.dataset.mwMvpPositiveAt = '';
+      applyOwnedSafeCardClass(card, reason || 'mvp_ownership_cleared');
       if (typeof card.querySelectorAll === 'function') {
         const blurredChildren = card.querySelectorAll('[data-mw-moderated="blurred"]');
         for (let i = 0; i < blurredChildren.length; i++) {
@@ -4345,13 +4481,21 @@ export function generateModerationScript(config: InjectionConfig): string {
       hardItemKeyKnown &&
       strictContinuityItemKey === hardBlurItemKey
     );
+    const ownedCard = getOwnedCardContainerFromNode(videoNode);
+    const cardExplicitOwnedPositive = !!(
+      ownedCard &&
+      ownedCard.classList &&
+      ownedCard.classList.contains(OWNED_POSITIVE_CARD_CLASS) &&
+      !ownedCard.classList.contains(OWNED_SAFE_CARD_CLASS)
+    );
     if (
       hasAuthoritativeBlur &&
       !contextData &&
       !hardKeyMatchesStrict &&
       !hardSrcMatchesCurrent &&
       !holdBlurDuringUnresolvedTransition &&
-      !preserveShortsHardBlurDuringResolvedContinuity
+      !preserveShortsHardBlurDuringResolvedContinuity &&
+      !cardExplicitOwnedPositive
     ) {
       videoNode.style.removeProperty('filter');
       videoNode.style.removeProperty('-webkit-filter');
@@ -4394,6 +4538,10 @@ export function generateModerationScript(config: InjectionConfig): string {
       });
     }
     let activeVideoBlurred = hasAuthoritativeBlur || hasIncidentalBlur;
+    if (cardExplicitOwnedPositive) {
+      activeVideoBlurred = true;
+      hasAuthoritativeBlur = true;
+    }
     if (activeVideoBlurred && !hasAuthoritativeBlur && !contextData) {
       videoNode.style.removeProperty('filter');
       videoNode.style.removeProperty('-webkit-filter');
@@ -7384,6 +7532,12 @@ export function generateModerationScript(config: InjectionConfig): string {
       element.dataset.mwSrc = src;
       element.dataset.mwItemId = itemId || '';
       markAuthoritativeHardBlur(element, src);
+      if (_mvpProof === 'classifier_positive' && !shortsMode && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
+        const ownershipCard = getOwnedCardContainerFromNode(element);
+        if (ownershipCard) {
+          applyOwnedPositiveCardClass(ownershipCard, getDiagItemKey(src), 'classifier_positive');
+        }
+      }
       if (CONFIG.mvpPositiveCardOwnershipV1 && (_mvpProof === 'classifier_positive') && !shortsMode && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
         const _mvpCard = typeof element.closest === 'function'
           ? (element.closest(NON_SHORTS_REATTACH_STRONG_CARD_SELECTOR) || element.closest(NON_SHORTS_REATTACH_CARD_SELECTOR))
@@ -8964,6 +9118,12 @@ export function generateModerationScript(config: InjectionConfig): string {
           markSafeResolved(src);
           // Remove soft blur if result is safe
           removeSoftBlur(element, src);
+          if (mvpMainSurface) {
+            const safeCard = getOwnedCardContainerFromNode(element);
+            if (safeCard) {
+              applyOwnedSafeCardClass(safeCard, 'classifier_safe');
+            }
+          }
           if (wasInSoftBlur && !finalBlur) {
             state.stats.semanticDelaySaved++;
           }
@@ -9964,6 +10124,9 @@ export function generateModerationScript(config: InjectionConfig): string {
         mutation.removedNodes.forEach(node => {
           if (node.nodeType !== 1) return;
           pruneDisconnectedPending('mutation_removed');
+          if (isYouTube() && !isShortsModeActive()) {
+            reapplyOwnedContainerBlurFromMutationNode(mutation.target, 'mutation_removed');
+          }
           if (isYouTube() && isRelevantShortsContainerNode(node)) {
             shortsAttrMode = reevaluateShortsObserverMode(
               'youtube_container_removed',
@@ -9977,6 +10140,9 @@ export function generateModerationScript(config: InjectionConfig): string {
         });
         mutation.addedNodes.forEach(node => {
           if (node.nodeType !== 1) return;
+          if (isYouTube() && !isShortsModeActive()) {
+            reapplyOwnedContainerBlurFromMutationNode(node, 'mutation_added');
+          }
           if (isYouTube() && isRelevantShortsContainerNode(node)) {
             shortsAttrMode = reevaluateShortsObserverMode(
               'youtube_container_added',
@@ -10044,6 +10210,7 @@ export function generateModerationScript(config: InjectionConfig): string {
             )
           ) {
             diagNonShortsReattach(target, 'attr:' + attr);
+            reapplyOwnedContainerBlurFromMutationNode(target, 'mutation_attr:' + attr);
           }
           if (
             isYouTube() &&

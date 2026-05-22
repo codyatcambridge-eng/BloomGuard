@@ -1,0 +1,11 @@
+{
+	"appId": "bet.goodcreation.miracleworker",
+	"appName": "Miracle Worker",
+	"webDir": "dist",
+	"plugins": {
+		"InAppBrowser": {}
+	},
+	"packageClassList": [
+		"InAppBrowserPlugin"
+	]
+}
