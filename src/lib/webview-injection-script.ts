@@ -1151,7 +1151,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     mutationScan: { sec: 0, count: 0 },
   };
   const SHORTS_HEAVY_SCAN_THROTTLE_MS = 1500;
+  const HOMEPAGE_TOP_REFRESH_COOLDOWN_MS = 900;
   let shortsHeavyScanLastAt = 0;
+  let homepageTopRefreshLastAt = 0;
   let diagPrevRequests = 0;
   let diagPrevResponses = 0;
   let diagLastShortsScanBatchStartAt = 0;
@@ -3131,6 +3133,20 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function getOwnedCardContainerFromNode(node) {
     if (!node || node.nodeType !== 1 || typeof node.closest !== 'function') return null;
+    if (!isShortsModeActive() && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
+      const tightMainFeedCard =
+        node.closest('ytm-rich-grid-media') ||
+        node.closest('ytd-rich-grid-media') ||
+        node.closest('ytm-rich-item-renderer') ||
+        node.closest('ytd-rich-item-renderer') ||
+        node.closest('ytm-video-with-context-renderer') ||
+        node.closest('ytm-compact-video-renderer') ||
+        node.closest('ytd-video-renderer') ||
+        node.closest('ytd-compact-video-renderer') ||
+        node.closest('ytd-grid-video-renderer') ||
+        node.closest('ytd-thumbnail');
+      if (tightMainFeedCard) return tightMainFeedCard;
+    }
     return (
       node.closest('ytm-shorts-lockup-view-model') ||
       node.closest('ytd-reel-item-renderer') ||
@@ -3145,8 +3161,6 @@ export function generateModerationScript(config: InjectionConfig): string {
       node.closest('ytd-rich-section-renderer') ||
       node.closest('ytm-rich-grid-renderer') ||
       node.closest('ytd-rich-grid-renderer') ||
-      node.closest('ytm-rich-grid-media') ||
-      node.closest('ytd-rich-grid-media') ||
       node.closest('ytd-rich-item-renderer') ||
       node.closest('ytd-video-renderer') ||
       node.closest('ytm-rich-item-renderer') ||
@@ -3249,7 +3263,32 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!card.classList || !card.classList.contains(OWNED_POSITIVE_CARD_CLASS)) return;
     const mediaNodes = card.querySelectorAll('img,video,yt-image img,yt-img-shadow img,.yt-core-image');
     const nodeList = [];
+    let hasKnownSafeMedia = false;
     for (let i = 0; i < mediaNodes.length; i += 1) nodeList.push(mediaNodes[i]);
+    for (let i = 0; i < nodeList.length; i += 1) {
+      const mediaForSafeCheck = nodeList[i];
+      const safeSrc = normalizeUrl(String(
+        (mediaForSafeCheck.dataset && mediaForSafeCheck.dataset.mwSrc) ||
+        mediaForSafeCheck.currentSrc ||
+        mediaForSafeCheck.src ||
+        ''
+      )) || '';
+      if (safeSrc && isSafeResolvedActive(safeSrc)) {
+        hasKnownSafeMedia = true;
+        break;
+      }
+    }
+    if (hasKnownSafeMedia) {
+      applyOwnedSafeCardClass(card, 'reapply_guard_known_safe_media:' + String(reason || 'unknown'));
+      console.log(
+        '[MW-OWNED-CARD-BLUR-REAPPLY]',
+        'cardNodeId=' + getDiagNodeId(card),
+        'reason=guard_known_safe_media',
+        'sourceReason=' + String(reason || 'unknown'),
+        'mediaCount=' + String(nodeList.length)
+      );
+      return;
+    }
     for (let i = 0; i < nodeList.length; i += 1) {
       const media = nodeList[i];
       try {
@@ -3346,6 +3385,59 @@ export function generateModerationScript(config: InjectionConfig): string {
           'reason=' + String(reason || 'unknown')
         );
       }
+    }
+  }
+
+  function clearHomepageOwnedPositiveWithoutBlur(reason) {
+    if (isShortsModeActive()) return;
+    if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
+    const ownedCards = document.querySelectorAll('.' + OWNED_POSITIVE_CARD_CLASS);
+    for (let i = 0; i < ownedCards.length; i += 1) {
+      const card = ownedCards[i];
+      if (!card || card.nodeType !== 1) continue;
+      if (isShortsShelfOwnedCard(card)) continue;
+      const mediaNodes = (typeof card.querySelectorAll === 'function')
+        ? card.querySelectorAll('img,video,yt-image img,yt-img-shadow img,.yt-core-image')
+        : [];
+      let hasBlurredMedia = false;
+      for (let j = 0; j < mediaNodes.length; j += 1) {
+        const media = mediaNodes[j];
+        if (!media || media.nodeType !== 1) continue;
+        if (String((media.dataset && media.dataset.mwModerated) || '') === 'blurred') {
+          hasBlurredMedia = true;
+          break;
+        }
+      }
+      if (!hasBlurredMedia) {
+        applyOwnedSafeCardClass(card, 'lifecycle_reset_non_blurred:' + String(reason || 'unknown'));
+      }
+    }
+  }
+
+  function runHomepageLifecycleBoundaryReset(reason) {
+    if (isShortsModeActive()) return;
+    if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
+    const now = Date.now();
+    if ((now - homepageTopRefreshLastAt) < HOMEPAGE_TOP_REFRESH_COOLDOWN_MS) return;
+    homepageTopRefreshLastAt = now;
+    state.pageEpoch += 1;
+    diagLogLifecycleSnapshot('homepage_lifecycle_boundary', reason || 'unknown', lastUrl, window.location.href);
+    state.pendingRequests.forEach(req => {
+      if (req && req.timeoutId) clearTimeout(req.timeoutId);
+    });
+    state.pendingRequests.clear();
+    state.pending.forEach((_item, itemId) => clearPendingItem(itemId, 'homepage_boundary_reset'));
+    state.pendingBySrc.clear();
+    state.scanned.clear();
+    state.elements.clear();
+    clearHomepageOwnedPositiveWithoutBlur(reason || 'unknown');
+    restampHomepageTopSafeCards('boundary:' + String(reason || 'unknown'));
+    scheduleInitTimeout('homepageBoundarySafeRestamp', function() {
+      restampHomepageTopSafeCards('boundary_delayed:' + String(reason || 'unknown'));
+    }, 120);
+    scheduleInitTimeout('homepageBoundaryFullScan', scanFullPage, 120);
+    if (isYouTube()) {
+      scheduleInitTimeout('homepageBoundaryYouTubeScan', scanYouTubeThumbnails, 220);
     }
   }
 
@@ -10492,6 +10584,14 @@ export function generateModerationScript(config: InjectionConfig): string {
       scheduleShortsRevealOverlayReposition('youtube_scroll');
       const currentScrollY = window.scrollY;
       const scrollDelta = Math.abs(currentScrollY - lastScrollY);
+      if (
+        !isShortsModeActive() &&
+        isYouTubeMainPageThumbnailSurfaceUrl(window.location.href) &&
+        currentScrollY <= 0 &&
+        lastScrollY <= 0
+      ) {
+        runHomepageLifecycleBoundaryReset('youtube_scroll_top_edge');
+      }
       
       // Only trigger if scrolled significantly
       if (scrollDelta > 200) {
@@ -10504,6 +10604,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         }, 150);
         timerLog('start', 'youtubeScrollTimeout');
       }
+      lastScrollY = currentScrollY;
     };
 
     window.addEventListener('scroll', timerState.youtubeScrollHandler, { passive: true });
@@ -10886,6 +10987,13 @@ export function generateModerationScript(config: InjectionConfig): string {
   timerState.mainScrollHandler = () => {
     if (timerState.paused) return;
     scheduleShortsRevealOverlayReposition('main_scroll');
+    if (
+      !isShortsModeActive() &&
+      isYouTubeMainPageThumbnailSurfaceUrl(window.location.href) &&
+      window.scrollY <= 0
+    ) {
+      runHomepageLifecycleBoundaryReset('main_scroll_top_edge');
+    }
     clearNamedTimeout('mainScrollTimeout', 'reschedule');
     timerState.mainScrollTimeout = setTimeout(() => {
       scanFullPage();
@@ -10987,6 +11095,10 @@ export function generateModerationScript(config: InjectionConfig): string {
       // Clear scanned state for fresh scan
       state.scanned.clear();
       state.elements.clear();
+      if (!nextIsShorts && isYouTubeMainPageThumbnailSurfaceUrl(nextUrl)) {
+        clearHomepageOwnedPositiveWithoutBlur('spa_url_change');
+        restampHomepageTopSafeCards('spa_url_change');
+      }
       scheduleInitTimeout('spaFullScan', scanFullPage, 300);
       if (isYouTube()) {
         scheduleInitTimeout('spaYouTubeScan', scanYouTubeThumbnails, 500);
@@ -11099,6 +11211,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       resumeManagedTimers('visibility_visible');
       refreshShortsFreshnessOnReentry('visibility_visible');
       scheduleShortsRevealOverlayReposition('visibility_visible');
+      runHomepageLifecycleBoundaryReset('visibility_visible');
       return;
     }
     pauseManagedTimers('visibility_hidden');
@@ -11106,6 +11219,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   window.addEventListener('pageshow', () => {
     refreshShortsFreshnessOnReentry('pageshow');
     scheduleShortsRevealOverlayReposition('pageshow');
+    runHomepageLifecycleBoundaryReset('pageshow');
   });
   window.addEventListener('beforeunload', () => teardownManagedScheduling('beforeunload'));
   window.addEventListener('pagehide', () => teardownManagedScheduling('pagehide'));
