@@ -3305,6 +3305,25 @@ export function generateModerationScript(config: InjectionConfig): string {
         media.style.setProperty('-webkit-backdrop-filter', 'blur(40px)', 'important');
         media.dataset.mwModerated = 'blurred';
         reapplyCount += 1;
+        // Guarantee a reveal overlay exists — reapply path skips applyBlur so overlay is never created otherwise
+        if (media.isConnected) {
+          const reapplySrc = String(
+            (media.dataset.mwSrc) ||
+            (media.src && String(media.src)) ||
+            (media.currentSrc && String(media.currentSrc)) ||
+            (media.poster && String(media.poster)) ||
+            ''
+          );
+          if (reapplySrc && !findRevealOverlayForElement(media, reapplySrc)) {
+            createRevealOverlay(
+              media,
+              reapplySrc,
+              media.dataset.mwCategory || '',
+              media.dataset.mwItemId || '',
+              false
+            );
+          }
+        }
       } catch (e) {}
     }
     console.log(
@@ -7941,10 +7960,10 @@ export function generateModerationScript(config: InjectionConfig): string {
         if (!keepOverlay) {
           removeRevealOverlay(element, src, 'removeBlur_reveal');
         }
-      } else if (overlay) {
-        overlay.style.display = 'none';
+      } else {
+        removeRevealOverlay(element, src, 'removeBlur_reveal');
       }
-      
+
       diagBlurStateLog('removeBlur.exit', element, src, 'overlayFound=' + (!!overlay));
       console.log('[MW] blur removed:', src.substring(0, 60));
     } catch (e) {}
@@ -8382,25 +8401,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       );
     }
     
-    const badge = document.createElement('span');
-    badge.style.cssText = [
-      'position: absolute',
-      'top: 8px',
-      'left: 8px',
-      'background: rgba(0,0,0,0.8)',
-      'color: #ff6b6b',
-      'padding: 3px 8px',
-      'border-radius: 4px',
-      'font-size: 10px',
-      'font-weight: bold',
-      'pointer-events: none',
-    ].join(';');
-    badge.textContent = (category || 'flagged').toUpperCase();
-    overlay.appendChild(badge);
-    
     const btn = document.createElement('button');
     btn.className = 'mw-reveal-btn';
-    btn.textContent = isRevealedForSource(src, element) ? '🔒 Hide' : '👁 Reveal';
+    btn.textContent = '👁 Reveal';
     btn.style.cssText = [
       'background: rgba(0, 0, 0, 0.9)',
       'color: white',
@@ -8411,6 +8414,11 @@ export function generateModerationScript(config: InjectionConfig): string {
       'font-size: 14px',
       'font-weight: bold',
       'pointer-events: auto',
+      'max-width: calc(100% - 16px)',
+      'box-sizing: border-box',
+      'white-space: nowrap',
+      'overflow: hidden',
+      'text-overflow: ellipsis',
     ].join(';');
 
     overlay.addEventListener('click', function(e) {
