@@ -3131,7 +3131,8 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function getOwnedCardContainerFromNode(node) {
     if (!node || node.nodeType !== 1 || typeof node.closest !== 'function') return null;
-    return (
+    // Prefer per-item card owners first to avoid broad section ownership blur.
+    const strictOwner = (
       node.closest('ytm-shorts-lockup-view-model') ||
       node.closest('ytd-reel-item-renderer') ||
       node.closest('ytm-shorts-shelf-renderer') ||
@@ -3139,18 +3140,22 @@ export function generateModerationScript(config: InjectionConfig): string {
       node.closest('ytd-reel-shelf-renderer') ||
       node.closest('ytm-rich-shelf-renderer') ||
       node.closest('ytd-rich-shelf-renderer') ||
-      node.closest('ytm-item-section-renderer') ||
-      node.closest('ytd-item-section-renderer') ||
       node.closest('ytd-rich-grid-media') ||
       node.closest('ytd-rich-item-renderer') ||
       node.closest('ytd-video-renderer') ||
       node.closest('ytm-rich-item-renderer') ||
       node.closest('ytm-video-with-context-renderer') ||
       node.closest('ytm-compact-video-renderer') ||
-      node.closest('ytd-thumbnail') ||
       node.closest(NON_SHORTS_REATTACH_STRONG_CARD_SELECTOR) ||
       node.closest(NON_SHORTS_REATTACH_CARD_SELECTOR)
     );
+    if (strictOwner) return strictOwner;
+    const fallbackOwner =
+      node.closest('ytm-item-section-renderer') ||
+      node.closest('ytd-item-section-renderer') ||
+      node.closest('ytd-thumbnail') ||
+      findRegularMainCardFallbackNode(node);
+    return fallbackOwner || null;
   }
 
   function isShortsShelfOwnedCard(card) {
@@ -3220,24 +3225,97 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (isShortsModeActive()) return;
     if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
     if (!card.classList || !card.classList.contains(OWNED_POSITIVE_CARD_CLASS)) return;
+    // Lifecycle safety: refuse stale ownership and downgrade to safe immediately.
+    if (!isShortsShelfOwnedCard(card)) {
+      const hrefKey = getMvpCardHrefItemKey(card);
+      const storedItemKey = String((card.dataset && card.dataset.mwOwnedPositiveItemKey) || 'unknown');
+      const mvpEpoch = String((card.dataset && card.dataset.mwMvpPositiveEpoch) || '');
+      const mvpOwned = String((card.dataset && card.dataset.mwMvpPositiveOwned) || '');
+      const epochMatches = !mvpEpoch || mvpEpoch === String(state.pageEpoch || 0);
+      const itemMatches = !!storedItemKey && storedItemKey !== 'unknown' && hrefKey !== 'unknown' && storedItemKey === hrefKey;
+      const hasOwnedSignal = mvpOwned === '1' || String((card.dataset && card.dataset.mwOwnedPositive) || '') === '1';
+      if (!hasOwnedSignal || !epochMatches || !itemMatches) {
+        applyOwnedSafeCardClass(card, reason || 'reapply_invalidated_to_safe');
+        console.log(
+          '[MW-OWNED-CARD-REAPPLY-SKIP-STALE]',
+          'cardNodeId=' + getDiagNodeId(card),
+          'reason=' + String(reason || 'unknown'),
+          'hrefKey=' + String(hrefKey || 'unknown'),
+          'storedItemKey=' + String(storedItemKey || 'unknown'),
+          'mvpOwned=' + mvpOwned,
+          'mvpEpoch=' + mvpEpoch,
+          'pageEpoch=' + String(state.pageEpoch || 0)
+        );
+        return;
+      }
+    }
+    const ownedItemKey = String(
+      (card.dataset && (
+        card.dataset.mwOwnedPositiveItemKey ||
+        card.dataset.mwMvpPositiveItemKey ||
+        card.dataset.mwMvpPositiveHrefKey
+      )) || 'unknown'
+    );
     const mediaNodes = card.querySelectorAll('img,video,yt-image img,yt-img-shadow img,.yt-core-image');
     const nodeList = [];
+    let skippedSafeCount = 0;
+    let skippedUnownedCount = 0;
+    let reapplyCount = 0;
     for (let i = 0; i < mediaNodes.length; i += 1) nodeList.push(mediaNodes[i]);
     for (let i = 0; i < nodeList.length; i += 1) {
       const media = nodeList[i];
       try {
+        const moderatedState = String((media.dataset && media.dataset.mwModerated) || '').toLowerCase();
+        const preblurCleared = !!(media.dataset && media.dataset.mwPreblurClear === 'true');
+        if (
+          preblurCleared ||
+          moderatedState === 'safe' ||
+          moderatedState === 'timeout-safe' ||
+          moderatedState === 'revealed'
+        ) {
+          skippedSafeCount += 1;
+          continue;
+        }
+        const mediaSrc = String(
+          (media.currentSrc && String(media.currentSrc)) ||
+          (media.src && String(media.src)) ||
+          (media.poster && String(media.poster)) ||
+          ((media.dataset && (media.dataset.src || media.dataset.mwSrc || media.dataset.mwOrigSrc || media.dataset.mwOrigPoster)) || '')
+        );
+        const mediaItemKey = getDiagItemKey(mediaSrc);
+        const mediaHardKey = String((media.dataset && media.dataset.mwHardBlurItemKey) || 'unknown');
+        const isExistingHardBlur = (
+          moderatedState === 'blurred' ||
+          String((media.dataset && media.dataset.mwHardBlur) || '0') === '1' ||
+          (media.classList && media.classList.contains('mw-blurred'))
+        );
+        const identityOwned =
+          ownedItemKey !== 'unknown' &&
+          (
+            mediaItemKey === ownedItemKey ||
+            mediaHardKey === ownedItemKey
+          );
+        if (!identityOwned && !isExistingHardBlur) {
+          skippedUnownedCount += 1;
+          continue;
+        }
         media.style.setProperty('filter', 'blur(40px)', 'important');
         media.style.setProperty('-webkit-filter', 'blur(40px)', 'important');
         media.style.setProperty('backdrop-filter', 'blur(40px)', 'important');
         media.style.setProperty('-webkit-backdrop-filter', 'blur(40px)', 'important');
         media.dataset.mwModerated = 'blurred';
+        reapplyCount += 1;
       } catch (e) {}
     }
     console.log(
       '[MW-OWNED-CARD-BLUR-REAPPLY]',
       'cardNodeId=' + getDiagNodeId(card),
       'reason=' + String(reason || 'unknown'),
-      'mediaCount=' + String(nodeList.length)
+      'mediaCount=' + String(nodeList.length),
+      'ownedItemKey=' + String(ownedItemKey || 'unknown'),
+      'reapplied=' + String(reapplyCount),
+      'skippedSafe=' + String(skippedSafeCount),
+      'skippedUnowned=' + String(skippedUnownedCount)
     );
     if (isShortsShelfOwnedCard(card)) {
       console.log(
@@ -3247,6 +3325,65 @@ export function generateModerationScript(config: InjectionConfig): string {
         'mediaCount=' + String(nodeList.length)
       );
     }
+  }
+
+  function clearStaleOwnedLifecycleMarkers(reason) {
+    if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return 'SKIP_NON_MAIN_SURFACE';
+    const why = String(reason || 'host_lifecycle_boundary');
+    let cardCount = 0;
+    let shortsLockupCount = 0;
+    try {
+      const cards = document.querySelectorAll(
+        '.' + OWNED_POSITIVE_CARD_CLASS +
+        ',.' + OWNED_SAFE_CARD_CLASS +
+        ',[data-mw-mvp-positive-owned="1"]' +
+        ',[data-mw-owned-positive="1"]'
+      );
+      for (let i = 0; i < cards.length; i += 1) {
+        const card = cards[i];
+        if (!card || card.nodeType !== 1) continue;
+        cardCount += 1;
+        card.classList.remove(OWNED_POSITIVE_CARD_CLASS);
+        card.classList.remove(OWNED_SAFE_CARD_CLASS);
+        if (!card.dataset) continue;
+        card.dataset.mwOwnedPositive = '';
+        card.dataset.mwOwnedPositiveItemKey = '';
+        card.dataset.mwOwnedPositiveAt = '';
+        card.dataset.mwOwnedPositiveReason = why;
+        card.dataset.mwMvpPositiveOwned = '';
+        card.dataset.mwMvpPositiveItemKey = '';
+        card.dataset.mwMvpPositiveHrefKey = '';
+        card.dataset.mwMvpPositiveEpoch = '';
+        card.dataset.mwMvpPositiveAt = '';
+      }
+    } catch (e) {}
+    try {
+      const lockups = document.querySelectorAll(
+        'ytm-shorts-lockup-view-model,' +
+        'ytd-reel-item-renderer,' +
+        'ytm-shorts-shelf-renderer,' +
+        'ytd-shorts-shelf-renderer,' +
+        'ytd-reel-shelf-renderer'
+      );
+      for (let i = 0; i < lockups.length; i += 1) {
+        const lockup = lockups[i];
+        if (!lockup || lockup.nodeType !== 1 || !lockup.dataset) continue;
+        if (lockup.dataset.mwShortsShelfOwned === '1') shortsLockupCount += 1;
+        lockup.dataset.mwShortsShelfOwned = '';
+        lockup.dataset.mwShortsShelfItemKey = '';
+        lockup.dataset.mwShortsShelfAt = '';
+      }
+    } catch (e) {}
+    console.log(
+      '[MW-LIFECYCLE-OWNERSHIP-CLEAR]',
+      'reason=' + why,
+      'cards=' + String(cardCount),
+      'shortsLockups=' + String(shortsLockupCount),
+      'navId=' + String(NAV_ID || 'none'),
+      'pageEpoch=' + String(state.pageEpoch || 0),
+      'url=' + window.location.href
+    );
+    return 'OK';
   }
 
   function reapplyOwnedContainerBlurFromMutationNode(node, reason) {
@@ -10710,6 +10847,13 @@ export function generateModerationScript(config: InjectionConfig): string {
       return forceFirstEntryModerationRequest(reason || 'host_force_first_entry');
     } catch (e) {
       return 'ERR';
+    }
+  };
+  window.__MW_CLEAR_STALE_OWNERSHIP__ = function(reason) {
+    try {
+      return clearStaleOwnedLifecycleMarkers(reason || 'host_lifecycle_boundary');
+    } catch (e) {
+      return 'ERR:' + String(e);
     }
   };
 
