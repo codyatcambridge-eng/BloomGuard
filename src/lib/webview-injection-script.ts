@@ -3029,6 +3029,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     'ytd-video-renderer',
     'ytd-compact-video-renderer',
     'ytd-grid-video-renderer',
+    'yt-lockup-view-model',
+    'yt-lockup-view-model-wiz',
+    'ytd-movie-renderer',
     '#content',
   ].join(',');
   const NON_SHORTS_REATTACH_STRONG_CARD_SELECTOR = [
@@ -3039,6 +3042,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     'ytd-video-renderer',
     'ytd-compact-video-renderer',
     'ytd-grid-video-renderer',
+    'yt-lockup-view-model',
+    'yt-lockup-view-model-wiz',
+    'ytd-movie-renderer',
   ].join(',');
   const NON_SHORTS_REATTACH_CONTEXT_TTL_MS = 45000;
   const NON_SHORTS_REATTACH_CONTEXT_MAX = 400;
@@ -3154,6 +3160,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       node.closest('ytm-rich-item-renderer') ||
       node.closest('ytm-video-with-context-renderer') ||
       node.closest('ytm-compact-video-renderer') ||
+      node.closest('yt-lockup-view-model') ||
+      node.closest('yt-lockup-view-model-wiz') ||
+      node.closest('ytd-movie-renderer') ||
       node.closest(NON_SHORTS_REATTACH_STRONG_CARD_SELECTOR) ||
       node.closest(NON_SHORTS_REATTACH_CARD_SELECTOR)
     );
@@ -7640,7 +7649,11 @@ export function generateModerationScript(config: InjectionConfig): string {
     const card = (typeof element.closest === 'function')
       ? (element.closest(NON_SHORTS_REATTACH_STRONG_CARD_SELECTOR) || element.closest(NON_SHORTS_REATTACH_CARD_SELECTOR))
       : null;
-    if (!card) return deny('no_card_boundary');
+    if (!card) {
+      if (mvpProof === 'classifier_positive') return allow('classifier_positive');
+      if (mvpProof === 'card_blurred') return allow('card_blurred_no_boundary');
+      return deny('no_card_boundary');
+    }
     const hrefKey = getMvpCardHrefItemKey(card);
     if (hrefKey === 'unknown') return deny('href_key_unknown');
     if (!itemKey || itemKey === 'unknown') return deny('item_key_unknown');
@@ -8088,7 +8101,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
     }
     if (!shortsMode && CONFIG.mvpPositiveCardOwnershipV1 && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
-      if (!isMvpBlurAuthorized(element, src, getDiagItemKey(src), 'none', 'createRevealOverlay')) {
+      const overlayProof = isAuthoritativeHardBlur(element) ? 'card_blurred' : 'none';
+      if (!isMvpBlurAuthorized(element, src, getDiagItemKey(src), overlayProof, 'createRevealOverlay')) {
         return;
       }
     }
@@ -8178,36 +8192,42 @@ export function generateModerationScript(config: InjectionConfig): string {
       const activeOwnerToken = activeContext && activeContext.ownerToken ? String(activeContext.ownerToken) : '';
       const elementOwnerToken = String(element.dataset.mwShortsOwnerToken || '');
       if (!activeOwnerToken || !elementOwnerToken || activeOwnerToken !== elementOwnerToken) {
-        const mismatchCountRaw = Number(element.dataset.mwOwnerMismatchCount || '0');
-        const mismatchCount = Number.isFinite(mismatchCountRaw) ? mismatchCountRaw : 0;
-        if (mismatchCount < 1) {
-          element.dataset.mwOwnerMismatchCount = '1';
-          if (element.dataset.mwOwnerMismatchRetryScheduled !== 'true') {
-            element.dataset.mwOwnerMismatchRetryScheduled = 'true';
-            setTimeout(function() {
-              if (!element || element.nodeType !== 1 || !element.isConnected) return;
-              if (element.dataset) {
-                element.dataset.mwOwnerMismatchRetryScheduled = 'false';
-              }
-              if (String(element.dataset.mwModerated || '') !== 'blurred') return;
-              createRevealOverlay(element, src, category, itemId, false);
-            }, 120);
+        if (activeOwnerToken && !elementOwnerToken) {
+          // Context token exists but hasn't been written to this resolved element yet (timing gap on first Shorts entry).
+          // Sync it now and fall through to create the overlay normally.
+          element.dataset.mwShortsOwnerToken = activeOwnerToken;
+        } else {
+          const mismatchCountRaw = Number(element.dataset.mwOwnerMismatchCount || '0');
+          const mismatchCount = Number.isFinite(mismatchCountRaw) ? mismatchCountRaw : 0;
+          if (mismatchCount < 1) {
+            element.dataset.mwOwnerMismatchCount = '1';
+            if (element.dataset.mwOwnerMismatchRetryScheduled !== 'true') {
+              element.dataset.mwOwnerMismatchRetryScheduled = 'true';
+              setTimeout(function() {
+                if (!element || element.nodeType !== 1 || !element.isConnected) return;
+                if (element.dataset) {
+                  element.dataset.mwOwnerMismatchRetryScheduled = 'false';
+                }
+                if (String(element.dataset.mwModerated || '') !== 'blurred') return;
+                createRevealOverlay(element, src, category, itemId, false);
+              }, 120);
+            }
+            if (DIAG_YT_BLUR) {
+              console.log(
+                '[DIAG][REVEAL_OWNER] mismatch_retry_scheduled',
+                'node=' + getDiagNodeId(element),
+                'active=' + String(activeOwnerToken || '').substring(0, 120),
+                'element=' + String(elementOwnerToken || '').substring(0, 120),
+                'src=' + String(src || '').substring(0, 180)
+              );
+            }
+            return;
           }
-          if (DIAG_YT_BLUR) {
-            console.log(
-              '[DIAG][REVEAL_OWNER] mismatch_retry_scheduled',
-              'node=' + getDiagNodeId(element),
-              'active=' + String(activeOwnerToken || '').substring(0, 120),
-              'element=' + String(elementOwnerToken || '').substring(0, 120),
-              'src=' + String(src || '').substring(0, 180)
-            );
-          }
+          element.dataset.mwOwnerMismatchCount = '0';
+          element.dataset.mwOwnerMismatchRetryScheduled = 'false';
+          clearAllBlurAndOverlay(element, src || (activeContext && activeContext.src) || '', 'createRevealOverlay_owner_mismatch', 'safe');
           return;
         }
-        element.dataset.mwOwnerMismatchCount = '0';
-        element.dataset.mwOwnerMismatchRetryScheduled = 'false';
-        clearAllBlurAndOverlay(element, src || (activeContext && activeContext.src) || '', 'createRevealOverlay_owner_mismatch', 'safe');
-        return;
       }
       element.dataset.mwOwnerMismatchCount = '0';
       element.dataset.mwOwnerMismatchRetryScheduled = 'false';
