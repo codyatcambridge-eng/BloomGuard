@@ -3283,6 +3283,12 @@ export function generateModerationScript(config: InjectionConfig): string {
           (media.poster && String(media.poster)) ||
           ((media.dataset && (media.dataset.src || media.dataset.mwSrc || media.dataset.mwOrigSrc || media.dataset.mwOrigPoster)) || '')
         );
+        // Guard recycled elements: mwModerated may be absent on a new DOM node
+        // but the src key is still in state.revealed from the manual reveal tap.
+        if (mediaSrc && isRevealedForSource(mediaSrc, media)) {
+          skippedSafeCount += 1;
+          continue;
+        }
         const mediaItemKey = getDiagItemKey(mediaSrc);
         const mediaHardKey = String((media.dataset && media.dataset.mwHardBlurItemKey) || 'unknown');
         const isExistingHardBlur = (
@@ -6019,6 +6025,10 @@ export function generateModerationScript(config: InjectionConfig): string {
       ' contextItemId=' + (context.itemId || 'none')
     );
     if (healthy) return;
+    // Card was manually revealed — its unblurred state is intentional.
+    // All sub-paths already check reveal state, but exiting here prevents
+    // burning through the heal attempt window on every interval tick.
+    if (revealed) return;
 
     const now = Date.now();
     const healState = getShortsHealthHealState(container);
