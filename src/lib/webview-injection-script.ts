@@ -1630,7 +1630,14 @@ export function generateModerationScript(config: InjectionConfig): string {
         host === 'm.youtube.com';
       if (!isYouTubeMainHost) return false;
       var path = String(parsed.pathname || '/').toLowerCase();
-      return path === '/' || path.indexOf('/feed') === 0 || path.indexOf('/results') === 0;
+      return (
+        path === '/' ||
+        path.indexOf('/feed') === 0 ||
+        path.indexOf('/results') === 0 ||
+        path.indexOf('/@') === 0 ||
+        path.indexOf('/channel/') === 0 ||
+        path.indexOf('/c/') === 0
+      );
     } catch (e) {
       return false;
     }
@@ -8381,7 +8388,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       'display: flex',
       'align-items: center',
       'justify-content: center',
-      shortsMode ? 'background: transparent' : 'background: rgba(0, 0, 0, 0.3)',
+      shortsMode ? 'background: rgba(0, 0, 0, 0.15)' : 'background: rgba(0, 0, 0, 0.3)',
       shortsMode ? 'z-index: 2147483647' : 'z-index: 9998',
       'cursor: default',
       'pointer-events: none',
@@ -11060,6 +11067,15 @@ export function generateModerationScript(config: InjectionConfig): string {
       // Clear scanned state for fresh scan
       state.scanned.clear();
       state.elements.clear();
+      // blurred is a stats-only tracker; reset it each navigation so it
+      // reflects only the current page rather than accumulating all time.
+      state.blurred.clear();
+      // Cap revealed state to prevent unbounded growth over very long sessions.
+      // Only fires when the user has manually revealed 400+ items in one session.
+      if (state.revealed.size > 400) {
+        state.revealed.clear();
+        state.revealedMeta.clear();
+      }
       scheduleInitTimeout('spaFullScan', scanFullPage, 300);
       if (isYouTube()) {
         scheduleInitTimeout('spaYouTubeScan', scanYouTubeThumbnails, 500);
