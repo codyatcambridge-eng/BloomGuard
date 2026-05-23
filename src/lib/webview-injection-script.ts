@@ -8502,6 +8502,13 @@ export function generateModerationScript(config: InjectionConfig): string {
         // Shorts MVP: a single tap should fully reveal and clear the overlay
         // to avoid a second tap requirement on active shorts.
         removeBlur(element, src, { keepOverlay: false });
+        // Remove the owned-card CSS class so the "filter: blur(40px) !important"
+        // rule on .mw-owned-positive-card no longer overrides the reveal.
+        // applyOwnedSafeCardClass guards against Shorts/non-main-page internally.
+        const revealOwnerCard = getOwnedCardContainerFromNode(element);
+        if (revealOwnerCard) {
+          applyOwnedSafeCardClass(revealOwnerCard, 'manual_reveal');
+        }
         const afterBlurCount = countBlurredNodesForItemKey(src);
         const removedBlurCount = beforeBlurCount > afterBlurCount ? (beforeBlurCount - afterBlurCount) : 0;
         console.log(
