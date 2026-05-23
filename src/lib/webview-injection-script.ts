@@ -1092,6 +1092,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     return String(NAV_ID || 'none');
   }
   const NONCE_PREFIX = String(CONFIG.nonce || '').substring(0, 6);
+  console.log('[MW][HYPEBOI] script_loaded navId=' + NAV_ID + ' pageEpoch=' + CONFIG.pageEpoch + ' ts=' + Date.now());
   postToHost({
     type: 'MW_INJECTED_ACK',
     navId: NAV_ID,
