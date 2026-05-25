@@ -1200,8 +1200,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     youtubeScrollHandler: null,
     youtubeMutationScanTimeout: null,
     revealOverlayRepositionRaf: null,
+    nonShortsRevealOverlayRepositionRaf: null,
     revealOverlayRetryTimeout: null,
     revealOverlayLastReason: '',
+    nonShortsRevealOverlayLastReason: '',
     revealOverlayScrollHandler: null,
     revealOverlayResizeHandler: null,
     debugSummaryInterval: null,
@@ -6680,6 +6682,7 @@ export function generateModerationScript(config: InjectionConfig): string {
             }
           }
           if (isRevealOverlayScopeValid(overlay, anchor)) {
+            positionNonShortsRevealOverlay(overlay, anchor, 'identity_readopt');
             try { overlay.style.display = ''; overlay.style.pointerEvents = ''; } catch (e) {}
             if (DIAG_YT_BLUR) {
               console.log(
@@ -6699,6 +6702,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           if (rParent && rParent.nodeType === 1) {
             try { rParent.appendChild(overlay); } catch (e) {}
             if (isRevealOverlayScopeValid(overlay, anchor)) {
+              positionNonShortsRevealOverlay(overlay, anchor, 'scope_reparent');
               try { overlay.style.display = ''; overlay.style.pointerEvents = ''; } catch (e) {}
               if (DIAG_YT_BLUR) {
                 console.log(
@@ -7018,8 +7022,13 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (timerState.revealOverlayRepositionRaf && typeof window.cancelAnimationFrame === 'function') {
       window.cancelAnimationFrame(timerState.revealOverlayRepositionRaf);
     }
+    if (timerState.nonShortsRevealOverlayRepositionRaf && typeof window.cancelAnimationFrame === 'function') {
+      window.cancelAnimationFrame(timerState.nonShortsRevealOverlayRepositionRaf);
+    }
     timerState.revealOverlayRepositionRaf = null;
+    timerState.nonShortsRevealOverlayRepositionRaf = null;
     timerState.revealOverlayLastReason = '';
+    timerState.nonShortsRevealOverlayLastReason = '';
     clearNamedTimeout('revealOverlayRetryTimeout', reason || 'cancel');
     if (DIAG_YT_BLUR) {
       console.log(
@@ -7032,10 +7041,18 @@ export function generateModerationScript(config: InjectionConfig): string {
   function ensureRevealOverlayPositionListeners() {
     if (timerState.revealOverlayScrollHandler && timerState.revealOverlayResizeHandler) return;
     timerState.revealOverlayScrollHandler = function() {
-      scheduleShortsRevealOverlayReposition('window_scroll');
+      if (isShortsModeActive()) {
+        scheduleShortsRevealOverlayReposition('window_scroll');
+      } else {
+        scheduleNonShortsRevealOverlayReposition('window_scroll');
+      }
     };
     timerState.revealOverlayResizeHandler = function() {
-      scheduleShortsRevealOverlayReposition('window_resize');
+      if (isShortsModeActive()) {
+        scheduleShortsRevealOverlayReposition('window_resize');
+      } else {
+        scheduleNonShortsRevealOverlayReposition('window_resize');
+      }
     };
     window.addEventListener('scroll', timerState.revealOverlayScrollHandler, { passive: true });
     window.addEventListener('resize', timerState.revealOverlayResizeHandler, { passive: true });
@@ -7173,10 +7190,42 @@ export function generateModerationScript(config: InjectionConfig): string {
     const immediateParent = node.parentElement;
     if (!immediateParent) return null;
 
-    // Prefer known thumbnail container selectors — these are stable regardless of lazy-load
-    // timing, unlike the size-heuristic which picks the wrong ancestor when images haven't
-    // loaded yet (0-height) and then re-resolves to a different node once they do.
+    // Prefer the tightest thumbnail-media container first so overlay centering remains
+    // anchored to the visual image box even when card wrappers mutate on scroll/hover.
     const card = findNonShortsReattachCardNode(node);
+    const pickTightestContainer = function(startNode) {
+      const candidates = [];
+      let cursor = startNode;
+      for (let depth = 0; depth < 9 && cursor; depth += 1) {
+        if (cursor === document.body || cursor === document.documentElement) break;
+        const tag = String(cursor.tagName || '').toLowerCase();
+        const nodeId = String(cursor.id || '').toLowerCase();
+        const looksLikeThumb =
+          nodeId === 'thumbnail' ||
+          tag === 'ytd-thumbnail' ||
+          tag === 'ytm-thumbnail' ||
+          tag === 'yt-image' ||
+          tag === 'yt-img-shadow';
+        if (looksLikeThumb && cursor.isConnected) {
+          try {
+            const rect = cursor.getBoundingClientRect();
+            const width = Number(rect && rect.width) || 0;
+            const height = Number(rect && rect.height) || 0;
+            if (width >= 32 && height >= 32) {
+              candidates.push({ node: cursor, area: width * height });
+            }
+          } catch (e) {}
+        }
+        if (card && cursor === card) break;
+        cursor = cursor.parentElement;
+      }
+      if (!candidates.length) return null;
+      candidates.sort(function(a, b) { return a.area - b.area; });
+      return candidates[0].node || null;
+    };
+    const tightest = pickTightestContainer(node);
+    if (tightest) return tightest;
+
     let thumbCursor = immediateParent;
     for (let i = 0; i < 8 && thumbCursor; i += 1) {
       if (thumbCursor === document.body || thumbCursor === document.documentElement) break;
@@ -7223,6 +7272,95 @@ export function generateModerationScript(config: InjectionConfig): string {
       cursor = cursor.parentElement;
     }
     return immediateParent;
+  }
+
+  function positionNonShortsRevealOverlay(overlay, anchor, reason) {
+    if (!overlay || overlay.nodeType !== 1 || !overlay.isConnected) return false;
+    if (isPortalRevealOverlay(overlay)) return false;
+    const target = (
+      anchor &&
+      anchor.nodeType === 1 &&
+      anchor.isConnected &&
+      typeof anchor.getBoundingClientRect === 'function'
+    ) ? anchor : resolveRevealOverlayAnchorTarget(overlay);
+    if (!target || !target.isConnected || typeof target.getBoundingClientRect !== 'function') return false;
+    const parent = overlay.parentElement;
+    if (!parent || !parent.isConnected || typeof parent.getBoundingClientRect !== 'function') return false;
+    let parentRect = null;
+    let anchorRect = null;
+    try {
+      parentRect = parent.getBoundingClientRect();
+      anchorRect = target.getBoundingClientRect();
+    } catch (e) {
+      return false;
+    }
+    if (!parentRect || !anchorRect) return false;
+    const width = Math.max(0, Number(anchorRect.width) || 0);
+    const height = Math.max(0, Number(anchorRect.height) || 0);
+    if (width < 16 || height < 16) return false;
+    const left = Math.round((Number(anchorRect.left) || 0) - (Number(parentRect.left) || 0));
+    const top = Math.round((Number(anchorRect.top) || 0) - (Number(parentRect.top) || 0));
+    overlay.style.position = 'absolute';
+    overlay.style.inset = 'auto';
+    overlay.style.left = left + 'px';
+    overlay.style.top = top + 'px';
+    overlay.style.width = Math.round(width) + 'px';
+    overlay.style.height = Math.round(height) + 'px';
+    overlay.style.display = 'flex';
+    overlay.style.alignItems = 'center';
+    overlay.style.justifyContent = 'center';
+    overlay.style.pointerEvents = 'none';
+    const button = overlay.querySelector('.mw-reveal-btn');
+    if (button && button.nodeType === 1) {
+      button.style.position = 'relative';
+      button.style.left = 'auto';
+      button.style.top = 'auto';
+      button.style.transform = 'none';
+      button.style.margin = 'auto';
+      button.style.pointerEvents = 'auto';
+    }
+    console.log(
+      '[MW-REVEAL-POSITION] non_shorts_center',
+      'overlayId=' + getRevealOverlayDebugId(overlay),
+      'reason=' + String(reason || 'unknown'),
+      'anchor=' + getDiagNodeId(target),
+      'parent=' + getDiagNodeId(parent),
+      'rect=' + Math.round(width) + 'x' + Math.round(height) + '@' + left + ',' + top
+    );
+    return true;
+  }
+
+  function repositionAllNonShortsRevealOverlays(reason) {
+    if (isShortsModeActive()) return;
+    const overlays = document.querySelectorAll('.mw-reveal-overlay');
+    for (let i = 0; i < overlays.length; i += 1) {
+      const overlay = overlays[i];
+      if (!overlay || overlay.nodeType !== 1 || !overlay.isConnected) continue;
+      if (isPortalRevealOverlay(overlay)) continue;
+      const anchor = resolveRevealOverlayAnchorTarget(overlay);
+      if (!anchor || !anchor.isConnected) continue;
+      if (!enforceRevealOverlayVisibilityGuard(overlay, anchor, 'non_shorts_reposition:' + String(reason || 'unknown'))) {
+        continue;
+      }
+      positionNonShortsRevealOverlay(overlay, anchor, reason || 'non_shorts_reposition');
+    }
+  }
+
+  function scheduleNonShortsRevealOverlayReposition(reason) {
+    if (timerState.paused || timerState.teardownDone) return;
+    if (isShortsModeActive()) return;
+    timerState.nonShortsRevealOverlayLastReason = reason || 'unknown';
+    if (timerState.nonShortsRevealOverlayRepositionRaf) return;
+    if (typeof window.requestAnimationFrame !== 'function') {
+      repositionAllNonShortsRevealOverlays(timerState.nonShortsRevealOverlayLastReason || 'sync');
+      return;
+    }
+    timerState.nonShortsRevealOverlayRepositionRaf = window.requestAnimationFrame(function() {
+      timerState.nonShortsRevealOverlayRepositionRaf = null;
+      const runReason = timerState.nonShortsRevealOverlayLastReason || 'raf';
+      timerState.nonShortsRevealOverlayLastReason = '';
+      repositionAllNonShortsRevealOverlays(runReason);
+    });
   }
 
   function getDiagOverlayState(node) {
@@ -8553,6 +8691,8 @@ export function generateModerationScript(config: InjectionConfig): string {
             'text-overflow: ellipsis',
           ].join(';');
         }
+        positionNonShortsRevealOverlay(existingOverlay, element, 'existing_overlay');
+        scheduleNonShortsRevealOverlayReposition('existing_overlay');
       }
       enforceRevealOverlayVisibilityGuard(existingOverlay, element, 'createRevealOverlay_reuse');
       return;
@@ -8878,6 +9018,10 @@ export function generateModerationScript(config: InjectionConfig): string {
       console.log('[DIAG][REVEAL_UI] portal_update', 'itemKey=' + itemKey);
     }
     overlayParent.appendChild(overlay);
+    if (!shortsMode) {
+      positionNonShortsRevealOverlay(overlay, element, 'overlay_created');
+      scheduleNonShortsRevealOverlayReposition('overlay_created');
+    }
     element.dataset.mwHasOverlay = 'true';
     if (!enforceRevealOverlayVisibilityGuard(overlay, element, 'createRevealOverlay_created')) {
       return;
@@ -10798,6 +10942,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       
       enforceRevealOverlayVisibilityGuardGlobal('mutation_batch');
+      if (!isShortsModeActive() && hasYouTubeChanges) {
+        scheduleNonShortsRevealOverlayReposition('mutation');
+      }
       if (shortsAttrMode && hasYouTubeChanges) {
         scheduleShortsRevealOverlayReposition('mutation');
         scheduleYouTubeScan('mutation');
@@ -10985,6 +11132,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (timerState.youtubeScrollTimeout) count++;
     if (timerState.youtubeMutationScanTimeout) count++;
     if (timerState.revealOverlayRepositionRaf) count++;
+    if (timerState.nonShortsRevealOverlayRepositionRaf) count++;
     if (adaptiveShortsWatchState.pendingRescanTimer) count++;
     if (adaptiveShortsWatchState.observer) count++;
     count += timerState.initialTimeouts.length;
