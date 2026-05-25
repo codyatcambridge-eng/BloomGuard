@@ -3540,14 +3540,43 @@ export function generateModerationScript(config: InjectionConfig): string {
   function getMvpCardHrefItemKey(card) {
     if (!card || card.nodeType !== 1 || typeof card.querySelector !== 'function') return 'unknown';
     try {
+      // Hybrid Shorts cards in home/search/channel feeds often use /shorts/<id> anchors
+      // instead of /watch?v=<id>; treat both as stable card identity keys for authz.
+      const extractItemKeyFromHref = function(rawHref) {
+        const href = String(rawHref || '');
+        if (!href) return 'unknown';
+        const watchMatch = href.match(/[?&]v=([^&/#]+)/);
+        if (watchMatch && watchMatch[1]) return String(watchMatch[1]);
+        const shortsMatch = href.match(new RegExp('/shorts/([^/?#]+)'));
+        if (shortsMatch && shortsMatch[1]) {
+          console.log(
+            '[MW-MVP-AUTHZ]',
+            'shorts_inline_key_extracted=' + String(shortsMatch[1]),
+            'href=' + href.substring(0, 160)
+          );
+          return String(shortsMatch[1]);
+        }
+        return 'unknown';
+      };
       const inner = card.querySelector('a[href*="/watch"]');
       if (inner) {
         const href = String(inner.getAttribute ? inner.getAttribute('href') : (inner.href || ''));
         if (href) {
-          const match = href.match(/[?&]v=([^&/#]+)/);
-          if (match && match[1]) {
-            console.log('[MW-MVP-HREF-KEY-DESCENDANT-HIT]', 'cardNodeId=' + getDiagNodeId(card), 'key=' + String(match[1]));
-            return String(match[1]);
+          const matchKey = extractItemKeyFromHref(href);
+          if (matchKey !== 'unknown') {
+            console.log('[MW-MVP-HREF-KEY-DESCENDANT-HIT]', 'cardNodeId=' + getDiagNodeId(card), 'key=' + String(matchKey));
+            return String(matchKey);
+          }
+        }
+      }
+      const shortsInner = card.querySelector('a[href*="/shorts/"]');
+      if (shortsInner) {
+        const shortsHref = String(shortsInner.getAttribute ? shortsInner.getAttribute('href') : (shortsInner.href || ''));
+        if (shortsHref) {
+          const shortsKey = extractItemKeyFromHref(shortsHref);
+          if (shortsKey !== 'unknown') {
+            console.log('[MW-MVP-HREF-KEY-DESCENDANT-HIT]', 'cardNodeId=' + getDiagNodeId(card), 'key=' + String(shortsKey));
+            return String(shortsKey);
           }
         }
       }
@@ -3555,10 +3584,21 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (outer) {
         const href = String(outer.getAttribute ? outer.getAttribute('href') : (outer.href || ''));
         if (href) {
-          const match = href.match(/[?&]v=([^&/#]+)/);
-          if (match && match[1]) {
-            console.log('[MW-MVP-HREF-KEY-ANCESTOR-HIT]', 'cardNodeId=' + getDiagNodeId(card), 'key=' + String(match[1]));
-            return String(match[1]);
+          const matchKey = extractItemKeyFromHref(href);
+          if (matchKey !== 'unknown') {
+            console.log('[MW-MVP-HREF-KEY-ANCESTOR-HIT]', 'cardNodeId=' + getDiagNodeId(card), 'key=' + String(matchKey));
+            return String(matchKey);
+          }
+        }
+      }
+      const shortsOuter = (typeof card.closest === 'function') ? card.closest('a[href*="/shorts/"]') : null;
+      if (shortsOuter) {
+        const shortsHref = String(shortsOuter.getAttribute ? shortsOuter.getAttribute('href') : (shortsOuter.href || ''));
+        if (shortsHref) {
+          const shortsKey = extractItemKeyFromHref(shortsHref);
+          if (shortsKey !== 'unknown') {
+            console.log('[MW-MVP-HREF-KEY-ANCESTOR-HIT]', 'cardNodeId=' + getDiagNodeId(card), 'key=' + String(shortsKey));
+            return String(shortsKey);
           }
         }
       }
