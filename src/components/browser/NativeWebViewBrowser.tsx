@@ -1389,6 +1389,46 @@ export const NativeWebViewBrowser = () => {
     };
   }, []);
 
+  const clearStaleOwnershipAtBoundary = useCallback(async (
+    scriptExecutor: ((script: string) => Promise<string | null>) | undefined,
+    reason: string,
+    urlHint?: string,
+  ) => {
+    if (!scriptExecutor) return;
+    const targetUrl = String(urlHint || currentUrlRef.current || '');
+    const family = getCacheFamilyContext(targetUrl);
+    if (!isYouTubeFamilyContext(family)) return;
+    const safeReason = escapeForJs(reason || 'host_boundary');
+    try {
+      const result = await scriptExecutor(`
+        (function() {
+          try {
+            if (typeof window.__MW_CLEAR_STALE_OWNERSHIP__ !== 'function') return 'NO_HOOK';
+            return window.__MW_CLEAR_STALE_OWNERSHIP__('${safeReason}');
+          } catch (e) {
+            return 'ERR:' + String(e);
+          }
+        })();
+      `);
+      console.log(
+        '[DIAG][OWNERSHIP_BOUNDARY_CLEAR]',
+        'reason=' + reason,
+        'family=' + family,
+        'url=' + (targetUrl || 'unknown'),
+        'result=' + String(result || 'null'),
+      );
+    } catch (error) {
+      console.warn(
+        '[DIAG][OWNERSHIP_BOUNDARY_CLEAR]',
+        'reason=' + reason,
+        'family=' + family,
+        'url=' + (targetUrl || 'unknown'),
+        'result=EXEC_ERROR',
+        'message=' + (error instanceof Error ? error.message : String(error)),
+      );
+    }
+  }, []);
+
   const {
     state: webViewState,
     listenersAttached: webViewListenersAttached,
@@ -1443,6 +1483,7 @@ export const NativeWebViewBrowser = () => {
       // Teardown first, then inject to avoid __MW_ACTIVE__ races.
       if (!skipBootstrapLoadStart && executeScript) {
         void (async () => {
+          await clearStaleOwnershipAtBoundary(executeScript, 'onLoadStart', url);
           await teardownWebViewScheduling('navigation_start', url).catch(() => undefined);
           await injectModerationScript(executeScript, 'onLoadStart', url);
         })();
@@ -1577,6 +1618,13 @@ export const NativeWebViewBrowser = () => {
       } else {
         exitPendingReinject(`context_exit_${previousFamily}_to_${nextFamily}`, url);
         setCentralBlurState(false, 'url_change_safe_reset');
+      }
+      if (executeScript && isYouTubeFamilyContext(previousFamily) && isYouTubeFamilyContext(nextFamily)) {
+        void clearStaleOwnershipAtBoundary(
+          executeScript,
+          `onUrlChange_${previousFamily}_to_${nextFamily}`,
+          url,
+        );
       }
     },
     onNavigationRequest: handleNavigationRequest,
@@ -2950,14 +2998,14 @@ export const NativeWebViewBrowser = () => {
       );
     }
 
-    const shouldTreatAsUnsafe = hardOverlayDecision || shortsAnyShouldBlurHit || nonShortsMainThumbAnyShouldBlurHit;
+    const shouldTreatAsUnsafe = hardOverlayDecision || shortsAnyShouldBlurHit;
     // Preserve existing hard-only behavior outside Shorts; Shorts treat any shouldBlur hit as unsafe.
     if (shouldTreatAsUnsafe) {
       const unsafeReason = hardOverlayDecision
         ? `moderation_request_hard:${decisionReason}`
         : (shortsAnyShouldBlurHit
           ? 'moderation_request_shorts_item_blur'
-          : 'moderation_request_main_page_item_blur');
+          : 'moderation_request_non_shorts_hard');
       processModerationSafetySignal(true, unsafeReason);
     } else {
       processModerationSafetySignal(false, 'moderation_request_no_hard');
