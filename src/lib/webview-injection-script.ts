@@ -997,13 +997,20 @@ export function generateModerationScript(config: InjectionConfig): string {
     } catch (e) {}
   }
 
+  function isPersistentRevealKey(key) {
+    return String(key || '').indexOf('shorts:') === 0;
+  }
+
   function persistRevealEntry(key, meta) {
     try {
+      if (!isPersistentRevealKey(key)) return;
       const now = Date.now();
       const expiresAt = (meta.expiresAt && meta.expiresAt > now) ? meta.expiresAt : (now + MW_REVEAL_TTL_MS);
       const newEntry = { revealedAt: meta.revealedAt || now, expiresAt: expiresAt, src: meta.src || '', shortsId: meta.shortsId || '' };
       const store = readRevealStore();
-      const entries = Object.entries(store).filter(function([, v]) { return v && v.expiresAt > now; });
+      const entries = Object.entries(store).filter(function([k, v]) {
+        return isPersistentRevealKey(k) && v && v.expiresAt > now;
+      });
       if (entries.length >= MW_REVEAL_MAX_ENTRIES) {
         entries.sort(function(a, b) { return (a[1].revealedAt || 0) - (b[1].revealedAt || 0); });
         entries.splice(0, entries.length - MW_REVEAL_MAX_ENTRIES + 1);
@@ -1031,6 +1038,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       const now = Date.now();
       const pruned = {};
       Object.entries(store).forEach(function([key, entry]) {
+        if (!isPersistentRevealKey(key)) return;
         if (!entry || typeof entry !== 'object') return;
         if (entry.expiresAt && entry.expiresAt <= now) return;
         pruned[key] = entry;
