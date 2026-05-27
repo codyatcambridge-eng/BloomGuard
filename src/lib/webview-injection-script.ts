@@ -6561,6 +6561,82 @@ export function generateModerationScript(config: InjectionConfig): string {
     return !!(parent && parent.nodeType === 1 && String(parent.id || '') === REVEAL_PORTAL_ID);
   }
 
+  function getPreferredNonShortsOverlayContainer(node) {
+    if (!node || node.nodeType !== 1) return null;
+    const card = findNonShortsReattachCardNode(node);
+    let cursor = node;
+    for (let i = 0; i < 10 && cursor; i += 1) {
+      if (cursor === document.body || cursor === document.documentElement) break;
+      const tag = String(cursor.tagName || '').toLowerCase();
+      const nid = String(cursor.id || '').toLowerCase();
+      if (
+        nid === 'thumbnail' ||
+        tag === 'ytd-thumbnail' ||
+        tag === 'ytm-thumbnail' ||
+        tag === 'ytd-rich-item-renderer' ||
+        tag === 'ytd-video-renderer' ||
+        tag === 'ytd-compact-video-renderer'
+      ) {
+        return cursor;
+      }
+      if (card && cursor === card) return cursor;
+      cursor = cursor.parentElement;
+    }
+    return node.parentElement || null;
+  }
+
+  function resolveNonShortsRevealOverlayAnchor(overlay) {
+    if (!overlay || overlay.nodeType !== 1 || !overlay.isConnected) return null;
+    const overlayNodeId = String((overlay.dataset && overlay.dataset.mwNodeId) || '');
+    const overlaySrc = String((overlay.dataset && overlay.dataset.mwFor) || '');
+    const overlayIdentity = getRevealOverlayIdentityKey(overlaySrc);
+    const searchRoots = [];
+    const card = findNonShortsReattachCardNode(overlay);
+    if (card && card.nodeType === 1) searchRoots.push(card);
+    const parent = overlay.parentElement;
+    if (parent && parent.nodeType === 1 && searchRoots.indexOf(parent) === -1) searchRoots.push(parent);
+    searchRoots.push(document);
+
+    let best = null;
+    let bestScore = -1;
+    for (let r = 0; r < searchRoots.length; r += 1) {
+      const root = searchRoots[r];
+      if (!root || typeof root.querySelectorAll !== 'function') continue;
+      const candidates = root.querySelectorAll('[data-mw-moderated="blurred"]');
+      for (let i = 0; i < candidates.length; i += 1) {
+        const candidate = candidates[i];
+        if (!candidate || candidate.nodeType !== 1 || !candidate.isConnected) continue;
+        const nodeIdMatch = !!(overlayNodeId && getDiagNodeId(candidate) === overlayNodeId);
+        const identityMatch = doesRevealOverlayIdentityMatch(candidate, overlayIdentity);
+        if (!nodeIdMatch && !identityMatch) continue;
+        if (!isAuthoritativeHardBlur(candidate)) continue;
+        const container = getPreferredNonShortsOverlayContainer(candidate);
+        let score = nodeIdMatch ? 100 : 10;
+        if (container) {
+          const ctag = String(container.tagName || '').toLowerCase();
+          const cid = String(container.id || '').toLowerCase();
+          if (cid === 'thumbnail' || ctag === 'ytd-thumbnail' || ctag === 'ytm-thumbnail') score += 4;
+          if (ctag === 'ytd-rich-item-renderer' || ctag === 'ytd-video-renderer' || ctag === 'ytd-compact-video-renderer') score += 2;
+        }
+        if (score > bestScore) {
+          best = candidate;
+          bestScore = score;
+        }
+      }
+    }
+    if (!best) return null;
+    const stableContainer = getPreferredNonShortsOverlayContainer(best);
+    if (stableContainer && stableContainer.nodeType === 1) {
+      try {
+        const pos = String(window.getComputedStyle(stableContainer).position || '');
+        if (!pos || pos === 'static') {
+          stableContainer.style.setProperty('position', 'relative', 'important');
+        }
+      } catch (e) {}
+    }
+    return best;
+  }
+
   function resolveRevealOverlayAnchorTarget(overlay) {
     if (!overlay || overlay.nodeType !== 1) return null;
     const bound = (
@@ -6571,6 +6647,13 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (bound) return bound;
     if (isPortalRevealOverlay(overlay) && isShortsModeActive()) {
       return resolveShortsRevealOverlayAnchor(overlay);
+    }
+    if (!isPortalRevealOverlay(overlay) && !isShortsModeActive()) {
+      const fallback = resolveNonShortsRevealOverlayAnchor(overlay);
+      if (fallback) {
+        setRevealOverlayAnchorTarget(overlay, fallback, 'non_shorts_fallback_resolve');
+        return fallback;
+      }
     }
     return null;
   }
