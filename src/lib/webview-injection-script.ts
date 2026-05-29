@@ -6569,6 +6569,13 @@ export function generateModerationScript(config: InjectionConfig): string {
     return !!(parent && parent.nodeType === 1 && String(parent.id || '') === REVEAL_PORTAL_ID);
   }
 
+  function shouldUsePortalRevealOverlayForNode(node) {
+    if (!node || node.nodeType !== 1) return false;
+    // Keep architecture uniform with Shorts so reveal controls stay outside
+    // YouTube's interactive thumbnail/card tree.
+    return true;
+  }
+
   function getPreferredNonShortsOverlayContainer(node) {
     if (!node || node.nodeType !== 1) return null;
     const card = findNonShortsReattachCardNode(node);
@@ -6653,8 +6660,17 @@ export function generateModerationScript(config: InjectionConfig): string {
       overlay.__mwAnchorTarget.isConnected
     ) ? overlay.__mwAnchorTarget : null;
     if (bound) return bound;
-    if (isPortalRevealOverlay(overlay) && isShortsModeActive()) {
-      return resolveShortsRevealOverlayAnchor(overlay);
+    if (isPortalRevealOverlay(overlay)) {
+      const portalMode = String((overlay.dataset && overlay.dataset.mwPortalMode) || '');
+      if (portalMode === 'shorts' || (portalMode !== 'non_shorts' && isShortsModeActive())) {
+        return resolveShortsRevealOverlayAnchor(overlay);
+      }
+      const nonShortsFallback = resolveNonShortsRevealOverlayAnchor(overlay);
+      if (nonShortsFallback) {
+        setRevealOverlayAnchorTarget(overlay, nonShortsFallback, 'portal_non_shorts_fallback_resolve');
+        return nonShortsFallback;
+      }
+      return null;
     }
     if (!isPortalRevealOverlay(overlay) && !isShortsModeActive()) {
       const fallback = resolveNonShortsRevealOverlayAnchor(overlay);
@@ -6706,6 +6722,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!overlay || overlay.nodeType !== 1 || !overlay.isConnected) return false;
     if (!anchorNode || anchorNode.nodeType !== 1 || !anchorNode.isConnected) return false;
     if (isPortalRevealOverlay(overlay)) {
+      const portalMode = String((overlay.dataset && overlay.dataset.mwPortalMode) || '');
+      if (portalMode === 'shorts') return true;
+      if (portalMode === 'non_shorts') return true;
       return isShortsModeActive();
     }
     const card = findNonShortsReattachCardNode(anchorNode);
@@ -6739,7 +6758,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       } else if (portalOverlay) {
         const ctx = getShortsBlurContextForNode(anchor);
         const token = String((overlay.dataset && overlay.dataset.mwShortsOwnerToken) || '');
-        if (!ctx || !ctx.ownerToken || !token || token !== String(ctx.ownerToken || '')) {
+        const portalMode = String((overlay.dataset && overlay.dataset.mwPortalMode) || '');
+        if ((portalMode === 'shorts' || (portalMode !== 'non_shorts' && isShortsModeActive())) && (!ctx || !ctx.ownerToken || !token || token !== String(ctx.ownerToken || ''))) {
           rejectReason = 'shorts_owner_mismatch';
         }
       }
@@ -7228,16 +7248,14 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!node || node.nodeType !== 1) return null;
     const nodeId = getDiagNodeId(node);
     const shortsMode = isShortsModeActive();
-    if (shortsMode) {
-      const portal = document.getElementById(REVEAL_PORTAL_ID);
-      if (portal && typeof portal.querySelectorAll === 'function') {
-        const overlays = portal.querySelectorAll('.mw-reveal-overlay');
-        for (let i = 0; i < overlays.length; i += 1) {
-          const overlay = overlays[i];
-          if (!overlay || !overlay.isConnected) continue;
-          if (overlay.dataset.mwNodeId === nodeId) return overlay;
-          if (src && overlay.dataset.mwFor === src) return overlay;
-        }
+    const portal = document.getElementById(REVEAL_PORTAL_ID);
+    if (portal && typeof portal.querySelectorAll === 'function') {
+      const overlays = portal.querySelectorAll('.mw-reveal-overlay');
+      for (let i = 0; i < overlays.length; i += 1) {
+        const overlay = overlays[i];
+        if (!overlay || !overlay.isConnected) continue;
+        if (overlay.dataset.mwNodeId === nodeId) return overlay;
+        if (src && overlay.dataset.mwFor === src) return overlay;
       }
     }
     const parents = [];
@@ -7367,7 +7385,9 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function positionNonShortsRevealOverlay(overlay, anchor, reason) {
     if (!overlay || overlay.nodeType !== 1 || !overlay.isConnected) return false;
-    if (isPortalRevealOverlay(overlay)) return false;
+    if (isPortalRevealOverlay(overlay)) {
+      return positionShortsRevealOverlay(overlay, anchor, reason || 'non_shorts_portal_position');
+    }
     const target = (
       anchor &&
       anchor.nodeType === 1 &&
@@ -7427,7 +7447,6 @@ export function generateModerationScript(config: InjectionConfig): string {
     for (let i = 0; i < overlays.length; i += 1) {
       const overlay = overlays[i];
       if (!overlay || overlay.nodeType !== 1 || !overlay.isConnected) continue;
-      if (isPortalRevealOverlay(overlay)) continue;
       const anchor = resolveRevealOverlayAnchorTarget(overlay);
       if (!anchor || !anchor.isConnected) continue;
       if (!enforceRevealOverlayVisibilityGuard(overlay, anchor, 'non_shorts_reposition:' + String(reason || 'unknown'))) {
@@ -8442,6 +8461,7 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function createRevealOverlay(element, src, category, itemId, allowShortsReresolve) {
     const shortsMode = isShortsModeActive();
+    const usePortalOverlay = shortsMode || shouldUsePortalRevealOverlayForNode(element);
     if (!shortsMode && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
       console.log(
         '[DIAG][MVP_ITEM_CHAIN] stage=reveal_attempt',
@@ -8713,13 +8733,14 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       existingOverlay.style.pointerEvents = 'none';
       existingOverlay.style.display = 'flex';
-      if (shortsMode) {
+      if (usePortalOverlay) {
         setRevealOverlayAnchorTarget(existingOverlay, element, 'existing_overlay');
         const portal = ensureRevealPortal();
+        existingOverlay.dataset.mwPortalMode = shortsMode ? 'shorts' : 'non_shorts';
         if (portal && existingOverlay.parentElement !== portal) {
           portal.appendChild(existingOverlay);
         }
-        if (portal) {
+        if (portal && shortsMode) {
           const activeOverlays = portal.querySelectorAll('.mw-reveal-overlay');
           for (let i = 0; i < activeOverlays.length; i += 1) {
             const active = activeOverlays[i];
@@ -8729,9 +8750,14 @@ export function generateModerationScript(config: InjectionConfig): string {
             }
           }
         }
-        positionShortsRevealOverlay(existingOverlay, element, 'existing_overlay');
-        scheduleShortsRevealOverlayReposition('existing_overlay');
-        console.log('[DIAG][REVEAL_UI] portal_update', 'itemKey=' + getDiagItemKey(src));
+        if (shortsMode) {
+          positionShortsRevealOverlay(existingOverlay, element, 'existing_overlay');
+          scheduleShortsRevealOverlayReposition('existing_overlay');
+        } else {
+          positionShortsRevealOverlay(existingOverlay, element, 'existing_overlay_non_shorts');
+          scheduleNonShortsRevealOverlayReposition('existing_overlay_non_shorts');
+        }
+        console.log('[DIAG][REVEAL_UI] portal_update', 'mode=' + (shortsMode ? 'shorts' : 'non_shorts'), 'itemKey=' + getDiagItemKey(src));
       } else {
         const nonShortsOverlayParent = resolveNonShortsRevealOverlayParent(element) || element.parentElement;
         if (nonShortsOverlayParent) {
@@ -8832,7 +8858,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       );
       return;
     }
-    const overlayParent = shortsMode ? ensureRevealPortal() : (resolveNonShortsRevealOverlayParent(element) || parent);
+    const overlayParent = usePortalOverlay ? ensureRevealPortal() : (resolveNonShortsRevealOverlayParent(element) || parent);
     if (!overlayParent) return;
     const overlayCountBefore = document.querySelectorAll('.mw-reveal-overlay').length;
     const itemKey = getDiagItemKey(src);
@@ -8854,7 +8880,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       'parentNode=' + getDiagNodeId(overlayParent),
       'targetNode=' + getDiagNodeId(element)
     );
-    if (!shortsMode) {
+    if (!usePortalOverlay) {
       const parentPos = window.getComputedStyle(overlayParent).position;
       if (parentPos === 'static') {
         overlayParent.style.position = 'relative';
@@ -8867,6 +8893,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     overlay.className = 'mw-reveal-overlay';
     overlay.dataset.mwFor = src;
     overlay.dataset.mwNodeId = getDiagNodeId(element);
+    if (usePortalOverlay) {
+      overlay.dataset.mwPortalMode = shortsMode ? 'shorts' : 'non_shorts';
+    }
     if (shortsMode && shortsOwnerToken) {
       overlay.dataset.mwShortsOwnerToken = shortsOwnerToken;
       element.dataset.mwOverlayOwnerToken = shortsOwnerToken;
@@ -8874,13 +8903,13 @@ export function generateModerationScript(config: InjectionConfig): string {
     overlay.dataset.mwOverlayId = overlayId;
     setRevealOverlayAnchorTarget(overlay, element, 'overlay_created');
     overlay.style.cssText = [
-      shortsMode ? 'position: fixed' : 'position: absolute',
+      usePortalOverlay ? 'position: fixed' : 'position: absolute',
       'inset: 0',
       'display: flex',
       'align-items: center',
       'justify-content: center',
       shortsMode ? 'background: rgba(0, 0, 0, 0.15)' : 'background: rgba(0, 0, 0, 0.06)',
-      shortsMode ? 'z-index: 2147483647' : 'z-index: 9998',
+      usePortalOverlay ? 'z-index: 2147483647' : 'z-index: 9998',
       'cursor: default',
       'pointer-events: none',
     ].join(';');
@@ -9106,11 +9135,15 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       positionShortsRevealOverlay(overlay, element, 'overlay_created');
       scheduleShortsRevealOverlayReposition('overlay_created');
-      console.log('[DIAG][REVEAL_UI] portal_update', 'itemKey=' + itemKey);
+      console.log('[DIAG][REVEAL_UI] portal_update', 'mode=shorts', 'itemKey=' + itemKey);
     }
     overlayParent.appendChild(overlay);
     if (!shortsMode) {
-      positionNonShortsRevealOverlay(overlay, element, 'overlay_created');
+      if (usePortalOverlay) {
+        positionShortsRevealOverlay(overlay, element, 'overlay_created_non_shorts');
+      } else {
+        positionNonShortsRevealOverlay(overlay, element, 'overlay_created');
+      }
       scheduleNonShortsRevealOverlayReposition('overlay_created');
     }
     element.dataset.mwHasOverlay = 'true';
