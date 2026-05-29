@@ -7034,10 +7034,12 @@ export function generateModerationScript(config: InjectionConfig): string {
       btn.style.top = centerY + 'px';
       btn.style.transform = 'translate(-50%, -50%)';
     }
+    const portalMode = String((overlay.dataset && overlay.dataset.mwPortalMode) || '');
     if (DIAG_YT_BLUR) {
       console.log(
         '[DIAG][REVEAL_POS] placed',
         'overlayId=' + String((overlay.dataset && overlay.dataset.mwOverlayId) || 'unknown'),
+        'portal_mode=' + (portalMode || (isShortsModeActive() ? 'shorts' : 'unknown')),
         'reason=' + (reason || 'unknown'),
         'anchorNode=' + getDiagNodeId(element),
         'anchorRect=' + Math.round(rect.left) + ',' + Math.round(rect.top) + ',' + Math.round(rect.width) + 'x' + Math.round(rect.height),
@@ -8757,7 +8759,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           positionShortsRevealOverlay(existingOverlay, element, 'existing_overlay_non_shorts');
           scheduleNonShortsRevealOverlayReposition('existing_overlay_non_shorts');
         }
-        console.log('[DIAG][REVEAL_UI] portal_update', 'mode=' + (shortsMode ? 'shorts' : 'non_shorts'), 'itemKey=' + getDiagItemKey(src));
+        console.log('[DIAG][REVEAL_UI] portal_update', 'portal_mode=' + (shortsMode ? 'shorts' : 'non_shorts'), 'itemKey=' + getDiagItemKey(src));
       } else {
         const nonShortsOverlayParent = resolveNonShortsRevealOverlayParent(element) || element.parentElement;
         if (nonShortsOverlayParent) {
@@ -8991,15 +8993,18 @@ export function generateModerationScript(config: InjectionConfig): string {
     btn.addEventListener('click', function(e) {
       e.preventDefault();
       e.stopPropagation();
+      const portalMode = String((overlay.dataset && overlay.dataset.mwPortalMode) || '');
       console.log(
         '[DIAG][REVEAL_EVT] button_click',
         'overlayId=' + overlayId,
+        'portal_mode=' + (portalMode || (shortsMode ? 'shorts' : 'none')),
         'target=' + getDiagTargetDescriptor(e.target)
       );
       if (!shortsMode && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
         console.log(
           '[DIAG][MVP_REVEAL_PATH] tap_received',
           'channel=button',
+          'portal_mode=' + (portalMode || 'none'),
           'overlayId=' + overlayId,
           'itemKey=' + itemKey
         );
@@ -9135,7 +9140,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       positionShortsRevealOverlay(overlay, element, 'overlay_created');
       scheduleShortsRevealOverlayReposition('overlay_created');
-      console.log('[DIAG][REVEAL_UI] portal_update', 'mode=shorts', 'itemKey=' + itemKey);
+      console.log('[DIAG][REVEAL_UI] portal_update', 'portal_mode=shorts', 'itemKey=' + itemKey);
     }
     overlayParent.appendChild(overlay);
     if (!shortsMode) {
