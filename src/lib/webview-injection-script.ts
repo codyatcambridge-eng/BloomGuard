@@ -7050,6 +7050,65 @@ export function generateModerationScript(config: InjectionConfig): string {
     return true;
   }
 
+  function positionPortalNonShortsRevealOverlay(overlay, element, reason) {
+    if (!overlay || overlay.nodeType !== 1) return false;
+    if (!element || !element.isConnected || typeof element.getBoundingClientRect !== 'function') {
+      overlay.style.display = 'none';
+      return false;
+    }
+    let rect = null;
+    try {
+      rect = element.getBoundingClientRect();
+    } catch (e) {
+      rect = null;
+    }
+    if (!rect) return false;
+    const viewportWidth = Math.max(window.innerWidth || 0, 1);
+    const viewportHeight = Math.max(window.innerHeight || 0, 1);
+    const width = Math.max(0, Number(rect.width) || 0);
+    const height = Math.max(0, Number(rect.height) || 0);
+    if (width < 16 || height < 16) {
+      overlay.style.display = 'none';
+      return false;
+    }
+    const isOffscreen =
+      rect.right < 0 ||
+      rect.bottom < 0 ||
+      rect.left > viewportWidth ||
+      rect.top > viewportHeight;
+    if (isOffscreen) {
+      overlay.style.display = 'none';
+      return false;
+    }
+    const centerX = Math.max(24, Math.min(viewportWidth - 24, Math.round((Number(rect.left) || 0) + (width / 2))));
+    const centerY = Math.max(28, Math.min(viewportHeight - 28, Math.round((Number(rect.top) || 0) + (height / 2))));
+    overlay.style.position = 'fixed';
+    overlay.style.inset = '0';
+    overlay.style.display = 'block';
+    overlay.style.pointerEvents = 'none';
+    overlay.style.background = 'transparent';
+    const btn = overlay.querySelector('.mw-reveal-btn');
+    if (btn && btn.nodeType === 1) {
+      btn.style.position = 'absolute';
+      btn.style.left = centerX + 'px';
+      btn.style.top = centerY + 'px';
+      btn.style.transform = 'translate(-50%, -50%)';
+      btn.style.pointerEvents = 'auto';
+    }
+    if (DIAG_YT_BLUR) {
+      console.log(
+        '[DIAG][REVEAL_POS] placed',
+        'overlayId=' + String((overlay.dataset && overlay.dataset.mwOverlayId) || 'unknown'),
+        'portal_mode=non_shorts',
+        'reason=' + (reason || 'unknown'),
+        'anchorNode=' + getDiagNodeId(element),
+        'anchorRect=' + Math.round(rect.left) + ',' + Math.round(rect.top) + ',' + Math.round(width) + 'x' + Math.round(height),
+        'button=' + centerX + ',' + centerY
+      );
+    }
+    return true;
+  }
+
   function repositionAllShortsRevealOverlays(reason) {
     if (!isShortsModeActive()) return;
     const portal = document.getElementById(REVEAL_PORTAL_ID);
@@ -7256,8 +7315,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       for (let i = 0; i < overlays.length; i += 1) {
         const overlay = overlays[i];
         if (!overlay || !overlay.isConnected) continue;
+        const portalMode = String((overlay.dataset && overlay.dataset.mwPortalMode) || '');
         if (overlay.dataset.mwNodeId === nodeId) return overlay;
-        if (src && overlay.dataset.mwFor === src) return overlay;
+        if (src && overlay.dataset.mwFor === src && (shortsMode || portalMode === 'shorts')) return overlay;
       }
     }
     const parents = [];
@@ -7388,7 +7448,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   function positionNonShortsRevealOverlay(overlay, anchor, reason) {
     if (!overlay || overlay.nodeType !== 1 || !overlay.isConnected) return false;
     if (isPortalRevealOverlay(overlay)) {
-      return positionShortsRevealOverlay(overlay, anchor, reason || 'non_shorts_portal_position');
+      return positionPortalNonShortsRevealOverlay(overlay, anchor, reason || 'non_shorts_portal_position');
     }
     const target = (
       anchor &&
@@ -7449,6 +7509,8 @@ export function generateModerationScript(config: InjectionConfig): string {
     for (let i = 0; i < overlays.length; i += 1) {
       const overlay = overlays[i];
       if (!overlay || overlay.nodeType !== 1 || !overlay.isConnected) continue;
+      const portalMode = String((overlay.dataset && overlay.dataset.mwPortalMode) || '');
+      if (portalMode === 'shorts') continue;
       const anchor = resolveRevealOverlayAnchorTarget(overlay);
       if (!anchor || !anchor.isConnected) continue;
       if (!enforceRevealOverlayVisibilityGuard(overlay, anchor, 'non_shorts_reposition:' + String(reason || 'unknown'))) {
@@ -8756,7 +8818,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           positionShortsRevealOverlay(existingOverlay, element, 'existing_overlay');
           scheduleShortsRevealOverlayReposition('existing_overlay');
         } else {
-          positionShortsRevealOverlay(existingOverlay, element, 'existing_overlay_non_shorts');
+          positionPortalNonShortsRevealOverlay(existingOverlay, element, 'existing_overlay_non_shorts');
           scheduleNonShortsRevealOverlayReposition('existing_overlay_non_shorts');
         }
         console.log('[DIAG][REVEAL_UI] portal_update', 'portal_mode=' + (shortsMode ? 'shorts' : 'non_shorts'), 'itemKey=' + getDiagItemKey(src));
@@ -9145,7 +9207,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     overlayParent.appendChild(overlay);
     if (!shortsMode) {
       if (usePortalOverlay) {
-        positionShortsRevealOverlay(overlay, element, 'overlay_created_non_shorts');
+        positionPortalNonShortsRevealOverlay(overlay, element, 'overlay_created_non_shorts');
       } else {
         positionNonShortsRevealOverlay(overlay, element, 'overlay_created');
       }
@@ -11332,9 +11394,12 @@ export function generateModerationScript(config: InjectionConfig): string {
         display: flex !important;
         align-items: center !important;
         justify-content: center !important;
-        background: rgba(0, 0, 0, 0.25) !important;
+        background: transparent !important;
         z-index: 9998 !important;
         pointer-events: none !important;
+      }
+      #mw-reveal-portal .mw-reveal-overlay[data-mw-portal-mode="non_shorts"] {
+        background: transparent !important;
       }
       .mw-reveal-btn {
         z-index: 9999 !important;

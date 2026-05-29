@@ -263,6 +263,7 @@ export const NativeWebViewBrowser = () => {
   const topLayerLabelRef = useRef('none');
   const [diagTopLayerLabel, setDiagTopLayerLabel] = useState('none');
   const [showDiagLayerBadge, setShowDiagLayerBadge] = useState(false);
+  const launchStateNormalizedRef = useRef(false);
   
   const [urlInput, setUrlInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -741,6 +742,23 @@ export const NativeWebViewBrowser = () => {
   useEffect(() => {
     console.log('[DIAG][BROWSER] platform isNative=' + isNative);
   }, [isNative]);
+
+  // Defensive launch normalization: if a stale in-memory view ever re-enters as
+  // `search` with no active query/results, force home so browser opens cleanly.
+  useEffect(() => {
+    if (launchStateNormalizedRef.current) return;
+    launchStateNormalizedRef.current = true;
+    const staleSearchLaunch =
+      currentView === 'search' &&
+      !isSearching &&
+      searchResults.length === 0 &&
+      !String(searchQuery || '').trim();
+    if (!staleSearchLaunch) return;
+    console.log('[DIAG][BROWSER] normalize_launch stale_search_to_home');
+    setSearchError(null);
+    setUrlInput('');
+    goHome();
+  }, [currentView, isSearching, searchResults.length, searchQuery, goHome]);
 
   // Utility functions
   const toDiagUrl = useCallback((input: string): string => {
