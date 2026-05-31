@@ -9155,6 +9155,28 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
     });
     console.log('[DIAG][REVEAL_UI] bind_button', 'overlayId=' + overlayId);
+    // iOS touch capture: fire reveal via touchend so YouTube card/anchor
+    // touchstart handlers cannot intercept the tap before our click fires.
+    // This fixes home-feed regular video and all Shorts-shelf thumbnails where
+    // ytm-rich-item-renderer / <a href="/shorts/..."> consume the touch first.
+    var _mwBtnTouchX = 0, _mwBtnTouchY = 0;
+    btn.addEventListener('touchstart', function(e) {
+      e.stopPropagation();
+      var t = e.touches && e.touches[0];
+      _mwBtnTouchX = t ? t.clientX : 0;
+      _mwBtnTouchY = t ? t.clientY : 0;
+    }, { passive: false });
+    btn.addEventListener('touchend', function(e) {
+      var t = e.changedTouches && e.changedTouches[0];
+      if (t) {
+        var dx = Math.abs(t.clientX - _mwBtnTouchX);
+        var dy = Math.abs(t.clientY - _mwBtnTouchY);
+        if (dx > 12 || dy > 12) return;
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      btn.dispatchEvent(new MouseEvent('click', { bubbles: false, cancelable: true, view: window }));
+    }, { passive: false });
     overlay.dataset.mwRevealHandlersBound = 'true';
     
     overlay.appendChild(btn);
