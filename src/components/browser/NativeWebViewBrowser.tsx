@@ -743,8 +743,8 @@ export const NativeWebViewBrowser = () => {
     console.log('[DIAG][BROWSER] platform isNative=' + isNative);
   }, [isNative]);
 
-  // Defensive launch normalization: if a stale in-memory view ever re-enters as
-  // `search` with no active query/results, force home so browser opens cleanly.
+  // Defensive launch normalization: startup must land on home unless there is
+  // an active, meaningful search/navigation state to preserve.
   useEffect(() => {
     if (launchStateNormalizedRef.current) return;
     launchStateNormalizedRef.current = true;
@@ -753,12 +753,21 @@ export const NativeWebViewBrowser = () => {
       !isSearching &&
       searchResults.length === 0 &&
       !String(searchQuery || '').trim();
-    if (!staleSearchLaunch) return;
-    console.log('[DIAG][BROWSER] normalize_launch stale_search_to_home');
+    const staleNonHomeLaunch =
+      currentView !== 'home' &&
+      !String(currentUrl || '').trim() &&
+      !isSearching &&
+      !String(searchQuery || '').trim();
+    if (!staleSearchLaunch && !staleNonHomeLaunch) return;
+    console.log(
+      '[DIAG][BROWSER] normalize_launch to_home',
+      'reason=' + (staleSearchLaunch ? 'stale_search_to_home' : 'stale_non_home_to_home'),
+      'currentView=' + currentView
+    );
     setSearchError(null);
     setUrlInput('');
     goHome();
-  }, [currentView, isSearching, searchResults.length, searchQuery, goHome]);
+  }, [currentView, currentUrl, isSearching, searchResults.length, searchQuery, goHome]);
 
   // Utility functions
   const toDiagUrl = useCallback((input: string): string => {

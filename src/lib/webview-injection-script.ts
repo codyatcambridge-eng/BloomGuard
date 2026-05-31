@@ -6571,9 +6571,7 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function shouldUsePortalRevealOverlayForNode(node) {
     if (!node || node.nodeType !== 1) return false;
-    // Keep architecture uniform with Shorts so reveal controls stay outside
-    // YouTube's interactive thumbnail/card tree.
-    return true;
+    return false;
   }
 
   function getPreferredNonShortsOverlayContainer(node) {
@@ -7050,65 +7048,6 @@ export function generateModerationScript(config: InjectionConfig): string {
     return true;
   }
 
-  function positionPortalNonShortsRevealOverlay(overlay, element, reason) {
-    if (!overlay || overlay.nodeType !== 1) return false;
-    if (!element || !element.isConnected || typeof element.getBoundingClientRect !== 'function') {
-      overlay.style.display = 'none';
-      return false;
-    }
-    let rect = null;
-    try {
-      rect = element.getBoundingClientRect();
-    } catch (e) {
-      rect = null;
-    }
-    if (!rect) return false;
-    const viewportWidth = Math.max(window.innerWidth || 0, 1);
-    const viewportHeight = Math.max(window.innerHeight || 0, 1);
-    const width = Math.max(0, Number(rect.width) || 0);
-    const height = Math.max(0, Number(rect.height) || 0);
-    if (width < 16 || height < 16) {
-      overlay.style.display = 'none';
-      return false;
-    }
-    const isOffscreen =
-      rect.right < 0 ||
-      rect.bottom < 0 ||
-      rect.left > viewportWidth ||
-      rect.top > viewportHeight;
-    if (isOffscreen) {
-      overlay.style.display = 'none';
-      return false;
-    }
-    const centerX = Math.max(24, Math.min(viewportWidth - 24, Math.round((Number(rect.left) || 0) + (width / 2))));
-    const centerY = Math.max(28, Math.min(viewportHeight - 28, Math.round((Number(rect.top) || 0) + (height / 2))));
-    overlay.style.position = 'fixed';
-    overlay.style.inset = '0';
-    overlay.style.display = 'block';
-    overlay.style.pointerEvents = 'none';
-    overlay.style.background = 'transparent';
-    const btn = overlay.querySelector('.mw-reveal-btn');
-    if (btn && btn.nodeType === 1) {
-      btn.style.position = 'absolute';
-      btn.style.left = centerX + 'px';
-      btn.style.top = centerY + 'px';
-      btn.style.transform = 'translate(-50%, -50%)';
-      btn.style.pointerEvents = 'auto';
-    }
-    if (DIAG_YT_BLUR) {
-      console.log(
-        '[DIAG][REVEAL_POS] placed',
-        'overlayId=' + String((overlay.dataset && overlay.dataset.mwOverlayId) || 'unknown'),
-        'portal_mode=non_shorts',
-        'reason=' + (reason || 'unknown'),
-        'anchorNode=' + getDiagNodeId(element),
-        'anchorRect=' + Math.round(rect.left) + ',' + Math.round(rect.top) + ',' + Math.round(width) + 'x' + Math.round(height),
-        'button=' + centerX + ',' + centerY
-      );
-    }
-    return true;
-  }
-
   function repositionAllShortsRevealOverlays(reason) {
     if (!isShortsModeActive()) return;
     const portal = document.getElementById(REVEAL_PORTAL_ID);
@@ -7213,6 +7152,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   function ensureRevealOverlayPositionListeners() {
     if (timerState.revealOverlayScrollHandler && timerState.revealOverlayResizeHandler) return;
     timerState.revealOverlayScrollHandler = function() {
+      ensureRevealPortal();
       if (isShortsModeActive()) {
         scheduleShortsRevealOverlayReposition('window_scroll');
       } else {
@@ -7220,6 +7160,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
     };
     timerState.revealOverlayResizeHandler = function() {
+      ensureRevealPortal();
       if (isShortsModeActive()) {
         scheduleShortsRevealOverlayReposition('window_resize');
       } else {
@@ -7447,9 +7388,7 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function positionNonShortsRevealOverlay(overlay, anchor, reason) {
     if (!overlay || overlay.nodeType !== 1 || !overlay.isConnected) return false;
-    if (isPortalRevealOverlay(overlay)) {
-      return positionPortalNonShortsRevealOverlay(overlay, anchor, reason || 'non_shorts_portal_position');
-    }
+    if (isPortalRevealOverlay(overlay)) return false;
     const target = (
       anchor &&
       anchor.nodeType === 1 &&
@@ -7534,6 +7473,14 @@ export function generateModerationScript(config: InjectionConfig): string {
       const runReason = timerState.nonShortsRevealOverlayLastReason || 'raf';
       timerState.nonShortsRevealOverlayLastReason = '';
       repositionAllNonShortsRevealOverlays(runReason);
+      if (typeof window.requestAnimationFrame === 'function' && !timerState.paused && !timerState.teardownDone && !isShortsModeActive()) {
+        window.requestAnimationFrame(function() {
+          window.requestAnimationFrame(function() {
+            if (timerState.paused || timerState.teardownDone || isShortsModeActive()) return;
+            repositionAllNonShortsRevealOverlays(runReason + ':followup2');
+          });
+        });
+      }
     });
   }
 
@@ -7798,8 +7745,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       element.dataset.mwPreblurClear = 'true';
       element.dataset.mwOverlayOwnerToken = '';
       element.dataset.mwShortsOwnerToken = '';
-      element.dataset.mwHardBlur = '0';
-      element.dataset.mwHardBlurItemKey = '';
+      clearAuthoritativeHardBlur(element);
       if (isShortsModeActive()) {
         clearShortsBlurContextForNode(element, reason || 'clear_all');
       }
@@ -8800,11 +8746,11 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (usePortalOverlay) {
         setRevealOverlayAnchorTarget(existingOverlay, element, 'existing_overlay');
         const portal = ensureRevealPortal();
-        existingOverlay.dataset.mwPortalMode = shortsMode ? 'shorts' : 'non_shorts';
+        existingOverlay.dataset.mwPortalMode = 'shorts';
         if (portal && existingOverlay.parentElement !== portal) {
           portal.appendChild(existingOverlay);
         }
-        if (portal && shortsMode) {
+        if (portal) {
           const activeOverlays = portal.querySelectorAll('.mw-reveal-overlay');
           for (let i = 0; i < activeOverlays.length; i += 1) {
             const active = activeOverlays[i];
@@ -8814,14 +8760,9 @@ export function generateModerationScript(config: InjectionConfig): string {
             }
           }
         }
-        if (shortsMode) {
-          positionShortsRevealOverlay(existingOverlay, element, 'existing_overlay');
-          scheduleShortsRevealOverlayReposition('existing_overlay');
-        } else {
-          positionPortalNonShortsRevealOverlay(existingOverlay, element, 'existing_overlay_non_shorts');
-          scheduleNonShortsRevealOverlayReposition('existing_overlay_non_shorts');
-        }
-        console.log('[DIAG][REVEAL_UI] portal_update', 'portal_mode=' + (shortsMode ? 'shorts' : 'non_shorts'), 'itemKey=' + getDiagItemKey(src));
+        positionShortsRevealOverlay(existingOverlay, element, 'existing_overlay');
+        scheduleShortsRevealOverlayReposition('existing_overlay');
+        console.log('[DIAG][REVEAL_UI] portal_update', 'portal_mode=shorts', 'itemKey=' + getDiagItemKey(src));
       } else {
         const nonShortsOverlayParent = resolveNonShortsRevealOverlayParent(element) || element.parentElement;
         if (nonShortsOverlayParent) {
@@ -8958,7 +8899,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     overlay.dataset.mwFor = src;
     overlay.dataset.mwNodeId = getDiagNodeId(element);
     if (usePortalOverlay) {
-      overlay.dataset.mwPortalMode = shortsMode ? 'shorts' : 'non_shorts';
+      overlay.dataset.mwPortalMode = 'shorts';
     }
     if (shortsMode && shortsOwnerToken) {
       overlay.dataset.mwShortsOwnerToken = shortsOwnerToken;
@@ -8972,8 +8913,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       'display: flex',
       'align-items: center',
       'justify-content: center',
-      shortsMode ? 'background: rgba(0, 0, 0, 0.15)' : 'background: rgba(0, 0, 0, 0.06)',
-      usePortalOverlay ? 'z-index: 2147483647' : 'z-index: 9998',
+      usePortalOverlay ? 'background: transparent' : (shortsMode ? 'background: rgba(0, 0, 0, 0.15)' : 'background: rgba(0, 0, 0, 0.06)'),
+      usePortalOverlay ? 'z-index: auto' : 'z-index: 9998',
       'cursor: default',
       'pointer-events: none',
     ].join(';');
@@ -9055,6 +8996,32 @@ export function generateModerationScript(config: InjectionConfig): string {
     btn.addEventListener('click', function(e) {
       e.preventDefault();
       e.stopPropagation();
+      // overlay.__mwAnchorTarget is kept current by setRevealOverlayAnchorTarget every
+      // time the overlay is reattached to a recycled card node (homepage infinite scroll
+      // recycles ytm-rich-item-renderer DOM nodes, making the original closure element
+      // stale and disconnected). We check data-mw-moderated so a recycled-but-connected
+      // node that now holds a different (non-blurred) video is not used as the target.
+      const anchorLive = overlay.__mwAnchorTarget;
+      let liveElement = (
+        anchorLive && anchorLive.nodeType === 1 &&
+        anchorLive.isConnected &&
+        String((anchorLive.dataset && anchorLive.dataset.mwModerated) || '') === 'blurred'
+      ) ? anchorLive : null;
+      if (!liveElement) {
+        const srcStr = String(src || '');
+        const blurredAll = document.querySelectorAll('[data-mw-moderated="blurred"]');
+        for (let _bi = 0; _bi < blurredAll.length; _bi++) {
+          const _bc = blurredAll[_bi];
+          if (_bc && _bc.isConnected && String((_bc.dataset && _bc.dataset.mwSrc) || '') === srcStr) {
+            liveElement = _bc;
+            if (anchorLive && anchorLive.nodeType === 1) {
+              setRevealOverlayAnchorTarget(overlay, _bc, 'click_dom_search');
+            }
+            break;
+          }
+        }
+      }
+      if (!liveElement) liveElement = element;
       const portalMode = String((overlay.dataset && overlay.dataset.mwPortalMode) || '');
       console.log(
         '[DIAG][REVEAL_EVT] button_click',
@@ -9072,7 +9039,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         );
       }
       logRevealHittestSnapshot(overlay, btn, overlayId, 'button_click', e);
-      const revealMeta = getRevealMetaForSource(src, element);
+      const revealMeta = getRevealMetaForSource(src, liveElement);
       const revealAllowed = !revealMeta.meta;
       const revealGateReason = revealAllowed ? 'not_revealed' : 'already_revealed_reblur_path';
       console.log(
@@ -9082,12 +9049,12 @@ export function generateModerationScript(config: InjectionConfig): string {
         'itemKey=' + itemKey,
         'revealKey=' + revealMeta.key
       );
-      
+
       if (!revealAllowed) {
         // Re-blur
         const sinceRevealMs = revealMeta.meta ? (Date.now() - Number(revealMeta.meta.revealedAt || Date.now())) : null;
-        unmarkRevealedForSource(src, element, 'manual_hide');
-        applyBlur(element, src, category, CONFIG.blurStrength, itemId);
+        unmarkRevealedForSource(src, liveElement, 'manual_hide');
+        applyBlur(liveElement, src, category, CONFIG.blurStrength, itemId);
         btn.textContent = '👁 Reveal';
         overlay.style.display = 'flex';
         console.log(
@@ -9107,14 +9074,14 @@ export function generateModerationScript(config: InjectionConfig): string {
           'itemKey=' + itemKey,
           'beforeBlurCount=' + beforeBlurCount
         );
-        const revealApplied = markRevealedForSource(src, element, 'manual_reveal');
+        const revealApplied = markRevealedForSource(src, liveElement, 'manual_reveal');
         // Shorts MVP: a single tap should fully reveal and clear the overlay
         // to avoid a second tap requirement on active shorts.
-        removeBlur(element, src, { keepOverlay: false });
+        removeBlur(liveElement, src, { keepOverlay: false });
         // Remove the owned-card CSS class so the "filter: blur(40px) !important"
         // rule on .mw-owned-positive-card no longer overrides the reveal.
         // applyOwnedSafeCardClass guards against Shorts/non-main-page internally.
-        const revealOwnerCard = getOwnedCardContainerFromNode(element);
+        const revealOwnerCard = getOwnedCardContainerFromNode(liveElement);
         if (revealOwnerCard) {
           applyOwnedSafeCardClass(revealOwnerCard, 'manual_reveal');
         }
@@ -9135,20 +9102,20 @@ export function generateModerationScript(config: InjectionConfig): string {
           !shortsMode && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href);
         if (!suppressImmediateLabelUi) {
           // POST a label request message so the host can open the labeling modal
-          var labelItemId = itemId || element.dataset.mwItemId || 'unknown_' + Date.now();
-          var mwModelVersion = element.dataset.mwModelVersion || null;
-          var mwDecisionReason = element.dataset.mwDecisionReason || null;
-          var mwNsfwRisk = toFiniteNumber(element.dataset.mwNsfwRisk);
-          var mwPersonPresent = element.dataset.mwPersonPresent === '1';
-          var mwSkinRatio = toFiniteNumber(element.dataset.mwSkinRatio);
-          var mwThirstScore = toFiniteNumber(element.dataset.mwThirstScore);
-          var mwSkinThreshold = toFiniteNumber(element.dataset.mwSkinThreshold);
-          var mwGrayMin = toFiniteNumber(element.dataset.mwGrayZoneMin);
-          var mwGrayMax = toFiniteNumber(element.dataset.mwGrayZoneMax);
-          var mwExplicitOverride = toFiniteNumber(element.dataset.mwExplicitOverride);
-          var mwImageWidth = toFiniteNumber(element.dataset.mwImageWidth);
-          var mwImageHeight = toFiniteNumber(element.dataset.mwImageHeight);
-          var mwHost = element.dataset.mwHost || null;
+          var labelItemId = itemId || liveElement.dataset.mwItemId || 'unknown_' + Date.now();
+          var mwModelVersion = liveElement.dataset.mwModelVersion || null;
+          var mwDecisionReason = liveElement.dataset.mwDecisionReason || null;
+          var mwNsfwRisk = toFiniteNumber(liveElement.dataset.mwNsfwRisk);
+          var mwPersonPresent = liveElement.dataset.mwPersonPresent === '1';
+          var mwSkinRatio = toFiniteNumber(liveElement.dataset.mwSkinRatio);
+          var mwThirstScore = toFiniteNumber(liveElement.dataset.mwThirstScore);
+          var mwSkinThreshold = toFiniteNumber(liveElement.dataset.mwSkinThreshold);
+          var mwGrayMin = toFiniteNumber(liveElement.dataset.mwGrayZoneMin);
+          var mwGrayMax = toFiniteNumber(liveElement.dataset.mwGrayZoneMax);
+          var mwExplicitOverride = toFiniteNumber(liveElement.dataset.mwExplicitOverride);
+          var mwImageWidth = toFiniteNumber(liveElement.dataset.mwImageWidth);
+          var mwImageHeight = toFiniteNumber(liveElement.dataset.mwImageHeight);
+          var mwHost = liveElement.dataset.mwHost || null;
           var labelRequest = {
             type: 'gc-label-request',
             requestId: 'r_' + Date.now().toString(36),
@@ -9158,7 +9125,7 @@ export function generateModerationScript(config: InjectionConfig): string {
             platform: PLATFORM,
             modelPrediction: {
               category: category,
-              confidence: toFiniteNumber(element.dataset.mwConfidence),
+              confidence: toFiniteNumber(liveElement.dataset.mwConfidence),
               model_version: mwModelVersion,
               thresholds: {
                 nsfw_gray_zone_min: mwGrayMin,
@@ -9206,11 +9173,8 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     overlayParent.appendChild(overlay);
     if (!shortsMode) {
-      if (usePortalOverlay) {
-        positionPortalNonShortsRevealOverlay(overlay, element, 'overlay_created_non_shorts');
-      } else {
-        positionNonShortsRevealOverlay(overlay, element, 'overlay_created');
-      }
+      ensureRevealOverlayPositionListeners();
+      positionNonShortsRevealOverlay(overlay, element, 'overlay_created');
       scheduleNonShortsRevealOverlayReposition('overlay_created');
     }
     element.dataset.mwHasOverlay = 'true';
@@ -11394,11 +11358,11 @@ export function generateModerationScript(config: InjectionConfig): string {
         display: flex !important;
         align-items: center !important;
         justify-content: center !important;
-        background: transparent !important;
+        background: rgba(0, 0, 0, 0.25) !important;
         z-index: 9998 !important;
         pointer-events: none !important;
       }
-      #mw-reveal-portal .mw-reveal-overlay[data-mw-portal-mode="non_shorts"] {
+      #mw-reveal-portal .mw-reveal-overlay {
         background: transparent !important;
       }
       .mw-reveal-btn {
@@ -11572,7 +11536,11 @@ export function generateModerationScript(config: InjectionConfig): string {
   // Scroll-triggered rescans
   timerState.mainScrollHandler = () => {
     if (timerState.paused) return;
-    scheduleShortsRevealOverlayReposition('main_scroll');
+    if (isShortsModeActive()) {
+      scheduleShortsRevealOverlayReposition('main_scroll');
+    } else {
+      scheduleNonShortsRevealOverlayReposition('main_scroll');
+    }
     clearNamedTimeout('mainScrollTimeout', 'reschedule');
     timerState.mainScrollTimeout = setTimeout(() => {
       scanFullPage();

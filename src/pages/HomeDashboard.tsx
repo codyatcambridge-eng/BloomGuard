@@ -22,10 +22,17 @@ const HomeDashboard = () => {
           <p className="text-[10px] text-gold/50 tracking-[0.3em] uppercase mt-0.5">Miracle Worker</p>
           <p className="mt-2 text-aqua font-display tracking-[0.2em]">FUN DASH MARKER 2026-05-29</p>
           <p className="mt-1 text-aqua font-display tracking-[0.2em]">yolo</p>
+          <p className="mt-1 text-aqua font-display tracking-[0.2em]">JOY</p>
+          <p className="mt-1 text-aqua font-display tracking-[0.2em]">BECAUSE-2026-05-29-0824</p>
           <p className="mt-2 text-silver">Welcome back! forgive</p>
           <p className="mt-1 text-aqua font-display tracking-wide">BOY</p>
           <p className="mt-1 text-aqua font-display tracking-wide">girl</p>
+          <p className="mt-1 text-aqua font-display tracking-wide">keep going</p>
+          <p className="mt-1 text-aqua font-display tracking-wide">Jesus</p>
+          <p className="mt-1 text-aqua font-display tracking-wide">Dang</p>
           <p className="mt-1 text-silver/60 font-display tracking-wide">Test</p>
+          <p className="mt-1 text-aqua font-display tracking-wide">Sassy</p>
+<p className="mt-1 text-aqua font-display tracking-wide">Iphone</p>
           {isActive && (
             <p className="mt-2 text-xs text-silver/70">
               Break active: {remainingFormatted}
