@@ -7501,6 +7501,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     const overlay = findRevealOverlayForElement(node, src || node.dataset.mwSrc || '');
     if (overlay && overlay.parentElement) {
       const overlayId = overlay.dataset && overlay.dataset.mwOverlayId ? overlay.dataset.mwOverlayId : 'unknown';
+      if (overlay.__mwAnchorGuard && overlay.__mwAnchorGuard.nodeType === 1) {
+        overlay.__mwAnchorGuard.style.pointerEvents = overlay.__mwAnchorGuardPE || '';
+        overlay.__mwAnchorGuard = null;
+      }
       overlay.parentElement.removeChild(overlay);
       console.log(
         '[DIAG][REVEAL_UI] overlay_removed',
@@ -9161,6 +9165,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     // ytm-rich-item-renderer / <a href="/shorts/..."> consume the touch first.
     var _mwBtnTouchX = 0, _mwBtnTouchY = 0;
     btn.addEventListener('touchstart', function(e) {
+      e.preventDefault();
       e.stopPropagation();
       var t = e.touches && e.touches[0];
       _mwBtnTouchX = t ? t.clientX : 0;
@@ -9198,6 +9203,21 @@ export function generateModerationScript(config: InjectionConfig): string {
       ensureRevealOverlayPositionListeners();
       positionNonShortsRevealOverlay(overlay, element, 'overlay_created');
       scheduleNonShortsRevealOverlayReposition('overlay_created');
+      // Disable the nearest <a> ancestor so WKWebView's native link-tap pipeline
+      // cannot intercept touches meant for the reveal button. Covers both regular
+      // video cards (<a href="/watch?v=...">) and Shorts shelf (<a href="/shorts/...">).
+      // The anchor is restored in removeRevealOverlay when the overlay is torn down.
+      var _anchorGuard = (typeof overlayParent.closest === 'function')
+        ? overlayParent.closest('a[href]')
+        : null;
+      if (!_anchorGuard && typeof element.closest === 'function') {
+        _anchorGuard = element.closest('a[href]');
+      }
+      if (_anchorGuard && _anchorGuard.nodeType === 1) {
+        overlay.__mwAnchorGuard = _anchorGuard;
+        overlay.__mwAnchorGuardPE = String(_anchorGuard.style.pointerEvents || '');
+        _anchorGuard.style.pointerEvents = 'none';
+      }
     }
     element.dataset.mwHasOverlay = 'true';
     if (!enforceRevealOverlayVisibilityGuard(overlay, element, 'createRevealOverlay_created')) {
