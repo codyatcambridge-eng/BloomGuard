@@ -8526,8 +8526,15 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
     }
     if (!shortsMode && CONFIG.mvpPositiveCardOwnershipV1 && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
-      const overlayProof = isAuthoritativeHardBlur(element) ? 'card_blurred' : 'none';
-      if (!isMvpBlurAuthorized(element, src, getDiagItemKey(src), overlayProof, 'createRevealOverlay')) {
+      // Guard: only create an overlay if the element carries an authoritative hard-blur
+      // stamp, which proves isMvpBlurAuthorized already ran and passed at applyBlur time.
+      // We do NOT re-run the full isMvpBlurAuthorized check here because
+      // getMvpCardHrefItemKey fails for home-feed card structures that use
+      // yt-lockup-view-model (querySelector cannot find the <a> anchor), causing
+      // false-deny for valid positive thumbnails and silently preventing overlay creation.
+      // enforceRevealOverlayVisibilityGuard (called below) is the safety net against
+      // stale-DOM mismatches on recycled cards.
+      if (!isAuthoritativeHardBlur(element)) {
         return;
       }
     }
@@ -9212,6 +9219,20 @@ export function generateModerationScript(config: InjectionConfig): string {
         : null;
       if (!_anchorGuard && typeof element.closest === 'function') {
         _anchorGuard = element.closest('a[href]');
+      }
+      if (!_anchorGuard) {
+        // Fallback for home-feed ytm-rich-item-renderer / yt-lockup-view-model where the
+        // <a> navigation anchor is not an ancestor of the thumbnail but lives as a
+        // sibling or child within the card. Search the nearest card container.
+        var _cardForGuard = (typeof element.closest === 'function')
+          ? (element.closest('yt-lockup-view-model') ||
+             element.closest('ytm-rich-item-renderer') ||
+             element.closest('ytm-compact-video-renderer') ||
+             element.closest('ytm-video-with-context-renderer'))
+          : null;
+        if (_cardForGuard && typeof _cardForGuard.querySelector === 'function') {
+          _anchorGuard = _cardForGuard.querySelector('a[href*="/watch"], a[href*="/shorts/"]');
+        }
       }
       if (_anchorGuard && _anchorGuard.nodeType === 1) {
         overlay.__mwAnchorGuard = _anchorGuard;
