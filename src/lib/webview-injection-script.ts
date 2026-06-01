@@ -3548,25 +3548,54 @@ export function generateModerationScript(config: InjectionConfig): string {
   function getMvpCardHrefItemKey(card) {
     if (!card || card.nodeType !== 1 || typeof card.querySelector !== 'function') return 'unknown';
     try {
-      const inner = card.querySelector('a[href*="/watch"]');
+      // Extract video ID from a raw href string, handling both /watch?v= and /shorts/ formats.
+      var extractIdFromHref = function(href) {
+        if (!href) return '';
+        var wm = href.match(/[?&]v=([^&/#]+)/);
+        if (wm && wm[1]) return String(wm[1]);
+        var sm = href.match(/\\/shorts\\/([^/?#]+)/);
+        if (sm && sm[1]) return String(sm[1]);
+        return '';
+      };
+      var getHref = function(a) {
+        return String(a.getAttribute ? a.getAttribute('href') : (a.href || ''));
+      };
+
+      // 1. Descendant search — works for ytm-compact-video-renderer and most simple cards.
+      var inner = card.querySelector('a[href*="/watch"], a[href*="/shorts/"]');
       if (inner) {
-        const href = String(inner.getAttribute ? inner.getAttribute('href') : (inner.href || ''));
-        if (href) {
-          const match = href.match(/[?&]v=([^&/#]+)/);
-          if (match && match[1]) {
-            console.log('[MW-MVP-HREF-KEY-DESCENDANT-HIT]', 'cardNodeId=' + getDiagNodeId(card), 'key=' + String(match[1]));
-            return String(match[1]);
-          }
+        var key = extractIdFromHref(getHref(inner));
+        if (key) {
+          console.log('[MW-MVP-HREF-KEY-DESCENDANT-HIT]', 'cardNodeId=' + getDiagNodeId(card), 'key=' + key);
+          return key;
         }
       }
-      const outer = (typeof card.closest === 'function') ? card.closest('a[href*="/watch"]') : null;
+
+      // 2. Ancestor search — card is itself inside an <a> (some embed layouts).
+      var outer = (typeof card.closest === 'function')
+        ? card.closest('a[href*="/watch"], a[href*="/shorts/"]')
+        : null;
       if (outer) {
-        const href = String(outer.getAttribute ? outer.getAttribute('href') : (outer.href || ''));
-        if (href) {
-          const match = href.match(/[?&]v=([^&/#]+)/);
-          if (match && match[1]) {
-            console.log('[MW-MVP-HREF-KEY-ANCESTOR-HIT]', 'cardNodeId=' + getDiagNodeId(card), 'key=' + String(match[1]));
-            return String(match[1]);
+        var key = extractIdFromHref(getHref(outer));
+        if (key) {
+          console.log('[MW-MVP-HREF-KEY-ANCESTOR-HIT]', 'cardNodeId=' + getDiagNodeId(card), 'key=' + key);
+          return key;
+        }
+      }
+
+      // 3. Home-feed fallback: yt-lockup-view-model may shadow-scope its <a>, so walk up
+      // to the outer ytm-rich-item-renderer / ytd-rich-item-renderer and search there.
+      // This is a read-only DOM query — no state changes, zero regression risk.
+      var richItem = (typeof card.closest === 'function')
+        ? (card.closest('ytm-rich-item-renderer') || card.closest('ytd-rich-item-renderer'))
+        : null;
+      if (richItem && typeof richItem.querySelector === 'function') {
+        var richInner = richItem.querySelector('a[href*="/watch"], a[href*="/shorts/"]');
+        if (richInner) {
+          var key = extractIdFromHref(getHref(richInner));
+          if (key) {
+            console.log('[DIAG][HOME_FEED_REVEAL] href_key_via_rich_item', 'cardNodeId=' + getDiagNodeId(card), 'richNodeId=' + getDiagNodeId(richItem), 'key=' + key);
+            return key;
           }
         }
       }
@@ -8526,16 +8555,18 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
     }
     if (!shortsMode && CONFIG.mvpPositiveCardOwnershipV1 && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
-      // Guard: only create an overlay if the element carries an authoritative hard-blur
-      // stamp, which proves isMvpBlurAuthorized already ran and passed at applyBlur time.
-      // We do NOT re-run the full isMvpBlurAuthorized check here because
-      // getMvpCardHrefItemKey fails for home-feed card structures that use
-      // yt-lockup-view-model (querySelector cannot find the <a> anchor), causing
-      // false-deny for valid positive thumbnails and silently preventing overlay creation.
-      // enforceRevealOverlayVisibilityGuard (called below) is the safety net against
-      // stale-DOM mismatches on recycled cards.
+      // Authorization gate for overlay creation.
+      // Fast path: an authoritative hard-blur stamp proves isMvpBlurAuthorized already ran
+      // and passed at applyBlur time. This is the common case and avoids redundant work.
+      // Slow path: if the stamp is absent (e.g. overlay heal on a <video> node that never
+      // carried the stamp), fall back to the full isMvpBlurAuthorized check — now backed by
+      // the more robust getMvpCardHrefItemKey that resolves home-feed yt-lockup-view-model
+      // cards. This keeps negative-content protection intact rather than blindly bypassing it.
       if (!isAuthoritativeHardBlur(element)) {
-        return;
+        var overlayProof = 'none';
+        if (!isMvpBlurAuthorized(element, src, getDiagItemKey(src), overlayProof, 'createRevealOverlay')) {
+          return;
+        }
       }
     }
     const attemptShortsReresolve = function(reason) {
@@ -9220,19 +9251,32 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (!_anchorGuard && typeof element.closest === 'function') {
         _anchorGuard = element.closest('a[href]');
       }
-      if (!_anchorGuard) {
+      var _cardForGuard = (typeof element.closest === 'function')
+        ? (element.closest('yt-lockup-view-model') ||
+           element.closest('ytm-rich-item-renderer') ||
+           element.closest('ytd-rich-item-renderer') ||
+           element.closest('ytm-compact-video-renderer') ||
+           element.closest('ytm-video-with-context-renderer'))
+        : null;
+      if (_cardForGuard) {
+        console.log(
+          '[DIAG][HOME_FEED_REVEAL] card_detected',
+          'cardTag=' + String(_cardForGuard.tagName || '').toLowerCase(),
+          'cardNodeId=' + getDiagNodeId(_cardForGuard),
+          'itemKey=' + itemKey,
+          'ancestorAnchorFound=' + String(!!_anchorGuard)
+        );
+      }
+      if (!_anchorGuard && _cardForGuard && typeof _cardForGuard.querySelector === 'function') {
         // Fallback for home-feed ytm-rich-item-renderer / yt-lockup-view-model where the
         // <a> navigation anchor is not an ancestor of the thumbnail but lives as a
         // sibling or child within the card. Search the nearest card container.
-        var _cardForGuard = (typeof element.closest === 'function')
-          ? (element.closest('yt-lockup-view-model') ||
-             element.closest('ytm-rich-item-renderer') ||
-             element.closest('ytm-compact-video-renderer') ||
-             element.closest('ytm-video-with-context-renderer'))
-          : null;
-        if (_cardForGuard && typeof _cardForGuard.querySelector === 'function') {
-          _anchorGuard = _cardForGuard.querySelector('a[href*="/watch"], a[href*="/shorts/"]');
-        }
+        _anchorGuard = _cardForGuard.querySelector('a[href*="/watch"], a[href*="/shorts/"]');
+        console.log(
+          '[DIAG][HOME_FEED_REVEAL] anchor_guard_fallback',
+          'cardNodeId=' + getDiagNodeId(_cardForGuard),
+          'anchorFound=' + String(!!_anchorGuard)
+        );
       }
       if (_anchorGuard && _anchorGuard.nodeType === 1) {
         overlay.__mwAnchorGuard = _anchorGuard;
