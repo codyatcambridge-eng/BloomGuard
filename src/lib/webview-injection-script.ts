@@ -3599,6 +3599,28 @@ export function generateModerationScript(config: InjectionConfig): string {
           }
         }
       }
+
+      // 4. Open Shadow DOM attempt — yt-lockup-view-model components occasionally expose
+      // an open shadowRoot. querySelector cannot cross shadow boundaries, but a direct
+      // shadowRoot.querySelector can. Closed roots return null here (harmless no-op).
+      var shadowHosts = [card];
+      if (richItem && richItem !== card) shadowHosts.push(richItem);
+      var lockup = (typeof card.closest === 'function') ? card.closest('yt-lockup-view-model') : null;
+      if (lockup && shadowHosts.indexOf(lockup) === -1) shadowHosts.push(lockup);
+      for (var s = 0; s < shadowHosts.length; s += 1) {
+        var host = shadowHosts[s];
+        var root = host && host.shadowRoot ? host.shadowRoot : null;
+        if (root && typeof root.querySelector === 'function') {
+          var shadowInner = root.querySelector('a[href*="/watch"], a[href*="/shorts/"]');
+          if (shadowInner) {
+            var key = extractIdFromHref(getHref(shadowInner));
+            if (key) {
+              console.log('[DIAG][HOME_FEED_REVEAL] href_key_via_shadow_root', 'cardNodeId=' + getDiagNodeId(card), 'hostTag=' + String(host.tagName || '').toLowerCase(), 'key=' + key);
+              return key;
+            }
+          }
+        }
+      }
     } catch (e) {}
     console.log('[MW-MVP-HREF-KEY-UNKNOWN]', 'cardNodeId=' + getDiagNodeId(card));
     return 'unknown';
@@ -6539,6 +6561,100 @@ export function generateModerationScript(config: InjectionConfig): string {
     }, true);
   }
 
+  // Document-level geometric tap interceptor.
+  // The per-card anchor guard (pointer-events:none on the card <a>) cannot defeat
+  // YouTube home-feed cards whose navigation anchor lives in a Shadow DOM
+  // (yt-lockup-view-model) — closest()/querySelector() cannot reach it, so the
+  // native WKWebView link tap fires and navigates instead of revealing.
+  // This interceptor works purely on geometry at the document capture phase, which
+  // runs BEFORE any shadow-DOM target handler or native link activation. It only
+  // acts when a tap lands on a VISIBLE .mw-reveal-btn, so it is a no-op for every
+  // other tap and cannot regress scrolling, Shorts, or normal navigation.
+  function ensureRevealTapInterceptor() {
+    if (window.__MW_REVEAL_TAP_INTERCEPTOR__) return;
+    window.__MW_REVEAL_TAP_INTERCEPTOR__ = true;
+    var pendingBtn = null;
+    var startX = 0;
+    var startY = 0;
+    var lastFireAt = 0;
+
+    var findRevealBtnAtPoint = function(x, y) {
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+      var btns = document.querySelectorAll('.mw-reveal-btn');
+      for (var i = 0; i < btns.length; i += 1) {
+        var b = btns[i];
+        if (!b || b.nodeType !== 1 || !b.isConnected) continue;
+        var st = null;
+        try { st = window.getComputedStyle(b); } catch (e) {}
+        if (st && (st.display === 'none' || st.visibility === 'hidden' || st.pointerEvents === 'none' || Number(st.opacity) === 0)) continue;
+        var r = null;
+        try { r = b.getBoundingClientRect(); } catch (e) { continue; }
+        if (!r || r.width < 1 || r.height < 1) continue;
+        var pad = 6; // fat-finger tolerance
+        if (x >= r.left - pad && x <= r.right + pad && y >= r.top - pad && y <= r.bottom + pad) {
+          return b;
+        }
+      }
+      return null;
+    };
+
+    var fireReveal = function(btn, phase) {
+      if (!btn) return;
+      lastFireAt = Date.now();
+      window.__MW_REVEAL_SYNTHETIC__ = true;
+      try {
+        btn.dispatchEvent(new MouseEvent('click', { bubbles: false, cancelable: true, view: window }));
+      } catch (e) {
+        try { btn.click(); } catch (e2) {}
+      }
+      window.__MW_REVEAL_SYNTHETIC__ = false;
+      console.log('[DIAG][HOME_FEED_REVEAL] interceptor_fired', 'phase=' + String(phase || 'unknown'));
+    };
+
+    var onTouchStart = function(e) {
+      var t = e && e.touches && e.touches[0];
+      if (!t) { pendingBtn = null; return; }
+      var btn = findRevealBtnAtPoint(t.clientX, t.clientY);
+      if (!btn) { pendingBtn = null; return; }
+      pendingBtn = btn;
+      startX = t.clientX;
+      startY = t.clientY;
+      // Suppress the native anchor tap at the earliest possible point.
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    };
+
+    var onTouchEnd = function(e) {
+      if (!pendingBtn) return;
+      var btn = pendingBtn;
+      pendingBtn = null;
+      var t = e && e.changedTouches && e.changedTouches[0];
+      if (t) {
+        if (Math.abs(t.clientX - startX) > 14 || Math.abs(t.clientY - startY) > 14) return; // moved → scroll
+        if (!findRevealBtnAtPoint(t.clientX, t.clientY)) return; // released off the button
+      }
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      fireReveal(btn, 'touchend');
+    };
+
+    var onClick = function(e) {
+      if (window.__MW_REVEAL_SYNTHETIC__) return; // our own dispatch → let it reach the button
+      var btn = findRevealBtnAtPoint(e.clientX, e.clientY);
+      if (!btn) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (Date.now() - lastFireAt < 400) return; // debounce same-gesture native click
+      fireReveal(btn, 'click');
+    };
+
+    document.addEventListener('touchstart', onTouchStart, { capture: true, passive: false });
+    document.addEventListener('touchend', onTouchEnd, { capture: true, passive: false });
+    document.addEventListener('click', onClick, { capture: true });
+    window.__MW_REVEAL_TAP_HANDLERS__ = { touchstart: onTouchStart, touchend: onTouchEnd, click: onClick };
+    console.log('[DIAG][HOME_FEED_REVEAL] interceptor_installed');
+  }
+
   function ensureRevealPortal() {
     let portal = document.getElementById(REVEAL_PORTAL_ID);
     if (portal) return portal;
@@ -8637,6 +8753,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       ' hasOverlay=' + (element.dataset.mwHasOverlay === 'true')
     );
     ensureRevealDocClickCapture();
+    ensureRevealTapInterceptor();
     if (element.dataset.mwModerated !== 'blurred') {
       removeRevealOverlay(element, src, 'createRevealOverlay_not_blurred');
       if (DIAG_YT_BLUR) {
@@ -9272,10 +9389,15 @@ export function generateModerationScript(config: InjectionConfig): string {
         // <a> navigation anchor is not an ancestor of the thumbnail but lives as a
         // sibling or child within the card. Search the nearest card container.
         _anchorGuard = _cardForGuard.querySelector('a[href*="/watch"], a[href*="/shorts/"]');
+        // Open Shadow DOM attempt (closed roots return null → harmless).
+        if (!_anchorGuard && _cardForGuard.shadowRoot && typeof _cardForGuard.shadowRoot.querySelector === 'function') {
+          _anchorGuard = _cardForGuard.shadowRoot.querySelector('a[href*="/watch"], a[href*="/shorts/"]');
+        }
         console.log(
           '[DIAG][HOME_FEED_REVEAL] anchor_guard_fallback',
           'cardNodeId=' + getDiagNodeId(_cardForGuard),
-          'anchorFound=' + String(!!_anchorGuard)
+          'anchorFound=' + String(!!_anchorGuard),
+          'viaShadow=' + String(!!(_anchorGuard && _cardForGuard.shadowRoot && _cardForGuard.shadowRoot.contains && _cardForGuard.shadowRoot.contains(_anchorGuard)))
         );
       }
       if (_anchorGuard && _anchorGuard.nodeType === 1) {
@@ -11891,6 +12013,16 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (window.__MW_BLUR_HEAL_OBSERVER__) {
       try { window.__MW_BLUR_HEAL_OBSERVER__.disconnect(); } catch (e) {}
       window.__MW_BLUR_HEAL_OBSERVER__ = null;
+    }
+    if (window.__MW_REVEAL_TAP_HANDLERS__) {
+      try {
+        const h = window.__MW_REVEAL_TAP_HANDLERS__;
+        document.removeEventListener('touchstart', h.touchstart, { capture: true });
+        document.removeEventListener('touchend', h.touchend, { capture: true });
+        document.removeEventListener('click', h.click, { capture: true });
+      } catch (e) {}
+      window.__MW_REVEAL_TAP_HANDLERS__ = null;
+      window.__MW_REVEAL_TAP_INTERCEPTOR__ = false;
     }
     window.__MW_ACTIVE__ = false;
   }
