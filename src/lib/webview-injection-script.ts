@@ -688,19 +688,29 @@ export function generateModerationScript(config: InjectionConfig): string {
     const rawPushState = history.pushState;
     const rawReplaceState = history.replaceState;
 
+    // Drive SPA-nav re-scan immediately instead of waiting for the 1200ms poll.
+    // checkUrlChange self-guards on href !== lastUrl, so calling it here AND from
+    // the poll is idempotent (no double rescan). This removes the ~1.2s window
+    // where blur is absent after Home->Watch->Back style transitions.
+    const triggerNavRescan = function(reason) {
+      try {
+        if (typeof checkUrlChange === 'function') checkUrlChange();
+      } catch (e) {}
+    };
+
     history.pushState = function() {
       const result = rawPushState.apply(this, arguments);
-      setTimeout(function() { sendBlurReady('pushState'); }, 0);
+      setTimeout(function() { sendBlurReady('pushState'); triggerNavRescan('pushState'); }, 0);
       return result;
     };
 
     history.replaceState = function() {
       const result = rawReplaceState.apply(this, arguments);
-      setTimeout(function() { sendBlurReady('replaceState'); }, 0);
+      setTimeout(function() { sendBlurReady('replaceState'); triggerNavRescan('replaceState'); }, 0);
       return result;
     };
 
-    window.addEventListener('popstate', function() { sendBlurReady('popstate'); });
+    window.addEventListener('popstate', function() { sendBlurReady('popstate'); triggerNavRescan('popstate'); });
     window.addEventListener('hashchange', function() { sendBlurReady('hashchange'); });
     window.addEventListener('pageshow', function() { sendBlurReady('pageshow'); });
     window.addEventListener('load', function() { sendBlurReady('load'); });
