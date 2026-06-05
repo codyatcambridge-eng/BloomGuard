@@ -11766,6 +11766,62 @@ export function generateModerationScript(config: InjectionConfig): string {
     scheduleInitTimeout('initialYouTubeScan', scanYouTubeThumbnails, 6000);
   }
 
+  // COLD-START SCAN ENSURE (paused-independent).
+  // ROOT CAUSE this fixes: timerState.paused is seeded from document.visibilityState
+  // (paused = document.visibilityState !== 'visible'). On a cold launch the WebView is
+  // frequently injected while the document is not yet 'visible', so paused=true — which
+  // makes scheduleInitTimeout AND every periodic scan bail. The page then gets only the
+  // single immediate scanFullPage() above; if that runs before the home-feed cards hydrate
+  // or the classifier is ready, blur never appears until a navigation triggers
+  // checkUrlChange()'s fresh scan (the reported "only blurs after tapping search"). These
+  // bounded retries call the existing scan functions DIRECTLY so they run regardless of the
+  // paused gate, restoring the multi-attempt cold-start scanning the working baseline had.
+  // Idempotent via state.scanned/safeResolved dedup; stops on teardown; touches no Shorts,
+  // reveal, epoch, or blur-application logic.
+  [900, 2200, 4200, 6500].forEach(function(delayMs) {
+    const coldId = setTimeout(function() {
+      timerState.initialTimeouts = timerState.initialTimeouts.filter(t => t !== coldId);
+      if (timerState.teardownDone) return;
+      console.log(
+        '[MW][ColdStartScan] retry',
+        'delay=' + delayMs,
+        'paused=' + timerState.paused,
+        'visibility=' + document.visibilityState,
+        'url=' + window.location.href.substring(0, 80)
+      );
+      try { scanFullPage(); } catch (e) {}
+      if (isYT) { try { scanYouTubeThumbnails(); } catch (e) {} }
+    }, delayMs);
+    timerState.initialTimeouts.push(coldId);
+  });
+
+  // NUCLEAR COLD-START BLUR GUARANTEE (paused-decoupled, self-disabling).
+  // Bridges the paused-stuck cold-start window so blur engages on ANY page from launch
+  // despite the iOS WebView visibilityState quirk that leaves the scan engine paused
+  // until the user interacts. It does work ONLY while timerState.paused is true (the bug
+  // state) AND the page is not active Shorts; the instant the normal engine goes live
+  // (paused=false) it is a zero-cost no-op. Self-terminates on teardown. Calls only the
+  // existing scan functions (idempotent via scanned-dedup; reveal preserved because
+  // applyBlur skips revealed src). Touches no pause/resume/teardown, Shorts, reveal,
+  // epoch, or blur-application logic.
+  timerState.coldStartGuaranteeInterval = setInterval(function() {
+    if (timerState.teardownDone) {
+      clearInterval(timerState.coldStartGuaranteeInterval);
+      timerState.coldStartGuaranteeInterval = null;
+      return;
+    }
+    if (!timerState.paused) return;     // normal engine live -> do nothing
+    if (isShortsModeActive()) return;   // never touch active Shorts
+    console.log(
+      '[MW][ColdStartGuarantee] scan',
+      'paused=' + timerState.paused,
+      'visibility=' + document.visibilityState,
+      'url=' + window.location.href.substring(0, 80)
+    );
+    try { scanFullPage(); } catch (e) {}
+    if (isYT) { try { scanYouTubeThumbnails(); } catch (e) {} }
+  }, 2500);
+
   function startYouTubePeriodicScan(reason) {
     if (!isYT || timerState.paused || timerState.youtubePeriodicInterval) return;
     timerState.youtubePeriodicInterval = setInterval(scanYouTubeThumbnails, 5000);
@@ -12058,6 +12114,130 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   hydrateRevealStateFromStorage();
   startManagedTimers('init');
+
+  // NUCLEAR STARTUP RESUME (cold-start blur guarantee).
+  // The host only injects into a WebView it is actively presenting, so an injected page IS
+  // foreground content. But on iOS the in-app WebView can report document.visibilityState
+  // !== 'visible' at injection, seeding timerState.paused=true and leaving the scan engine
+  // dormant until the user interacts (the "blurs only after tapping search" symptom). If the
+  // engine is still paused shortly after init, force it live and kick a scan so blur appears
+  // on the FIRST page with no interaction. Never touches active Shorts (sacred lifecycle);
+  // pause-on-genuine-background still works via the visibilitychange handler below.
+  (function() {
+    var forceResumeTries = 0;
+    var forceResumeId = setInterval(function() {
+      forceResumeTries += 1;
+      if (timerState.teardownDone || forceResumeTries > 6) { clearInterval(forceResumeId); return; }
+      if (!timerState.paused) { clearInterval(forceResumeId); return; }
+      if (isShortsModeActive()) return; // leave active Shorts to its own lifecycle
+      console.log('[MW][ForceResume] engine_was_paused resuming', 'visibility=' + document.visibilityState, 'try=' + forceResumeTries);
+      resumeManagedTimers('cold_start_force_resume');
+      try { scanFullPage(); } catch (e) {}
+      if (isYT) { try { scanYouTubeThumbnails(); } catch (e) {} }
+      clearInterval(forceResumeId);
+    }, 1200);
+  })();
+
+  // COLD-START MODEL-READINESS WATCHDOG (self-contained).
+  // ROOT CAUSE this fixes: the host NSFWJS / TensorFlow.js model is often NOT loaded when the
+  // first scans fire on cold launch. Those requests time out (requestTimeout=8s) and the
+  // FAIL-OPEN path marks the thumbnails 'timeout-safe' + markSafeResolved() (2-min TTL), so
+  // the home feed stays UN-blurred until a navigation — the classic "req>0 res=0, no blur on
+  // open" symptom. This watchdog watches the request/response counters: while requests have
+  // been sent but NO results have come back (model still loading), it clears the cold-start
+  // suppression and re-issues a clean scan; the moment results start flowing (model ready) it
+  // does one recovery rescan and stops. Bounded checkpoints (<=5); excludes active Shorts;
+  // preserves authoritative blur (does NOT clear state.blurred or hard-blur stamps), revealed
+  // state, epoch, or any reveal/positive function — only re-drives the request pipeline.
+  var mwStartupState = 'init'; // init | waiting-model | ok
+  function mwColdStartRescan(reason) {
+    try {
+      if (batchTimer) { clearTimeout(batchTimer); batchTimer = null; }
+      batchQueue = [];
+      state.pendingRequests.forEach(function(r) { if (r && r.timeoutId) clearTimeout(r.timeoutId); });
+      state.pendingRequests.clear();
+      state.pending.forEach(function(_item, itemId) { clearPendingItem(itemId, 'startup_rescan'); });
+      state.pendingBySrc.clear();
+      // Clear the cold-start suppression so timed-out items get re-requested. Authoritative
+      // blur (state.blurred + node hard-blur stamps) and revealed state are left untouched.
+      state.scanned.clear();
+      state.safeResolved.clear();
+      state.safeResolvedAt.clear();
+      var stale = document.querySelectorAll('[data-mw-moderated="timeout-safe"]');
+      for (var i = 0; i < stale.length; i += 1) {
+        try { stale[i].removeAttribute('data-mw-moderated'); } catch (e) {}
+      }
+    } catch (e) {}
+    console.log('[MW][StartupBlur] rescan', 'reason=' + reason);
+    try { scanFullPage(); } catch (e) {}
+    if (isYT) { try { scanYouTubeThumbnails(); } catch (e) {} }
+  }
+  (function mwStartupWatchdog() {
+    var settled = false;
+    [1500, 3500, 6000, 9000, 13000].forEach(function(delay) {
+      setTimeout(function() {
+        if (timerState.teardownDone || settled) return;
+        var s = state.stats || {};
+        var req = s.requestsSent || 0;
+        var res = s.responsesReceived || 0;
+        if (res > 0) {
+          // Model is answering — recover anything stuck from the not-ready window, then stop.
+          settled = true;
+          mwStartupState = 'ok';
+          mwColdStartRescan('model_ready_recover');
+          console.log('[MW][StartupBlur] startup:ok', 'req=' + req, 'res=' + res);
+          return;
+        }
+        if (req > 0 && !isShortsModeActive()) {
+          // Requests sent but nothing classified yet -> model still loading. Re-issue.
+          mwStartupState = 'waiting-model';
+          console.log('[MW][StartupBlur] startup:waiting-model', 'req=' + req, 'res=' + res, 'atMs=' + delay);
+          mwColdStartRescan('model_not_ready_retry');
+        }
+      }, delay);
+    });
+  })();
+
+  // DIAGNOSTIC HUD (removable). Paints a tiny live status badge so cold-start behavior is
+  // visible without a console: build tag (proves fresh code), visibility/paused state, and
+  // live scan/request/response/blur counts. Set window.__MW_HUD__ = false before injection to
+  // disable. Purely cosmetic; reads state only, writes no app state.
+  (function() {
+    if (window.__MW_HUD__ === false) return;
+    var BUILD_TAG = 'MW 2026-06-05 cold-start-HUD';
+    var hud = document.createElement('div');
+    hud.id = 'mw-diag-hud';
+    hud.style.cssText = [
+      'position:fixed', 'top:6px', 'right:6px', 'z-index:2147483647',
+      'background:rgba(0,0,0,0.80)', 'color:#3f6', 'font:11px/1.3 monospace',
+      'padding:5px 7px', 'border-radius:6px', 'pointer-events:none',
+      'white-space:normal', 'max-width:62vw'
+    ].join(';');
+    function paint() {
+      if (timerState.teardownDone) return;
+      try {
+        var s = state.stats || {};
+        hud.textContent =
+          BUILD_TAG +
+          ' | startup=' + mwStartupState +
+          ' | vis=' + document.visibilityState +
+          ' paused=' + timerState.paused +
+          ' | scanned=' + (state.scanned ? state.scanned.size : '?') +
+          ' req=' + (s.requestsSent || 0) +
+          ' res=' + (s.responsesReceived || 0) +
+          ' blur=' + (s.blurred || 0) +
+          ' err=' + (s.errors || 0);
+      } catch (e) {}
+    }
+    function attach() {
+      if (timerState.teardownDone) return;
+      if (!document.body) { setTimeout(attach, 200); return; }
+      if (!document.getElementById('mw-diag-hud')) { document.body.appendChild(hud); }
+      paint();
+    }
+    attach();
+    setInterval(paint, 1000);
+  })();
 
   // Expose debug API
   window.__MW_DEBUG__ = {

@@ -2277,6 +2277,16 @@ export const NativeWebViewBrowser = () => {
     if (didInjectAfterSettingsLoadedRef.current) return;
 
     const urlHint = webViewState.currentUrl || currentUrlRef.current || 'about:blank';
+    // COLD-START FIX: on first launch the WebView opens before the real page URL
+    // commits (currentUrl is still '' / about:blank), while settings finish loading
+    // late. If we burn the one-shot latch here, injectModerationScript bootstrap_skips
+    // and the home feed never receives the script until an unrelated navigation
+    // (e.g. /results) re-triggers onLoadStart/onLoadEnd. Defer instead so this effect
+    // re-fires when webViewState.currentUrl commits to the real first page.
+    if (isBootstrapBlankUrl(urlHint)) {
+      console.log('[MW-Inject][SettingsLoadedReinject] defer_bootstrap_blank', 'url=' + urlHint.substring(0, 80));
+      return;
+    }
     didInjectAfterSettingsLoadedRef.current = true;
     console.log(
       '[MW-Inject][SettingsLoadedReinject]',
@@ -2284,7 +2294,17 @@ export const NativeWebViewBrowser = () => {
       'isOpen=' + webViewState.isOpen,
       'url=' + urlHint.substring(0, 80),
     );
-    injectModerationScript(executeScript, 'settings_loaded_reinject', urlHint).catch(() => undefined);
+    injectModerationScript(executeScript, 'settings_loaded_reinject', urlHint)
+      .then(() => {
+        // If the dispatch was internally skipped (in-flight / dedup), re-arm the
+        // one-shot so a later currentUrl/executeScript change retries. Never weakens
+        // the existing path: on success injectionDoneRef is already true and this no-ops.
+        if (!injectionDoneRef.current) {
+          didInjectAfterSettingsLoadedRef.current = false;
+          console.log('[MW-Inject][SettingsLoadedReinject] rearm_not_done', 'url=' + urlHint.substring(0, 80));
+        }
+      })
+      .catch(() => { didInjectAfterSettingsLoadedRef.current = false; });
   }, [
     ENABLE_SIGNAL_PIPELINE,
     settingsLoaded,
@@ -2292,6 +2312,82 @@ export const NativeWebViewBrowser = () => {
     webViewState.isOpen,
     webViewState.currentUrl,
     executeScript,
+    injectModerationScript,
+  ]);
+
+  // COLD-START / FIRST-LOAD INJECTION SAFETY NET (authoritative backstop).
+  // ROOT CAUSE this defends against: every injection trigger (onLoadEnd, reinjectTimer,
+  // settings-loaded catch-up) keys off the host-tracked currentUrl. On a cold launch the
+  // WebView emits an intermediate about:blank urlChangeEvent that clobbers currentUrl
+  // (useNativeWebView urlChangeEvent), and because the first YouTube page was the *opening*
+  // URL there is no later urlChangeEvent to restore it — so currentUrl stays bootstrap-blank
+  // while the visible page is the real home feed. Every guard then sees "blank" and refuses
+  // to inject until the user navigates (search bar), which finally emits a real urlChangeEvent.
+  // To make injection deterministic we resolve the target URL from the WEBVIEW'S OWN
+  // window.location.href whenever the host-tracked URL is unreliable, then re-drive the
+  // EXISTING injectModerationScript until injection is confirmed. Purely additive: stops the
+  // instant injectionDoneRef is true (so it no-ops on already-injected/healthy surfaces), and
+  // a redundant call only runs the existing host-context epoch-sync — it never tears down or
+  // re-applies blur. It touches no blur, reveal, Shorts, or epoch logic.
+  useEffect(() => {
+    if (!ENABLE_SIGNAL_PIPELINE) return;
+    if (!isNative || !webViewState.isOpen || !executeScript) return;
+    if (!settingsLoaded || !isRuntimeModerationEnabled || !webViewListenersAttached) return;
+    if (injectionDoneRef.current) return;
+
+    let cancelled = false;
+    let attempts = 0;
+    const maxAttempts = 10;
+
+    // Use the WebView's real location when the host-tracked URL is blank/stale, so a real
+    // page that arrived as the opening URL is never skipped. Does NOT mutate the shared
+    // currentUrl refs/state — it only sources a reliable target for this injection.
+    const resolveTargetUrl = async (): Promise<string> => {
+      const tracked = webViewState.currentUrl || currentUrlRef.current || '';
+      if (!isBootstrapBlankUrl(tracked)) return tracked;
+      try {
+        const raw = await executeScript(
+          '(function(){try{return JSON.stringify(window.location.href);}catch(e){return "";}})();',
+        );
+        let real = '';
+        try { real = String(JSON.parse(String(raw || '""')) || ''); }
+        catch { real = String(raw || '').replace(/^"|"$/g, ''); }
+        if (real && !isBootstrapBlankUrl(real)) return real;
+      } catch { /* fall through and retry next tick */ }
+      return tracked;
+    };
+
+    const tick = async () => {
+      if (cancelled || injectionDoneRef.current || attempts >= maxAttempts) {
+        clearInterval(timer);
+        return;
+      }
+      attempts += 1;
+      const urlHint = await resolveTargetUrl();
+      if (isBootstrapBlankUrl(urlHint)) {
+        console.log('[MW-Inject][ColdStartEnsure] await_real_url', 'attempt=' + attempts);
+        return; // WebView still on about:blank; retry on the next tick.
+      }
+      console.log(
+        '[MW-Inject][ColdStartEnsure]',
+        'attempt=' + attempts,
+        'navId=' + activeNavIdRef.current,
+        'url=' + urlHint.substring(0, 80),
+      );
+      void injectModerationScript(executeScript, 'cold_start_injection_ensure', urlHint);
+    };
+
+    const timer = setInterval(() => { void tick(); }, 700);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [
+    ENABLE_SIGNAL_PIPELINE,
+    isNative,
+    webViewState.isOpen,
+    webViewState.currentUrl,
+    executeScript,
+    settingsLoaded,
+    isRuntimeModerationEnabled,
+    webViewListenersAttached,
     injectModerationScript,
   ]);
 

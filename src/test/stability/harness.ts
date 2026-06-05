@@ -190,6 +190,8 @@ export interface MWTestProbe {
     itemId: string,
     mvpProof?: string,
   ) => void;
+  /** Cold-start model-readiness rescan (re-issues the request pipeline). */
+  mwColdStartRescan: (reason: string) => void;
 }
 
 export interface InjectionResult {
@@ -240,6 +242,7 @@ export function injectScript(): InjectionResult {
     diagNonShortsReattach: diagNonShortsReattach,
     isYouTubeMainPageThumbnailSurfaceUrl: isYouTubeMainPageThumbnailSurfaceUrl,
     applyBlur: applyBlur,
+    mwColdStartRescan: mwColdStartRescan,
   };
   `;
 
