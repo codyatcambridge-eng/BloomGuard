@@ -51,6 +51,16 @@ These systems are **MVP-ready and working**. They are FROZEN. The default answer
 - `forceFirstEntryModerationRequest` — first-entry latch.
 - The Shorts blur-context family + epoch handling + legacy-fallback probes.
 
+### Flash Shield (sacred)
+- `ensureFlashShieldStyle` — installs the `<style id="mw-flash-shield">` veil stylesheet.
+- `markFlashShieldCandidates` — stamps `data-mw-veil="1"` on size-filtered feed thumbnails.
+
+**Contract:** flash-shield is **OFF by default**; when ON it blurs feed thumbnails via the
+`mw-flash-shield` style keyed on `data-mw-veil` + `data-mw-moderated`
+(`html.mw-flash-shield-on img[data-mw-veil="1"]:not([data-mw-moderated])`), and must clear
+off safe / revealed / timeout-safe (the `filter: none !important` clear rule wins) and never
+blur avatars (`<120x60`) or set `data-mw-moderated`.
+
 ## Frozen host contract — `src/components/browser/NativeWebViewBrowser.tsx` / `src/hooks/useNativeWebView.ts`
 - `injectModerationScript` — the epoch/nav host-context handshake.
 - `onLoadStart` / `onLoadEnd` / `onUrlChange` lifecycle wiring.
@@ -68,6 +78,10 @@ npx vitest run --config vitest.stability.config.ts
 
 Locks the sacred behaviors:
 - `src/test/stability/mvp-sacred-reveal.golden.test.ts` — reveal + stale-closure guard.
+- `src/test/stability/mvp-sacred-coldstart.golden.test.ts` — cold-start rescan safety.
+- `src/test/stability/mvp-sacred-flashshield.golden.test.ts` — flash-shield veil (OFF by default).
+- `src/test/stability/mvp-sacred-lifecycle.golden.test.ts` — owned-card ownership stamp/clear,
+  positive survival across cold-start + SPA-nav scanned-clear, reveal persistence across rescan.
 - `src/test/stability/positive-continuity.test.ts` — positive stays blurred.
 - `src/test/stability/negative-isolation.test.ts` — negatives not over-blurred.
 - `src/test/stability/shorts-contamination.test.ts` — Shorts isolation.
