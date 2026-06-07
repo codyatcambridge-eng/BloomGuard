@@ -166,6 +166,21 @@ export const ModerationSettingsPanel = ({ compact = false }: ModerationSettingsP
         />
       </div>
 
+      {/* Flash Shield toggle */}
+      <div className="flex items-center justify-between py-3 border-t border-border">
+        <div className="flex items-center gap-2">
+          <Zap className="w-4 h-4 text-muted-foreground" />
+          <div>
+            <Label className="text-sm font-medium">Flash Shield (pre-paint blur)</Label>
+            <p className="text-xs text-muted-foreground">Blur thumbnails before they paint</p>
+          </div>
+        </div>
+        <Switch
+          checked={settings.flash_shield_enabled}
+          onCheckedChange={(checked) => updateSetting('flash_shield_enabled', checked)}
+        />
+      </div>
+
       {/* Status info */}
       <div className="p-3 bg-muted/50 rounded-lg">
         <div className="flex items-center gap-2">

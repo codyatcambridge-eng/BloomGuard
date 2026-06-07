@@ -192,6 +192,10 @@ export interface MWTestProbe {
   ) => void;
   /** Cold-start model-readiness rescan (re-issues the request pipeline). */
   mwColdStartRescan: (reason: string) => void;
+  /** Flash Shield V1: install the veil <style id="mw-flash-shield">. */
+  ensureFlashShieldStyle: () => void;
+  /** Flash Shield V1: stamp data-mw-veil="1" on size-filtered feed thumbnails. */
+  markFlashShieldCandidates: (root?: Element | Document) => void;
 }
 
 export interface InjectionResult {
@@ -213,7 +217,12 @@ export interface InjectionResult {
  * Window URL is pre-configured by vitest.stability.config.ts to
  * https://m.youtube.com/ — no location stub needed here.
  */
-export function injectScript(): InjectionResult {
+export interface InjectScriptOverrides {
+  /** Enable Flash Shield V1 (default OFF — mirrors production default). */
+  flashShieldV1?: boolean;
+}
+
+export function injectScript(overrides: InjectScriptOverrides = {}): InjectionResult {
   // Reset any previous injection
   (window as Record<string, unknown>).__MW_ACTIVE__ = false;
   delete (window as Record<string, unknown>).__MW_NON_SHORTS_REATTACH_CONTEXT__;
@@ -232,6 +241,7 @@ export function injectScript(): InjectionResult {
     nonce: TEST_NONCE,
     blockingMode: 'mvp',
     pageEpoch: TEST_PAGE_EPOCH,
+    flashShieldV1: overrides.flashShieldV1 === true,
   });
 
   // Inject probe code before the IIFE's closing return — production file untouched.
@@ -243,6 +253,8 @@ export function injectScript(): InjectionResult {
     isYouTubeMainPageThumbnailSurfaceUrl: isYouTubeMainPageThumbnailSurfaceUrl,
     applyBlur: applyBlur,
     mwColdStartRescan: mwColdStartRescan,
+    ensureFlashShieldStyle: ensureFlashShieldStyle,
+    markFlashShieldCandidates: markFlashShieldCandidates,
   };
   `;
 

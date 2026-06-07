@@ -1240,7 +1240,11 @@ export const NativeWebViewBrowser = () => {
       'reason=' + reason,
     );
     // Full moderation script: request scanning + host bridge + DOM blur/reveal behavior.
-    const mainScript = generateModerationScript(config);
+    // When the diagnostics toggle is on, surface the on-device cold-start HUD. This MUST be set
+    // before the IIFE runs, since the injection script reads window.__MW_HUD__ once at startup
+    // (runtime enable is also available via window.__MW_ENABLE_HUD__() in Web Inspector).
+    const hudPrelude = config.diagYouTubeShorts ? 'try{window.__MW_HUD__=true;}catch(e){}\n' : '';
+    const mainScript = hudPrelude + generateModerationScript(config);
     const noHookFallbackKey = [
       String(navId),
       String(webViewPageEpochRef.current),

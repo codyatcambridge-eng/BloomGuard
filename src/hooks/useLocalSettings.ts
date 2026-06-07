@@ -45,6 +45,7 @@ export interface LocalProtectionSettings {
   // MVP settings
   blocking_mode: BlockingMode;
   prototype_mode: boolean; // Show labeling UI on reveal
+  flash_shield_enabled: boolean; // Pre-paint blur (Flash Shield V1)
   // Page-level overlay policy tuning
   hard_overlay_confidence_threshold: number;
   soft_overlay_ratio_threshold: number;
@@ -80,6 +81,7 @@ const DEFAULT_SETTINGS: LocalProtectionSettings = {
   // MVP: Only block shirtless and swimwear
   blocking_mode: 'mvp',
   prototype_mode: false,
+  flash_shield_enabled: false, // Default OFF — pre-paint blur opt-in
   hard_overlay_confidence_threshold: 0.85,
   soft_overlay_ratio_threshold: 0.5,
   soft_overlay_min_hits: 4,
@@ -284,6 +286,7 @@ export const useLocalSettings = () => {
       nonce: sessionNonceRef.current,
       blockingMode: settings.blocking_mode,
       prototypeMode: settings.prototype_mode,
+      flashShieldV1: settings.flash_shield_enabled,
       triggers: triggers || {},
       segmentation: {
         enabled: segmentationSignalResolution.enabled,
@@ -306,6 +309,7 @@ export const useLocalSettings = () => {
     settings.debug_mode,
     settings.blocking_mode,
     settings.prototype_mode,
+    settings.flash_shield_enabled,
     segmentationSignalResolution.enabled,
     settings.segmentationGrayZoneOnly,
     settings.segmentationThrottleMs,

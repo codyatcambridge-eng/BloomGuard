@@ -34,6 +34,7 @@ export interface InjectionConfig {
   pageEpoch?: number;
   diagYouTubeShorts?: boolean;
   enableShortsHealthHeal?: boolean;
+  flashShieldV1?: boolean;
 }
 
 export interface FailOpenModePolicyInput {
@@ -206,6 +207,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     batchDelay: 100,
     requestTimeout: 8000,
     mvpPositiveCardOwnershipV1: true,
+    flashShieldV1: ${config.flashShieldV1 === true},
   };
 
   // Threshold mappings for blur dial levels.
@@ -570,6 +572,53 @@ export function generateModerationScript(config: InjectionConfig): string {
       '}',
     ].join('');
     (document.head || document.documentElement || document.body || document.documentElement).appendChild(style);
+  }
+
+  // FLASH SHIELD V1 (fail-closed pre-paint blur veil).
+  // Default OFF (gated on CONFIG.flashShieldV1). When ON, feed thumbnails are blurred by
+  // default via CSS so cold-start blur is deterministic regardless of scan timing; the EXISTING
+  // moderation pipeline clears the veil the instant it sets data-mw-moderated safe/revealed/
+  // timeout-safe, and keeps the hard blur for positives. These functions only ADD a style tag,
+  // a documentElement class, and a data-mw-veil stamp; they never set data-mw-moderated.
+  const FLASH_SHIELD_STYLE_ID = 'mw-flash-shield';
+  const FLASH_SHIELD_CLASS = 'mw-flash-shield-on';
+  function ensureFlashShieldStyle() {
+    if (document.getElementById(FLASH_SHIELD_STYLE_ID)) return;
+    const style = document.createElement('style');
+    style.id = FLASH_SHIELD_STYLE_ID;
+    style.textContent = [
+      'html.' + FLASH_SHIELD_CLASS + ' img[data-mw-veil="1"]:not([data-mw-moderated]) {',
+      'filter: blur(20px) !important;',
+      '-webkit-filter: blur(20px) !important;',
+      'transition: filter .15s ease;',
+      '}',
+      'html.' + FLASH_SHIELD_CLASS + ' img[data-mw-moderated="safe"],',
+      'html.' + FLASH_SHIELD_CLASS + ' img[data-mw-moderated="revealed"],',
+      'html.' + FLASH_SHIELD_CLASS + ' img[data-mw-moderated="timeout-safe"] {',
+      'filter: none !important;',
+      '-webkit-filter: none !important;',
+      '}',
+    ].join('');
+    (document.head || document.documentElement || document.body || document.documentElement).appendChild(style);
+  }
+
+  function markFlashShieldCandidates(root) {
+    if (!CONFIG.flashShieldV1) return;
+    try {
+      const scope = root || document;
+      const imgs = scope.querySelectorAll(
+        'yt-lockup-view-model img, yt-lockup-view-model-wiz img, ytm-rich-item-renderer img, ytm-media-item img, .yt-core-image, yt-image img'
+      );
+      for (let i = 0; i < imgs.length; i += 1) {
+        const img = imgs[i];
+        if (!img || img.dataset.mwVeil === '1') continue;
+        if (img.hasAttribute('data-mw-moderated')) continue;
+        const rect = img.getBoundingClientRect();
+        if (rect.width >= 120 && rect.height >= 60) {
+          img.dataset.mwVeil = '1';
+        }
+      }
+    } catch (e) {}
   }
 
   function ensureSensitivityToggle() {
@@ -1227,6 +1276,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     debugSummaryInterval: null,
     diagHeartbeatInterval: null,
     shortsHealthHealInterval: null,
+    flashShieldInterval: null,
     initialTimeouts: [],
     paused: document.visibilityState !== 'visible',
     teardownDone: false,
@@ -10643,13 +10693,23 @@ export function generateModerationScript(config: InjectionConfig): string {
       return;
     }
     
-    img.dataset.mwScanned = 'true';
-    img.dataset.mwLastScanSrc = src;
     img.dataset.mwOrigSrc = src;
-    
+
     const queued = queueForScan(src, img, 'img');
     diagScanRunLog('scanImgElement', img, src, queued, 'sourceType=img');
     if (queued) {
+      // COLD-START FIX: only mark the image scanned once it is ACTUALLY accepted into the
+      // pipeline. Previously mwScanned/mwLastScanSrc were stamped before queueForScan ran, so a
+      // home-feed <img> that was still 0x0 (not yet laid out on cold launch) got rejected by the
+      // tiny-image guard (getElementDimensions -> 0, < minImageSize) yet was left stamped
+      // mwScanned='true'. Every subsequent cold-start retry then hit the duplicate-src dedup
+      // above and bailed, so the thumbnail was NEVER re-queued once it gained real dimensions —
+      // the first YouTube home feed never blurred until a navigation cleared state. Stamping only
+      // on a successful queue lets transiently-skipped (0x0 / capped / rate-limited) images be
+      // re-evaluated on the next scan pass; genuinely-skipped tiny/avatar images bail before the
+      // rate limiter so re-evaluation stays cheap, and queued images are still deduped normally.
+      img.dataset.mwScanned = 'true';
+      img.dataset.mwLastScanSrc = src;
       state.stats.imgTags++;
     }
   }
@@ -12051,6 +12111,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     timerState.teardownDone = true;
     pauseManagedTimers(reason || 'teardown');
     stopAdaptiveShortsOverlayWatch('teardown:' + (reason || 'unknown'));
+    if (timerState.flashShieldInterval) {
+      clearInterval(timerState.flashShieldInterval);
+      timerState.flashShieldInterval = null;
+    }
     if (timerState.mainScrollHandler) {
       window.removeEventListener('scroll', timerState.mainScrollHandler);
       timerState.mainScrollHandler = null;
@@ -12115,6 +12179,29 @@ export function generateModerationScript(config: InjectionConfig): string {
   hydrateRevealStateFromStorage();
   startManagedTimers('init');
 
+  // FLASH SHIELD V1 init hookup (additive, default OFF). When the flag is on, install the veil
+  // style + documentElement class so feed thumbnails blur by default, stamp current candidates,
+  // and run a short bounded poll so lazily-inserted cold-start thumbnails also get veiled.
+  if (CONFIG.flashShieldV1) {
+    try {
+      ensureFlashShieldStyle();
+      document.documentElement.classList.add(FLASH_SHIELD_CLASS);
+      markFlashShieldCandidates(document);
+      var flashShieldTicks = 0;
+      timerState.flashShieldInterval = setInterval(function() {
+        flashShieldTicks += 1;
+        if (timerState.teardownDone || flashShieldTicks > 10) {
+          if (timerState.flashShieldInterval) {
+            clearInterval(timerState.flashShieldInterval);
+            timerState.flashShieldInterval = null;
+          }
+          return;
+        }
+        markFlashShieldCandidates(document);
+      }, 1200);
+    } catch (e) {}
+  }
+
   // NUCLEAR STARTUP RESUME (cold-start blur guarantee).
   // The host only injects into a WebView it is actively presenting, so an injected page IS
   // foreground content. But on iOS the in-app WebView can report document.visibilityState
@@ -12125,17 +12212,28 @@ export function generateModerationScript(config: InjectionConfig): string {
   // pause-on-genuine-background still works via the visibilitychange handler below.
   (function() {
     var forceResumeTries = 0;
-    var forceResumeId = setInterval(function() {
+    // Returns true when the interval should stop (engine live, or torn down). Returns false
+    // while it should keep retrying (e.g. transiently in active Shorts, which we never resume).
+    function attemptForceResume(via) {
+      if (timerState.teardownDone) return true;
+      if (!timerState.paused) return true;        // normal engine already live -> nothing to do
+      if (isShortsModeActive()) return false;     // leave active Shorts to its own lifecycle
       forceResumeTries += 1;
-      if (timerState.teardownDone || forceResumeTries > 6) { clearInterval(forceResumeId); return; }
-      if (!timerState.paused) { clearInterval(forceResumeId); return; }
-      if (isShortsModeActive()) return; // leave active Shorts to its own lifecycle
-      console.log('[MW][ForceResume] engine_was_paused resuming', 'visibility=' + document.visibilityState, 'try=' + forceResumeTries);
+      console.log('[MW][ForceResume] engine_was_paused resuming', 'via=' + via, 'visibility=' + document.visibilityState, 'try=' + forceResumeTries);
       resumeManagedTimers('cold_start_force_resume');
       try { scanFullPage(); } catch (e) {}
       if (isYT) { try { scanYouTubeThumbnails(); } catch (e) {} }
-      clearInterval(forceResumeId);
-    }, 1200);
+      return true;
+    }
+    // The paused gate is the #1 cold-start blocker, so attempt to clear it as early as possible
+    // (250ms) instead of waiting a full 1.2s; then a fast bounded fallback in case the eager
+    // attempt lands before body/feed hydration or before isShortsModeActive() settles.
+    setTimeout(function() { attemptForceResume('eager_250ms'); }, 250);
+    var forceResumeId = setInterval(function() {
+      if (timerState.teardownDone || forceResumeTries > 6 || attemptForceResume('interval')) {
+        clearInterval(forceResumeId);
+      }
+    }, 600);
   })();
 
   // COLD-START MODEL-READINESS WATCHDOG (self-contained).
@@ -12172,6 +12270,41 @@ export function generateModerationScript(config: InjectionConfig): string {
     try { scanFullPage(); } catch (e) {}
     if (isYT) { try { scanYouTubeThumbnails(); } catch (e) {} }
   }
+  // Full cold-start funnel string. The stage where blur dies is read directly off these:
+  //   req=0                  -> scans never issued requests (cards not hydrated / scan gated)
+  //   req>0 res=0            -> host bridge / model not answering (the classic stuck-open case)
+  //   res>0 stale>0          -> responses discarded by the epoch gate (handshake misalignment)
+  //   res>0 blur=0 stale=0   -> classifier returned negative, or applyBlur failed
+  function mwColdFunnel(s) {
+    // P0 DIAGNOSTIC: feed-thumbnail visibility vs scan coverage. If cardImg << cards, the
+    // thumbnails are hidden from querySelectorAll (closed shadow DOM / new wiz component). If
+    // thumb >> scanned, the scan is missing reachable thumbnails (selector/timing). This
+    // distinguishes "can't see the thumbnails" from "saw them but didn't blur".
+    var cards = 0, cardImg = 0, thumb = 0;
+    try {
+      var lockups = document.querySelectorAll(
+        'yt-lockup-view-model,yt-lockup-view-model-wiz,ytm-rich-item-renderer,ytm-media-item,ytm-video-with-context-renderer'
+      );
+      cards = lockups.length;
+      for (var i = 0; i < lockups.length; i += 1) {
+        if (lockups[i].querySelector('img')) cardImg += 1;
+      }
+      var imgs = document.querySelectorAll('img');
+      for (var j = 0; j < imgs.length; j += 1) {
+        var r = imgs[j].getBoundingClientRect();
+        if (r.width >= 120 && r.height >= 60) thumb += 1;
+      }
+    } catch (e) {}
+    return 'req=' + (s.requestsSent || 0) +
+      ' res=' + (s.responsesReceived || 0) +
+      ' blur=' + (s.blurred || 0) +
+      ' stale=' + (s.staleEpochDiscarded || 0) +
+      ' timeout=' + (s.timeouts || 0) +
+      ' nonceRej=' + (s.nonceRejected || 0) +
+      ' err=' + (s.errors || 0) +
+      ' scanned=' + (state.scanned ? state.scanned.size : '?') +
+      ' | cards=' + cards + ' cardImg=' + cardImg + ' thumb=' + thumb;
+  }
   (function mwStartupWatchdog() {
     var settled = false;
     [1500, 3500, 6000, 9000, 13000].forEach(function(delay) {
@@ -12180,63 +12313,82 @@ export function generateModerationScript(config: InjectionConfig): string {
         var s = state.stats || {};
         var req = s.requestsSent || 0;
         var res = s.responsesReceived || 0;
+        // Always emit the funnel so the failing stage is visible even when req===0.
+        console.log('[MW][ColdStartFunnel] t=' + delay + 'ms', 'paused=' + timerState.paused, 'vis=' + document.visibilityState, mwColdFunnel(s));
         if (res > 0) {
           // Model is answering — recover anything stuck from the not-ready window, then stop.
           settled = true;
           mwStartupState = 'ok';
           mwColdStartRescan('model_ready_recover');
-          console.log('[MW][StartupBlur] startup:ok', 'req=' + req, 'res=' + res);
+          console.log('[MW][StartupBlur] startup:ok', mwColdFunnel(s));
           return;
         }
         if (req > 0 && !isShortsModeActive()) {
           // Requests sent but nothing classified yet -> model still loading. Re-issue.
           mwStartupState = 'waiting-model';
-          console.log('[MW][StartupBlur] startup:waiting-model', 'req=' + req, 'res=' + res, 'atMs=' + delay);
+          console.log('[MW][StartupBlur] startup:waiting-model', 'atMs=' + delay, mwColdFunnel(s));
           mwColdStartRescan('model_not_ready_retry');
         }
       }, delay);
     });
   })();
 
-  // DIAGNOSTIC HUD (removable). Paints a tiny live status badge so cold-start behavior is
-  // visible without a console: build tag (proves fresh code), visibility/paused state, and
-  // live scan/request/response/blur counts. Set window.__MW_HUD__ = false before injection to
-  // disable. Purely cosmetic; reads state only, writes no app state.
+  // DIAGNOSTIC HUD (opt-in, off by default). Paints a tiny live status badge so cold-start
+  // behavior is visible without a console: build tag (proves fresh code), visibility/paused
+  // state, and the live cold-start funnel (scan/req/res/blur/stale/timeout/err). Two ways to
+  // enable, both safe and cosmetic (reads state only, writes no app state):
+  //   1. Host/pre-injection:  set window.__MW_HUD__ = true before the IIFE runs (the host wires
+  //      this to the diagnostics toggle), OR
+  //   2. Runtime:  call window.__MW_ENABLE_HUD__() from Safari Web Inspector at ANY time.
+  // (2) fixes the prior gap where __MW_HUD__ was only read once at startup, so setting it in the
+  // inspector after load never did anything. The badge also re-creates itself after SPA body
+  // swaps so it survives YouTube navigations.
   (function() {
-    if (window.__MW_HUD__ === false) return;
-    var BUILD_TAG = 'MW 2026-06-05 cold-start-HUD';
-    var hud = document.createElement('div');
-    hud.id = 'mw-diag-hud';
-    hud.style.cssText = [
-      'position:fixed', 'top:6px', 'right:6px', 'z-index:2147483647',
-      'background:rgba(0,0,0,0.80)', 'color:#3f6', 'font:11px/1.3 monospace',
-      'padding:5px 7px', 'border-radius:6px', 'pointer-events:none',
-      'white-space:normal', 'max-width:62vw'
-    ].join(';');
+    var BUILD_TAG = 'MW cold-start-HUD2 (funnel)';
+    var hud = null;
+    var hudStarted = false;
     function paint() {
-      if (timerState.teardownDone) return;
+      if (!hud || timerState.teardownDone) return;
       try {
         var s = state.stats || {};
         hud.textContent =
           BUILD_TAG +
           ' | startup=' + mwStartupState +
-          ' | vis=' + document.visibilityState +
-          ' paused=' + timerState.paused +
-          ' | scanned=' + (state.scanned ? state.scanned.size : '?') +
-          ' req=' + (s.requestsSent || 0) +
-          ' res=' + (s.responsesReceived || 0) +
-          ' blur=' + (s.blurred || 0) +
-          ' err=' + (s.errors || 0);
+          ' | vis=' + document.visibilityState + ' paused=' + timerState.paused +
+          ' | ' + mwColdFunnel(s);
       } catch (e) {}
     }
     function attach() {
       if (timerState.teardownDone) return;
-      if (!document.body) { setTimeout(attach, 200); return; }
-      if (!document.getElementById('mw-diag-hud')) { document.body.appendChild(hud); }
+      if (!document.body) { setTimeout(attach, 150); return; }
+      if (!hud || !hud.isConnected) {
+        var existing = document.getElementById('mw-diag-hud');
+        if (existing) {
+          hud = existing;
+        } else {
+          hud = document.createElement('div');
+          hud.id = 'mw-diag-hud';
+          hud.style.cssText = [
+            'position:fixed', 'top:6px', 'right:6px', 'z-index:2147483647',
+            'background:rgba(0,0,0,0.82)', 'color:#3f6', 'font:11px/1.3 monospace',
+            'padding:5px 7px', 'border-radius:6px', 'pointer-events:none',
+            'white-space:normal', 'max-width:72vw'
+          ].join(';');
+          document.body.appendChild(hud);
+        }
+      }
       paint();
     }
-    attach();
-    setInterval(paint, 1000);
+    function enableHud() {
+      if (hudStarted) { attach(); return 'HUD_ALREADY_ON'; }
+      hudStarted = true;
+      attach();
+      setInterval(attach, 1000); // attach() re-creates after a body swap, then repaints
+      console.log('[MW][HUD] enabled', BUILD_TAG);
+      return 'HUD_ENABLED';
+    }
+    window.__MW_ENABLE_HUD__ = enableHud;
+    if (window.__MW_HUD__ === true) enableHud();
   })();
 
   // Expose debug API
