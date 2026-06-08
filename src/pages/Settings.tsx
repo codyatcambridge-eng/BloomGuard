@@ -1,5 +1,6 @@
 import { Shield, DollarSign, AlertTriangle, Eye, EyeOff, Coffee, Clock, Lock } from "lucide-react";
 import { useSettings, BlurLevel } from "@/hooks/useSettings";
+import { useLocalSettings } from "@/hooks/useLocalSettings";
 import { toast } from "sonner";
 import { UTILITY_PASS_DURATIONS, UTILITY_PASS_REASONS } from "@/logic/utilityPass";
 import { useNavigate } from "react-router-dom";
@@ -7,6 +8,7 @@ import { useGateRuntime } from "@/hooks/useGateRuntime";
 
 const Settings = () => {
   const { settings, updateSetting, isLoading } = useSettings();
+  const { settings: mwLocalSettings, updateSetting: updateMwLocalSetting } = useLocalSettings();
   const navigate = useNavigate();
   const { effectiveShieldState, endPass } = useGateRuntime();
 
@@ -144,6 +146,25 @@ const Settings = () => {
           </h3>
 
           <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm text-foreground">Flash Shield (pre-paint blur)</p>
+                <p className="text-xs text-muted-foreground">Blur thumbnails on load, before AI scan - fixes blur-on-startup</p>
+              </div>
+              <button
+                onClick={() => updateMwLocalSetting('flash_shield_enabled', !mwLocalSettings.flash_shield_enabled)}
+                className={`w-12 h-7 rounded-full transition-all duration-300 ${
+                  mwLocalSettings.flash_shield_enabled ? "bg-aqua" : "bg-secondary"
+                }`}
+              >
+                <div
+                  className={`w-5 h-5 rounded-full bg-foreground transition-transform duration-300 ${
+                    mwLocalSettings.flash_shield_enabled ? "translate-x-6" : "translate-x-1"
+                  }`}
+                />
+              </button>
+            </div>
+
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm text-foreground">Block Adult Sites</p>

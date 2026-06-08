@@ -1277,6 +1277,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     diagHeartbeatInterval: null,
     shortsHealthHealInterval: null,
     flashShieldInterval: null,
+    flashShieldRafId: null,
+    flashShieldBurstRafId: null,
+    flashShieldObserver: null,
     initialTimeouts: [],
     paused: document.visibilityState !== 'visible',
     teardownDone: false,
@@ -12115,6 +12118,18 @@ export function generateModerationScript(config: InjectionConfig): string {
       clearInterval(timerState.flashShieldInterval);
       timerState.flashShieldInterval = null;
     }
+    if (timerState.flashShieldRafId) {
+      cancelAnimationFrame(timerState.flashShieldRafId);
+      timerState.flashShieldRafId = null;
+    }
+    if (timerState.flashShieldBurstRafId) {
+      cancelAnimationFrame(timerState.flashShieldBurstRafId);
+      timerState.flashShieldBurstRafId = null;
+    }
+    if (timerState.flashShieldObserver) {
+      try { timerState.flashShieldObserver.disconnect(); } catch (e) {}
+      timerState.flashShieldObserver = null;
+    }
     if (timerState.mainScrollHandler) {
       window.removeEventListener('scroll', timerState.mainScrollHandler);
       timerState.mainScrollHandler = null;
@@ -12199,6 +12214,51 @@ export function generateModerationScript(config: InjectionConfig): string {
         }
         markFlashShieldCandidates(document);
       }, 1200);
+
+      // FAST SETTLE (close the residual flash window). Feed <img>s report 0x0 while hydrating on
+      // cold start, so the size-gated markFlashShieldCandidates can't veil them at insertion —
+      // they'd otherwise paint UNBLURRED until the next 1.2s tick. Re-sweep on every animation
+      // frame for a bounded cold-start window so each thumbnail gets veiled within ~1 frame of
+      // gaining real dimensions instead of up to 1.2s later. The 1.2s interval above stays as the
+      // long safety net; this is purely additive responsiveness.
+      var flashShieldSettleStart = Date.now();
+      (function flashShieldRafSweep() {
+        if (timerState.teardownDone) { timerState.flashShieldRafId = null; return; }
+        markFlashShieldCandidates(document);
+        if (Date.now() - flashShieldSettleStart < 2500) {
+          timerState.flashShieldRafId = requestAnimationFrame(flashShieldRafSweep);
+        } else {
+          timerState.flashShieldRafId = null;
+        }
+      })();
+
+      // LONG TAIL. Infinite-scroll inserts new cards after the settle window closes. Veil them as
+      // they arrive — but inserted imgs are also 0x0 at insertion, so a single sweep would fire
+      // too early. Each batch of mutations instead kicks a short bounded rAF burst to catch the
+      // dimension settle. Coalesced via flashShieldBurstUntil so a scroll storm = one burst.
+      if (typeof MutationObserver !== 'undefined') {
+        var flashShieldBurstUntil = 0;
+        (function setupFlashShieldObserver() {
+          function flashShieldBurst() {
+            if (timerState.teardownDone) { timerState.flashShieldBurstRafId = null; return; }
+            markFlashShieldCandidates(document);
+            if (Date.now() < flashShieldBurstUntil) {
+              timerState.flashShieldBurstRafId = requestAnimationFrame(flashShieldBurst);
+            } else {
+              timerState.flashShieldBurstRafId = null;
+            }
+          }
+          var observer = new MutationObserver(function() {
+            if (timerState.teardownDone) return;
+            flashShieldBurstUntil = Date.now() + 600;
+            if (!timerState.flashShieldBurstRafId) {
+              timerState.flashShieldBurstRafId = requestAnimationFrame(flashShieldBurst);
+            }
+          });
+          observer.observe(document.documentElement, { childList: true, subtree: true });
+          timerState.flashShieldObserver = observer;
+        })();
+      }
     } catch (e) {}
   }
 

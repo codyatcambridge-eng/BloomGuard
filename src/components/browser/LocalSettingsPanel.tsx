@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { useLocalSettings } from '@/hooks/useLocalSettings';
 
 type TriggerKey =
   | 'sexualized_imagery'
@@ -59,6 +60,7 @@ const ALL_TRIGGERS: { key: TriggerKey; label: string }[] = [
 
 export default function LocalSettingsPanel() {
   const [triggers, setTriggers] = useState<Record<string, boolean>>({});
+  const { settings, updateSetting } = useLocalSettings();
 
   useEffect(() => {
     try {
@@ -85,6 +87,20 @@ export default function LocalSettingsPanel() {
 
   return (
     <div style={{ padding: 12 }}>
+      <div style={{ padding: 12, border: '1px solid #2dd4bf', borderRadius: 8, marginBottom: 16, background: 'rgba(45,212,191,0.06)' }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={!!settings.flash_shield_enabled}
+            onChange={(e) => updateSetting('flash_shield_enabled', e.target.checked)}
+            style={{ width: 18, height: 18 }}
+          />
+          <span style={{ fontWeight: 600 }}>Flash Shield — blur thumbnails on load (pre-paint)</span>
+        </label>
+        <p style={{ color: '#6b7280', margin: '6px 0 0 28px', fontSize: 13 }}>
+          Blurs feed thumbnails the instant the page paints, before AI classification. Turn ON to fix blur-on-startup; safe images un-blur once classified.
+        </p>
+      </div>
       <h3>Trigger Blocklist</h3>
       <p style={{ color: '#6b7280' }}>Select which triggers should cause moderation behavior. For MVP, blocking focuses on Shirtless & Swimwear.</p>
       <div style={{ display: 'grid', gap: 6 }}>

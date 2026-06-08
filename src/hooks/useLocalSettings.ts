@@ -81,7 +81,7 @@ const DEFAULT_SETTINGS: LocalProtectionSettings = {
   // MVP: Only block shirtless and swimwear
   blocking_mode: 'mvp',
   prototype_mode: false,
-  flash_shield_enabled: false, // Default OFF — pre-paint blur opt-in
+  flash_shield_enabled: true, // TEST: enabled for cold-start device verification (was: false opt-in)
   hard_overlay_confidence_threshold: 0.85,
   soft_overlay_ratio_threshold: 0.5,
   soft_overlay_min_hits: 4,
