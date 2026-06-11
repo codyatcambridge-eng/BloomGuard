@@ -598,6 +598,21 @@ export function generateModerationScript(config: InjectionConfig): string {
       'filter: none !important;',
       '-webkit-filter: none !important;',
       '}',
+      // ACTIVE SHORTS PLAYER veil (fail-closed). The active Short is a <video> (or poster img)
+      // inside #shorts-player ytm-reel-video-renderer, which the img-only feed rules above never
+      // match. Blur the veil-stamped active-reel media until the existing pipeline marks it
+      // safe/revealed/timeout-safe (then clear). Scoped to #shorts-player so the shelf is untouched.
+      'html.' + FLASH_SHIELD_CLASS + ' #shorts-player ytm-reel-video-renderer [data-mw-veil="1"]:not([data-mw-moderated]) {',
+      'filter: blur(24px) !important;',
+      '-webkit-filter: blur(24px) !important;',
+      'transition: filter .15s ease;',
+      '}',
+      'html.' + FLASH_SHIELD_CLASS + ' #shorts-player [data-mw-moderated="safe"],',
+      'html.' + FLASH_SHIELD_CLASS + ' #shorts-player [data-mw-moderated="revealed"],',
+      'html.' + FLASH_SHIELD_CLASS + ' #shorts-player [data-mw-moderated="timeout-safe"] {',
+      'filter: none !important;',
+      '-webkit-filter: none !important;',
+      '}',
     ].join('');
     (document.head || document.documentElement || document.body || document.documentElement).appendChild(style);
   }
@@ -618,6 +633,50 @@ export function generateModerationScript(config: InjectionConfig): string {
           img.dataset.mwVeil = '1';
         }
       }
+    } catch (e) {}
+  }
+
+  // ADDITIVE: stamp the ACTIVE Shorts player media (<video> / poster img) for the Flash Shield veil.
+  // Runs only when CONFIG.flashShieldV1 && isShortsModeActive(). Never sets data-mw-moderated and
+  // never calls the sacred Shorts blur functions — it only adds data-mw-veil="1", which the CSS rule
+  // above blurs until the existing pipeline resolves the node. Scoped to the active reel so we never
+  // veil a non-active (preloaded) Short.
+  function markFlashShieldShortsCandidate() {
+    if (!CONFIG.flashShieldV1 || !isShortsModeActive()) return;
+    try {
+      const reel = document.querySelector(
+        '#shorts-player ytm-reel-video-renderer[aria-hidden="false"], #shorts-player ytm-reel-video-renderer[is-active], #shorts-player ytm-reel-video-renderer[selected]'
+      ) || getActiveShortsPlayerContainer();
+      if (!reel || typeof reel.querySelector !== 'function') return;
+      const media = reel.querySelector('video, img');
+      if (media && media.dataset.mwVeil !== '1' && !media.hasAttribute('data-mw-moderated')) {
+        media.dataset.mwVeil = '1';
+      }
+    } catch (e) {}
+  }
+
+  // ADDITIVE: heal a missing reveal button on the active blurred Short (first-entry race). YouTube
+  // swaps the reel <video> during the classification round-trip, so the overlay can be dropped while
+  // the blur survives via reattach — leaving a blurred Short with no Reveal button. This re-creates
+  // the overlay by calling the EXISTING (frozen, unmodified) createRevealOverlay on the current live
+  // blurred node, but only if it has none. Cooldowned to avoid fighting DOM churn / reattach.
+  let shortsRevealHealAt = 0;
+  function healShortsRevealOverlay(reason) {
+    if (!isShortsModeActive() || timerState.paused || timerState.teardownDone) return;
+    const now = Date.now();
+    if (now - shortsRevealHealAt < 1500) return; // cooldown
+    try {
+      const reel = getActiveShortsPlayerContainer();
+      const node = (reel && typeof reel.querySelector === 'function')
+        ? reel.querySelector('[data-mw-moderated="blurred"]')
+        : null;
+      if (!node || !node.isConnected) return;
+      const src = (node.dataset && node.dataset.mwSrc) || '';
+      if (findRevealOverlayForElement(node, src)) return; // already has a reveal button
+      shortsRevealHealAt = now;
+      const ctx = getShortsBlurContextForNode(node);
+      createRevealOverlay(node, src, (ctx && ctx.category) || 'flagged', (node.dataset && node.dataset.mwItemId) || '', false);
+      console.log('[MW][ShortsRevealHeal] recreated overlay', 'reason=' + (reason || 'unknown'), 'nodeId=' + getDiagNodeId(node));
     } catch (e) {}
   }
 
@@ -2483,6 +2542,19 @@ export function generateModerationScript(config: InjectionConfig): string {
       : 'none';
     shortsReentryState.lastRefreshAt = now;
     shortsReentryState.lastReason = reason || 'unknown';
+    // ADDITIVE: veil the freshly-active Short immediately (Flash Shield), and run a bounded
+    // heal-burst so a positive Short gets its reveal button even after YouTube swaps the reel
+    // node mid-classification. The delays cover the async classify window; each call is internally
+    // guarded (flag/Shorts-mode/cooldown/teardown), so they are cheap no-ops when not applicable.
+    markFlashShieldShortsCandidate();
+    healShortsRevealOverlay('reentry:' + (reason || 'unknown'));
+    [700, 1600, 3000].forEach(function(delayMs) {
+      setTimeout(function() {
+        if (timerState.teardownDone) return;
+        markFlashShieldShortsCandidate();
+        healShortsRevealOverlay('reentry_delayed:' + (reason || 'unknown'));
+      }, delayMs);
+    });
     logAdaptiveShortsEvent(
       'shorts_reentry_refresh_start',
       'reason=' + (reason || 'unknown') +
@@ -6167,6 +6239,8 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function runShortsHealthHealCycle(reason) {
+    // ADDITIVE: also heal a missing reveal button on the active blurred Short (self-guarded/cooldowned).
+    healShortsRevealOverlay('health_heal_cycle:' + (reason || 'interval'));
     if (!isShortsHealthHealIntervalEligible()) return;
     const container = getActiveShortsPlayerContainer();
     if (!container || container.nodeType !== 1 || !container.isConnected) return;
@@ -12202,6 +12276,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       ensureFlashShieldStyle();
       document.documentElement.classList.add(FLASH_SHIELD_CLASS);
       markFlashShieldCandidates(document);
+      markFlashShieldShortsCandidate();
       var flashShieldTicks = 0;
       timerState.flashShieldInterval = setInterval(function() {
         flashShieldTicks += 1;
@@ -12213,6 +12288,9 @@ export function generateModerationScript(config: InjectionConfig): string {
           return;
         }
         markFlashShieldCandidates(document);
+        // Active Shorts: keep the playing reel veiled + ensure its reveal button exists.
+        markFlashShieldShortsCandidate();
+        healShortsRevealOverlay('flash_shield_interval');
       }, 1200);
 
       // FAST SETTLE (close the residual flash window). Feed <img>s report 0x0 while hydrating on

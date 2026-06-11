@@ -196,6 +196,10 @@ export interface MWTestProbe {
   ensureFlashShieldStyle: () => void;
   /** Flash Shield V1: stamp data-mw-veil="1" on size-filtered feed thumbnails. */
   markFlashShieldCandidates: (root?: Element | Document) => void;
+  /** Flash Shield V1: stamp data-mw-veil="1" on the ACTIVE Shorts player media node. */
+  markFlashShieldShortsCandidate: () => void;
+  /** Shorts reveal heal: recreate a missing reveal overlay on the active blurred Short. */
+  healShortsRevealOverlay: (reason: string) => void;
 }
 
 export interface InjectionResult {
@@ -255,6 +259,8 @@ export function injectScript(overrides: InjectScriptOverrides = {}): InjectionRe
     mwColdStartRescan: mwColdStartRescan,
     ensureFlashShieldStyle: ensureFlashShieldStyle,
     markFlashShieldCandidates: markFlashShieldCandidates,
+    markFlashShieldShortsCandidate: markFlashShieldShortsCandidate,
+    healShortsRevealOverlay: healShortsRevealOverlay,
   };
   `;
 
