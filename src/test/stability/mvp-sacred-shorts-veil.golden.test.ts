@@ -66,6 +66,19 @@ describe('GOLDEN: Flash Shield on active Shorts (additive)', () => {
     expect(style!.textContent).toMatch(/ytm-reel-video-renderer\s+\[data-mw-veil="1"\]/);
   });
 
+  it('CRITICAL: clears the veil on a video whose ANCESTOR container is safe/revealed (node-mismatch fix)', () => {
+    // The Shorts pipeline marks the stable container (not the inner video) safe/revealed. The veil
+    // is on the video, so a descendant-scoped clear rule is required or safe/revealed Shorts stay
+    // veiled forever. Lock that the descendant clear rules exist for safe AND revealed.
+    enterShorts(SHORT_ID);
+    buildActiveShort(SHORT_ID);
+    injection = injectScript({ flashShieldV1: true });
+    injection.probe.ensureFlashShieldStyle();
+    const css = document.getElementById('mw-flash-shield')!.textContent || '';
+    expect(css).toMatch(/\[data-mw-moderated="safe"\]\s+video\[data-mw-veil="1"\]/);
+    expect(css).toMatch(/\[data-mw-moderated="revealed"\]\s+video\[data-mw-veil="1"\]/);
+  });
+
   it('does NOT veil when flag is OFF', () => {
     enterShorts(SHORT_ID);
     const { video } = buildActiveShort(SHORT_ID);
@@ -74,6 +87,18 @@ describe('GOLDEN: Flash Shield on active Shorts (additive)', () => {
     injection.probe.markFlashShieldShortsCandidate();
 
     expect(video.dataset.mwVeil).toBeUndefined();
+  });
+
+  it('SEPARATION: veils even when sensitivity=0 (controlled only by its own toggle, not the dial)', () => {
+    enterShorts(SHORT_ID);
+    const { video } = buildActiveShort(SHORT_ID);
+    // Flash Shield ON but moderation sensitivity at 0 (blur dial off). The veil must still engage —
+    // it is gated ONLY on flash_shield_enabled, never on sensitivity/blur_dial.
+    injection = injectScript({ flashShieldV1: true, sensitivity: 0 });
+
+    injection.probe.markFlashShieldShortsCandidate();
+
+    expect(video.dataset.mwVeil).toBe('1');
   });
 });
 

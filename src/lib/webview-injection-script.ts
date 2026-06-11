@@ -588,9 +588,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     style.id = FLASH_SHIELD_STYLE_ID;
     style.textContent = [
       'html.' + FLASH_SHIELD_CLASS + ' img[data-mw-veil="1"]:not([data-mw-moderated]) {',
+      // INSTANT blur (no transition): a filter transition would animate 0 -> blur over .15s, leaving
+      // unfiltered content partially visible during the fade — a fail-closed leak. Snap it on.
       'filter: blur(20px) !important;',
       '-webkit-filter: blur(20px) !important;',
-      'transition: filter .15s ease;',
       '}',
       'html.' + FLASH_SHIELD_CLASS + ' img[data-mw-moderated="safe"],',
       'html.' + FLASH_SHIELD_CLASS + ' img[data-mw-moderated="revealed"],',
@@ -603,13 +604,29 @@ export function generateModerationScript(config: InjectionConfig): string {
       // match. Blur the veil-stamped active-reel media until the existing pipeline marks it
       // safe/revealed/timeout-safe (then clear). Scoped to #shorts-player so the shelf is untouched.
       'html.' + FLASH_SHIELD_CLASS + ' #shorts-player ytm-reel-video-renderer [data-mw-veil="1"]:not([data-mw-moderated]) {',
+      // INSTANT blur (no transition) — the active Short is full-screen, so a .15s fade-in would
+      // briefly expose unfiltered video. Snap the veil on with zero fade.
       'filter: blur(24px) !important;',
       '-webkit-filter: blur(24px) !important;',
-      'transition: filter .15s ease;',
       '}',
       'html.' + FLASH_SHIELD_CLASS + ' #shorts-player [data-mw-moderated="safe"],',
       'html.' + FLASH_SHIELD_CLASS + ' #shorts-player [data-mw-moderated="revealed"],',
       'html.' + FLASH_SHIELD_CLASS + ' #shorts-player [data-mw-moderated="timeout-safe"] {',
+      'filter: none !important;',
+      '-webkit-filter: none !important;',
+      '}',
+      // CRITICAL: the Shorts pipeline marks the STABLE CONTAINER (ytm-reel-video-renderer / #shorts-player)
+      // as safe/revealed via resolveShortsStableBlurTarget, but the veil is stamped on the inner
+      // <video>/img. The element-level clear rules above target the moderated CONTAINER, not the veiled
+      // descendant — so without this a SAFE or REVEALED Short would stay veiled forever. Clear the veil
+      // on veil-stamped media whose ANCESTOR (within #shorts-player) is resolved. The video/img type
+      // makes specificity tie the blur rule above; declared AFTER it so the clear wins on source order.
+      'html.' + FLASH_SHIELD_CLASS + ' #shorts-player [data-mw-moderated="safe"] video[data-mw-veil="1"],',
+      'html.' + FLASH_SHIELD_CLASS + ' #shorts-player [data-mw-moderated="safe"] img[data-mw-veil="1"],',
+      'html.' + FLASH_SHIELD_CLASS + ' #shorts-player [data-mw-moderated="revealed"] video[data-mw-veil="1"],',
+      'html.' + FLASH_SHIELD_CLASS + ' #shorts-player [data-mw-moderated="revealed"] img[data-mw-veil="1"],',
+      'html.' + FLASH_SHIELD_CLASS + ' #shorts-player [data-mw-moderated="timeout-safe"] video[data-mw-veil="1"],',
+      'html.' + FLASH_SHIELD_CLASS + ' #shorts-player [data-mw-moderated="timeout-safe"] img[data-mw-veil="1"] {',
       'filter: none !important;',
       '-webkit-filter: none !important;',
       '}',
@@ -2250,6 +2267,11 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function triggerAdaptiveShortsTargetedRescan(reason, candidateInfo, options) {
     if (!isShortsModeActive()) return;
+    // FAST VEIL: the adaptive Shorts observer fires this on every reel DOM change/swipe
+    // (~140ms debounce). Stamp the active Short for the Flash Shield veil IMMEDIATELY, before
+    // the cooldowned rescan below — so the veil paints within ~1 frame of the swipe (100-200ms),
+    // independent of the moderation rescan cadence. Self-guarded (flag + Shorts mode); no-op otherwise.
+    markFlashShieldShortsCandidate();
     const opts = options || {};
     const candidate = candidateInfo || getAdaptiveActiveShortsCandidateIdentity();
     const identity = candidate && candidate.contentIdentity ? candidate.contentIdentity : 'none';
@@ -2548,7 +2570,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     // guarded (flag/Shorts-mode/cooldown/teardown), so they are cheap no-ops when not applicable.
     markFlashShieldShortsCandidate();
     healShortsRevealOverlay('reentry:' + (reason || 'unknown'));
-    [700, 1600, 3000].forEach(function(delayMs) {
+    // Fast cadence: veil within ~120ms of (re)entry; later ticks cover reel-node swaps + the
+    // async classify window for the reveal-button heal. Each call is internally guarded/cooldowned.
+    [120, 250, 450, 800, 1600, 3000].forEach(function(delayMs) {
       setTimeout(function() {
         if (timerState.teardownDone) return;
         markFlashShieldShortsCandidate();
@@ -2591,6 +2615,10 @@ export function generateModerationScript(config: InjectionConfig): string {
   function forceFirstEntryModerationRequest(reason) {
     if (!isShortsModeActive()) return 'SKIP_NOT_SHORTS';
     if (timerState.paused || timerState.teardownDone) return 'SKIP_INACTIVE';
+
+    // FAST VEIL on first entry: stamp the active Short the moment the host forces the first-entry
+    // request, so Flash Shield veils the playing video before the classifier round-trip completes.
+    markFlashShieldShortsCandidate();
 
     const shortsUrlId = getCurrentShortsUrlId() || '';
     const candidate = getAdaptiveActiveShortsCandidateIdentity();
@@ -11208,6 +11236,7 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function scanActiveShortsPlayerContainer(reason) {
     if (!isShortsModeActive()) return false;
+    markFlashShieldShortsCandidate(); // periodic safety net for the active-Short veil
     refreshAdaptiveShortsOverlayWatch('scanActiveShortsPlayerContainer:' + (reason || 'unknown'));
     console.log(
       '[DIAG][SHORTS_SCAN] discovery_run',

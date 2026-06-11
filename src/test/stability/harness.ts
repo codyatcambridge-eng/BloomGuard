@@ -224,6 +224,8 @@ export interface InjectionResult {
 export interface InjectScriptOverrides {
   /** Enable Flash Shield V1 (default OFF — mirrors production default). */
   flashShieldV1?: boolean;
+  /** Override moderation sensitivity (default 3). Used to prove the veil is independent of it. */
+  sensitivity?: number;
 }
 
 export function injectScript(overrides: InjectScriptOverrides = {}): InjectionResult {
@@ -239,7 +241,7 @@ export function injectScript(overrides: InjectScriptOverrides = {}): InjectionRe
   vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 
   const rawScript = generateModerationScript({
-    sensitivity: 3,
+    sensitivity: overrides.sensitivity ?? 3,
     blurStrength: 40,
     enabled: true,
     nonce: TEST_NONCE,
