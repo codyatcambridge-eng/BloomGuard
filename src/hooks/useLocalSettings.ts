@@ -59,6 +59,8 @@ export interface LocalProtectionSettings {
   segmentationSkinRatioRelaxed: number;
   segmentationSkinRatioMedium: number;
   segmentationSkinRatioStrict: number;
+  // Flash Shield V1 - independent pre-paint frosted veil (strictly separate from blur_dial / main moderation)
+  flash_shield_enabled: boolean;
 }
 
 const SETTINGS_KEY = 'iron_watch_local_settings';
@@ -95,6 +97,8 @@ const DEFAULT_SETTINGS: LocalProtectionSettings = {
   segmentationSkinRatioRelaxed: 0.28,
   segmentationSkinRatioMedium: 0.22,
   segmentationSkinRatioStrict: 0.16,
+  // Flash Shield: independent frosted pre-paint veil (default on for safety)
+  flash_shield_enabled: true,
 };
 
 export const useLocalSettings = () => {
@@ -297,6 +301,8 @@ export const useLocalSettings = () => {
           strict: settings.segmentationSkinRatioStrict,
         },
       },
+      // Flash Shield V1: independent pre-paint frosted veil. Strictly separate from blur_dial.
+      flashShieldV1: settings.flash_shield_enabled === true,
     };
   }, [
     settings.shield_active,
@@ -314,6 +320,7 @@ export const useLocalSettings = () => {
     settings.segmentationSkinRatioRelaxed,
     settings.segmentationSkinRatioMedium,
     settings.segmentationSkinRatioStrict,
+    settings.flash_shield_enabled,
   ]);
 
   const getSegmentationConfig = useCallback(() => {

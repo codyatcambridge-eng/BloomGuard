@@ -26,6 +26,8 @@ export interface InjectionConfig {
   sensitivity: number; // 0-4 blur dial
   blurStrength: number; // px
   enabled: boolean;
+  scanEnabled?: boolean; // Scanner/discovery can remain active for Flash Shield when the main dial is off
+  flashShieldV1?: boolean;
   forcedBlur?: boolean; // Dev mode: blur everything
   failClosed?: boolean; // DEPRECATED: Now fail-open by default
   debug?: boolean; // Verbose logging
@@ -34,6 +36,249 @@ export interface InjectionConfig {
   pageEpoch?: number;
   diagYouTubeShorts?: boolean;
   enableShortsHealthHeal?: boolean;
+}
+
+/**
+ * Minimal document-start bootstrap for iOS WKWebView.
+ * The full moderation script replaces the bootstrap observer after injection.
+ */
+export function generateFlashShieldBootstrap(enabled: boolean): string {
+  if (!enabled) return '';
+
+  return `
+    (function() {
+      'use strict';
+      if (window.__MW_FLASH_BOOTSTRAP__ && typeof window.__MW_FLASH_BOOTSTRAP__.setEnabled === 'function') {
+        window.__MW_FLASH_BOOTSTRAP__.setEnabled(true);
+        return;
+      }
+      var STYLE_ID = 'mw-flash-shield';
+      var ROOT_CLASS = 'mw-flash-shield-on';
+      var OVERLAY_CLASS = 'mw-flash-shorts-overlay';
+      var observer = null;
+      var active = true;
+      var burstRaf = null;
+      function ensureStyle() {
+        if (document.getElementById(STYLE_ID)) return;
+        var styleHost = document.head || document.documentElement;
+        if (!styleHost) return;
+        var style = document.createElement('style');
+        style.id = STYLE_ID;
+        style.textContent = [
+          'html.' + ROOT_CLASS + ' [data-mw-veil="1"]:not([data-mw-moderated="safe"]):not([data-mw-moderated="revealed"]):not([data-mw-moderated="timeout-safe"]) {',
+          'filter: blur(20px) saturate(.72) brightness(.94) !important;',
+          '-webkit-filter: blur(20px) saturate(.72) brightness(.94) !important;',
+          'backdrop-filter: blur(22px) saturate(.82) !important;',
+          '-webkit-backdrop-filter: blur(22px) saturate(.82) !important;',
+          '}',
+          'html.' + ROOT_CLASS + ' #shorts-player ytm-reel-video-renderer[aria-hidden="false"] video:not([data-mw-moderated="safe"]):not([data-mw-moderated="revealed"]):not([data-mw-moderated="timeout-safe"]),',
+          'html.' + ROOT_CLASS + ' #shorts-player ytm-reel-video-renderer[is-active] video:not([data-mw-moderated="safe"]):not([data-mw-moderated="revealed"]):not([data-mw-moderated="timeout-safe"]),',
+          'html.' + ROOT_CLASS + ' #shorts-player ytm-reel-video-renderer[selected] video:not([data-mw-moderated="safe"]):not([data-mw-moderated="revealed"]):not([data-mw-moderated="timeout-safe"]) {',
+          'filter: blur(24px) saturate(.72) brightness(.92) !important;',
+          '-webkit-filter: blur(24px) saturate(.72) brightness(.92) !important;',
+          '}',
+          'html.' + ROOT_CLASS + ' #shorts-player video[data-mw-veil="1"]:not([data-mw-moderated="safe"]):not([data-mw-moderated="revealed"]):not([data-mw-moderated="timeout-safe"]),',
+          'html.' + ROOT_CLASS + ' ytm-reel-video-renderer video[data-mw-veil="1"]:not([data-mw-moderated="safe"]):not([data-mw-moderated="revealed"]):not([data-mw-moderated="timeout-safe"]),',
+          'html.' + ROOT_CLASS + ' ytd-reel-video-renderer video[data-mw-veil="1"]:not([data-mw-moderated="safe"]):not([data-mw-moderated="revealed"]):not([data-mw-moderated="timeout-safe"]) {',
+          'filter: blur(24px) saturate(.72) brightness(.92) !important;',
+          '-webkit-filter: blur(24px) saturate(.72) brightness(.92) !important;',
+          '}',
+          'html.' + ROOT_CLASS + ' [data-mw-flash-frame="1"] {',
+          'position: relative !important;',
+          'isolation: isolate !important;',
+          '}',
+          'html.' + ROOT_CLASS + ' .' + OVERLAY_CLASS + ' {',
+          'position: absolute !important;',
+          'inset: 0 !important;',
+          'display: block !important;',
+          'pointer-events: none !important;',
+          'z-index: 2147483000 !important;',
+          'background: rgba(8,8,10,.22) !important;',
+          'backdrop-filter: blur(22px) saturate(.82) !important;',
+          '-webkit-backdrop-filter: blur(22px) saturate(.82) !important;',
+          '}',
+          'html.' + ROOT_CLASS + ' [data-mw-moderated="safe"] > .' + OVERLAY_CLASS + ',',
+          'html.' + ROOT_CLASS + ' [data-mw-moderated="revealed"] > .' + OVERLAY_CLASS + ',',
+          'html.' + ROOT_CLASS + ' [data-mw-moderated="timeout-safe"] > .' + OVERLAY_CLASS + ' {',
+          'display: none !important;',
+          '}',
+          'html.' + ROOT_CLASS + ' [data-mw-moderated="safe"] [data-mw-veil="1"],',
+          'html.' + ROOT_CLASS + ' [data-mw-moderated="revealed"] [data-mw-veil="1"],',
+          'html.' + ROOT_CLASS + ' [data-mw-moderated="timeout-safe"] [data-mw-veil="1"],',
+          'html.' + ROOT_CLASS + ' [data-mw-veil="1"][data-mw-moderated="safe"],',
+          'html.' + ROOT_CLASS + ' [data-mw-veil="1"][data-mw-moderated="revealed"],',
+          'html.' + ROOT_CLASS + ' [data-mw-veil="1"][data-mw-moderated="timeout-safe"] {',
+          'filter: none !important;',
+          '-webkit-filter: none !important;',
+          'backdrop-filter: none !important;',
+          '-webkit-backdrop-filter: none !important;',
+          '}',
+        ].join('');
+        styleHost.appendChild(style);
+      }
+      function getActiveShortsFrame() {
+        var selectors = [
+          '#shorts-player ytm-reel-video-renderer[selected]',
+          '#shorts-player ytm-reel-video-renderer[is-active]',
+          '#shorts-player ytm-reel-video-renderer[aria-hidden="false"]',
+          '#shorts-player ytm-reel-video-renderer[aria-current="true"]',
+          '#shorts-player ytm-shorts-lockup-view-model-v2[selected]',
+          '#shorts-player ytm-shorts-lockup-view-model-v2[is-active]',
+          '#shorts-player ytm-shorts-lockup-view-model-v2[aria-hidden="false"]',
+          '#shorts-player ytm-shorts-lockup-view-model[selected]',
+          '#shorts-player ytm-shorts-lockup-view-model[is-active]',
+          '#shorts-player ytd-reel-video-renderer[is-active]',
+          'ytm-reel-video-renderer[selected]',
+          'ytm-reel-video-renderer[is-active]',
+          'ytm-reel-video-renderer[aria-hidden="false"]',
+          'ytm-shorts-lockup-view-model-v2[is-active]',
+          'ytm-shorts-lockup-view-model[is-active]',
+          'ytd-reel-video-renderer[is-active]',
+          '#shorts-player ytm-reel-video-renderer',
+          '#shorts-player ytd-reel-video-renderer',
+          '#shorts-player ytm-shorts-lockup-view-model-v2',
+          '#shorts-player ytm-shorts-lockup-view-model',
+          '#player-container',
+          '#shorts-player'
+        ];
+        for (var i = 0; i < selectors.length; i += 1) {
+          var frame = document.querySelector(selectors[i]);
+          if (frame && frame.isConnected && frame.querySelector('video, img')) return frame;
+        }
+        return null;
+      }
+      function getShortsIdentity(frame, media) {
+        var pathMatch = String(location.pathname || '').match(/\\/shorts\\/([^/?#]+)/i);
+        var shortsId = pathMatch && pathMatch[1] ? pathMatch[1] : 'none';
+        var nodeId = '';
+        if (media && media.getAttribute) {
+          nodeId = media.getAttribute('data-video-id') || media.getAttribute('data-item-id') || '';
+        }
+        if (!nodeId && frame && frame.getAttribute) {
+          nodeId = frame.getAttribute('data-video-id') || frame.getAttribute('data-item-id') || frame.getAttribute('data-id') || '';
+        }
+        var source = media
+          ? String(media.currentSrc || media.getAttribute('src') || media.getAttribute('poster') || '')
+          : '';
+        return [shortsId, nodeId || 'none', source || 'none'].join('|');
+      }
+      function ensureShortsOverlay(frame, identity) {
+        var overlay = null;
+        for (var i = 0; i < frame.children.length; i += 1) {
+          if (frame.children[i].classList && frame.children[i].classList.contains(OVERLAY_CLASS)) {
+            overlay = frame.children[i];
+            break;
+          }
+        }
+        if (!overlay) {
+          overlay = document.createElement('div');
+          overlay.className = OVERLAY_CLASS;
+          overlay.setAttribute('aria-hidden', 'true');
+          frame.appendChild(overlay);
+        }
+        overlay.dataset.mwFlashIdentity = identity;
+      }
+      function stampActiveShorts() {
+        if (!active || !/\\/shorts(?:\\/|$)/i.test(String(location.pathname || ''))) return;
+        var frame = getActiveShortsFrame();
+        if (!frame) return;
+        var media = frame.querySelector('video.html5-main-video, video, img');
+        if (!media) return;
+        var identity = getShortsIdentity(frame, media);
+        var previousIdentity = String(frame.dataset.mwFlashIdentity || '');
+        if (previousIdentity && previousIdentity !== identity) {
+          frame.removeAttribute('data-mw-moderated');
+          media.removeAttribute('data-mw-moderated');
+          media.removeAttribute('data-mw-preblur-clear');
+        }
+        document.querySelectorAll('[data-mw-flash-frame="1"]').forEach(function(node) {
+          if (node !== frame) node.removeAttribute('data-mw-flash-frame');
+        });
+        frame.dataset.mwFlashIdentity = identity;
+        frame.dataset.mwFlashFrame = '1';
+        media.dataset.mwFlashIdentity = identity;
+        if (media.getAttribute('data-mw-moderated') !== 'blurred') {
+          media.dataset.mwVeil = '1';
+        }
+        ensureShortsOverlay(frame, identity);
+      }
+      function startShortsBurst() {
+        if (burstRaf || typeof requestAnimationFrame !== 'function') return;
+        var startedAt = Date.now();
+        var sweep = function() {
+          stampActiveShorts();
+          if (active && Date.now() - startedAt < 190) {
+            burstRaf = requestAnimationFrame(sweep);
+          } else {
+            burstRaf = null;
+          }
+        };
+        stampActiveShorts();
+        burstRaf = requestAnimationFrame(sweep);
+      }
+      function stamp(root) {
+        if (!active) return;
+        ensureStyle();
+        if (document.documentElement) document.documentElement.classList.add(ROOT_CLASS);
+        var scope = root && root.querySelectorAll ? root : document;
+        var media = scope.querySelectorAll(
+          'yt-lockup-view-model img, yt-lockup-view-model-wiz img, ytm-rich-item-renderer img, ytm-media-item img, ytm-shorts-lockup-view-model img, .yt-core-image, yt-image img, img[src*="googleusercontent"], .g-img img'
+        );
+        for (var i = 0; i < media.length; i += 1) {
+          if (!media[i].hasAttribute('data-mw-moderated')) media[i].dataset.mwVeil = '1';
+        }
+        stampActiveShorts();
+      }
+      function setEnabled(next) {
+        active = !!next;
+        if (document.documentElement) {
+          document.documentElement.classList.toggle(ROOT_CLASS, active);
+        }
+        if (active) {
+          stamp(document);
+          return;
+        }
+        document.querySelectorAll('[data-mw-veil="1"]').forEach(function(node) {
+          node.removeAttribute('data-mw-veil');
+        });
+        document.querySelectorAll('[data-mw-flash-frame="1"]').forEach(function(node) {
+          node.removeAttribute('data-mw-flash-frame');
+        });
+        document.querySelectorAll('.' + OVERLAY_CLASS).forEach(function(node) {
+          node.remove();
+        });
+      }
+      ensureStyle();
+      setEnabled(true);
+      startShortsBurst();
+      observer = new MutationObserver(function(mutations) {
+        if (!active) return;
+        for (var i = 0; i < mutations.length; i += 1) {
+          for (var j = 0; j < mutations[i].addedNodes.length; j += 1) {
+            var node = mutations[i].addedNodes[j];
+            if (node && node.nodeType === 1) stamp(node);
+          }
+        }
+        stamp(document);
+        startShortsBurst();
+      });
+      observer.observe(document, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['src', 'poster', 'aria-hidden', 'selected', 'is-active', 'class', 'style']
+      });
+      window.__MW_FLASH_BOOTSTRAP__ = {
+        setEnabled: setEnabled,
+        disconnect: function() {
+          if (observer) observer.disconnect();
+          observer = null;
+          if (burstRaf && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(burstRaf);
+          burstRaf = null;
+        }
+      };
+    })();
+  `;
 }
 
 export interface FailOpenModePolicyInput {
@@ -189,6 +434,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     blurStrength: CLAMPED_BLUR_STRENGTH,
     softBlurStrength: 8, // Soft blur for semantic delay
     enabled: ${config.enabled},
+    scanEnabled: ${config.scanEnabled === true || config.enabled === true},
     forcedBlur: ${config.forcedBlur || false},
     failClosed: ${failClosed},
     debug: ${config.debug || false},
@@ -206,6 +452,8 @@ export function generateModerationScript(config: InjectionConfig): string {
     batchDelay: 100,
     requestTimeout: 8000,
     mvpPositiveCardOwnershipV1: true,
+    // Flash Shield V1 - independent frosted pre-paint veil (strictly separate from sensitivity/dial)
+    flashShieldV1: ${config.flashShieldV1 === true},
   };
 
   // Threshold mappings for blur dial levels.
@@ -219,7 +467,18 @@ export function generateModerationScript(config: InjectionConfig): string {
   function getThresholdsForLevel(level) {
     return THRESHOLDS[level] || THRESHOLDS[3];
   }
-  let effectiveThresholds = getThresholdsForLevel(CONFIG.sensitivity);
+  // Flash-only scanning uses a fixed moderate classification profile without changing
+  // CONFIG.sensitivity or enabling the main hard-blur dial.
+  const FLASH_SHIELD_SCAN_LEVEL = 2;
+  let effectiveThresholds = getThresholdsForLevel(
+    CONFIG.sensitivity > 0 ? CONFIG.sensitivity : (CONFIG.flashShieldV1 ? FLASH_SHIELD_SCAN_LEVEL : 0)
+  );
+
+  // Flash Shield consts (early for init use; full functions defined later)
+  const FLASH_SHIELD_STYLE_ID = 'mw-flash-shield';
+  const FLASH_SHIELD_CLASS = 'mw-flash-shield-on';
+  const FLASH_SHIELD_SHORTS_OVERLAY_CLASS = 'mw-flash-shorts-overlay';
+
   const HEURISTIC_CACHE_KEY = 'mw_heuristic_cache';
   const HEURISTIC_CACHE_LIMIT = 32;
   const MW_REVEAL_STORE_KEY = 'mw_reveal_store';
@@ -572,6 +831,320 @@ export function generateModerationScript(config: InjectionConfig): string {
     (document.head || document.documentElement || document.body || document.documentElement).appendChild(style);
   }
 
+  // ==================== FLASH SHIELD V1 (additive only on sacred baseline) ====================
+  // FREEZE-OVERRIDE: new independent frosted glass pre-paint veil system.
+  // No modifications to frozen function *bodies* (createRevealOverlay, diagNonShortsReattach, isMvpBlurAuthorized, resolveShortsStableBlurTarget, etc.).
+  // Only new functions + additive call sites.
+  // Controlled solely by flashShieldV1 (from host flash_shield_enabled).
+  // Frosted aesthetic: backdrop-filter + saturate + rgba tint (from Liquid Glass/overlay history) + filter blur for speed/compatibility.
+  // Targets: all YT thumbnails (home/search/results/shelf), active Shorts reel containers (for iOS), Google images.
+  // <200ms on active Shorts: immediate calls in forceFirstEntry + reentry (best from mvp.2 + mvp.1).
+  // Safe: clear instantly via moderated clear CSS.
+  // Positive: keep frosted veil + additive call to frozen createRevealOverlay for button.
+  // Separation: flag only; no touch to sensitivity, thresholds, main apply logic. Works at dial=0.
+
+  function ensureFlashShieldStyle() {
+    if (document.getElementById(FLASH_SHIELD_STYLE_ID)) return;
+    const style = document.createElement('style');
+    style.id = FLASH_SHIELD_STYLE_ID;
+    style.textContent = [
+      'html.' + FLASH_SHIELD_CLASS + ' [data-mw-veil="1"]:not([data-mw-moderated="safe"]):not([data-mw-moderated="revealed"]):not([data-mw-moderated="timeout-safe"]) {',
+      '  filter: blur(20px) saturate(0.72) brightness(0.94) !important;',
+      '  -webkit-filter: blur(20px) saturate(0.72) brightness(0.94) !important;',
+      '  backdrop-filter: blur(22px) saturate(0.82) !important;',
+      '  -webkit-backdrop-filter: blur(22px) saturate(0.82) !important;',
+      '}',
+      'html.' + FLASH_SHIELD_CLASS + ' #shorts-player video[data-mw-veil="1"]:not([data-mw-moderated="safe"]):not([data-mw-moderated="revealed"]):not([data-mw-moderated="timeout-safe"]),',
+      'html.' + FLASH_SHIELD_CLASS + ' ytm-reel-video-renderer video[data-mw-veil="1"]:not([data-mw-moderated="safe"]):not([data-mw-moderated="revealed"]):not([data-mw-moderated="timeout-safe"]),',
+      'html.' + FLASH_SHIELD_CLASS + ' ytd-reel-video-renderer video[data-mw-veil="1"]:not([data-mw-moderated="safe"]):not([data-mw-moderated="revealed"]):not([data-mw-moderated="timeout-safe"]) {',
+      '  filter: blur(24px) saturate(0.72) brightness(0.92) !important;',
+      '  -webkit-filter: blur(24px) saturate(0.72) brightness(0.92) !important;',
+      '}',
+      'html.' + FLASH_SHIELD_CLASS + ' [data-mw-flash-frame="1"] {',
+      '  position: relative !important;',
+      '  isolation: isolate !important;',
+      '}',
+      'html.' + FLASH_SHIELD_CLASS + ' .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS + ' {',
+      '  position: absolute !important;',
+      '  inset: 0 !important;',
+      '  display: block !important;',
+      '  pointer-events: none !important;',
+      '  z-index: 2147483000 !important;',
+      '  backdrop-filter: blur(22px) saturate(0.82) !important;',
+      '  -webkit-backdrop-filter: blur(22px) saturate(0.82) !important;',
+      '  background: rgba(8,8,10,0.22) !important;',
+      '}',
+      'html.' + FLASH_SHIELD_CLASS + ' [data-mw-moderated="safe"] > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS + ',',
+      'html.' + FLASH_SHIELD_CLASS + ' [data-mw-moderated="revealed"] > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS + ',',
+      'html.' + FLASH_SHIELD_CLASS + ' [data-mw-moderated="timeout-safe"] > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS + ' {',
+      '  display: none !important;',
+      '}',
+      'html.' + FLASH_SHIELD_CLASS + ' [data-mw-moderated="safe"] [data-mw-veil="1"],',
+      'html.' + FLASH_SHIELD_CLASS + ' [data-mw-moderated="revealed"] [data-mw-veil="1"],',
+      'html.' + FLASH_SHIELD_CLASS + ' [data-mw-moderated="timeout-safe"] [data-mw-veil="1"],',
+      'html.' + FLASH_SHIELD_CLASS + ' [data-mw-veil="1"][data-mw-moderated="safe"],',
+      'html.' + FLASH_SHIELD_CLASS + ' [data-mw-veil="1"][data-mw-moderated="revealed"],',
+      'html.' + FLASH_SHIELD_CLASS + ' [data-mw-veil="1"][data-mw-moderated="timeout-safe"] {',
+      '  filter: none !important;',
+      '  -webkit-filter: none !important;',
+      '  backdrop-filter: none !important;',
+      '  -webkit-backdrop-filter: none !important;',
+      '}',
+    ].join('');
+    (document.head || document.documentElement || document.body || document.documentElement).appendChild(style);
+  }
+
+  function markFlashShieldCandidates(root) {
+    if (!CONFIG.flashShieldV1) return;
+    try {
+      const scope = root || document;
+      const selector = (
+        'yt-lockup-view-model img, yt-lockup-view-model-wiz img, ytm-rich-item-renderer img, ' +
+        'ytm-media-item img, ytm-shorts-lockup-view-model img, .yt-core-image, yt-image img, ' +
+        'img[src*="googleusercontent"], .g-img img'
+      );
+      const imgs = [];
+      if (scope.nodeType === 1 && typeof scope.matches === 'function' && scope.matches(selector)) {
+        imgs.push(scope);
+      }
+      if (typeof scope.querySelectorAll === 'function') {
+        scope.querySelectorAll(selector).forEach(function(img) { imgs.push(img); });
+      }
+      for (let i = 0; i < imgs.length; i += 1) {
+        const img = imgs[i];
+        if (!img || img.dataset.mwVeil === '1') continue;
+        if (img.hasAttribute('data-mw-moderated')) continue;
+        const rect = img.getBoundingClientRect();
+        if (rect.width >= 120 && rect.height >= 60) {
+          img.dataset.mwVeil = '1';
+        }
+      }
+    } catch (e) {}
+  }
+
+  function getFlashShieldActiveShortsFrame() {
+    if (!isShortsModeActive()) return null;
+    const selectors = [
+      '#shorts-player ytm-reel-video-renderer[selected]',
+      '#shorts-player ytm-reel-video-renderer[is-active]',
+      '#shorts-player ytm-reel-video-renderer[aria-hidden="false"]',
+      '#shorts-player ytm-reel-video-renderer[aria-current="true"]',
+      '#shorts-player ytm-shorts-lockup-view-model-v2[selected]',
+      '#shorts-player ytm-shorts-lockup-view-model-v2[is-active]',
+      '#shorts-player ytm-shorts-lockup-view-model-v2[aria-hidden="false"]',
+      '#shorts-player ytm-shorts-lockup-view-model[selected]',
+      '#shorts-player ytm-shorts-lockup-view-model[is-active]',
+      '#shorts-player ytd-reel-video-renderer[is-active]',
+      'ytm-reel-video-renderer[selected]',
+      'ytm-reel-video-renderer[is-active]',
+      'ytm-reel-video-renderer[aria-hidden="false"]',
+      'ytm-shorts-lockup-view-model-v2[is-active]',
+      'ytm-shorts-lockup-view-model[is-active]',
+      'ytd-reel-video-renderer[is-active]',
+      '#shorts-player ytm-reel-video-renderer',
+      '#shorts-player ytd-reel-video-renderer',
+      '#shorts-player ytm-shorts-lockup-view-model-v2',
+      '#shorts-player ytm-shorts-lockup-view-model',
+      '#player-container',
+      '#shorts-player',
+    ];
+    for (let i = 0; i < selectors.length; i += 1) {
+      const frame = document.querySelector(selectors[i]);
+      if (
+        frame &&
+        frame.isConnected &&
+        typeof frame.querySelector === 'function' &&
+        frame.querySelector('video, img')
+      ) {
+        return frame;
+      }
+    }
+    return null;
+  }
+
+  function getFlashShieldShortsIdentity(frame, media) {
+    const shortsId = getCurrentShortsUrlId() || 'none';
+    const mediaId = media && media.getAttribute
+      ? String(media.getAttribute('data-video-id') || media.getAttribute('data-item-id') || '')
+      : '';
+    const frameId = frame && frame.getAttribute
+      ? String(frame.getAttribute('data-video-id') || frame.getAttribute('data-item-id') || frame.getAttribute('data-id') || '')
+      : '';
+    const source = media
+      ? String(media.currentSrc || media.getAttribute('src') || media.getAttribute('poster') || '')
+      : '';
+    return [shortsId, mediaId || frameId || 'none', source || 'none'].join('|');
+  }
+
+  function ensureFlashShieldShortsOverlay(frame, identity) {
+    if (!frame || !frame.isConnected) return null;
+    let overlay = null;
+    for (let i = 0; i < frame.children.length; i += 1) {
+      const child = frame.children[i];
+      if (child.classList && child.classList.contains(FLASH_SHIELD_SHORTS_OVERLAY_CLASS)) {
+        overlay = child;
+        break;
+      }
+    }
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.className = FLASH_SHIELD_SHORTS_OVERLAY_CLASS;
+      overlay.setAttribute('aria-hidden', 'true');
+      frame.appendChild(overlay);
+    }
+    overlay.dataset.mwFlashIdentity = identity;
+    return overlay;
+  }
+
+  function markFlashShieldShortsCandidate() {
+    if (!CONFIG.flashShieldV1 || !isShortsModeActive()) return;
+    try {
+      // FREEZE-OVERRIDE: additive active-player shield based on the March sovereign
+      // targeting pattern. Frozen moderation, applyBlur, and reveal bodies are untouched.
+      const frame = getFlashShieldActiveShortsFrame();
+      if (!frame) return;
+      const media = frame.querySelector('video.html5-main-video, video, img');
+      if (!media) return;
+      const identity = getFlashShieldShortsIdentity(frame, media);
+      const previousIdentity = String(frame.dataset.mwFlashIdentity || '');
+      if (previousIdentity && previousIdentity !== identity) {
+        frame.removeAttribute('data-mw-moderated');
+        frame.removeAttribute('data-mw-flash-positive');
+        media.removeAttribute('data-mw-moderated');
+        media.removeAttribute('data-mw-preblur-clear');
+        media.removeAttribute('data-mw-flash-positive');
+        clearAuthoritativeHardBlur(frame);
+        clearAuthoritativeHardBlur(media);
+      }
+      document.querySelectorAll('[data-mw-flash-frame="1"]').forEach(function(node) {
+        if (node !== frame) node.removeAttribute('data-mw-flash-frame');
+      });
+      frame.dataset.mwFlashIdentity = identity;
+      frame.dataset.mwFlashFrame = '1';
+      media.dataset.mwFlashIdentity = identity;
+      if (media.dataset.mwModerated !== 'blurred') media.dataset.mwVeil = '1';
+      ensureFlashShieldShortsOverlay(frame, identity);
+    } catch (e) {}
+  }
+
+  function scheduleFlashShieldShortsBurst(reason) {
+    if (!CONFIG.flashShieldV1 || !isShortsModeActive() || timerState.teardownDone) return;
+    // FREEZE-OVERRIDE: bounded first-paint and node-reuse sweeps, all inside 200ms.
+    [0, 16, 50, 120, 180].forEach(function(delayMs) {
+      setTimeout(function() {
+        if (!CONFIG.flashShieldV1 || timerState.teardownDone || !isShortsModeActive()) return;
+        markFlashShieldShortsCandidate();
+      }, delayMs);
+    });
+  }
+
+  function clearFlashShieldResolution(element, nextState) {
+    if (!CONFIG.flashShieldV1 || !element || element.nodeType !== 1) return;
+    try {
+      const resolved = isShortsModeActive() ? resolveShortsStableBlurTarget(element, element.dataset.mwSrc || '') : null;
+      const target = resolved && resolved.target && resolved.target.isConnected ? resolved.target : element;
+      target.dataset.mwModerated = nextState;
+      target.removeAttribute('data-mw-flash-frame');
+      if (typeof target.querySelector === 'function') {
+        const overlay = target.querySelector(':scope > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS);
+        if (overlay) overlay.remove();
+      }
+      if (target.dataset.mwFlashPositive === '1') {
+        target.removeAttribute('data-mw-flash-positive');
+        clearAuthoritativeHardBlur(target);
+      }
+      const veiled = [];
+      if (target.dataset.mwVeil === '1') veiled.push(target);
+      if (typeof target.querySelectorAll === 'function') {
+        target.querySelectorAll('[data-mw-veil="1"]').forEach(function(node) { veiled.push(node); });
+      }
+      veiled.forEach(function(node) {
+        node.dataset.mwModerated = nextState;
+      });
+    } catch (e) {}
+  }
+
+  function disableFlashShieldRuntime() {
+    document.documentElement.classList.remove(FLASH_SHIELD_CLASS);
+    document.querySelectorAll('[data-mw-flash-positive="1"]').forEach(function(node) {
+      clearAllBlurAndOverlay(
+        node,
+        String(node.dataset.mwSrc || ''),
+        'flash_shield_disabled',
+        'safe'
+      );
+      node.removeAttribute('data-mw-flash-positive');
+    });
+    document.querySelectorAll('[data-mw-veil="1"]').forEach(function(node) {
+      node.removeAttribute('data-mw-veil');
+    });
+    document.querySelectorAll('[data-mw-flash-frame="1"]').forEach(function(node) {
+      node.removeAttribute('data-mw-flash-frame');
+    });
+    document.querySelectorAll('.' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS).forEach(function(node) {
+      node.remove();
+    });
+  }
+
+  // FREEZE-OVERRIDE: additive Flash-only positive state. This intentionally does not call
+  // applyBlur or alter sensitivity/thresholds; it preserves the frosted veil and delegates
+  // reveal UI creation to the existing frozen createRevealOverlay implementation.
+  function applyFlashShieldPositive(element, src, category, itemId) {
+    if (!CONFIG.flashShieldV1 || !element || element.nodeType !== 1) return false;
+    try {
+      let target = element;
+      let stableSelector = '';
+      if (isShortsModeActive()) {
+        const stableResolution = resolveShortsStableBlurTarget(element, src);
+        if (stableResolution && stableResolution.target && stableResolution.target.isConnected) {
+          target = stableResolution.target;
+          stableSelector = stableResolution.selectorUsed || '';
+        }
+      }
+      target.dataset.mwModerated = 'blurred';
+      target.dataset.mwFlashPositive = '1';
+      target.dataset.mwCategory = category || 'flagged';
+      target.dataset.mwSrc = src || '';
+      target.dataset.mwItemId = itemId || '';
+      markAuthoritativeHardBlur(target, src);
+      if (isShortsModeActive()) {
+        target.dataset.mwFlashFrame = '1';
+        setShortsBlurContextForNode(
+          target,
+          src,
+          category || 'flagged',
+          itemId,
+          24,
+          stableSelector || null,
+          'flash_shield_positive'
+        );
+      }
+      createRevealOverlay(target, src, category || 'flagged', itemId, false);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function healFlashShieldReveal(reason) {
+    if (!CONFIG.flashShieldV1) return;
+    try {
+      const nodes = document.querySelectorAll('[data-mw-flash-positive="1"][data-mw-moderated="blurred"]');
+      for (let i = 0; i < nodes.length; i += 1) {
+        const node = nodes[i];
+        const src = String(node.dataset.mwSrc || '');
+        if (!node.isConnected || findRevealOverlayForElement(node, src)) continue;
+        createRevealOverlay(
+          node,
+          src,
+          String(node.dataset.mwCategory || 'flagged'),
+          String(node.dataset.mwItemId || ''),
+          false
+        );
+      }
+    } catch (e) {}
+  }
+
   function ensureSensitivityToggle() {
     ensureSensitivityToggleStyle();
     if (document.getElementById(SENSITIVITY_TOGGLE_ID)) return;
@@ -611,13 +1184,16 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     CONFIG.sensitivity = normalized;
     CONFIG.enabled = normalized > 0;
-    effectiveThresholds = getThresholdsForLevel(normalized);
+    CONFIG.scanEnabled = CONFIG.enabled || CONFIG.flashShieldV1;
+    effectiveThresholds = getThresholdsForLevel(
+      normalized > 0 ? normalized : (CONFIG.flashShieldV1 ? FLASH_SHIELD_SCAN_LEVEL : 0)
+    );
     const toggle = document.getElementById(SENSITIVITY_TOGGLE_ID);
     if (toggle) {
       updateSensitivityToggleButton(toggle);
     }
     console.log('[MW] Filter Intensity set to', normalized, 'label=' + getSensitivityLabel(normalized), 'reason=' + (reason || 'toggle'));
-    if (CONFIG.enabled) {
+    if (CONFIG.scanEnabled) {
       scanFullPage();
       if (isYouTube()) {
         scanYouTubeThumbnails();
@@ -1227,6 +1803,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     debugSummaryInterval: null,
     diagHeartbeatInterval: null,
     shortsHealthHealInterval: null,
+    flashShieldInterval: null,
+    flashShieldRafId: null,
+    flashShieldBurstRafId: null,
+    flashShieldObserver: null,
     initialTimeouts: [],
     paused: document.visibilityState !== 'visible',
     teardownDone: false,
@@ -1589,13 +2169,33 @@ export function generateModerationScript(config: InjectionConfig): string {
   const diagShortsBlurredHtml5MainVideoNodeIds = new Set();
   const diagShortsLastBlurNodeIdBySrc = {};
   const SHORTS_STABLE_CONTAINER_SELECTORS = [
-    '#shorts-player ytm-reel-video-renderer[aria-hidden="false"]',
     '#shorts-player ytm-reel-video-renderer[selected]',
     '#shorts-player ytm-reel-video-renderer[is-active]',
+    '#shorts-player ytm-reel-video-renderer[aria-hidden="false"]',
+    '#shorts-player ytm-reel-video-renderer[aria-current="true"]',
+    '#shorts-player ytm-shorts-lockup-view-model-v2[selected]',
+    '#shorts-player ytm-shorts-lockup-view-model-v2[is-active]',
+    '#shorts-player ytm-shorts-lockup-view-model-v2[aria-hidden="false"]',
+    '#shorts-player ytm-shorts-lockup-view-model-v2[aria-current="true"]',
+    '#shorts-player ytm-shorts-lockup-view-model[selected]',
+    '#shorts-player ytm-shorts-lockup-view-model[is-active]',
+    '#shorts-player ytm-shorts-lockup-view-model[aria-hidden="false"]',
+    '#shorts-player ytd-reel-video-renderer[is-active]',
+    '#shorts-player ytd-reel-video-renderer[aria-hidden="false"]',
+    'ytm-reel-video-renderer[selected]',
+    'ytm-reel-video-renderer[is-active]',
+    'ytm-reel-video-renderer[aria-hidden="false"]',
+    'ytm-shorts-lockup-view-model-v2[is-active]',
+    'ytm-shorts-lockup-view-model[is-active]',
+    'ytd-reel-video-renderer[is-active]',
     '#shorts-player ytm-reel-video-renderer',
+    '#shorts-player ytd-reel-video-renderer',
+    '#shorts-player ytm-shorts-lockup-view-model-v2',
+    '#shorts-player ytm-shorts-lockup-view-model',
+    '#player-container',
     '#shorts-player',
   ];
-  const SHORTS_STABLE_CONTAINER_TAG_SELECTOR = 'ytm-reel-video-renderer, ytm-shorts-lockup-view-model, #shorts-player';
+  const SHORTS_STABLE_CONTAINER_TAG_SELECTOR = 'ytm-reel-video-renderer, ytd-reel-video-renderer, ytm-shorts-lockup-view-model, ytm-shorts-lockup-view-model-v2, #shorts-player, #player-container';
   const SHORTS_SWAP_REATTACH_WINDOW_MS = 2600;
   const SHORTS_HEALTH_HEAL_COOLDOWN_MS = 1500;
   const SHORTS_HEALTH_HEAL_MAX_ATTEMPTS = 5;
@@ -2138,6 +2738,9 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function triggerAdaptiveShortsTargetedRescan(reason, candidateInfo, options) {
     if (!isShortsModeActive()) return;
+    // FREEZE-OVERRIDE: stamp before the existing rescan debounce/cooldown.
+    markFlashShieldShortsCandidate();
+    scheduleFlashShieldShortsBurst('adaptive:' + (reason || 'unknown'));
     const opts = options || {};
     const candidate = candidateInfo || getAdaptiveActiveShortsCandidateIdentity();
     const identity = candidate && candidate.contentIdentity ? candidate.contentIdentity : 'none';
@@ -2430,6 +3033,16 @@ export function generateModerationScript(config: InjectionConfig): string {
       : 'none';
     shortsReentryState.lastRefreshAt = now;
     shortsReentryState.lastReason = reason || 'unknown';
+    // FREEZE-OVERRIDE: immediate stamp plus bounded node-swap/reveal-heal burst.
+    markFlashShieldShortsCandidate();
+    scheduleFlashShieldShortsBurst('reentry:' + (reason || 'unknown'));
+    [120, 250, 450, 800].forEach(function(delayMs) {
+      setTimeout(function() {
+        if (timerState.teardownDone) return;
+        markFlashShieldShortsCandidate();
+        healFlashShieldReveal('reentry:' + (reason || 'unknown'));
+      }, delayMs);
+    });
     logAdaptiveShortsEvent(
       'shorts_reentry_refresh_start',
       'reason=' + (reason || 'unknown') +
@@ -2466,6 +3079,10 @@ export function generateModerationScript(config: InjectionConfig): string {
   function forceFirstEntryModerationRequest(reason) {
     if (!isShortsModeActive()) return 'SKIP_NOT_SHORTS';
     if (timerState.paused || timerState.teardownDone) return 'SKIP_INACTIVE';
+
+    // FREEZE-OVERRIDE: frosted pre-paint veil immediately on first entry.
+    markFlashShieldShortsCandidate();
+    scheduleFlashShieldShortsBurst('first_entry:' + (reason || 'unknown'));
 
     const shortsUrlId = getCurrentShortsUrlId() || '';
     const candidate = getAdaptiveActiveShortsCandidateIdentity();
@@ -7990,6 +8607,10 @@ export function generateModerationScript(config: InjectionConfig): string {
   function removeSoftBlur(element, src) {
     let removed = false;
     try {
+      // FREEZE-OVERRIDE: additive Flash Shield resolution before the frozen safe-clear path.
+      if (CONFIG.flashShieldV1) {
+        clearFlashShieldResolution(element, 'safe');
+      }
       const shortsMode = isShortsModeActive();
       const srcForClear = src || element.dataset.mwSrc || '';
       if (shortsMode) {
@@ -10059,7 +10680,10 @@ export function generateModerationScript(config: InjectionConfig): string {
         (predictedLabel === 'sexy' && sexyScoreForAction > 0.8);
       const dynamicBlurCandidate = rawCategory === 'swimwear' || (predictedLabel === 'sexy' && sexyScoreForAction < 0.8);
       let finalBlur = CONFIG.forcedBlur || (shouldApplyBlur && dialActive);
-      if (hardBlurOverride) {
+      const flashPositive = CONFIG.flashShieldV1 && shouldApplyBlur;
+      // FREEZE-OVERRIDE: hard overrides remain owned by the main dial; Flash-only positives
+      // use applyFlashShieldPositive below and never enter applyBlur.
+      if (hardBlurOverride && dialActive) {
         finalBlur = true;
         decisionReason = (decisionReason ? decisionReason + '/' : '') + 'hard_blur';
       } else if (dynamicBlurCandidate) {
@@ -10144,6 +10768,14 @@ export function generateModerationScript(config: InjectionConfig): string {
           });
           // Apply strong blur
           applyBlur(element, src, predictedLabel || category || 'flagged', CONFIG.blurStrength, itemId, 'classifier_positive');
+        // FREEZE-OVERRIDE: additive Flash-only positive branch; frozen applyBlur is untouched.
+        } else if (flashPositive) {
+          applyFlashShieldPositive(
+            element,
+            src,
+            predictedLabel || category || 'flagged',
+            itemId
+          );
         } else {
           if (preDecisionState === 'blurred' || element.classList.contains('mw-blurred') || preDecisionHasBlur) {
             console.log(
@@ -10174,6 +10806,14 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (finalBlur) {
         clearSafeResolved(src);
         findAndBlur(src, predictedLabel || category, CONFIG.blurStrength, true, itemId);
+      // FREEZE-OVERRIDE: additive fan-out for duplicate media nodes carrying the same source.
+      } else if (flashPositive) {
+        clearSafeResolved(src);
+        findAndApplyFlashShieldPositive(
+          src,
+          predictedLabel || category || 'flagged',
+          itemId
+        );
       } else {
         markSafeResolved(src);
         // Remove soft blur from all matching elements
@@ -10281,6 +10921,24 @@ export function generateModerationScript(config: InjectionConfig): string {
         'pageEpoch=' + state.pageEpoch,
         'urlFamily=' + getDiagUrlFamily(window.location.href)
       );
+    } catch (e) {}
+  }
+
+  function findAndApplyFlashShieldPositive(src, category, itemId) {
+    if (!CONFIG.flashShieldV1 || isRevealedForSource(src, null)) return;
+    try {
+      document.querySelectorAll('img, video, [data-mw-bg-src]').forEach(function(node) {
+        const matches = (
+          node.dataset.mwSrc === src ||
+          node.dataset.mwBgSrc === src ||
+          node.dataset.mwOrigSrc === src ||
+          node.dataset.mwOrigPoster === src ||
+          node.src === src ||
+          node.poster === src
+        );
+        if (!matches || isRevealedForSource(src, node)) return;
+        applyFlashShieldPositive(node, src, category, itemId);
+      });
     } catch (e) {}
   }
 
@@ -10987,7 +11645,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function scanFullPage() {
-    if (!CONFIG.enabled || CONFIG.sensitivity === 0) {
+    if (!CONFIG.scanEnabled) {
       console.log('[MW] Scanning disabled (sensitivity: ' + CONFIG.sensitivity + ')');
       return;
     }
@@ -11155,7 +11813,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       : ['src', 'srcset', 'poster', 'data-src', 'data-lazy-src', 'style'];
     const observer = new MutationObserver(mutations => {
       if (timerState.paused) return;
-      if (!CONFIG.enabled || CONFIG.sensitivity === 0) return;
+      if (!CONFIG.scanEnabled && !CONFIG.flashShieldV1) return;
       
       let hasYouTubeChanges = false;
       shortsAttrMode = reevaluateShortsObserverMode('mutation_batch', window.location.href).mode;
@@ -11180,6 +11838,8 @@ export function generateModerationScript(config: InjectionConfig): string {
         });
         mutation.addedNodes.forEach(node => {
           if (node.nodeType !== 1) return;
+          markFlashShieldCandidates(node);
+          if (isShortsModeActive()) markFlashShieldShortsCandidate();
           if (isYouTube() && !isShortsModeActive()) {
             reapplyOwnedContainerBlurFromMutationNode(node, 'mutation_added');
           }
@@ -11233,6 +11893,10 @@ export function generateModerationScript(config: InjectionConfig): string {
         if (mutation.type === 'attributes') {
           const target = mutation.target;
           const attr = mutation.attributeName || '';
+          if (CONFIG.flashShieldV1 && target && target.nodeType === 1) {
+            markFlashShieldCandidates(target);
+            if (isShortsModeActive()) markFlashShieldShortsCandidate();
+          }
           if (
             isYouTube() &&
             !isShortsModeActive() &&
@@ -11929,6 +12593,104 @@ export function generateModerationScript(config: InjectionConfig): string {
     timerLog('start', 'urlChangeInterval:' + reason);
   }
 
+  function stopFlashShieldRuntime() {
+    if (timerState.flashShieldInterval) {
+      clearInterval(timerState.flashShieldInterval);
+      timerState.flashShieldInterval = null;
+    }
+    if (timerState.flashShieldRafId) {
+      cancelAnimationFrame(timerState.flashShieldRafId);
+      timerState.flashShieldRafId = null;
+    }
+    if (timerState.flashShieldBurstRafId) {
+      cancelAnimationFrame(timerState.flashShieldBurstRafId);
+      timerState.flashShieldBurstRafId = null;
+    }
+    if (timerState.flashShieldObserver) {
+      try { timerState.flashShieldObserver.disconnect(); } catch (e) {}
+      timerState.flashShieldObserver = null;
+    }
+  }
+
+  function startFlashShieldRuntime() {
+    if (!CONFIG.flashShieldV1 || timerState.teardownDone) return;
+    try {
+      if (window.__MW_FLASH_BOOTSTRAP__ && typeof window.__MW_FLASH_BOOTSTRAP__.disconnect === 'function') {
+        window.__MW_FLASH_BOOTSTRAP__.disconnect();
+      }
+      ensureFlashShieldStyle();
+      document.documentElement.classList.add(FLASH_SHIELD_CLASS);
+      markFlashShieldCandidates(document);
+      markFlashShieldShortsCandidate();
+      scheduleFlashShieldShortsBurst('runtime_start');
+
+      if (!timerState.flashShieldInterval) {
+        let ticks = 0;
+        timerState.flashShieldInterval = setInterval(function() {
+          ticks += 1;
+          if (!CONFIG.flashShieldV1 || timerState.teardownDone || ticks > 10) {
+            if (timerState.flashShieldInterval) clearInterval(timerState.flashShieldInterval);
+            timerState.flashShieldInterval = null;
+            return;
+          }
+          markFlashShieldCandidates(document);
+          markFlashShieldShortsCandidate();
+          healFlashShieldReveal('interval');
+        }, 1200);
+      }
+
+      const settleStartedAt = Date.now();
+      const settle = function() {
+        if (!CONFIG.flashShieldV1 || timerState.teardownDone) {
+          timerState.flashShieldRafId = null;
+          return;
+        }
+        markFlashShieldCandidates(document);
+        markFlashShieldShortsCandidate();
+        if (Date.now() - settleStartedAt < 2500) {
+          timerState.flashShieldRafId = requestAnimationFrame(settle);
+        } else {
+          timerState.flashShieldRafId = null;
+        }
+      };
+      if (!timerState.flashShieldRafId) {
+        timerState.flashShieldRafId = requestAnimationFrame(settle);
+      }
+
+      if (!timerState.flashShieldObserver && typeof MutationObserver !== 'undefined') {
+        let burstUntil = 0;
+        const burst = function() {
+          if (!CONFIG.flashShieldV1 || timerState.teardownDone) {
+            timerState.flashShieldBurstRafId = null;
+            return;
+          }
+          markFlashShieldCandidates(document);
+          markFlashShieldShortsCandidate();
+          if (Date.now() < burstUntil) {
+            timerState.flashShieldBurstRafId = requestAnimationFrame(burst);
+          } else {
+            timerState.flashShieldBurstRafId = null;
+          }
+        };
+        timerState.flashShieldObserver = new MutationObserver(function() {
+          if (!CONFIG.flashShieldV1 || timerState.teardownDone) return;
+          burstUntil = Date.now() + 600;
+          markFlashShieldShortsCandidate();
+          scheduleFlashShieldShortsBurst('runtime_mutation');
+          if (!timerState.flashShieldBurstRafId) {
+            timerState.flashShieldBurstRafId = requestAnimationFrame(burst);
+          }
+        });
+        timerState.flashShieldObserver.observe(document.documentElement, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: ['src', 'poster', 'aria-hidden', 'selected', 'is-active'],
+        });
+      }
+    } catch (e) {}
+  }
+
   function stopManagedTimers(reason) {
     stopAdaptiveShortsOverlayWatch('stopManagedTimers:' + (reason || 'unknown'));
     clearNamedInterval('legacyResultsInterval', reason);
@@ -11995,6 +12757,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     timerState.teardownDone = true;
     pauseManagedTimers(reason || 'teardown');
     stopAdaptiveShortsOverlayWatch('teardown:' + (reason || 'unknown'));
+    stopFlashShieldRuntime();
     if (timerState.mainScrollHandler) {
       window.removeEventListener('scroll', timerState.mainScrollHandler);
       timerState.mainScrollHandler = null;
@@ -12055,9 +12818,29 @@ export function generateModerationScript(config: InjectionConfig): string {
   window.__MW_TEARDOWN__ = function(reason) {
     teardownManagedScheduling(reason || 'host_teardown');
   };
+  window.__MW_FLASH_SHIELD_SET__ = function(enabled) {
+    try {
+      CONFIG.flashShieldV1 = !!enabled;
+      CONFIG.scanEnabled = CONFIG.enabled || CONFIG.flashShieldV1;
+      if (window.__MW_FLASH_BOOTSTRAP__ && typeof window.__MW_FLASH_BOOTSTRAP__.setEnabled === 'function') {
+        window.__MW_FLASH_BOOTSTRAP__.setEnabled(CONFIG.flashShieldV1);
+      }
+      if (CONFIG.flashShieldV1) {
+        startFlashShieldRuntime();
+        scanFullPage();
+      } else {
+        stopFlashShieldRuntime();
+        disableFlashShieldRuntime();
+      }
+      return 'OK';
+    } catch (e) {
+      return 'ERR:' + String(e);
+    }
+  };
 
   hydrateRevealStateFromStorage();
   startManagedTimers('init');
+  if (CONFIG.flashShieldV1) startFlashShieldRuntime();
 
   // Expose debug API
   window.__MW_DEBUG__ = {

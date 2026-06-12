@@ -101,6 +101,18 @@ export const ModerationSettingsPanel = ({ compact = false }: ModerationSettingsP
         </p>
       </div>
 
+      {/* Flash Shield - independent frosted glass pre-paint veil (strict separation from Filter Intensity / main dial) */}
+      <div className="flex items-center justify-between py-3 border-t border-border">
+        <div>
+          <Label className="text-sm font-medium">Flash Shield (pre-paint)</Label>
+          <p className="text-xs text-muted-foreground">Instant frosted veil on all images &amp; active Shorts until AI scan completes. Independent of dial.</p>
+        </div>
+        <Switch
+          checked={settings.flash_shield_enabled}
+          onCheckedChange={(checked) => updateSetting('flash_shield_enabled', checked)}
+        />
+      </div>
+
       {/* Blur Strength */}
       <div className="space-y-4">
         <div className="flex items-center justify-between">

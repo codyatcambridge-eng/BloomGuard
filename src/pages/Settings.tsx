@@ -4,9 +4,16 @@ import { toast } from "sonner";
 import { UTILITY_PASS_DURATIONS, UTILITY_PASS_REASONS } from "@/logic/utilityPass";
 import { useNavigate } from "react-router-dom";
 import { useGateRuntime } from "@/hooks/useGateRuntime";
+import { useLocalSettings } from "@/hooks/useLocalSettings";
+import { Switch } from "@/components/ui/switch";
 
 const Settings = () => {
   const { settings, updateSetting, isLoading } = useSettings();
+  const {
+    settings: localSettings,
+    updateSetting: updateLocalSetting,
+    isLoaded: localSettingsLoaded,
+  } = useLocalSettings();
   const navigate = useNavigate();
   const { effectiveShieldState, endPass } = useGateRuntime();
 
@@ -136,6 +143,31 @@ const Settings = () => {
             {settings.blur_sensitivity === 'LOW' && 'Blurs explicit content only'}
             {settings.blur_sensitivity === 'HIGH' && 'Blurs suggestive and explicit content'}
           </div>
+        </section>
+
+        <section className="cathedral-card">
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-sm bg-secondary flex items-center justify-center">
+                <EyeOff className="w-5 h-5 text-aqua" />
+              </div>
+              <div>
+                <h3 className="font-display text-sm tracking-wider">FLASH SHIELD</h3>
+                <p className="text-xs text-muted-foreground">
+                  Frost images and active Shorts before AI scanning completes
+                </p>
+              </div>
+            </div>
+            <Switch
+              aria-label="Flash Shield"
+              checked={localSettings.flash_shield_enabled}
+              onCheckedChange={(checked) => updateLocalSetting('flash_shield_enabled', checked)}
+              disabled={!localSettingsLoaded}
+            />
+          </div>
+          <p className="mt-4 pt-4 border-t border-border text-xs text-muted-foreground">
+            Independent of Shield Strength and enabled by default.
+          </p>
         </section>
 
         <section className="cathedral-card">

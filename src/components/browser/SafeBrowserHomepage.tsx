@@ -55,6 +55,7 @@ export const SafeBrowserHomepage = ({ onSearch, isSearching = false }: SafeBrows
           <p className="mt-1 font-display tracking-widest text-aqua">
             FUN HOME MARKER 2026-05-29
           </p>
+          <p className="mt-1 font-display tracking-widest text-aqua">try</p>
           <p className="italic" style={{ fontSize: '14px', color: '#E0E0E0' }}>
             Algorithms are noisy, real life is quiet where Focus Browser is.
           </p>

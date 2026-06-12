@@ -303,6 +303,8 @@ export const NativeWebViewBrowser = () => {
   const deviceId = useDeviceId();
   const effectiveShieldEnabled = effectiveShieldState.shieldEnabled;
   const isRuntimeModerationEnabled = effectiveShieldEnabled && localSettings.blur_dial > 0;
+  const isFlashShieldEnabled = localSettings.flash_shield_enabled === true;
+  const shouldInjectModeration = isRuntimeModerationEnabled || isFlashShieldEnabled;
 
   // Central blur source-of-truth with hysteresis to avoid flicker.
   const blurStateRef = useRef<{ enabled: boolean; reason: string; timestamp: number }>({
@@ -1111,8 +1113,8 @@ export const NativeWebViewBrowser = () => {
       console.log('[MW-Inject][Gate] settings not loaded; skipping inject', 'reason=' + reason);
       return;
     }
-    if (!isRuntimeModerationEnabled) {
-      console.log('[MW-Bridge] Moderation disabled, skipping injection');
+    if (!shouldInjectModeration) {
+      console.log('[MW-Bridge] Moderation and Flash Shield disabled, skipping injection');
       return;
     }
 
@@ -1227,6 +1229,7 @@ export const NativeWebViewBrowser = () => {
     const config = {
       ...getModerationConfig(),
       enabled: isRuntimeModerationEnabled,
+      scanEnabled: shouldInjectModeration,
       pageEpoch: webViewPageEpochRef.current,
       diagYouTubeShorts: localSettings.diag_youtube_shorts === true && isYouTubeUrl(targetUrl),
     };
@@ -1406,7 +1409,7 @@ export const NativeWebViewBrowser = () => {
     } finally {
       injectionInFlightRef.current = false;
     }
-  }, [ENABLE_SIGNAL_PIPELINE, settingsLoaded, isRuntimeModerationEnabled, getModerationConfig, localSettings.diag_youtube_shorts, exitPendingReinject]);
+  }, [ENABLE_SIGNAL_PIPELINE, settingsLoaded, isRuntimeModerationEnabled, shouldInjectModeration, getModerationConfig, localSettings.diag_youtube_shorts, exitPendingReinject]);
 
   const getWebViewListenerDiagContext = useCallback(() => {
     return {
@@ -2293,6 +2296,44 @@ export const NativeWebViewBrowser = () => {
     webViewState.currentUrl,
     executeScript,
     injectModerationScript,
+  ]);
+
+  useEffect(() => {
+    if (!settingsLoaded || !isNative || !webViewState.isOpen || !executeScript) return;
+    const enabled = isFlashShieldEnabled;
+    void (async () => {
+      const result = await executeScript(`
+        (function() {
+          try {
+            if (typeof window.__MW_FLASH_SHIELD_SET__ === 'function') {
+              return window.__MW_FLASH_SHIELD_SET__(${enabled ? 'true' : 'false'});
+            }
+            if (window.__MW_FLASH_BOOTSTRAP__ && typeof window.__MW_FLASH_BOOTSTRAP__.setEnabled === 'function') {
+              window.__MW_FLASH_BOOTSTRAP__.setEnabled(${enabled ? 'true' : 'false'});
+              return 'BOOTSTRAP_ONLY';
+            }
+            return 'NO_HOOK';
+          } catch (e) {
+            return 'ERR:' + String(e);
+          }
+        })();
+      `);
+      if (enabled && String(result || '').includes('NO_HOOK')) {
+        await injectModerationScript(
+          executeScript,
+          'flash_shield_live_enable',
+          webViewState.currentUrl || currentUrlRef.current || '',
+        );
+      }
+    })();
+  }, [
+    settingsLoaded,
+    isNative,
+    webViewState.isOpen,
+    webViewState.currentUrl,
+    executeScript,
+    injectModerationScript,
+    isFlashShieldEnabled,
   ]);
 
   useEffect(() => {
@@ -3550,7 +3591,7 @@ export const NativeWebViewBrowser = () => {
    * This is used when postMessage doesn't work reliably
    */
   useEffect(() => {
-    if (!ENABLE_SIGNAL_PIPELINE || !isNative || !webViewState.isOpen || !isRuntimeModerationEnabled) {
+    if (!ENABLE_SIGNAL_PIPELINE || !isNative || !webViewState.isOpen || !shouldInjectModeration) {
       return;
     }
     if (!webViewListenersAttached) {
@@ -4005,7 +4046,7 @@ export const NativeWebViewBrowser = () => {
     isNative,
     webViewState.isOpen,
     webViewListenersAttached,
-    isRuntimeModerationEnabled,
+    shouldInjectModeration,
     moderationBridge,
     localSettings.blur_strength_px,
     webViewState.currentUrl,
