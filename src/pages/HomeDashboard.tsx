@@ -20,6 +20,7 @@ const HomeDashboard = () => {
         <header className="text-center mb-8">
           <h1 className="font-display text-3xl tracking-wider text-gold">Bloom Guard</h1>
           <p className="text-[10px] text-gold/50 tracking-[0.3em] uppercase mt-0.5">Miracle Worker</p>
+          <p className="text-[10px] text-silver/60 mt-0.5">Kake</p>
           <p className="mt-2 text-silver">Welcome back!</p>
           <p className="mt-1 text-aqua font-display tracking-wide">Hopee</p>
           <p className="mt-1 text-aqua font-display tracking-wide">science</p>
