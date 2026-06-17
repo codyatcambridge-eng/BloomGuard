@@ -10643,13 +10643,20 @@ export function generateModerationScript(config: InjectionConfig): string {
       return;
     }
     
-    img.dataset.mwScanned = 'true';
-    img.dataset.mwLastScanSrc = src;
     img.dataset.mwOrigSrc = src;
-    
+
     const queued = queueForScan(src, img, 'img');
     diagScanRunLog('scanImgElement', img, src, queued, 'sourceType=img');
     if (queued) {
+      // Only stamp the scan-dedup markers once the image has actually entered the pipeline.
+      // On cold launch, home-feed <img>s are still hydrating and report 0x0, so isTinyImage
+      // rejects them and queueForScan returns false. Stamping mwScanned/mwLastScanSrc before
+      // the queue meant every later retry hit the duplicate-src dedup above and bailed, so the
+      // thumbnail was never re-queued once it gained real dimensions (the cold-start no-blur /
+      // "needs a search-bar tap" bug). Deferring the stamp lets transiently-skipped images
+      // (0x0 / queue-capped / rate-limited) be re-evaluated on the next scan pass.
+      img.dataset.mwScanned = 'true';
+      img.dataset.mwLastScanSrc = src;
       state.stats.imgTags++;
     }
   }

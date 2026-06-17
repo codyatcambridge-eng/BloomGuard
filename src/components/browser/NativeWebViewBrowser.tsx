@@ -2391,6 +2391,73 @@ export const NativeWebViewBrowser = () => {
     injectModerationScript,
   ]);
 
+  // COLD-START INJECTION DRIVER (host-side heartbeat).
+  // The one-shot gate-ready path misses cold launch: the WebView reports an about:blank
+  // bootstrap URL before the real YouTube URL commits, and an epoch-sync-only call can flip
+  // injectionDoneRef true so later retries bail. A settings toggle works only because it
+  // re-runs the inject effects once the URL is real and gates are ready. This heartbeat does
+  // that on its own: every 1.2s, while the WebView is open + moderation enabled + listeners
+  // attached, it resolves the WebView's REAL url, clears the epoch-sync-poisoned
+  // injectionDoneRef, and re-drives the EXISTING injectModerationScript — until a fresh blur
+  // handshake confirms the injected script is alive, then stops (~15s safety cap). Host-side
+  // only: no change to the injection engine, reveal, positive-stability, or Shorts logic.
+  useEffect(() => {
+    if (!ENABLE_SIGNAL_PIPELINE) return;
+    if (!isNative || !webViewState.isOpen || !executeScript) return;
+    if (!settingsLoaded || !isRuntimeModerationEnabled || !webViewListenersAttached) return;
+
+    let cancelled = false;
+    let ticks = 0;
+    if (ENABLE_DOM_BLUR) blurReadyRef.current = false; // require a FRESH handshake to confirm aliveness
+
+    const tick = async () => {
+      if (cancelled) { clearInterval(timer); return; }
+      if (blurReadyRef.current) { clearInterval(timer); return; } // script confirmed alive -> done
+      if (ticks >= 12) { clearInterval(timer); return; }          // ~15s safety cap
+      ticks += 1;
+
+      let urlHint = webViewState.currentUrl || currentUrlRef.current || '';
+      if (isBootstrapBlankUrl(urlHint)) {
+        try {
+          const raw = await executeScript(
+            '(function(){try{return JSON.stringify(window.location.href);}catch(e){return "";}})();',
+          );
+          let real = '';
+          try { real = String(JSON.parse(String(raw || '""')) || ''); }
+          catch { real = String(raw || '').replace(/^"|"$/g, ''); }
+          if (real && !isBootstrapBlankUrl(real)) urlHint = real;
+        } catch { /* ignore — retry next tick */ }
+      }
+      if (cancelled || isBootstrapBlankUrl(urlHint)) return; // page not committed; retry next tick
+
+      injectionDoneRef.current = false; // epoch-sync-only must not block the real injection
+      console.log(
+        '[MW-Inject][ColdStartDriver]',
+        'tick=' + ticks,
+        'navId=' + activeNavIdRef.current,
+        'url=' + urlHint.substring(0, 80),
+      );
+      await injectModerationScript(executeScript, 'cold_start_driver', urlHint);
+      if (ENABLE_DOM_BLUR) await requestBlurHandshake('cold_start_driver');
+    };
+
+    const timer = setInterval(() => { void tick(); }, 1200);
+    void tick();
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [
+    ENABLE_SIGNAL_PIPELINE,
+    ENABLE_DOM_BLUR,
+    isNative,
+    webViewState.isOpen,
+    webViewState.currentUrl,
+    executeScript,
+    settingsLoaded,
+    isRuntimeModerationEnabled,
+    webViewListenersAttached,
+    injectModerationScript,
+    requestBlurHandshake,
+  ]);
+
   useEffect(() => {
     if (!ENABLE_DOM_BLUR) return;
     if (!isNative || !webViewState.isOpen) return;
