@@ -166,6 +166,26 @@ const isBootstrapBlankUrl = (value?: string): boolean => {
   return normalized === '' || normalized === 'about:blank' || normalized.startsWith('about:blank');
 };
 
+export const isCurrentInjectionReadinessMessage = (
+  message: Record<string, unknown>,
+  activeNavId: number,
+  activeEpoch: number,
+  expectedNoncePrefix: string,
+  fallbackUrl = '',
+): boolean => {
+  const messageUrl = String(message.url || fallbackUrl || '');
+  const messageHostNavId = Number(message.hostNavId);
+  const messageEpoch = Number(message.pageEpoch);
+  return (
+    !isBootstrapBlankUrl(messageUrl) &&
+    Number.isFinite(messageHostNavId) &&
+    messageHostNavId === activeNavId &&
+    Number.isFinite(messageEpoch) &&
+    messageEpoch === activeEpoch &&
+    String(message.noncePrefix || '') === expectedNoncePrefix
+  );
+};
+
 const getYouTubeShortsId = (value?: string): string => {
   if (!value) return 'none';
   try {
@@ -686,6 +706,7 @@ export const NativeWebViewBrowser = () => {
   const lastInjectionAtRef = useRef(0);
   const duplicateInjectionSkipsRef = useRef(0);
   const noHookFallbackRecoverKeysRef = useRef<Set<string>>(new Set());
+  const modelReadyRescanKeyRef = useRef('');
   const didInjectAfterSettingsLoadedRef = useRef(false);
   const nonBootstrapAckObservedRef = useRef(false);
   const epochContextCurrentRef = useRef(false);
@@ -1209,9 +1230,6 @@ export const NativeWebViewBrowser = () => {
       epochContextCurrentRef.current = true;
       relaxedEpochBypassHookStableRef.current =
         nonBootstrapAckObservedRef.current && epochContextCurrentRef.current;
-      injectionDoneRef.current = true;
-      lastInjectedUrlRef.current = targetUrl;
-      lastInjectionAtRef.current = Date.now();
       console.log(
         '[DIAG][EPOCH_SYNC][HOST]',
         'action=sync_applied',
@@ -1221,8 +1239,6 @@ export const NativeWebViewBrowser = () => {
         'pageEpoch=' + webViewPageEpochRef.current,
         'url=' + (targetUrl || 'unknown'),
       );
-      exitPendingReinject('epoch_sync_success', targetUrl);
-      return;
     }
     const config = {
       ...getModerationConfig(),
@@ -1258,6 +1274,17 @@ export const NativeWebViewBrowser = () => {
     };
     try {
       const injectResult = await scriptExecutor(mainScript);
+      if (injectResult === null || injectResult === undefined) {
+        console.warn(
+          '[DIAG][INJECT] dispatch_unconfirmed',
+          'reason=' + reason,
+          'navId=' + navId,
+          'pageEpoch=' + webViewPageEpochRef.current,
+          'url=' + (targetUrl || 'unknown'),
+          'result=null',
+        );
+        return;
+      }
       const injectResultText = String(injectResult || '');
       const alreadyActive = injectResultText.includes('MW_ALREADY_ACTIVE');
       if (alreadyActive) {
@@ -1285,19 +1312,25 @@ export const NativeWebViewBrowser = () => {
             );
             if (teardownText === 'TEARDOWN_OK') {
               const reinjectResult = await scriptExecutor(mainScript);
-              const reinjectText = String(reinjectResult || '');
-              if (!reinjectText.includes('MW_ALREADY_ACTIVE')) {
-                injectionDoneRef.current = true;
-                lastInjectedUrlRef.current = targetUrl;
-                lastInjectionAtRef.current = Date.now();
-                console.log(
-                  '[DIAG][INJECT] no_hook_active_recover_success',
+              if (reinjectResult === null || reinjectResult === undefined) {
+                console.warn(
+                  '[DIAG][INJECT] no_hook_active_recover_unconfirmed',
                   'reason=' + reason,
                   'navId=' + navId,
                   'pageEpoch=' + webViewPageEpochRef.current,
                   'url=' + (targetUrl || 'unknown'),
                 );
-                exitPendingReinject('inject_no_hook_recover_success', targetUrl);
+                return;
+              }
+              const reinjectText = String(reinjectResult || '');
+              if (!reinjectText.includes('MW_ALREADY_ACTIVE')) {
+                console.log(
+                  '[DIAG][INJECT] no_hook_active_recover_dispatched',
+                  'reason=' + reason,
+                  'navId=' + navId,
+                  'pageEpoch=' + webViewPageEpochRef.current,
+                  'url=' + (targetUrl || 'unknown'),
+                );
                 return;
               }
             }
@@ -1344,19 +1377,26 @@ export const NativeWebViewBrowser = () => {
             'teardown=' + teardownText,
           );
           try {
-            await scriptExecutor(mainScript);
-            injectionDoneRef.current = true;
-            lastInjectedUrlRef.current = targetUrl;
-            lastInjectionAtRef.current = Date.now();
+            const reinjectResult = await scriptExecutor(mainScript);
+            if (reinjectResult === null || reinjectResult === undefined) {
+              console.warn(
+                '[DIAG][INJECT] no_hook_active_recover_unconfirmed',
+                'reason=' + reason,
+                'navId=' + navId,
+                'pageEpoch=' + webViewPageEpochRef.current,
+                'url=' + (targetUrl || 'unknown'),
+                'mode=fallback_no_return',
+              );
+              return;
+            }
             console.log(
-              '[DIAG][INJECT] no_hook_active_recover_success',
+              '[DIAG][INJECT] no_hook_active_recover_dispatched',
               'reason=' + reason,
               'navId=' + navId,
               'pageEpoch=' + webViewPageEpochRef.current,
               'url=' + (targetUrl || 'unknown'),
               'mode=fallback_no_return',
             );
-            exitPendingReinject('inject_no_hook_recover_success', targetUrl);
             return;
           } catch (reinjectError) {
             console.warn(
@@ -1371,9 +1411,6 @@ export const NativeWebViewBrowser = () => {
           }
         }
       }
-      injectionDoneRef.current = true;
-      lastInjectedUrlRef.current = targetUrl;
-      lastInjectionAtRef.current = Date.now();
       console.log(
         '[MW-Inject][InjectedDispatch]',
         'navId=' + navId,
@@ -1388,12 +1425,11 @@ export const NativeWebViewBrowser = () => {
         'url=' + (targetUrl || 'unknown'),
       );
       console.log(
-        '[DIAG][INJECT] success',
+        '[DIAG][INJECT] dispatch_awaiting_ack',
         'reason=' + reason,
         'navId=' + navId,
         'url=' + (targetUrl || 'unknown'),
       );
-      exitPendingReinject('inject_success', targetUrl);
     } catch (error) {
       console.error('[MW-Bridge] Moderation script injection failed:', error);
       console.log(
@@ -2120,6 +2156,76 @@ export const NativeWebViewBrowser = () => {
     `);
   }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, executeScript]);
 
+  const requestPhase0ModelReadyRescan = useCallback(async (source: string) => {
+    if (!moderationBridge.isReady) return;
+    if (!isNative || !webViewState.isOpen || !executeScript) return;
+    if (!injectionDoneRef.current) return;
+
+    const navId = activeNavIdRef.current;
+    const pageEpoch = webViewPageEpochRef.current;
+    const rescanKey = `${navId}:${pageEpoch}`;
+    if (modelReadyRescanKeyRef.current === rescanKey) return;
+
+    const safeSource = escapeForJs(source);
+    try {
+      const result = await executeScript(`
+        (function() {
+          try {
+            if (typeof window.__MW_MODEL_READY_RESCAN__ !== 'function') return 'NO_HOOK';
+            return window.__MW_MODEL_READY_RESCAN__('${safeSource}');
+          } catch (e) {
+            return 'ERR';
+          }
+        })();
+      `);
+      const resultText = String(result || '').replace(/^"|"$/g, '');
+      if (resultText !== 'OK') {
+        console.log(
+          '[DIAG][PHASE0_MODEL_READY] rescan_deferred',
+          'source=' + source,
+          'result=' + (resultText || 'null'),
+          'navId=' + navId,
+          'pageEpoch=' + pageEpoch,
+        );
+        return;
+      }
+      if (
+        navId !== activeNavIdRef.current ||
+        pageEpoch !== webViewPageEpochRef.current
+      ) {
+        return;
+      }
+      modelReadyRescanKeyRef.current = rescanKey;
+      console.log(
+        '[DIAG][PHASE0_MODEL_READY] rescan_complete',
+        'source=' + source,
+        'navId=' + navId,
+        'pageEpoch=' + pageEpoch,
+      );
+    } catch (error) {
+      console.warn(
+        '[DIAG][PHASE0_MODEL_READY] rescan_failed',
+        'source=' + source,
+        'navId=' + navId,
+        'pageEpoch=' + pageEpoch,
+        error,
+      );
+    }
+  }, [
+    moderationBridge.isReady,
+    isNative,
+    webViewState.isOpen,
+    executeScript,
+  ]);
+
+  // Phase 0 lifecycle boundary: model readiness is the authoritative point at
+  // which fail-open cold-start results can be retried. This is a one-shot
+  // nav/epoch rescan, not a heartbeat and not a settings or policy change.
+  useEffect(() => {
+    if (!moderationBridge.isReady) return;
+    void requestPhase0ModelReadyRescan('model_ready_transition');
+  }, [moderationBridge.isReady, requestPhase0ModelReadyRescan]);
+
   const flushBlurStateToWebView = useCallback(async () => {
     if (!ENABLE_DOM_BLUR) return;
     if (!isNative || !webViewState.isOpen || !executeScript) return;
@@ -2323,12 +2429,9 @@ export const NativeWebViewBrowser = () => {
   // URL there is no later urlChangeEvent to restore it — so currentUrl stays bootstrap-blank
   // while the visible page is the real home feed. Every guard then sees "blank" and refuses
   // to inject until the user navigates (search bar), which finally emits a real urlChangeEvent.
-  // To make injection deterministic we resolve the target URL from the WEBVIEW'S OWN
-  // window.location.href whenever the host-tracked URL is unreliable, then re-drive the
-  // EXISTING injectModerationScript until injection is confirmed. Purely additive: stops the
-  // instant injectionDoneRef is true (so it no-ops on already-injected/healthy surfaces), and
-  // a redundant call only runs the existing host-context epoch-sync — it never tears down or
-  // re-applies blur. It touches no blur, reveal, Shorts, or epoch logic.
+  // Phase 0 boundary: resolve the WEBVIEW'S OWN location and retry only until the
+  // current nav/epoch reports a real ACK/readiness message. This is startup
+  // infrastructure only; it does not depend on any protection-strength setting.
   useEffect(() => {
     if (!ENABLE_SIGNAL_PIPELINE) return;
     if (!isNative || !webViewState.isOpen || !executeScript) return;
@@ -2337,7 +2440,10 @@ export const NativeWebViewBrowser = () => {
 
     let cancelled = false;
     let attempts = 0;
+    let tickInFlight = false;
     const maxAttempts = 10;
+    const startupNavId = activeNavIdRef.current;
+    const startupEpoch = webViewPageEpochRef.current;
 
     // Use the WebView's real location when the host-tracked URL is blank/stale, so a real
     // page that arrived as the opening URL is never skipped. Does NOT mutate the shared
@@ -2358,29 +2464,44 @@ export const NativeWebViewBrowser = () => {
     };
 
     const tick = async () => {
-      if (cancelled || injectionDoneRef.current || attempts >= maxAttempts) {
+      const navigationChanged =
+        activeNavIdRef.current !== startupNavId ||
+        webViewPageEpochRef.current !== startupEpoch;
+      if (cancelled || navigationChanged || injectionDoneRef.current || attempts >= maxAttempts) {
         clearInterval(timer);
         return;
       }
+      if (tickInFlight) return;
+
+      tickInFlight = true;
       attempts += 1;
-      const urlHint = await resolveTargetUrl();
-      if (isBootstrapBlankUrl(urlHint)) {
-        console.log('[MW-Inject][ColdStartEnsure] await_real_url', 'attempt=' + attempts);
-        return; // WebView still on about:blank; retry on the next tick.
+      try {
+        const urlHint = await resolveTargetUrl();
+        if (isBootstrapBlankUrl(urlHint)) {
+          console.log('[MW-Inject][ColdStartEnsure] await_real_url', 'attempt=' + attempts);
+          return; // WebView still on about:blank; retry on the next tick.
+        }
+        console.log(
+          '[MW-Inject][ColdStartEnsure]',
+          'attempt=' + attempts,
+          'navId=' + activeNavIdRef.current,
+          'url=' + urlHint.substring(0, 80),
+        );
+        await injectModerationScript(executeScript, 'cold_start_injection_ensure', urlHint);
+        if (!cancelled && !injectionDoneRef.current && ENABLE_DOM_BLUR) {
+          await requestBlurHandshake('cold_start_injection_ensure');
+        }
+      } finally {
+        tickInFlight = false;
       }
-      console.log(
-        '[MW-Inject][ColdStartEnsure]',
-        'attempt=' + attempts,
-        'navId=' + activeNavIdRef.current,
-        'url=' + urlHint.substring(0, 80),
-      );
-      void injectModerationScript(executeScript, 'cold_start_injection_ensure', urlHint);
     };
 
-    const timer = setInterval(() => { void tick(); }, 700);
+    const timer = setInterval(() => { void tick(); }, 900);
+    void tick();
     return () => { cancelled = true; clearInterval(timer); };
   }, [
     ENABLE_SIGNAL_PIPELINE,
+    ENABLE_DOM_BLUR,
     isNative,
     webViewState.isOpen,
     webViewState.currentUrl,
@@ -2389,6 +2510,7 @@ export const NativeWebViewBrowser = () => {
     isRuntimeModerationEnabled,
     webViewListenersAttached,
     injectModerationScript,
+    requestBlurHandshake,
   ]);
 
   useEffect(() => {
@@ -3224,24 +3346,50 @@ export const NativeWebViewBrowser = () => {
       return payload;
     };
 
+    const confirmCurrentInjectionReadiness = (
+      typedMessage: Record<string, unknown>,
+      source: 'capgo' | 'window',
+    ): string | null => {
+      const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
+      const messageUrl = String(typedMessage.url || activeUrl || '');
+      const expectedNoncePrefix = sessionNonce.substring(0, 6);
+      const isCurrent = isCurrentInjectionReadinessMessage(
+        typedMessage,
+        activeNavIdRef.current,
+        webViewPageEpochRef.current,
+        expectedNoncePrefix,
+        activeUrl,
+      );
+
+      if (!isCurrent) {
+        console.log(
+          '[DIAG][INJECT] readiness_ignored_stale',
+          'source=' + source,
+          'type=' + String(typedMessage.type || 'unknown'),
+          'hostNavId=' + String(typedMessage.hostNavId ?? 'none'),
+          'activeNavId=' + activeNavIdRef.current,
+          'pageEpoch=' + String(typedMessage.pageEpoch ?? 'none'),
+          'activeEpoch=' + webViewPageEpochRef.current,
+          'url=' + (messageUrl || 'unknown'),
+        );
+        return null;
+      }
+
+      injectionDoneRef.current = true;
+      lastInjectedUrlRef.current = messageUrl;
+      lastInjectionAtRef.current = Date.now();
+      exitPendingReinject('injection_readiness_confirmed', messageUrl);
+      return messageUrl;
+    };
+
     const handleIncomingMessage = async (rawPayload: unknown, source: 'capgo' | 'window') => {
       const message = unwrapPayload(rawPayload);
       if (!message || typeof message !== 'object') return;
 
       const typedMessage = message as Record<string, unknown>;
       if (typedMessage.type === 'MW_INJECTED_ACK') {
-        const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
-        const ackUrl = String(typedMessage.url || activeUrl || '');
-        if (isBootstrapBlankUrl(ackUrl)) {
-          console.log(
-            '[DIAG][INJECT] ack_ignored_bootstrap_blank',
-            'source=' + source,
-            'navId=' + String(typedMessage.navId ?? 'none'),
-            'pageEpoch=' + String(typedMessage.pageEpoch ?? 'none'),
-            'url=' + String(typedMessage.url ?? 'unknown'),
-          );
-          return;
-        }
+        const ackUrl = confirmCurrentInjectionReadiness(typedMessage, source);
+        if (!ackUrl) return;
         nonBootstrapAckObservedRef.current = true;
         const ackEpoch = (
           typeof typedMessage.pageEpoch === 'number' && Number.isFinite(typedMessage.pageEpoch)
@@ -3268,6 +3416,7 @@ export const NativeWebViewBrowser = () => {
           'pageEpoch=' + String(typedMessage.pageEpoch ?? 'none'),
           'url=' + String(typedMessage.url ?? 'unknown'),
         );
+        await requestPhase0ModelReadyRescan('injection_ack');
         if (isYouTubeShortsUrl(ackUrl) && ackEpoch !== null && ackEpoch === activeEpoch) {
           armShortsFirstEntryLatch('ack_received', ackUrl);
           if (shortsAckNoReqRecoverTimerRef.current) {
@@ -3442,15 +3591,8 @@ export const NativeWebViewBrowser = () => {
 
       if (ENABLE_DOM_BLUR && isBlurOverlayReadyMessage(message)) {
         const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
-        const readyUrl = String(typedMessage.url || activeUrl || '');
-        if (isBootstrapBlankUrl(readyUrl)) {
-          console.log(
-            '[MW-Host] Blur overlay READY: bootstrap_blank_ignore',
-            String(typedMessage.reason || 'ready'),
-            readyUrl,
-          );
-          return;
-        }
+        const readyUrl = confirmCurrentInjectionReadiness(typedMessage, source);
+        if (!readyUrl) return;
         const shortsReadyContext = isYouTubeShortsUrl(activeUrl) || isYouTubeShortsUrl(readyUrl);
         if (shortsReadyContext) {
           const readyKey = [
@@ -3639,6 +3781,8 @@ export const NativeWebViewBrowser = () => {
     isGraceEpochAcceptedForActiveShortsVideo,
     isShortsMessageEligibleForFirstEntryState,
     webViewState.currentUrl,
+    exitPendingReinject,
+    requestPhase0ModelReadyRescan,
   ]);
 
   /**

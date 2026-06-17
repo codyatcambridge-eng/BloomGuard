@@ -173,6 +173,7 @@ export const TEST_PAGE_EPOCH = 1748800001000;
  */
 export interface MWTestProbe {
   getMvpCardHrefItemKey: (card: Element) => string;
+  getOwnedCardContainerFromNode: (node: Element) => Element | null;
   isMvpBlurAuthorized: (
     element: Element,
     src: string,
@@ -190,6 +191,9 @@ export interface MWTestProbe {
     itemId: string,
     mvpProof?: string,
   ) => void;
+  reapplyOwnedContainerBlur: (card: Element, reason: string) => void;
+  registerElement: (itemId: string, element: Element) => void;
+  handleModerationResult: (message: Record<string, unknown>) => void;
   /** Cold-start model-readiness rescan (re-issues the request pipeline). */
   mwColdStartRescan: (reason: string) => void;
 }
@@ -238,10 +242,14 @@ export function injectScript(): InjectionResult {
   const probeCode = `
   window.__MW_TEST_PROBE__ = {
     getMvpCardHrefItemKey: getMvpCardHrefItemKey,
+    getOwnedCardContainerFromNode: getOwnedCardContainerFromNode,
     isMvpBlurAuthorized: isMvpBlurAuthorized,
     diagNonShortsReattach: diagNonShortsReattach,
     isYouTubeMainPageThumbnailSurfaceUrl: isYouTubeMainPageThumbnailSurfaceUrl,
     applyBlur: applyBlur,
+    reapplyOwnedContainerBlur: reapplyOwnedContainerBlur,
+    registerElement: function(itemId, element) { state.elements.set(itemId, element); },
+    handleModerationResult: handleModerationResult,
     mwColdStartRescan: mwColdStartRescan,
   };
   `;

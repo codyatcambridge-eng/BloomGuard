@@ -636,6 +636,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     postToHost({
       type: 'MW_BLUR_READY',
       reason: reason || 'ready',
+      hostNavId: Number(window.__MW_HOST_NAV_ID__),
+      pageEpoch: CONFIG.pageEpoch,
+      noncePrefix: String(CONFIG.nonce || '').substring(0, 6),
       url: window.location.href,
       timestamp: Date.now(),
     });
@@ -1188,6 +1191,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   postToHost({
     type: 'MW_INJECTED_ACK',
     navId: NAV_ID,
+    hostNavId: Number(window.__MW_HOST_NAV_ID__),
     pageEpoch: CONFIG.pageEpoch,
     noncePrefix: NONCE_PREFIX,
     url: window.location.href,
@@ -3236,17 +3240,34 @@ export function generateModerationScript(config: InjectionConfig): string {
     return null;
   }
 
+  function getShortsShelfItemOwnerFromNode(node) {
+    if (!node || node.nodeType !== 1 || typeof node.closest !== 'function') return null;
+    const directOwner = node.closest(
+      'ytm-shorts-lockup-view-model,' +
+      'ytm-reel-item-renderer,' +
+      'ytd-reel-item-renderer'
+    );
+    if (directOwner) return directOwner;
+
+    // Phase 0 Results shelf boundary: newer mobile YouTube can use a generic
+    // lockup model for each Short. Accept it only when that individual lockup
+    // owns a Shorts href; never fall back to the surrounding shelf renderer.
+    const genericLockup = node.closest('yt-lockup-view-model,yt-lockup-view-model-wiz');
+    if (
+      genericLockup &&
+      typeof genericLockup.querySelector === 'function' &&
+      genericLockup.querySelector('a[href*="/shorts/"]')
+    ) {
+      return genericLockup;
+    }
+    return null;
+  }
+
   function getOwnedCardContainerFromNode(node) {
     if (!node || node.nodeType !== 1 || typeof node.closest !== 'function') return null;
     // Prefer per-item card owners first to avoid broad section ownership blur.
     const strictOwner = (
-      node.closest('ytm-shorts-lockup-view-model') ||
-      node.closest('ytd-reel-item-renderer') ||
-      node.closest('ytm-shorts-shelf-renderer') ||
-      node.closest('ytd-shorts-shelf-renderer') ||
-      node.closest('ytd-reel-shelf-renderer') ||
-      node.closest('ytm-rich-shelf-renderer') ||
-      node.closest('ytd-rich-shelf-renderer') ||
+      getShortsShelfItemOwnerFromNode(node) ||
       node.closest('ytd-rich-grid-media') ||
       node.closest('ytd-rich-item-renderer') ||
       node.closest('ytd-video-renderer') ||
@@ -3271,14 +3292,16 @@ export function generateModerationScript(config: InjectionConfig): string {
   function isShortsShelfOwnedCard(card) {
     if (!card || card.nodeType !== 1 || typeof card.matches !== 'function') return false;
     try {
+      if (card.matches('yt-lockup-view-model,yt-lockup-view-model-wiz')) {
+        return !!(
+          typeof card.querySelector === 'function' &&
+          card.querySelector('a[href*="/shorts/"]')
+        );
+      }
       return !!card.matches(
         'ytm-shorts-lockup-view-model,' +
-        'ytd-reel-item-renderer,' +
-        'ytm-shorts-shelf-renderer,' +
-        'ytd-shorts-shelf-renderer,' +
-        'ytd-reel-shelf-renderer,' +
-        'ytm-rich-shelf-renderer,' +
-        'ytd-rich-shelf-renderer'
+        'ytm-reel-item-renderer,' +
+        'ytd-reel-item-renderer'
       );
     } catch (e) {
       return false;
@@ -8178,10 +8201,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     // Handles img elements inside ytm-shorts-lockup-view-model on the main feed.
     // Active Shorts (isShortsModeActive=true) already exited above.
     // Regular cards do not have ytm-shorts-lockup-view-model as an ancestor.
-    const shortsShelfLockup = (
-      !isShortsModeActive() &&
-      typeof element.closest === 'function'
-    ) ? element.closest('ytm-shorts-lockup-view-model') : null;
+    const shortsShelfLockup = !isShortsModeActive()
+      ? getShortsShelfItemOwnerFromNode(element)
+      : null;
     if (shortsShelfLockup) {
       const shelfAnchor = typeof shortsShelfLockup.querySelector === 'function'
         ? shortsShelfLockup.querySelector('a[href^="/shorts/"]')
@@ -8384,9 +8406,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           }
         }
         // Shorts shelf ownership stamp — must happen before createRevealOverlay
-        const _shelfLockup = typeof element.closest === 'function'
-          ? element.closest('ytm-shorts-lockup-view-model')
-          : null;
+        const _shelfLockup = getShortsShelfItemOwnerFromNode(element);
         if (_shelfLockup) {
           const _shelfItemKey = getDiagItemKey(src);
           _shelfLockup.dataset.mwShortsShelfOwned = '1';
@@ -8457,9 +8477,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       
       createRevealOverlay(element, src, category, itemId);
       if (!shortsMode && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
-        const _shelfLockupForDiag = typeof element.closest === 'function'
-          ? element.closest('ytm-shorts-lockup-view-model')
-          : null;
+        const _shelfLockupForDiag = getShortsShelfItemOwnerFromNode(element);
         if (_shelfLockupForDiag) {
           const overlayAfterCreate = findRevealOverlayForElement(element, src);
           console.log(
@@ -9999,17 +10017,16 @@ export function generateModerationScript(config: InjectionConfig): string {
       // ======== ANATOMICAL LOGIC ========
       // Only maintain blur if Sexy or Porn > 0.60
       let shouldApplyBlur = shouldBlur;
+      const authoritativeHostNegative = shouldBlur === false;
       let decisionReason = hostDecisionReason || reason || '';
       const forceUnsafe = FORCE_UNSAFE_CATEGORIES.has(rawCategory);
 
       // Prefer explicit threshold evaluation when label + score are available.
       // Directionality: score > threshold => blur.
       //
-      // Guardrail: preserve host-safe decisions by default.
-      // Only allow threshold-based escalation from safe->blur in strict/max sensitivity
-      // or when failClosed is explicitly enabled.
-      const allowSafeToBlurEscalation = CONFIG.failClosed || CONFIG.sensitivity >= 3;
-      if (!shouldBlur && !allowSafeToBlurEscalation) {
+      // Phase 0 guardrail: this result is already tied to the pending item identity,
+      // so an explicit host-negative decision is authoritative for this item.
+      if (authoritativeHostNegative) {
         shouldApplyBlur = false;
         decisionReason = 'host_safe_preserved';
       } else if (forceUnsafe && shouldBlur) {
@@ -10051,6 +10068,10 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (policyDecision.reason) {
         decisionReason = policyDecision.reason;
       }
+      if (authoritativeHostNegative) {
+        shouldApplyBlur = false;
+        decisionReason = 'host_safe_preserved';
+      }
       
       const dialActive = CONFIG.enabled && CONFIG.sensitivity > 0;
       const sexyScoreForAction = unsafeScores.sexy || 0;
@@ -10058,8 +10079,10 @@ export function generateModerationScript(config: InjectionConfig): string {
       const hardBlurOverride = (predictedLabel === 'porn' && pornScoreForAction > 0.8) ||
         (predictedLabel === 'sexy' && sexyScoreForAction > 0.8);
       const dynamicBlurCandidate = rawCategory === 'swimwear' || (predictedLabel === 'sexy' && sexyScoreForAction < 0.8);
-      let finalBlur = CONFIG.forcedBlur || (shouldApplyBlur && dialActive);
-      if (hardBlurOverride) {
+      let finalBlur = authoritativeHostNegative
+        ? false
+        : (CONFIG.forcedBlur || (shouldApplyBlur && dialActive));
+      if (!authoritativeHostNegative && shouldApplyBlur && hardBlurOverride) {
         finalBlur = true;
         decisionReason = (decisionReason ? decisionReason + '/' : '') + 'hard_blur';
       } else if (dynamicBlurCandidate) {
@@ -11699,6 +11722,18 @@ export function generateModerationScript(config: InjectionConfig): string {
       return 'ERR:' + String(e);
     }
   };
+  window.__MW_MODEL_READY_RESCAN__ = function(reason) {
+    try {
+      // Phase 0 boundary: active Shorts owns a separate first-entry lifecycle.
+      // Home/results/watch surfaces use this one-shot hook to recover thumbnails
+      // that received fail-open results before the native model was ready.
+      if (isShortsModeActive()) return 'SKIP_ACTIVE_SHORTS';
+      mwColdStartRescan(reason || 'host_model_ready');
+      return 'OK';
+    } catch (e) {
+      return 'ERR:' + String(e);
+    }
+  };
 
   // Track SPA URL transitions for lifecycle diagnostics and epoch handling.
   let lastUrl = window.location.href;
@@ -11794,33 +11829,6 @@ export function generateModerationScript(config: InjectionConfig): string {
     }, delayMs);
     timerState.initialTimeouts.push(coldId);
   });
-
-  // NUCLEAR COLD-START BLUR GUARANTEE (paused-decoupled, self-disabling).
-  // Bridges the paused-stuck cold-start window so blur engages on ANY page from launch
-  // despite the iOS WebView visibilityState quirk that leaves the scan engine paused
-  // until the user interacts. It does work ONLY while timerState.paused is true (the bug
-  // state) AND the page is not active Shorts; the instant the normal engine goes live
-  // (paused=false) it is a zero-cost no-op. Self-terminates on teardown. Calls only the
-  // existing scan functions (idempotent via scanned-dedup; reveal preserved because
-  // applyBlur skips revealed src). Touches no pause/resume/teardown, Shorts, reveal,
-  // epoch, or blur-application logic.
-  timerState.coldStartGuaranteeInterval = setInterval(function() {
-    if (timerState.teardownDone) {
-      clearInterval(timerState.coldStartGuaranteeInterval);
-      timerState.coldStartGuaranteeInterval = null;
-      return;
-    }
-    if (!timerState.paused) return;     // normal engine live -> do nothing
-    if (isShortsModeActive()) return;   // never touch active Shorts
-    console.log(
-      '[MW][ColdStartGuarantee] scan',
-      'paused=' + timerState.paused,
-      'visibility=' + document.visibilityState,
-      'url=' + window.location.href.substring(0, 80)
-    );
-    try { scanFullPage(); } catch (e) {}
-    if (isYT) { try { scanYouTubeThumbnails(); } catch (e) {} }
-  }, 2500);
 
   function startYouTubePeriodicScan(reason) {
     if (!isYT || timerState.paused || timerState.youtubePeriodicInterval) return;
@@ -12196,47 +12204,6 @@ export function generateModerationScript(config: InjectionConfig): string {
         }
       }, delay);
     });
-  })();
-
-  // DIAGNOSTIC HUD (removable). Paints a tiny live status badge so cold-start behavior is
-  // visible without a console: build tag (proves fresh code), visibility/paused state, and
-  // live scan/request/response/blur counts. Set window.__MW_HUD__ = false before injection to
-  // disable. Purely cosmetic; reads state only, writes no app state.
-  (function() {
-    if (window.__MW_HUD__ === false) return;
-    var BUILD_TAG = 'MW 2026-06-05 cold-start-HUD';
-    var hud = document.createElement('div');
-    hud.id = 'mw-diag-hud';
-    hud.style.cssText = [
-      'position:fixed', 'top:6px', 'right:6px', 'z-index:2147483647',
-      'background:rgba(0,0,0,0.80)', 'color:#3f6', 'font:11px/1.3 monospace',
-      'padding:5px 7px', 'border-radius:6px', 'pointer-events:none',
-      'white-space:normal', 'max-width:62vw'
-    ].join(';');
-    function paint() {
-      if (timerState.teardownDone) return;
-      try {
-        var s = state.stats || {};
-        hud.textContent =
-          BUILD_TAG +
-          ' | startup=' + mwStartupState +
-          ' | vis=' + document.visibilityState +
-          ' paused=' + timerState.paused +
-          ' | scanned=' + (state.scanned ? state.scanned.size : '?') +
-          ' req=' + (s.requestsSent || 0) +
-          ' res=' + (s.responsesReceived || 0) +
-          ' blur=' + (s.blurred || 0) +
-          ' err=' + (s.errors || 0);
-      } catch (e) {}
-    }
-    function attach() {
-      if (timerState.teardownDone) return;
-      if (!document.body) { setTimeout(attach, 200); return; }
-      if (!document.getElementById('mw-diag-hud')) { document.body.appendChild(hud); }
-      paint();
-    }
-    attach();
-    setInterval(paint, 1000);
   })();
 
   // Expose debug API

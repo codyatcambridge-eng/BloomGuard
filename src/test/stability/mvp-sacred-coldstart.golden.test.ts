@@ -41,6 +41,19 @@ afterEach(() => {
 });
 
 describe('GOLDEN: Cold-Start Rescan (sacred — must not regress positive blur)', () => {
+  it('exposes a bounded host model-ready recovery hook without a visual HUD', () => {
+    injection = injectScript();
+    const modelReadyRescan = (
+      window as unknown as {
+        __MW_MODEL_READY_RESCAN__?: (reason: string) => string;
+      }
+    ).__MW_MODEL_READY_RESCAN__;
+
+    expect(modelReadyRescan).toBeTypeOf('function');
+    expect(modelReadyRescan?.('test_model_ready_hook')).toBe('OK');
+    expect(document.getElementById('mw-diag-hud')).toBeNull();
+  });
+
   it('SAFETY: a cold-start rescan does NOT un-blur an authoritative-blurred positive', () => {
     const { video } = buildCard('ytm-rich-item-renderer', POSITIVE_ID);
     injection = injectScript();
