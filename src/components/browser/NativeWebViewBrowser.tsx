@@ -2391,6 +2391,37 @@ export const NativeWebViewBrowser = () => {
     injectModerationScript,
   ]);
 
+  // RECOVERY RE-ARM SIGNAL (shared by P3 foreground/inactivity recovery + P4 refresh recovery).
+  // Bumping this nonce re-runs the cold-start injection heartbeat below, which re-drives
+  // injectModerationScript until a fresh blur handshake confirms the injected script is alive
+  // again (the fresh script self-scans on init, rebuilding blur + reveal ownership). Bumped when
+  // (a) the app returns to foreground and a liveness probe finds the script dead/purged, or
+  // (b) the user hits refresh. Host-side only — no Flash Shield, settings, or blur-dial coupling.
+  const [recoveryNonce, setRecoveryNonce] = useState(0);
+
+  // Force the injected script to re-scan and re-own the CURRENT DOM (positives re-blurred, reveal
+  // overlays recreated) WITHOUT re-injecting. Used when a foreground liveness probe confirms the
+  // script is still ALIVE but YouTube may have replaced/restaled the feed during a long
+  // background. Calls only the existing idempotent scan entry points (__MW_SCAN_FULL__/
+  // __MW_SCAN_YT__ = scanFullPage/scanYouTubeThumbnails); it never clears authoritative blur and
+  // never touches Flash Shield, settings panels, the blur dial, or NSFWJS tuning.
+  const forceWebViewRescan = useCallback(async (reason: string) => {
+    if (!ENABLE_DOM_BLUR) return;
+    if (!isNative || !webViewState.isOpen || !executeScript) return;
+    try {
+      await executeScript(`
+        (function() {
+          try {
+            if (typeof window.__MW_SCAN_FULL__ === 'function') window.__MW_SCAN_FULL__();
+            if (typeof window.__MW_SCAN_YT__ === 'function') window.__MW_SCAN_YT__();
+            return 'OK';
+          } catch (e) { return 'ERR:' + String(e); }
+        })();
+      `);
+      console.log('[MW-Host][ForceRescan]', 'reason=' + reason, 'navId=' + activeNavIdRef.current);
+    } catch { /* ignore — next probe/heartbeat tick will retry */ }
+  }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, executeScript]);
+
   // COLD-START INJECTION DRIVER (host-side heartbeat).
   // The one-shot gate-ready path misses cold launch: the WebView reports an about:blank
   // bootstrap URL before the real YouTube URL commits, and an epoch-sync-only call can flip
@@ -2401,6 +2432,7 @@ export const NativeWebViewBrowser = () => {
   // injectionDoneRef, and re-drives the EXISTING injectModerationScript — until a fresh blur
   // handshake confirms the injected script is alive, then stops (~15s safety cap). Host-side
   // only: no change to the injection engine, reveal, positive-stability, or Shorts logic.
+  // Re-armed by recoveryNonce (P3 dead-script recovery / P4 refresh) to rebuild after teardown.
   useEffect(() => {
     if (!ENABLE_SIGNAL_PIPELINE) return;
     if (!isNative || !webViewState.isOpen || !executeScript) return;
@@ -2456,6 +2488,7 @@ export const NativeWebViewBrowser = () => {
     webViewListenersAttached,
     injectModerationScript,
     requestBlurHandshake,
+    recoveryNonce,
   ]);
 
   useEffect(() => {
@@ -2468,6 +2501,84 @@ export const NativeWebViewBrowser = () => {
     }, 800);
     return () => clearInterval(timer);
   }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, requestBlurHandshake]);
+
+  // P3 — FOREGROUND / INACTIVITY RECOVERY.
+  // After a long background, iOS can purge the WebView's JS context (the injected script, its
+  // timers, observers, ownership caches, and reveal overlays all vanish), or YouTube can replace
+  // the feed DOM. b915's web-layer visibilitychange only pauses/resumes timers — it does NOT
+  // re-inject a dead script or re-own a restaled DOM, so blur silently drops after ~an hour idle
+  // until a manual nav/refresh. On foreground we run a BOUNDED liveness probe: ping the injected
+  // script and wait briefly for its handshake ack.
+  //   - acks (ALIVE): force a rescan so positives YouTube re-rendered are re-blurred and reveal
+  //     overlays recreated (no re-inject).
+  //   - no ack (DEAD/purged): safely reset injection readiness and bump recoveryNonce to re-arm
+  //     the bounded injection heartbeat, which re-injects until a fresh handshake confirms life.
+  // A false "dead" verdict is safe: re-inject returns MW_ALREADY_ACTIVE on a healthy script and
+  // no-ops (no teardown unless its hooks are unresponsive). Host-side only; never clears
+  // authoritative blur and never touches Flash Shield, settings, the blur dial, or NSFWJS tuning.
+  useEffect(() => {
+    if (!ENABLE_DOM_BLUR) return;
+    if (!isNative || !webViewState.isOpen || !executeScript) return;
+    if (!settingsLoaded || !isRuntimeModerationEnabled || !webViewListenersAttached) return;
+
+    const FOREGROUND_PROBE_TIMEOUT_MS = 1200;       // generous, to avoid false "dead" on a busy script
+    const FOREGROUND_RECOVERY_MIN_INTERVAL_MS = 4000; // debounce rapid visibility/focus churn
+
+    let probing = false;
+    let cancelled = false;
+    let lastProbeAt = 0;
+
+    const probeAndRecover = async (trigger: string) => {
+      if (cancelled || probing) return;
+      if (document.visibilityState !== 'visible') return;
+      const now = Date.now();
+      if (now - lastProbeAt < FOREGROUND_RECOVERY_MIN_INTERVAL_MS) return;
+      lastProbeAt = now;
+      probing = true;
+      try {
+        blurReadyRef.current = false; // require a FRESH ack to prove the script is still alive
+        await requestBlurHandshake('foreground_liveness_probe:' + trigger);
+        const deadline = Date.now() + FOREGROUND_PROBE_TIMEOUT_MS;
+        while (!cancelled && !blurReadyRef.current && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        if (cancelled) return;
+        if (blurReadyRef.current) {
+          await forceWebViewRescan('foreground_alive:' + trigger);
+        } else {
+          console.log(
+            '[MW-Host][ForegroundRecovery] script_dead reinjecting',
+            'trigger=' + trigger,
+            'navId=' + activeNavIdRef.current,
+          );
+          injectionDoneRef.current = false;
+          blurReadyRef.current = false;
+          setRecoveryNonce((n) => n + 1);
+        }
+      } finally {
+        probing = false;
+      }
+    };
+
+    const onVisible = () => { void probeAndRecover('visibilitychange'); };
+    window.addEventListener('focus', onVisible);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('focus', onVisible);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [
+    ENABLE_DOM_BLUR,
+    isNative,
+    webViewState.isOpen,
+    executeScript,
+    settingsLoaded,
+    isRuntimeModerationEnabled,
+    webViewListenersAttached,
+    requestBlurHandshake,
+    forceWebViewRescan,
+  ]);
 
   useEffect(() => {
     return () => {
@@ -4559,11 +4670,17 @@ export const NativeWebViewBrowser = () => {
     }
     if (currentView === 'browse' && isNative && webViewState.isOpen) {
       await webViewReload();
-      // Reset injection flag to re-inject moderation script
+      // P4 — REFRESH RECOVERY. A reload drops the whole injected context (the new document has
+      // no __MW_ACTIVE__, timers, ownership, or reveal overlays). Resetting these refs alone does
+      // NOT re-fire any effect (refs are not reactive), so blur/reveal could stay dropped until a
+      // nav. Reset readiness AND bump recoveryNonce to re-arm the bounded injection heartbeat,
+      // which re-injects into the reloaded page; the fresh script's init scan rebuilds blur +
+      // reveal ownership. Host-side only — no Flash Shield, settings, or blur-dial coupling.
       injectionDoneRef.current = false;
       blurReadyRef.current = false;
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       setCentralBlurState(false, 'manual_reload');
+      setRecoveryNonce((n) => n + 1);
       return;
     }
   }, [readerContent, currentView, searchQuery, isNative, webViewState.isOpen, handleReaderMode, handleSearch, webViewReload, setCentralBlurState]);
