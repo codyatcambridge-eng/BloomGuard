@@ -182,6 +182,7 @@ export interface MWTestProbe {
   ) => boolean;
   diagNonShortsReattach: (videoNode: HTMLVideoElement, reason: string) => void;
   isYouTubeMainPageThumbnailSurfaceUrl: (url: string) => boolean;
+  repairNonShortsBlurRevealInvariant: (reason: string) => void;
   applyBlur: (
     element: Element,
     src: string,
@@ -239,6 +240,7 @@ export function injectScript(): InjectionResult {
     isMvpBlurAuthorized: isMvpBlurAuthorized,
     diagNonShortsReattach: diagNonShortsReattach,
     isYouTubeMainPageThumbnailSurfaceUrl: isYouTubeMainPageThumbnailSurfaceUrl,
+    repairNonShortsBlurRevealInvariant: repairNonShortsBlurRevealInvariant,
     applyBlur: applyBlur,
   };
   `;

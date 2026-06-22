@@ -4531,14 +4531,15 @@ export const NativeWebViewBrowser = () => {
       return;
     }
     if (currentView === 'browse' && isNative && webViewState.isOpen) {
-      await webViewReload();
-      // Reset injection flag to re-inject moderation script
-      resetInjectionReadiness('manual_reload');
+      const reloadUrl = webViewState.currentUrl || currentUrlRef.current || '';
+      resetInjectionReadiness('manual_reload_preflight');
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
-      setCentralBlurState(false, 'manual_reload');
+      setCentralBlurState(false, 'manual_reload_preflight');
+      await teardownWebViewScheduling('manual_reload_preflight', reloadUrl).catch(() => undefined);
+      await webViewReload();
       return;
     }
-  }, [readerContent, currentView, searchQuery, isNative, webViewState.isOpen, handleReaderMode, handleSearch, webViewReload, setCentralBlurState, resetInjectionReadiness]);
+  }, [readerContent, currentView, searchQuery, isNative, webViewState.isOpen, webViewState.currentUrl, handleReaderMode, handleSearch, webViewReload, setCentralBlurState, resetInjectionReadiness, teardownWebViewScheduling]);
 
   const handleHome = useCallback(async () => {
     teardownWebViewScheduling('home_reset', webViewState.currentUrl).catch(() => undefined);

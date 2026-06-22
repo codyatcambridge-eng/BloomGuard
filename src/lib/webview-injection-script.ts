@@ -12485,6 +12485,102 @@ export function generateModerationScript(config: InjectionConfig): string {
     } catch (e) {}
   }
 
+  function getBloomGuardMarkedNodeSrc(node) {
+    if (!node || node.nodeType !== 1) return '';
+    const source = getDiagSourceFields(node);
+    return normalizeUrl(
+      node.dataset.mwSrc ||
+      source.currentSrc ||
+      source.poster ||
+      (node.getAttribute && (
+        node.getAttribute('src') ||
+        node.getAttribute('poster') ||
+        node.getAttribute('data-src') ||
+        node.getAttribute('data-lazy-src') ||
+        ''
+      )) ||
+      ''
+    ) || String(node.dataset.mwSrc || source.currentSrc || source.poster || '');
+  }
+
+  function hasBloomGuardBlurResidue(node) {
+    if (!node || node.nodeType !== 1) return false;
+    try {
+      const filter = String(node.style.getPropertyValue('filter') || node.style.filter || '').toLowerCase();
+      const webkitFilter = String(node.style.getPropertyValue('-webkit-filter') || '').toLowerCase();
+      const backdrop = String(node.style.getPropertyValue('backdrop-filter') || '').toLowerCase();
+      const webkitBackdrop = String(node.style.getPropertyValue('-webkit-backdrop-filter') || '').toLowerCase();
+      return (
+        filter.includes('blur(') ||
+        webkitFilter.includes('blur(') ||
+        backdrop.includes('blur(') ||
+        webkitBackdrop.includes('blur(') ||
+        node.classList.contains('mw-blurred') ||
+        node.classList.contains('mw-softblur') ||
+        node.dataset.mwModerated === 'blurred' ||
+        node.dataset.mwModerated === 'softblur' ||
+        node.dataset.mwVeil === '1'
+      );
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function repairNonShortsBlurRevealInvariant(reason) {
+    if (isShortsModeActive()) return;
+    if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
+    try {
+      const nodes = document.querySelectorAll(
+        '[data-mw-moderated="blurred"],[data-mw-moderated="softblur"],.mw-blurred,.mw-softblur,[data-mw-veil="1"]'
+      );
+      let cleared = 0;
+      let revealRepaired = 0;
+      let preserved = 0;
+      for (let i = 0; i < nodes.length; i += 1) {
+        const node = nodes[i];
+        if (!node || node.nodeType !== 1 || !node.isConnected) continue;
+        if (!hasBloomGuardBlurResidue(node)) continue;
+
+        const src = getBloomGuardMarkedNodeSrc(node);
+        const itemKey = getDiagItemKey(src);
+        const hasHardPositiveStamp =
+          node.dataset.mwHardBlur === '1' ||
+          (node.dataset.mwModerated === 'blurred' && node.classList.contains('mw-blurred') && !!src);
+
+        if (hasHardPositiveStamp && src && isMvpBlurAuthorized(node, src, itemKey, 'card_blurred', 'shorts_exit_invariant_repair')) {
+          if (!findRevealOverlayForElement(node, src)) {
+            createRevealOverlay(node, src, node.dataset.mwCategory || 'flagged', node.dataset.mwItemId || itemKey);
+            if (findRevealOverlayForElement(node, src)) {
+              revealRepaired += 1;
+            } else {
+              preserved += 1;
+            }
+          } else {
+            preserved += 1;
+          }
+          continue;
+        }
+
+        if (node.dataset.mwVeil === '1') {
+          node.removeAttribute('data-mw-veil');
+        }
+        if (clearAllBlurAndOverlay(node, src, reason || 'shorts_exit_invariant_repair', 'safe')) {
+          cleared += 1;
+        }
+      }
+      if (cleared || revealRepaired || preserved) {
+        console.log(
+          '[DIAG][LIFECYCLE_REPAIR] non_shorts_blur_reveal_invariant',
+          'reason=' + (reason || 'unknown'),
+          'cleared=' + cleared,
+          'revealRepaired=' + revealRepaired,
+          'preserved=' + preserved,
+          'url=' + window.location.href
+        );
+      }
+    } catch (e) {}
+  }
+
   const checkUrlChange = () => {
     if (window.location.href !== lastUrl) {
       const previousUrl = lastUrl;
@@ -12535,6 +12631,15 @@ export function generateModerationScript(config: InjectionConfig): string {
       const nextIsShorts = isYouTubeShortsUrl(nextUrl);
       if (previousIsShorts !== nextIsShorts) {
         sweepOrphanedModeOverlays(nextIsShorts ? 'enter_shorts' : 'leave_shorts');
+        if (previousIsShorts && !nextIsShorts) {
+          repairNonShortsBlurRevealInvariant('leave_shorts_immediate');
+          scheduleInitTimeout('shortsExitInvariantRepair', function() {
+            repairNonShortsBlurRevealInvariant('leave_shorts_250ms');
+          }, 250);
+          scheduleInitTimeout('shortsExitInvariantRepair', function() {
+            repairNonShortsBlurRevealInvariant('leave_shorts_1000ms');
+          }, 1000);
+        }
       }
       if (previousIsShorts || nextIsShorts) {
         resetShortsBlurContext('url_change');
