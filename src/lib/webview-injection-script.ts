@@ -455,6 +455,11 @@ export function generateModerationScript(config: InjectionConfig): string {
     // Flash Shield V1 - independent frosted pre-paint veil (strictly separate from sensitivity/dial)
     flashShieldV1: ${config.flashShieldV1 === true},
   };
+  let offModeVisualCleanupActive = false;
+
+  function isVisualModerationActive() {
+    return !offModeVisualCleanupActive && CONFIG.scanEnabled === true && (CONFIG.enabled === true || CONFIG.flashShieldV1 === true);
+  }
 
   // Threshold mappings for blur dial levels.
   const THRESHOLDS = {
@@ -1090,6 +1095,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   // applyBlur or alter sensitivity/thresholds; it preserves the frosted veil and delegates
   // reveal UI creation to the existing frozen createRevealOverlay implementation.
   function applyFlashShieldPositive(element, src, category, itemId) {
+    if (!isVisualModerationActive()) return false;
     if (!CONFIG.flashShieldV1 || !element || element.nodeType !== 1) return false;
     try {
       let target = element;
@@ -2115,6 +2121,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function queueMutationScan(node, reason) {
+    if (!isVisualModerationActive()) return;
     if (!node || node.nodeType !== 1) return;
     if (mutationScanSet.has(node)) {
       diagMutationScheduleLog('skip_duplicate', node, reason || 'unknown', false);
@@ -8896,6 +8903,7 @@ export function generateModerationScript(config: InjectionConfig): string {
    * Uses !important to override site styles on iOS
    */
   function applyBlur(element, src, category, blurStrengthPx, itemId, _mvpProof) {
+    if (!isVisualModerationActive()) return;
     // Check persistence
     if (isRevealedForSource(src, element)) return;
     if (!isMvpBlurAuthorized(element, src, getDiagItemKey(src), _mvpProof || 'none', 'applyBlur')) return;
@@ -9252,6 +9260,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function createRevealOverlay(element, src, category, itemId, allowShortsReresolve) {
+    if (!isVisualModerationActive()) return;
     const shortsMode = isShortsModeActive();
     const usePortalOverlay = shortsMode || shouldUsePortalRevealOverlayForNode(element);
     if (!shortsMode && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
@@ -9446,6 +9455,7 @@ export function generateModerationScript(config: InjectionConfig): string {
               element.dataset.mwOwnerDeferScheduled = 'true';
               element.__mwDeferTimerId = setTimeout(function() {
                 element.__mwDeferTimerId = null;
+                if (!isVisualModerationActive()) return;
                 if (!element || element.nodeType !== 1 || !element.isConnected) return;
                 if (element.dataset) element.dataset.mwOwnerDeferScheduled = 'false';
                 if (String(element.dataset.mwModerated || '') !== 'blurred') return;
@@ -9484,6 +9494,7 @@ export function generateModerationScript(config: InjectionConfig): string {
             element.dataset.mwOwnerMismatchRetryScheduled = 'true';
             element.__mwMismatchTimerId = setTimeout(function() {
               element.__mwMismatchTimerId = null;
+              if (!isVisualModerationActive()) return;
               if (!element || element.nodeType !== 1 || !element.isConnected) return;
               if (element.dataset) {
                 element.dataset.mwOwnerMismatchRetryScheduled = 'false';
@@ -10836,6 +10847,7 @@ export function generateModerationScript(config: InjectionConfig): string {
    * Find and blur all elements matching a src
    */
   function findAndBlur(src, category, blurStrengthPx, shouldBlur, originItemId) {
+    if (!isVisualModerationActive()) return;
     if (!shouldBlur) return;
     if (isRevealedForSource(src, null)) return;
     
@@ -11730,6 +11742,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function scanActiveShortsPlayerContainer(reason) {
+    if (!isVisualModerationActive()) return false;
     if (!isShortsModeActive()) return false;
     refreshAdaptiveShortsOverlayWatch('scanActiveShortsPlayerContainer:' + (reason || 'unknown'));
     console.log(
@@ -12078,6 +12091,12 @@ export function generateModerationScript(config: InjectionConfig): string {
   
   // Poll legacy results queue (fallback if postMessage doesn't work)
   function processLegacyResults() {
+    if (!isVisualModerationActive()) {
+      if (window.__GC_SCAN_RESULTS__ && window.__GC_SCAN_RESULTS__.length > 0) {
+        window.__GC_SCAN_RESULTS__.splice(0, window.__GC_SCAN_RESULTS__.length);
+      }
+      return;
+    }
     if (!window.__GC_SCAN_RESULTS__ || window.__GC_SCAN_RESULTS__.length === 0) {
       return;
     }
@@ -12581,6 +12600,100 @@ export function generateModerationScript(config: InjectionConfig): string {
     } catch (e) {}
   }
 
+  function cleanupBloomGuardVisualModeration(reason) {
+    const cleanupReason = reason || 'off_mode_cleanup';
+    let clearedNodes = 0;
+    let removedOverlays = 0;
+    try {
+      offModeVisualCleanupActive = true;
+      CONFIG.enabled = false;
+      CONFIG.scanEnabled = false;
+      CONFIG.flashShieldV1 = false;
+      document.documentElement.classList.remove(FLASH_SHIELD_CLASS);
+      stopFlashShieldRuntime();
+      disableFlashShieldRuntime();
+
+      document.querySelectorAll('.mw-reveal-overlay,.mw-reveal-btn,#' + REVEAL_PORTAL_ID + ',.' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS).forEach(function(node) {
+        if (node && node.parentElement) {
+          node.parentElement.removeChild(node);
+          removedOverlays += 1;
+        }
+      });
+
+      document.querySelectorAll('.' + OWNED_POSITIVE_CARD_CLASS + ',.' + OWNED_SAFE_CARD_CLASS + ',[data-mw-owned-positive="1"],[data-mw-owned-safe="1"]').forEach(function(card) {
+        if (!card || card.nodeType !== 1) return;
+        try {
+          card.classList.remove(OWNED_POSITIVE_CARD_CLASS);
+          card.classList.remove(OWNED_SAFE_CARD_CLASS);
+          card.removeAttribute('data-mw-owned-positive');
+          card.removeAttribute('data-mw-owned-safe');
+          card.removeAttribute('data-mw-owned-item-key');
+          card.removeAttribute('data-mw-owned-href-key');
+          card.removeAttribute('data-mw-owned-epoch');
+        } catch (e) {}
+      });
+
+      document.querySelectorAll(
+        '[data-mw-moderated],[data-mw-veil="1"],[data-mw-flash-frame="1"],[data-mw-flash-positive="1"],[data-mw-hard-blur="1"],[data-mw-has-overlay="true"],.mw-blurred,.mw-softblur'
+      ).forEach(function(node) {
+        if (!node || node.nodeType !== 1) return;
+        try {
+          const src = getBloomGuardMarkedNodeSrc(node);
+          if (clearAllBlurAndOverlay(node, src, cleanupReason, 'safe')) {
+            clearedNodes += 1;
+          }
+          node.removeAttribute('data-mw-veil');
+          node.removeAttribute('data-mw-flash-frame');
+          node.removeAttribute('data-mw-flash-positive');
+          node.removeAttribute('data-mw-hard-blur');
+          node.removeAttribute('data-mw-hard-blur-src');
+          node.removeAttribute('data-mw-hard-blur-item-key');
+          node.removeAttribute('data-mw-hard-blur-epoch');
+          node.removeAttribute('data-mw-category');
+          node.removeAttribute('data-mw-src');
+          node.removeAttribute('data-mw-item-id');
+          node.removeAttribute('data-mw-overlay-owner-token');
+          node.removeAttribute('data-mw-shorts-owner-token');
+          node.removeAttribute('data-mw-shorts-stable-selector');
+          node.removeAttribute('data-mw-has-overlay');
+          node.setAttribute('data-mw-moderated', 'safe');
+          clearShortsBlurContextForNode(node, cleanupReason);
+        } catch (e) {}
+      });
+
+      state.pendingRequests.forEach(function(req) {
+        if (req && req.timeoutId) clearTimeout(req.timeoutId);
+      });
+      state.pendingRequests.clear();
+      state.pending.forEach(function(item) {
+        if (item && item.blurTimer) clearTimeout(item.blurTimer);
+      });
+      state.pending.clear();
+      state.pendingBySrc.clear();
+      state.scanned.clear();
+      state.elements.clear();
+      state.blurred.clear();
+      mutationScanQueue.length = 0;
+      mutationScanSet.clear();
+      batchQueue = [];
+      if (batchTimer) {
+        clearTimeout(batchTimer);
+        batchTimer = null;
+      }
+      if (mutationScanTimer) {
+        clearTimeout(mutationScanTimer);
+        mutationScanTimer = null;
+      }
+    } catch (e) {}
+    console.log(
+      '[DIAG][OFF_MODE] visual_cleanup',
+      'reason=' + cleanupReason,
+      'clearedNodes=' + clearedNodes,
+      'removedOverlays=' + removedOverlays
+    );
+    return 'OK_OFF_MODE_CLEANUP';
+  }
+
   const checkUrlChange = () => {
     if (window.location.href !== lastUrl) {
       const previousUrl = lastUrl;
@@ -12925,8 +13038,18 @@ export function generateModerationScript(config: InjectionConfig): string {
   window.__MW_TEARDOWN__ = function(reason) {
     teardownManagedScheduling(reason || 'host_teardown');
   };
+  window.__MW_OFF_MODE_CLEANUP__ = function(reason) {
+    try {
+      cleanupBloomGuardVisualModeration(reason || 'host_off_mode');
+      teardownManagedScheduling(reason || 'host_off_mode');
+      return 'OK_OFF_MODE_CLEANUP';
+    } catch (e) {
+      return 'ERR:' + String(e);
+    }
+  };
   window.__MW_FLASH_SHIELD_SET__ = function(enabled) {
     try {
+      if (offModeVisualCleanupActive) return 'SKIP_OFF_MODE';
       CONFIG.flashShieldV1 = !!enabled;
       CONFIG.scanEnabled = CONFIG.enabled || CONFIG.flashShieldV1;
       if (window.__MW_FLASH_BOOTSTRAP__ && typeof window.__MW_FLASH_BOOTSTRAP__.setEnabled === 'function') {

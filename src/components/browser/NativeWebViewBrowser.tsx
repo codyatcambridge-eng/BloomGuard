@@ -19,6 +19,12 @@ import { supabase } from '@/integrations/supabase/client';
 import { generateModerationScript } from '@/lib/webview-injection-script';
 import { getInjectionReadinessVerdict } from '@/lib/injection-readiness';
 import {
+  isProtectionOffState,
+  shouldInjectForProtection,
+  shouldRunFlashShield,
+  shouldRunRuntimeModeration,
+} from '@/lib/protection-mode';
+import {
   isValidModerationRequest,
   createResultMessage,
   createBlurOverlayStateMessage,
@@ -303,9 +309,15 @@ export const NativeWebViewBrowser = () => {
   const { effectiveShieldState } = useGateRuntime();
   const deviceId = useDeviceId();
   const effectiveShieldEnabled = effectiveShieldState.shieldEnabled;
-  const isRuntimeModerationEnabled = effectiveShieldEnabled && localSettings.blur_dial > 0;
-  const isFlashShieldEnabled = localSettings.flash_shield_enabled === true;
-  const shouldInjectModeration = isRuntimeModerationEnabled || isFlashShieldEnabled;
+  const protectionModeState = {
+    effectiveShieldEnabled,
+    blurDial: localSettings.blur_dial,
+    flashShieldEnabled: localSettings.flash_shield_enabled === true,
+  };
+  const isProtectionOff = isProtectionOffState(protectionModeState);
+  const isRuntimeModerationEnabled = shouldRunRuntimeModeration(protectionModeState);
+  const isFlashShieldEnabled = shouldRunFlashShield(protectionModeState);
+  const shouldInjectModeration = shouldInjectForProtection(protectionModeState);
 
   // Central blur source-of-truth with hysteresis to avoid flicker.
   const blurStateRef = useRef<{ enabled: boolean; reason: string; timestamp: number }>({
@@ -2363,6 +2375,87 @@ export const NativeWebViewBrowser = () => {
     webViewState.currentUrl,
     executeScript,
     injectModerationScript,
+  ]);
+
+  useEffect(() => {
+    if (!settingsLoaded || !isNative || !webViewState.isOpen || !executeScript) return;
+    if (!isProtectionOff) return;
+
+    didInjectAfterSettingsLoadedRef.current = false;
+    resetInjectionReadiness('protection_off');
+    blurPendingRef.current = null;
+    blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
+    setCentralBlurState(false, 'protection_off');
+
+    let cancelled = false;
+    const cleanupTimers: ReturnType<typeof setTimeout>[] = [];
+    const runOffCleanup = (delayMs: number) => {
+      if (cancelled) return;
+      void executeScript(`
+        (function() {
+          try {
+            if (typeof window.__MW_OFF_MODE_CLEANUP__ === 'function') {
+              return window.__MW_OFF_MODE_CLEANUP__('host_protection_off_${delayMs}ms');
+            }
+            document.documentElement.classList.remove('mw-flash-shield-on');
+            document.querySelectorAll('.mw-reveal-overlay,.mw-reveal-btn,#mw-reveal-portal,.mw-flash-shorts-overlay').forEach(function(node) {
+              if (node && node.parentElement) node.parentElement.removeChild(node);
+            });
+            document.querySelectorAll('[data-mw-veil="1"]').forEach(function(node) {
+              node.removeAttribute('data-mw-veil');
+            });
+            document.querySelectorAll('[data-mw-flash-frame="1"]').forEach(function(node) {
+              node.removeAttribute('data-mw-flash-frame');
+            });
+            document.querySelectorAll('[data-mw-flash-positive="1"]').forEach(function(node) {
+              node.removeAttribute('data-mw-flash-positive');
+            });
+            document.querySelectorAll('[data-mw-moderated],.mw-blurred,.mw-softblur,[data-mw-hard-blur="1"],[data-mw-has-overlay="true"]').forEach(function(node) {
+              if (!node || node.nodeType !== 1) return;
+              try {
+                node.style.removeProperty('filter');
+                node.style.removeProperty('-webkit-filter');
+                node.style.removeProperty('backdrop-filter');
+                node.style.removeProperty('-webkit-backdrop-filter');
+                node.classList.remove('mw-blurred');
+                node.classList.remove('mw-softblur');
+                node.setAttribute('data-mw-moderated', 'safe');
+                node.setAttribute('data-mw-has-overlay', 'false');
+                node.removeAttribute('data-mw-hard-blur');
+              } catch (e) {}
+            });
+            return 'OK_FALLBACK_OFF_CLEANUP';
+          } catch (e) {
+            return 'ERR:' + String(e);
+          }
+        })();
+      `).then((result) => {
+        console.log('[DIAG][OFF_MODE] cleanup_result=' + String(result || 'null') + ' delayMs=' + delayMs);
+      }).catch((error) => {
+        console.warn('[DIAG][OFF_MODE] cleanup_error', error);
+      });
+    };
+
+    [0, 150, 500, 1000].forEach((delayMs) => {
+      if (delayMs === 0) {
+        runOffCleanup(delayMs);
+        return;
+      }
+      cleanupTimers.push(setTimeout(() => runOffCleanup(delayMs), delayMs));
+    });
+
+    return () => {
+      cancelled = true;
+      cleanupTimers.forEach((timer) => clearTimeout(timer));
+    };
+  }, [
+    settingsLoaded,
+    isNative,
+    webViewState.isOpen,
+    executeScript,
+    isProtectionOff,
+    resetInjectionReadiness,
+    setCentralBlurState,
   ]);
 
   useEffect(() => {

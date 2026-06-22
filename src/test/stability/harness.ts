@@ -183,6 +183,25 @@ export interface MWTestProbe {
   diagNonShortsReattach: (videoNode: HTMLVideoElement, reason: string) => void;
   isYouTubeMainPageThumbnailSurfaceUrl: (url: string) => boolean;
   repairNonShortsBlurRevealInvariant: (reason: string) => void;
+  offModeCleanup: (reason: string) => string;
+  isVisualModerationActive: () => boolean;
+  createRevealOverlay: (
+    element: Element,
+    src: string,
+    category: string,
+    itemId?: string,
+    allowShortsReresolve?: boolean,
+  ) => void;
+  findAndBlur: (
+    src: string,
+    category: string,
+    blurPx: number,
+    shouldBlur: boolean,
+    originItemId?: string,
+  ) => void;
+  queueMutationScan: (node: Element, reason: string) => void;
+  processLegacyResults: () => void;
+  scanActiveShortsPlayerContainer: (reason: string) => boolean;
   applyBlur: (
     element: Element,
     src: string,
@@ -241,6 +260,13 @@ export function injectScript(): InjectionResult {
     diagNonShortsReattach: diagNonShortsReattach,
     isYouTubeMainPageThumbnailSurfaceUrl: isYouTubeMainPageThumbnailSurfaceUrl,
     repairNonShortsBlurRevealInvariant: repairNonShortsBlurRevealInvariant,
+    offModeCleanup: cleanupBloomGuardVisualModeration,
+    isVisualModerationActive: isVisualModerationActive,
+    createRevealOverlay: createRevealOverlay,
+    findAndBlur: findAndBlur,
+    queueMutationScan: queueMutationScan,
+    processLegacyResults: processLegacyResults,
+    scanActiveShortsPlayerContainer: scanActiveShortsPlayerContainer,
     applyBlur: applyBlur,
   };
   `;
