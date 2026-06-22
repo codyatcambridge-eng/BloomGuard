@@ -62,6 +62,7 @@ export const SafeBrowserHomepage = ({ onSearch, isSearching = false }: SafeBrows
           <p className="mt-1 text-sm text-muted-foreground">fun</p>
           <p className="mt-1 font-display tracking-wide text-aqua">BOY</p>
           <p className="mt-1 font-display tracking-wide text-aqua">Geese</p>
+          <p className="mt-1 font-display tracking-wide text-aqua">DUck Duck</p>
         </div>
 
         {/* Search Form */}
