@@ -17,6 +17,7 @@ import { useModerationBridge } from '@/hooks/useModerationBridge';
 import { useGateRuntime } from '@/hooks/useGateRuntime';
 import { supabase } from '@/integrations/supabase/client';
 import { generateModerationScript } from '@/lib/webview-injection-script';
+import { getInjectionReadinessVerdict } from '@/lib/injection-readiness';
 import {
   isValidModerationRequest,
   createResultMessage,
@@ -713,6 +714,21 @@ export const NativeWebViewBrowser = () => {
     epochIncrementedCount: 0,
   });
   const messageFromWebViewHandlerRef = useRef<((payload: unknown) => void) | null>(null);
+
+  const resetInjectionReadiness = useCallback((reason: string) => {
+    injectionDoneRef.current = false;
+    nonBootstrapAckObservedRef.current = false;
+    epochContextCurrentRef.current = false;
+    relaxedEpochBypassHookStableRef.current = false;
+    blurReadyRef.current = false;
+    blurReadyDedupeRef.current = { key: '', at: 0 };
+    console.log(
+      '[DIAG][INJECT] readiness_reset',
+      'reason=' + reason,
+      'navId=' + activeNavIdRef.current,
+      'pageEpoch=' + webViewPageEpochRef.current,
+    );
+  }, []);
   
   const {
     currentView,
@@ -1211,19 +1227,15 @@ export const NativeWebViewBrowser = () => {
       epochContextCurrentRef.current = true;
       relaxedEpochBypassHookStableRef.current =
         nonBootstrapAckObservedRef.current && epochContextCurrentRef.current;
-      injectionDoneRef.current = true;
-      lastInjectedUrlRef.current = targetUrl;
-      lastInjectionAtRef.current = Date.now();
       console.log(
         '[DIAG][EPOCH_SYNC][HOST]',
-        'action=sync_applied',
+        'action=sync_applied_awaiting_readiness',
         'reason=' + reason,
         'syncResult=' + syncResult,
         'navId=' + navId,
         'pageEpoch=' + webViewPageEpochRef.current,
         'url=' + (targetUrl || 'unknown'),
       );
-      exitPendingReinject('epoch_sync_success', targetUrl);
       return;
     }
     const config = {
@@ -1290,17 +1302,14 @@ export const NativeWebViewBrowser = () => {
               const reinjectResult = await scriptExecutor(mainScript);
               const reinjectText = String(reinjectResult || '');
               if (!reinjectText.includes('MW_ALREADY_ACTIVE')) {
-                injectionDoneRef.current = true;
-                lastInjectedUrlRef.current = targetUrl;
-                lastInjectionAtRef.current = Date.now();
                 console.log(
                   '[DIAG][INJECT] no_hook_active_recover_success',
                   'reason=' + reason,
                   'navId=' + navId,
                   'pageEpoch=' + webViewPageEpochRef.current,
                   'url=' + (targetUrl || 'unknown'),
+                  'readiness=awaiting_ack',
                 );
-                exitPendingReinject('inject_no_hook_recover_success', targetUrl);
                 return;
               }
             }
@@ -1348,9 +1357,6 @@ export const NativeWebViewBrowser = () => {
           );
           try {
             await scriptExecutor(mainScript);
-            injectionDoneRef.current = true;
-            lastInjectedUrlRef.current = targetUrl;
-            lastInjectionAtRef.current = Date.now();
             console.log(
               '[DIAG][INJECT] no_hook_active_recover_success',
               'reason=' + reason,
@@ -1358,8 +1364,8 @@ export const NativeWebViewBrowser = () => {
               'pageEpoch=' + webViewPageEpochRef.current,
               'url=' + (targetUrl || 'unknown'),
               'mode=fallback_no_return',
+              'readiness=awaiting_ack',
             );
-            exitPendingReinject('inject_no_hook_recover_success', targetUrl);
             return;
           } catch (reinjectError) {
             console.warn(
@@ -1374,14 +1380,12 @@ export const NativeWebViewBrowser = () => {
           }
         }
       }
-      injectionDoneRef.current = true;
-      lastInjectedUrlRef.current = targetUrl;
-      lastInjectionAtRef.current = Date.now();
       console.log(
         '[MW-Inject][InjectedDispatch]',
         'navId=' + navId,
         'reason=' + reason,
         'targetUrl=' + (targetUrl || 'unknown'),
+        'readiness=awaiting_ack',
       );
       console.log(
         '[DIAG][INJECT] dispatch',
@@ -1391,12 +1395,11 @@ export const NativeWebViewBrowser = () => {
         'url=' + (targetUrl || 'unknown'),
       );
       console.log(
-        '[DIAG][INJECT] success',
+        '[DIAG][INJECT] dispatch_awaiting_readiness',
         'reason=' + reason,
         'navId=' + navId,
         'url=' + (targetUrl || 'unknown'),
       );
-      exitPendingReinject('inject_success', targetUrl);
     } catch (error) {
       console.error('[MW-Bridge] Moderation script injection failed:', error);
       console.log(
@@ -1491,13 +1494,8 @@ export const NativeWebViewBrowser = () => {
       logHostLayerDiagnostics('load_start');
       setIsLoading(true);
       clearLoadEndInjectTimer();
-      injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
-      nonBootstrapAckObservedRef.current = false;
-      epochContextCurrentRef.current = false;
-      relaxedEpochBypassHookStableRef.current = false;
-      blurReadyRef.current = false;
-      blurReadyDedupeRef.current = { key: '', at: 0 };
+      resetInjectionReadiness('navigation_load_start');
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       const canDeferLoadStartReset =
         pendingReinjectRef.current?.active === true &&
@@ -1577,11 +1575,8 @@ export const NativeWebViewBrowser = () => {
       setIsLoading(false);
       setFlashGuardState?.(true, 'load_error');
       clearLoadEndInjectTimer();
-      injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
-      nonBootstrapAckObservedRef.current = false;
-      epochContextCurrentRef.current = false;
-      relaxedEpochBypassHookStableRef.current = false;
+      resetInjectionReadiness('load_error');
       exitPendingReinject('load_error', url);
       setFallbackUrl(url);
       navigate('fallback', '', url);
@@ -1614,13 +1609,8 @@ export const NativeWebViewBrowser = () => {
       navigate('browse', url, url);
       // Reset injection for new page navigation
       clearLoadEndInjectTimer();
-      injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
-      nonBootstrapAckObservedRef.current = false;
-      epochContextCurrentRef.current = false;
-      relaxedEpochBypassHookStableRef.current = false;
-      blurReadyRef.current = false;
-      blurReadyDedupeRef.current = { key: '', at: 0 };
+      resetInjectionReadiness('url_change');
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       if (shortsIdChanged && executeScript) {
         const safeReason = escapeForJs('shorts_url_change_hard_reset');
@@ -1670,12 +1660,8 @@ export const NativeWebViewBrowser = () => {
         navId: activeNavIdRef.current,
         pageEpoch: webViewPageEpochRef.current,
       });
-      injectionDoneRef.current = false;
       injectionInFlightRef.current = false;
-      nonBootstrapAckObservedRef.current = false;
-      epochContextCurrentRef.current = false;
-      relaxedEpochBypassHookStableRef.current = false;
-      blurReadyRef.current = false;
+      resetInjectionReadiness('webview_closed');
       blurPendingRef.current = null;
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       setCentralBlurState(false, 'webview_closed');
@@ -2160,6 +2146,64 @@ export const NativeWebViewBrowser = () => {
     return;
   }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, executeScript]);
 
+  const probeInjectedScriptLiveness = useCallback(async (source: string): Promise<boolean> => {
+    if (!isNative || !webViewState.isOpen || !executeScript) return false;
+    const expectedEpoch = webViewPageEpochRef.current;
+    const result = await executeScript(`
+      (function() {
+        try {
+          var state = window.__MW_DEBUG__ && window.__MW_DEBUG__.state;
+          var pageEpoch = state && Number.isFinite(Number(state.pageEpoch)) ? Number(state.pageEpoch) : null;
+          return JSON.stringify({
+            active: window.__MW_ACTIVE__ === true,
+            hasSyncHook: typeof window.__MW_SYNC_HOST_CONTEXT__ === 'function',
+            pageEpoch: pageEpoch,
+            url: window.location.href
+          });
+        } catch (e) {
+          return JSON.stringify({ active: false, error: String(e) });
+        }
+      })();
+    `);
+    try {
+      const parsed = JSON.parse(String(result || '{}')) as {
+        active?: boolean;
+        hasSyncHook?: boolean;
+        pageEpoch?: number | null;
+        url?: string;
+      };
+      const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
+      const verdict = getInjectionReadinessVerdict(
+        {
+          type: 'MW_INJECTED_ACK',
+          pageEpoch: parsed.pageEpoch,
+          url: parsed.url,
+          timestamp: Date.now(),
+        },
+        {
+          activeUrl,
+          activePageEpoch: expectedEpoch,
+        },
+      );
+      const alive = parsed.active === true && parsed.hasSyncHook === true && verdict.accepted;
+      console.log(
+        '[DIAG][INJECT] liveness_probe',
+        'source=' + source,
+        'alive=' + alive,
+        'reason=' + verdict.reason,
+        'active=' + String(parsed.active === true),
+        'hasSyncHook=' + String(parsed.hasSyncHook === true),
+        'pageEpoch=' + String(parsed.pageEpoch ?? 'none'),
+        'expectedEpoch=' + expectedEpoch,
+        'url=' + String(parsed.url || 'unknown'),
+      );
+      return alive;
+    } catch {
+      console.log('[DIAG][INJECT] liveness_probe_parse_error', 'source=' + source, 'result=' + String(result || 'null'));
+      return false;
+    }
+  }, [isNative, webViewState.isOpen, webViewState.currentUrl, executeScript]);
+
   useEffect(() => {
     if (!ENABLE_DOM_BLUR) return;
     if (!isNative || !webViewState.isOpen) return;
@@ -2172,9 +2216,20 @@ export const NativeWebViewBrowser = () => {
     if (!isNative || !webViewState.isOpen) return;
 
     const onVisible = () => {
-      requestBlurHandshake('host_visible');
-      queueCurrentBlurState('host_visible_resync');
-      flushBlurStateToWebView();
+      void (async () => {
+        const alive = await probeInjectedScriptLiveness('host_visible');
+        if (!alive && executeScript) {
+          resetInjectionReadiness('host_visible_stale_liveness');
+          await injectModerationScript(
+            executeScript,
+            'host_visible_stale_liveness',
+            webViewState.currentUrl || currentUrlRef.current || '',
+          );
+        }
+        requestBlurHandshake('host_visible');
+        queueCurrentBlurState('host_visible_resync');
+        flushBlurStateToWebView();
+      })();
     };
 
     window.addEventListener('focus', onVisible);
@@ -2183,7 +2238,19 @@ export const NativeWebViewBrowser = () => {
       window.removeEventListener('focus', onVisible);
       document.removeEventListener('visibilitychange', onVisible);
     };
-  }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, requestBlurHandshake, queueCurrentBlurState, flushBlurStateToWebView]);
+  }, [
+    ENABLE_DOM_BLUR,
+    isNative,
+    webViewState.isOpen,
+    webViewState.currentUrl,
+    executeScript,
+    requestBlurHandshake,
+    queueCurrentBlurState,
+    flushBlurStateToWebView,
+    probeInjectedScriptLiveness,
+    resetInjectionReadiness,
+    injectModerationScript,
+  ]);
 
   useEffect(() => {
     if (!ENABLE_SIGNAL_PIPELINE) return;
@@ -3197,6 +3264,16 @@ export const NativeWebViewBrowser = () => {
         }
         relaxedEpochBypassHookStableRef.current =
           nonBootstrapAckObservedRef.current && epochContextCurrentRef.current;
+        const readinessVerdict = getInjectionReadinessVerdict(typedMessage, {
+          activeUrl,
+          activePageEpoch: activeEpoch,
+        });
+        if (readinessVerdict.accepted) {
+          injectionDoneRef.current = true;
+          lastInjectedUrlRef.current = activeUrl;
+          lastInjectionAtRef.current = Date.now();
+          exitPendingReinject('readiness_ack', activeUrl);
+        }
         console.log(
           '[MW-Host][ACK] MW_INJECTED_ACK',
           'source=' + source,
@@ -3204,6 +3281,8 @@ export const NativeWebViewBrowser = () => {
           'pageEpoch=' + String(typedMessage.pageEpoch ?? 'none'),
           'noncePrefix=' + String(typedMessage.noncePrefix ?? 'none'),
           'hookStable=' + relaxedEpochBypassHookStableRef.current,
+          'readiness=' + readinessVerdict.reason,
+          'injectionDone=' + String(injectionDoneRef.current),
           'url=' + String(typedMessage.url ?? 'unknown'),
         );
         console.log(
@@ -3421,8 +3500,24 @@ export const NativeWebViewBrowser = () => {
             armShortsLegacyFallbackProbe('blur_ready_without_req', SHORTS_LEGACY_FALLBACK_ENTRY_PROBE_MS);
           }
         }
+        const readinessVerdict = getInjectionReadinessVerdict(typedMessage, {
+          activeUrl,
+          activePageEpoch: webViewPageEpochRef.current,
+        });
+        if (readinessVerdict.accepted) {
+          injectionDoneRef.current = true;
+          lastInjectedUrlRef.current = activeUrl;
+          lastInjectionAtRef.current = Date.now();
+          exitPendingReinject('readiness_blur_ready', activeUrl);
+        }
         blurReadyRef.current = true;
-        console.log('[MW-Host] Blur overlay READY:', String(typedMessage.reason || 'ready'), String(typedMessage.url || ''));
+        console.log(
+          '[MW-Host] Blur overlay READY:',
+          String(typedMessage.reason || 'ready'),
+          String(typedMessage.url || ''),
+          'readiness=' + readinessVerdict.reason,
+          'injectionDone=' + String(injectionDoneRef.current),
+        );
         queueCurrentBlurState('webview_ready_sync');
         await flushBlurStateToWebView();
         return;
@@ -4438,13 +4533,12 @@ export const NativeWebViewBrowser = () => {
     if (currentView === 'browse' && isNative && webViewState.isOpen) {
       await webViewReload();
       // Reset injection flag to re-inject moderation script
-      injectionDoneRef.current = false;
-      blurReadyRef.current = false;
+      resetInjectionReadiness('manual_reload');
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
       setCentralBlurState(false, 'manual_reload');
       return;
     }
-  }, [readerContent, currentView, searchQuery, isNative, webViewState.isOpen, handleReaderMode, handleSearch, webViewReload, setCentralBlurState]);
+  }, [readerContent, currentView, searchQuery, isNative, webViewState.isOpen, handleReaderMode, handleSearch, webViewReload, setCentralBlurState, resetInjectionReadiness]);
 
   const handleHome = useCallback(async () => {
     teardownWebViewScheduling('home_reset', webViewState.currentUrl).catch(() => undefined);
@@ -4460,8 +4554,7 @@ export const NativeWebViewBrowser = () => {
       navId: activeNavIdRef.current,
       pageEpoch: webViewPageEpochRef.current,
     });
-    injectionDoneRef.current = false;
-    blurReadyRef.current = false;
+    resetInjectionReadiness('home_reset');
     blurPendingRef.current = null;
     blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
     setCentralBlurState(false, 'home_reset');
@@ -4475,7 +4568,7 @@ export const NativeWebViewBrowser = () => {
     setUrlInput('');
     setFallbackUrl('');
     goHome();
-  }, [isNative, webViewState.isOpen, webViewState.currentUrl, closeWebView, goHome, moderationBridge, setCentralBlurState, teardownWebViewScheduling, exitPendingReinject]);
+  }, [isNative, webViewState.isOpen, webViewState.currentUrl, closeWebView, goHome, moderationBridge, setCentralBlurState, teardownWebViewScheduling, exitPendingReinject, resetInjectionReadiness]);
 
   // Manual scan trigger for current page
   const handleScanPage = useCallback(async () => {

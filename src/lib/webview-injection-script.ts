@@ -1213,6 +1213,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       type: 'MW_BLUR_READY',
       reason: reason || 'ready',
       url: window.location.href,
+      navId: window.__MW_NAV_ID__ || window.__MW_HOST_NAV_ID__ || null,
+      pageEpoch: Number.isFinite(Number(CONFIG.pageEpoch)) ? Number(CONFIG.pageEpoch) : null,
       timestamp: Date.now(),
     });
   }

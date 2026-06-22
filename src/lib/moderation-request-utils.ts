@@ -151,6 +151,8 @@ export interface BlurOverlayCommandMessage {
 export interface BlurOverlayReadyMessage {
   type: 'MW_BLUR_READY';
   url?: string;
+  navId?: string | number;
+  pageEpoch?: number;
   reason?: string;
   timestamp: number;
 }
