@@ -202,6 +202,9 @@ export interface MWTestProbe {
   queueMutationScan: (node: Element, reason: string) => void;
   processLegacyResults: () => void;
   scanActiveShortsPlayerContainer: (reason: string) => boolean;
+  healActiveShortsBlurredNodeReveal: (reason: string) => boolean;
+  healNonShortsBlurredNodeReveal: (reason: string) => boolean;
+  markRevealedForSource: (src: string, element: Element, reason: string) => unknown;
   applyBlur: (
     element: Element,
     src: string,
@@ -267,6 +270,9 @@ export function injectScript(): InjectionResult {
     queueMutationScan: queueMutationScan,
     processLegacyResults: processLegacyResults,
     scanActiveShortsPlayerContainer: scanActiveShortsPlayerContainer,
+    healActiveShortsBlurredNodeReveal: healActiveShortsBlurredNodeReveal,
+    healNonShortsBlurredNodeReveal: healNonShortsBlurredNodeReveal,
+    markRevealedForSource: markRevealedForSource,
     applyBlur: applyBlur,
   };
   `;

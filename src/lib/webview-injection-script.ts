@@ -1151,6 +1151,110 @@ export function generateModerationScript(config: InjectionConfig): string {
     } catch (e) {}
   }
 
+  function isActiveShortsRevealHealCandidate(node, activeContainer, activeContext) {
+    if (!node || node.nodeType !== 1 || !node.isConnected) return false;
+    if (!activeContainer || activeContainer.nodeType !== 1 || !activeContainer.isConnected) return false;
+    if (node !== activeContainer && typeof activeContainer.contains === 'function' && !activeContainer.contains(node)) return false;
+    if (String(node.dataset.mwModerated || '') !== 'blurred') return false;
+    const src = String(node.dataset.mwSrc || (activeContext && activeContext.src) || '');
+    if (!src) return false;
+    if (isRevealedForSource(src, node)) return false;
+    if (findRevealOverlayForElement(node, src)) return false;
+
+    const contextToken = String((activeContext && activeContext.ownerToken) || '');
+    const nodeOwnerToken = String(node.dataset.mwShortsOwnerToken || '');
+    const hasShortsOwnership = !!(contextToken && nodeOwnerToken && contextToken === nodeOwnerToken);
+    const hasAuthoritativeBlur = isAuthoritativeHardBlur(node);
+    const hasFlashPositive = node.dataset.mwFlashPositive === '1';
+    return hasShortsOwnership || hasAuthoritativeBlur || hasFlashPositive;
+  }
+
+  function clearActiveShortsRevealedBlurResidue(node, activeContainer, activeContext, reason) {
+    if (!node || node.nodeType !== 1 || !node.isConnected) return false;
+    if (!activeContainer || activeContainer.nodeType !== 1 || !activeContainer.isConnected) return false;
+    if (node !== activeContainer && typeof activeContainer.contains === 'function' && !activeContainer.contains(node)) return false;
+    const src = String(node.dataset.mwSrc || (activeContext && activeContext.src) || '');
+    if (!src || !isRevealedForSource(src, node)) return false;
+    const hasBloomGuardBlur = !!(
+      String(node.dataset.mwModerated || '') === 'blurred' ||
+      String(node.dataset.mwHardBlur || '') === '1' ||
+      (node.classList && node.classList.contains('mw-blurred'))
+    );
+    if (!hasBloomGuardBlur) return false;
+    const changed = clearAllBlurAndOverlay(
+      node,
+      src,
+      'active_shorts_revealed_blur_residue:' + (reason || 'unknown'),
+      'revealed'
+    );
+    if (DIAG_YT_BLUR) {
+      console.log(
+        '[DIAG][SHORTS_REVEAL_HEAL]',
+        'reason=' + (reason || 'unknown'),
+        'clearedRevealedResidue=' + String(changed),
+        'nodeId=' + getDiagNodeId(node),
+        'src=' + String(src || '').substring(0, 180)
+      );
+    }
+    return changed;
+  }
+
+  function healActiveShortsBlurredNodeReveal(reason) {
+    if (!isVisualModerationActive()) return false;
+    if (!isShortsModeActive()) return false;
+    if (timerState.paused || timerState.teardownDone) return false;
+
+    const activeContainer = getActiveShortsPlayerContainer();
+    if (!activeContainer || activeContainer.nodeType !== 1 || !activeContainer.isConnected) return false;
+    const activeContext = getShortsBlurContextForNode(activeContainer);
+
+    const candidates = [];
+    if (activeContext && activeContext.targetNode && activeContext.targetNode.nodeType === 1) {
+      candidates.push(activeContext.targetNode);
+    }
+    candidates.push(activeContainer);
+    if (typeof activeContainer.querySelectorAll === 'function') {
+      const marked = activeContainer.querySelectorAll(
+        '[data-mw-moderated="blurred"],[data-mw-hard-blur="1"],[data-mw-flash-positive="1"],.mw-blurred'
+      );
+      for (let i = 0; i < marked.length; i += 1) {
+        candidates.push(marked[i]);
+      }
+    }
+
+    const seen = new Set();
+    for (let i = 0; i < candidates.length; i += 1) {
+      const node = candidates[i];
+      if (!node || node.nodeType !== 1) continue;
+      const nodeId = getDiagNodeId(node);
+      if (seen.has(nodeId)) continue;
+      seen.add(nodeId);
+      if (clearActiveShortsRevealedBlurResidue(node, activeContainer, activeContext, reason)) return true;
+      if (!isActiveShortsRevealHealCandidate(node, activeContainer, activeContext)) continue;
+      const src = String(node.dataset.mwSrc || (activeContext && activeContext.src) || '');
+      createRevealOverlay(
+        node,
+        src,
+        String(node.dataset.mwCategory || (activeContext && activeContext.category) || 'flagged'),
+        String(node.dataset.mwItemId || (activeContext && activeContext.itemId) || getDiagItemKey(src)),
+        false
+      );
+      const healed = !!findRevealOverlayForElement(node, src);
+      if (DIAG_YT_BLUR) {
+        console.log(
+          '[DIAG][SHORTS_REVEAL_HEAL]',
+          'reason=' + (reason || 'unknown'),
+          'healed=' + String(healed),
+          'nodeId=' + nodeId,
+          'src=' + String(src || '').substring(0, 180)
+        );
+      }
+      return healed;
+    }
+
+    return false;
+  }
+
   function ensureSensitivityToggle() {
     ensureSensitivityToggleStyle();
     if (document.getElementById(SENSITIVITY_TOGGLE_ID)) return;
@@ -1811,6 +1915,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     debugSummaryInterval: null,
     diagHeartbeatInterval: null,
     shortsHealthHealInterval: null,
+    nonShortsRevealHealAt: 0,
     flashShieldInterval: null,
     flashShieldRafId: null,
     flashShieldBurstRafId: null,
@@ -3050,6 +3155,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         if (timerState.teardownDone) return;
         markFlashShieldShortsCandidate();
         healFlashShieldReveal('reentry:' + (reason || 'unknown'));
+        healActiveShortsBlurredNodeReveal('reentry:' + (reason || 'unknown'));
       }, delayMs);
     });
     logAdaptiveShortsEvent(
@@ -6814,7 +6920,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     // Card was manually revealed — its unblurred state is intentional.
     // All sub-paths already check reveal state, but exiting here prevents
     // burning through the heal attempt window on every interval tick.
-    if (revealed) return;
+    if (revealed) {
+      healActiveShortsBlurredNodeReveal('shorts_health_revealed:' + (reason || 'unknown'));
+      return;
+    }
 
     const now = Date.now();
     const healState = getShortsHealthHealState(container);
@@ -8904,10 +9013,15 @@ export function generateModerationScript(config: InjectionConfig): string {
    */
   function applyBlur(element, src, category, blurStrengthPx, itemId, _mvpProof) {
     if (!isVisualModerationActive()) return;
-    // Check persistence
-    if (isRevealedForSource(src, element)) return;
-    if (!isMvpBlurAuthorized(element, src, getDiagItemKey(src), _mvpProof || 'none', 'applyBlur')) return;
     const shortsMode = isShortsModeActive();
+    // Check persistence
+    if (isRevealedForSource(src, element)) {
+      if (shortsMode) {
+        healActiveShortsBlurredNodeReveal('applyBlur_revealed_skip');
+      }
+      return;
+    }
+    if (!isMvpBlurAuthorized(element, src, getDiagItemKey(src), _mvpProof || 'none', 'applyBlur')) return;
     let shortsStableSelectorUsed = '';
     if (shortsMode) {
       const stableResolution = resolveShortsStableBlurTarget(element, src);
@@ -8950,6 +9064,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         if (!findRevealOverlayForElement(element, src) && element.isConnected) {
           createRevealOverlay(element, src, category, itemId, false);
         }
+        healActiveShortsBlurredNodeReveal('applyBlur_already_hard_blurred');
         diagScheduleBlurredNodePresenceChecks(element, src, itemId);
         return;
       }
@@ -9103,6 +9218,11 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       if (shortsMode && element.isConnected && !findRevealOverlayForElement(element, src)) {
         createRevealOverlay(element, src, category, itemId, false);
+      }
+      if (shortsMode) {
+        healActiveShortsBlurredNodeReveal('applyBlur');
+      } else if (isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
+        scheduleNonShortsRevealHealBounded('applyBlur');
       }
       const parentContainsOverlay = !!(element.parentElement && typeof element.parentElement.querySelector === 'function' && element.parentElement.querySelector('.mw-reveal-overlay'));
       console.log(
@@ -10870,14 +10990,27 @@ export function generateModerationScript(config: InjectionConfig): string {
         }
       };
 
+      const healAlreadyBlurredFanoutNode = function(node) {
+        if (!node || node.nodeType !== 1 || !node.isConnected) return false;
+        if (node.dataset.mwModerated !== 'blurred' || isRevealedForSource(src, node)) return false;
+        if (findRevealOverlayForElement(node, src)) return true;
+        if (isShortsModeActive()) {
+          createRevealOverlay(node, src, category);
+          return !!findRevealOverlayForElement(node, src);
+        }
+        if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return false;
+        const itemKey = getDiagItemKey(src);
+        if (!isMvpBlurAuthorized(node, src, itemKey, 'card_blurred', 'findAndBlur_reveal_heal')) return false;
+        createRevealOverlay(node, src, category, node.dataset.mwItemId || itemKey);
+        return !!findRevealOverlayForElement(node, src);
+      };
+
       // Images
       document.querySelectorAll('img').forEach(img => {
         if ((img.src === src || img.dataset.mwOrigSrc === src) && !isRevealedForSource(src, img)) {
           trackFanoutNode(img);
-          if (img.dataset.mwModerated === 'blurred' && !isRevealedForSource(src, img) && isShortsModeActive()) {
-            if (!findRevealOverlayForElement(img, src) && img.isConnected) {
-              createRevealOverlay(img, src, category);
-            }
+          if (img.dataset.mwModerated === 'blurred' && !isRevealedForSource(src, img)) {
+            healAlreadyBlurredFanoutNode(img);
             return;
           }
           if (img.dataset.mwModerated !== 'blurred' && !isRevealedForSource(src, img)) {
@@ -10891,10 +11024,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       document.querySelectorAll('video').forEach(video => {
         if ((video.poster === src || video.dataset.mwOrigPoster === src) && !isRevealedForSource(src, video)) {
           trackFanoutNode(video);
-          if (video.dataset.mwModerated === 'blurred' && !isRevealedForSource(src, video) && isShortsModeActive()) {
-            if (!findRevealOverlayForElement(video, src) && video.isConnected) {
-              createRevealOverlay(video, src, category);
-            }
+          if (video.dataset.mwModerated === 'blurred' && !isRevealedForSource(src, video)) {
+            healAlreadyBlurredFanoutNode(video);
             return;
           }
           if (video.dataset.mwModerated !== 'blurred' && !isRevealedForSource(src, video)) {
@@ -10908,10 +11039,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       document.querySelectorAll('[data-mw-bg-src]').forEach(el => {
         if (el.dataset.mwBgSrc === src && !isRevealedForSource(src, el)) {
           trackFanoutNode(el);
-          if (el.dataset.mwModerated === 'blurred' && !isRevealedForSource(src, el) && isShortsModeActive()) {
-            if (!findRevealOverlayForElement(el, src) && el.isConnected) {
-              createRevealOverlay(el, src, category);
-            }
+          if (el.dataset.mwModerated === 'blurred' && !isRevealedForSource(src, el)) {
+            healAlreadyBlurredFanoutNode(el);
             return;
           }
           if (el.dataset.mwModerated !== 'blurred' && !isRevealedForSource(src, el)) {
@@ -12017,6 +12146,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       enforceRevealOverlayVisibilityGuardGlobal('mutation_batch');
       if (!isShortsModeActive() && hasYouTubeChanges) {
         scheduleNonShortsRevealOverlayReposition('mutation');
+        scheduleNonShortsRevealHealBounded('mutation');
       }
       if (shortsAttrMode && hasYouTubeChanges) {
         scheduleShortsRevealOverlayReposition('mutation');
@@ -12545,6 +12675,81 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
   }
 
+  function isNonShortsRevealHealCandidate(node) {
+    if (!node || node.nodeType !== 1 || !node.isConnected) return false;
+    if (String(node.dataset.mwModerated || '') !== 'blurred') return false;
+    const src = getBloomGuardMarkedNodeSrc(node);
+    if (!src) return false;
+    if (isRevealedForSource(src, node)) return false;
+    if (findRevealOverlayForElement(node, src)) return false;
+    const itemKey = getDiagItemKey(src);
+    const hasHardPositiveStamp =
+      node.dataset.mwHardBlur === '1' ||
+      (node.classList.contains('mw-blurred') && !!src);
+    if (!hasHardPositiveStamp) return false;
+    return isMvpBlurAuthorized(node, src, itemKey, 'card_blurred', 'non_shorts_reveal_heal');
+  }
+
+  function healNonShortsBlurredNodeReveal(reason) {
+    if (!isVisualModerationActive()) return false;
+    if (isShortsModeActive()) return false;
+    if (timerState.paused || timerState.teardownDone) return false;
+    if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return false;
+
+    const nodes = document.querySelectorAll(
+      '[data-mw-moderated="blurred"],[data-mw-hard-blur="1"],.mw-blurred'
+    );
+    let healedCount = 0;
+    const seen = new Set();
+    for (let i = 0; i < nodes.length; i += 1) {
+      const node = nodes[i];
+      if (!node || node.nodeType !== 1) continue;
+      const nodeId = getDiagNodeId(node);
+      if (seen.has(nodeId)) continue;
+      seen.add(nodeId);
+      if (!isNonShortsRevealHealCandidate(node)) continue;
+      const src = getBloomGuardMarkedNodeSrc(node);
+      const itemKey = getDiagItemKey(src);
+      createRevealOverlay(
+        node,
+        src,
+        node.dataset.mwCategory || 'flagged',
+        node.dataset.mwItemId || itemKey
+      );
+      if (findRevealOverlayForElement(node, src)) {
+        healedCount += 1;
+        if (DIAG_YT_BLUR) {
+          console.log(
+            '[DIAG][NON_SHORTS_REVEAL_HEAL]',
+            'reason=' + (reason || 'unknown'),
+            'healed=true',
+            'nodeId=' + nodeId,
+            'src=' + String(src || '').substring(0, 180)
+          );
+        }
+      }
+    }
+    if (healedCount > 0) {
+      console.log(
+        '[DIAG][NON_SHORTS_REVEAL_HEAL]',
+        'reason=' + (reason || 'unknown'),
+        'healedCount=' + healedCount,
+        'url=' + window.location.href
+      );
+    }
+    return healedCount > 0;
+  }
+
+  function scheduleNonShortsRevealHealBounded(reason) {
+    if (timerState.paused || timerState.teardownDone) return;
+    if (isShortsModeActive()) return;
+    const now = Date.now();
+    const lastAt = Number(timerState.nonShortsRevealHealAt || 0);
+    if (Number.isFinite(lastAt) && now - lastAt < 200) return;
+    timerState.nonShortsRevealHealAt = now;
+    healNonShortsBlurredNodeReveal(reason);
+  }
+
   function repairNonShortsBlurRevealInvariant(reason) {
     if (isShortsModeActive()) return;
     if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
@@ -12752,6 +12957,11 @@ export function generateModerationScript(config: InjectionConfig): string {
           scheduleInitTimeout('shortsExitInvariantRepair', function() {
             repairNonShortsBlurRevealInvariant('leave_shorts_1000ms');
           }, 1000);
+        } else if (!nextIsShorts && isYouTubeMainPageThumbnailSurfaceUrl(nextUrl)) {
+          healNonShortsBlurredNodeReveal('spa_nav_immediate');
+          scheduleInitTimeout('nonShortsRevealHeal', function() {
+            healNonShortsBlurredNodeReveal('spa_nav_250ms');
+          }, 250);
         }
       }
       if (previousIsShorts || nextIsShorts) {
