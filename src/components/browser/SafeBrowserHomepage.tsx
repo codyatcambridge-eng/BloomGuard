@@ -56,6 +56,7 @@ export const SafeBrowserHomepage = ({ onSearch, isSearching = false }: SafeBrows
             Algorithms are noisy, real life is quiet where Focus Browser is.
           </p>
           <p className="mt-1 text-sm text-muted-foreground">test</p>
+          <p className="mt-1 text-sm font-display tracking-wider text-aqua">plants</p>
         </div>
 
         {/* Search Form */}
