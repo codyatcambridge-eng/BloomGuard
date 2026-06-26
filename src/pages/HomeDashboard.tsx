@@ -23,6 +23,8 @@ const HomeDashboard = () => {
           <p className="mt-1 text-xs text-gold/60 tracking-[0.25em] uppercase">Mac</p>
           <p className="mt-1 text-xs text-gold/60 tracking-[0.25em] uppercase">test run</p>
           <p className="mt-1 text-xs text-gold/60 tracking-[0.25em] uppercase">plants</p>
+          <p className="mt-1 text-xs text-gold/60 tracking-[0.25em] uppercase">BLOOMS</p>
+          <p className="mt-1 text-xs text-gold/60 tracking-[0.25em] uppercase">Wobble</p>
           <p className="mt-1 text-[10px] text-techBlue tracking-[0.24em] uppercase">velocity</p>
           <p className="mt-1 text-[10px] text-techBlue tracking-[0.24em] uppercase">JIM1</p>
           <p className="mt-2 text-silver">Welcome back!</p>

@@ -3,6 +3,7 @@ import { injectScript, type InjectionResult } from './harness';
 
 const POSITIVE_ID = 'dQw4w9WgXcQ';
 const SECOND_ID = 'aBcD1234xyZ';
+const THIRD_ID = 'zYxW9876qwe';
 
 function srcFor(id: string): string {
   return `https://i.ytimg.com/vi/${id}/hqdefault.jpg`;
@@ -190,5 +191,19 @@ describeOnYouTube('Active Shorts blur/reveal invariant', () => {
     expect(frame.dataset.mwModerated).toBe('revealed');
     expect(hasBlurFilter(frame)).toBe(false);
     expect(revealOverlays()).toHaveLength(0);
+  });
+
+  it('active Shorts reveal stays on the blur/reveal path and does not open label UI when prototype mode is off', () => {
+    const { frame, video, src } = buildActiveShort(THIRD_ID);
+    injection = injectScript();
+    injection.probe.applyBlur(video, src, 'porn', 40, THIRD_ID, 'classifier_positive');
+
+    revealButton()!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+
+    expect(frame.dataset.mwModerated).toBe('revealed');
+    expect(hasBlurFilter(frame)).toBe(false);
+    expect(revealOverlays()).toHaveLength(0);
+    expect(document.querySelector('.mw-correction-overlay')).toBeNull();
+    expect(injection.logs.some((line) => line.includes('posting gc-label-request'))).toBe(false);
   });
 });

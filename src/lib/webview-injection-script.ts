@@ -33,6 +33,7 @@ export interface InjectionConfig {
   debug?: boolean; // Verbose logging
   nonce: string; // Security nonce for message validation
   blockingMode?: 'mvp' | 'full';
+  prototypeMode?: boolean;
   pageEpoch?: number;
   diagYouTubeShorts?: boolean;
   enableShortsHealthHeal?: boolean;
@@ -440,6 +441,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     debug: ${config.debug || false},
     nonce: '${nonce}',
     blockingMode: '${config.blockingMode || 'mvp'}',
+    prototypeMode: ${config.prototypeMode === true},
     pageEpoch: ${pageEpoch},
     diagYouTubeShorts: ${config.diagYouTubeShorts ? 'true' : 'false'},
     enableShortsHealthHeal: ${config.enableShortsHealthHeal ? 'true' : 'false'},
@@ -10107,7 +10109,9 @@ export function generateModerationScript(config: InjectionConfig): string {
         // Keep second-tap playback clear on YouTube main-page MVP surfaces by skipping
         // immediate label/correction UI that can steal the next user tap.
         const suppressImmediateLabelUi =
-          !shortsMode && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href);
+          !CONFIG.prototypeMode ||
+          shortsMode ||
+          isYouTubeMainPageThumbnailSurfaceUrl(window.location.href);
         if (!suppressImmediateLabelUi) {
           // POST a label request message so the host can open the labeling modal
           var labelItemId = itemId || liveElement.dataset.mwItemId || 'unknown_' + Date.now();

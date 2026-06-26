@@ -4867,7 +4867,7 @@ export const NativeWebViewBrowser = () => {
   return (
     <div className="min-h-screen bg-background flex flex-col">
       {/* Global label listener for prototype mode */}
-      <LabelListener />
+      {localSettings.prototype_mode && <LabelListener />}
       {showDiagLayerBadge && (
         <div className="fixed right-2 top-2 z-[70] rounded bg-black/80 px-2 py-1 text-[10px] text-white pointer-events-none">
           TOP {diagTopLayerLabel}
