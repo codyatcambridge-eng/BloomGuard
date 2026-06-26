@@ -4017,10 +4017,35 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
   }
 
+  function isBroadShortsShelfContainerCard(card) {
+    if (!card || card.nodeType !== 1 || typeof card.matches !== 'function') return false;
+    try {
+      return !!card.matches(
+        'ytm-shorts-shelf-renderer,' +
+        'ytd-shorts-shelf-renderer,' +
+        'ytd-reel-shelf-renderer,' +
+        'ytm-rich-shelf-renderer,' +
+        'ytd-rich-shelf-renderer'
+      );
+    } catch (e) {
+      return false;
+    }
+  }
+
   function applyOwnedPositiveCardClass(card, itemKey, reason) {
     if (!card || card.nodeType !== 1) return;
     if (isShortsModeActive()) return;
     if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
+    if (isBroadShortsShelfContainerCard(card)) {
+      applyOwnedSafeCardClass(card, reason || 'broad_shorts_shelf_positive_denied');
+      console.log(
+        '[MW-SHORTS-SHELF] broad_positive_owner_denied',
+        'cardNodeId=' + getDiagNodeId(card),
+        'itemKey=' + String(itemKey || 'unknown'),
+        'reason=' + String(reason || 'unknown')
+      );
+      return;
+    }
     ensureOwnedCardStyle();
     card.classList.add(OWNED_POSITIVE_CARD_CLASS);
     card.classList.remove(OWNED_SAFE_CARD_CLASS);
@@ -4067,6 +4092,22 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (isShortsModeActive()) return;
     if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
     if (!card.classList || !card.classList.contains(OWNED_POSITIVE_CARD_CLASS)) return;
+    if (isBroadShortsShelfContainerCard(card)) {
+      applyOwnedSafeCardClass(card, reason || 'broad_shorts_shelf_reapply_denied');
+      if (typeof card.querySelectorAll === 'function') {
+        const staleOverlays = card.querySelectorAll('.mw-reveal-overlay');
+        for (let i = 0; i < staleOverlays.length; i += 1) {
+          const overlay = staleOverlays[i];
+          if (overlay && overlay.parentElement) overlay.parentElement.removeChild(overlay);
+        }
+      }
+      console.log(
+        '[MW-SHORTS-SHELF] broad_reapply_denied',
+        'cardNodeId=' + getDiagNodeId(card),
+        'reason=' + String(reason || 'unknown')
+      );
+      return;
+    }
     // Lifecycle safety: refuse stale ownership and downgrade to safe immediately.
     if (!isShortsShelfOwnedCard(card)) {
       const hrefKey = getMvpCardHrefItemKey(card);
@@ -7329,6 +7370,22 @@ export function generateModerationScript(config: InjectionConfig): string {
       for (var i = 0; i < btns.length; i += 1) {
         var b = btns[i];
         if (!b || b.nodeType !== 1 || !b.isConnected) continue;
+        var overlay = (typeof b.closest === 'function') ? b.closest('.mw-reveal-overlay') : null;
+        if (!overlay || !overlay.isConnected) continue;
+        var overlayStyle = null;
+        try { overlayStyle = window.getComputedStyle(overlay); } catch (e) {}
+        if (
+          overlayStyle &&
+          (
+            overlayStyle.display === 'none' ||
+            overlayStyle.visibility === 'hidden' ||
+            Number(overlayStyle.opacity) === 0
+          )
+        ) continue;
+        var anchor = overlay.__mwAnchorTarget || null;
+        if (anchor && anchor.nodeType === 1 && String((anchor.dataset && anchor.dataset.mwModerated) || '') !== 'blurred') {
+          continue;
+        }
         var st = null;
         try { st = window.getComputedStyle(b); } catch (e) {}
         if (st && (st.display === 'none' || st.visibility === 'hidden' || st.pointerEvents === 'none' || Number(st.opacity) === 0)) continue;

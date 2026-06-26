@@ -218,6 +218,7 @@ export interface MWTestProbe {
     anchorHint: Element | null,
     phase: string,
   ) => boolean;
+  reapplyOwnedContainerBlur: (card: Element, reason: string) => void;
 }
 
 export interface InjectionResult {
@@ -280,6 +281,7 @@ export function injectScript(): InjectionResult {
     markRevealedForSource: markRevealedForSource,
     applyBlur: applyBlur,
     enforceRevealOverlayVisibilityGuard: enforceRevealOverlayVisibilityGuard,
+    reapplyOwnedContainerBlur: reapplyOwnedContainerBlur,
   };
   `;
 
