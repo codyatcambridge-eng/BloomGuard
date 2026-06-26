@@ -7647,8 +7647,27 @@ export function generateModerationScript(config: InjectionConfig): string {
         const ctx = getShortsBlurContextForNode(anchor);
         const token = String((overlay.dataset && overlay.dataset.mwShortsOwnerToken) || '');
         const portalMode = String((overlay.dataset && overlay.dataset.mwPortalMode) || '');
-        if ((portalMode === 'shorts' || (portalMode !== 'non_shorts' && isShortsModeActive())) && (!ctx || !ctx.ownerToken || !token || token !== String(ctx.ownerToken || ''))) {
-          rejectReason = 'shorts_owner_mismatch';
+        const contextOwnerToken = String((ctx && ctx.ownerToken) || '');
+        const anchorOwnerToken = String((anchor.dataset && anchor.dataset.mwShortsOwnerToken) || '');
+        const contextOwnerMatches = !!(contextOwnerToken && token && token === contextOwnerToken);
+        const localOwnerMatches = !!(!contextOwnerToken && token && token === anchorOwnerToken && shortsActiveOwnerTokens.has(token));
+        const isShortsPortal = (portalMode === 'shorts' || (portalMode !== 'non_shorts' && isShortsModeActive()));
+        if (isShortsPortal && !(contextOwnerMatches || localOwnerMatches)) {
+          // Reaching here means the checks above already proved this anchor is an authoritative
+          // hard-blur whose content identity matches this overlay in a valid scope — i.e. the
+          // overlay genuinely belongs to the Short that is blurred right now. A *different* Short
+          // would have exited above as identity_mismatch. So a token-only mismatch is first-entry
+          // owner-token churn: getShortsBlurContextForNode re-resolved a different container node,
+          // rebuilding the deterministic token. Re-adopt the current owner token and KEEP the
+          // reveal rather than hiding it. This preserves the "a blurred active Short always keeps
+          // its reveal" invariant without weakening cross-Short protection (identity/auth/scope
+          // are unchanged and still gate everything above).
+          const readoptToken = contextOwnerToken || anchorOwnerToken || token;
+          if (readoptToken) {
+            try { overlay.dataset.mwShortsOwnerToken = readoptToken; } catch (e) {}
+            try { anchor.dataset.mwShortsOwnerToken = readoptToken; } catch (e) {}
+            shortsActiveOwnerTokens.add(readoptToken);
+          }
         }
       }
     }
@@ -9592,7 +9611,7 @@ export function generateModerationScript(config: InjectionConfig): string {
             }
             return;
           }
-          // All defers exhausted; health heal will retry when conditions improve.
+          // All defers exhausted; keep the active Shorts blur revealable without starting health heal.
           element.dataset.mwOwnerDeferCount = '0';
           element.dataset.mwOwnerDeferScheduled = 'false';
           if (DIAG_YT_BLUR) {
@@ -9602,7 +9621,16 @@ export function generateModerationScript(config: InjectionConfig): string {
               'src=' + String(src || '').substring(0, 180)
             );
           }
-          return;
+          const fallbackToken = buildShortsOwnerToken(
+            element,
+            src,
+            itemId,
+            getCurrentShortsUrlId(),
+            Date.now()
+          );
+          element.dataset.mwShortsOwnerToken = fallbackToken;
+          shortsActiveOwnerTokens.add(fallbackToken);
+          shortsOwnerToken = fallbackToken;
         }
       } else {
         // Both tokens present but different — video transitioned mid-blur.

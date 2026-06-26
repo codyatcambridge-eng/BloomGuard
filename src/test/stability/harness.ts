@@ -213,6 +213,11 @@ export interface MWTestProbe {
     itemId: string,
     mvpProof?: string,
   ) => void;
+  enforceRevealOverlayVisibilityGuard: (
+    overlay: Element,
+    anchorHint: Element | null,
+    phase: string,
+  ) => boolean;
 }
 
 export interface InjectionResult {
@@ -274,6 +279,7 @@ export function injectScript(): InjectionResult {
     healNonShortsBlurredNodeReveal: healNonShortsBlurredNodeReveal,
     markRevealedForSource: markRevealedForSource,
     applyBlur: applyBlur,
+    enforceRevealOverlayVisibilityGuard: enforceRevealOverlayVisibilityGuard,
   };
   `;
 
