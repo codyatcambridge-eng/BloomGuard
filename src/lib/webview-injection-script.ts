@@ -9092,6 +9092,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   function applyBlur(element, src, category, blurStrengthPx, itemId, _mvpProof) {
     if (!isVisualModerationActive()) return;
     const shortsMode = isShortsModeActive();
+    let appliedHardBlurForRevealInvariant = false;
     // Check persistence
     if (isRevealedForSource(src, element)) {
       if (shortsMode) {
@@ -9189,6 +9190,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       element.dataset.mwSrc = src;
       element.dataset.mwItemId = itemId || '';
       markAuthoritativeHardBlur(element, src);
+      appliedHardBlurForRevealInvariant = true;
       if (_mvpProof === 'classifier_positive' && !shortsMode && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
         const ownershipCard = getOwnedCardContainerFromNode(element);
         if (ownershipCard) {
@@ -9302,6 +9304,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       } else if (isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
         scheduleNonShortsRevealHealBounded('applyBlur');
       }
+      enforceHardBlurRevealInvariant(element, src, category, itemId, shortsMode, 'applyBlur', false);
       const parentContainsOverlay = !!(element.parentElement && typeof element.parentElement.querySelector === 'function' && element.parentElement.querySelector('.mw-reveal-overlay'));
       console.log(
         '[DIAG][BLUR_LAYER] apply',
@@ -9332,6 +9335,14 @@ export function generateModerationScript(config: InjectionConfig): string {
       diagBlurStateLog('applyBlur.exit', element, src, 'itemId=' + (itemId || 'N/A') + ' category=' + (category || 'flagged'));
       console.log('[MW] applied blur [' + category + '] itemId=' + (itemId || 'N/A') + ':', src.substring(0, 60));
     } catch (e) {
+      if (
+        appliedHardBlurForRevealInvariant &&
+        element &&
+        element.nodeType === 1 &&
+        !findRevealOverlayForElement(element, src)
+      ) {
+        clearAllBlurAndOverlay(element, src, 'applyBlur_exception_without_reveal', 'safe');
+      }
       console.error('[MW] Failed to apply blur:', e.message);
       state.stats.errors++;
     }
@@ -9455,6 +9466,40 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       diagBlurStateLog('clearElementBlur.exit', element, srcForClear, 'overlayFound=' + (!!overlay));
     } catch (e) {}
+  }
+
+  function enforceHardBlurRevealInvariant(element, src, category, itemId, shortsMode, reason, deferred) {
+    if (!element || element.nodeType !== 1) return true;
+    const moderated = String((element.dataset && element.dataset.mwModerated) || '');
+    const hasHardBlur = moderated === 'blurred' || isAuthoritativeHardBlur(element);
+    if (!hasHardBlur) return true;
+    if (findRevealOverlayForElement(element, src)) return true;
+    if (shortsMode && !deferred) {
+      setTimeout(function() {
+        if (!isVisualModerationActive()) return;
+        if (!element || element.nodeType !== 1 || !element.isConnected) return;
+        enforceHardBlurRevealInvariant(element, src, category, itemId, shortsMode, reason || 'deferred', true);
+      }, 360);
+      return false;
+    }
+    try {
+      createRevealOverlay(element, src, category, itemId, false);
+    } catch (e) {}
+    if (shortsMode) {
+      healActiveShortsBlurredNodeReveal('hard_blur_reveal_invariant:' + (reason || 'unknown'));
+    } else if (isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
+      healNonShortsBlurredNodeReveal('hard_blur_reveal_invariant:' + (reason || 'unknown'));
+    }
+    if (findRevealOverlayForElement(element, src)) return true;
+    console.warn(
+      '[DIAG][REVEAL_INVARIANT] clearing_hard_blur_without_reveal',
+      'reason=' + String(reason || 'unknown'),
+      'nodeId=' + getDiagNodeId(element),
+      'itemKey=' + getDiagItemKey(src),
+      'shorts=' + String(!!shortsMode)
+    );
+    clearAllBlurAndOverlay(element, src, 'hard_blur_without_reveal:' + (reason || 'unknown'), 'safe');
+    return false;
   }
 
   function createRevealOverlay(element, src, category, itemId, allowShortsReresolve) {

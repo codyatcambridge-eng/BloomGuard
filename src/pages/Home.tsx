@@ -73,6 +73,9 @@ const Home = () => {
             </p>
             <div className="h-px w-8 bg-gradient-to-l from-transparent to-gold/50" />
           </div>
+          <p className="mt-2 text-sm font-display text-gold tracking-widest uppercase">
+            NOPE Pixel
+          </p>
         </div>
 
         {/* The Tree (Hero) */}
