@@ -699,6 +699,7 @@ export const NativeWebViewBrowser = () => {
   const injectionInFlightRef = useRef(false);
   const lastInjectedUrlRef = useRef('');
   const lastInjectionAtRef = useRef(0);
+  const lastInjectedPageEpochRef = useRef(0);
   const duplicateInjectionSkipsRef = useRef(0);
   const noHookFallbackRecoverKeysRef = useRef<Set<string>>(new Set());
   const didInjectAfterSettingsLoadedRef = useRef(false);
@@ -712,6 +713,7 @@ export const NativeWebViewBrowser = () => {
   const currentUrlRef = useRef('');
   const webViewActiveInstanceIdRef = useRef<number | null>(null);
   const webViewListenersAttachedRef = useRef(false);
+  const lifecycleRecoveryTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
   const pendingReinjectRef = useRef<{
     active: boolean;
     navId: number;
@@ -741,6 +743,153 @@ export const NativeWebViewBrowser = () => {
       'pageEpoch=' + webViewPageEpochRef.current,
     );
   }, []);
+
+  const clearLifecycleRecoveryTimers = useCallback(() => {
+    if (lifecycleRecoveryTimersRef.current.length === 0) return;
+    lifecycleRecoveryTimersRef.current.forEach((timer) => clearTimeout(timer));
+    lifecycleRecoveryTimersRef.current = [];
+  }, []);
+
+  const requestCurrentSurfaceRescan = useCallback(async (reason: string, urlHint?: string) => {
+    if (!isNative || !webViewState.isOpen || !executeScript) return false;
+    const activeUrl = urlHint || webViewState.currentUrl || currentUrlRef.current || '';
+    const safeReason = escapeForJs(reason || 'host_current_surface_rescan');
+    const isShorts = isYouTubeShortsUrl(activeUrl);
+    const result = await executeScript(`
+      (function() {
+        try {
+          var reason = '${safeReason}';
+          var isShorts = ${isShorts ? 'true' : 'false'};
+          if (isShorts && typeof window.__MW_SCAN_ACTIVE_SHORTS__ === 'function') {
+            window.__MW_SCAN_ACTIVE_SHORTS__(reason);
+          }
+          if (typeof window.__MW_SCAN_FULL__ === 'function') {
+            window.__MW_SCAN_FULL__();
+          }
+          if (typeof window.__MW_SCAN_YT__ === 'function') {
+            window.__MW_SCAN_YT__();
+          }
+          return 'OK';
+        } catch (e) {
+          return 'ERR:' + String(e);
+        }
+      })();
+    `);
+    console.log(
+      '[DIAG][LIFECYCLE_REPAIR]',
+      'action=current_surface_rescan',
+      'reason=' + reason,
+      'url=' + toDiagUrl(activeUrl),
+      'result=' + String(result || 'null'),
+    );
+    return true;
+  }, [executeScript, isNative, toDiagUrl, webViewState.currentUrl, webViewState.isOpen]);
+
+  const scheduleLifecycleRecoveryScans = useCallback((reason: string, urlHint?: string) => {
+    if (!isNative || !webViewState.isOpen || !executeScript) return;
+    clearLifecycleRecoveryTimers();
+    const delays = [100, 500, 1000];
+    delays.forEach((delayMs) => {
+      const timer = setTimeout(() => {
+        const activeUrl = urlHint || webViewState.currentUrl || currentUrlRef.current || '';
+        if (!webViewState.isOpen || !executeScript) return;
+        void requestCurrentSurfaceRescan(`${reason}:${delayMs}ms`, activeUrl);
+      }, delayMs);
+      lifecycleRecoveryTimersRef.current.push(timer);
+    });
+    console.log(
+      '[DIAG][LIFECYCLE_REPAIR]',
+      'action=scan_schedule',
+      'reason=' + reason,
+      'timers=' + delays.join(','),
+      'url=' + toDiagUrl(urlHint || webViewState.currentUrl || currentUrlRef.current || ''),
+    );
+  }, [clearLifecycleRecoveryTimers, executeScript, isNative, requestCurrentSurfaceRescan, toDiagUrl, webViewState.currentUrl, webViewState.isOpen]);
+
+  const recoverWebViewLifecycle = useCallback(async (
+    reason: string,
+    urlHint?: string,
+    opts?: { rescan?: boolean; clearCache?: boolean; clearShorts?: boolean; forceResync?: boolean },
+  ) => {
+    const activeUrl = urlHint || webViewState.currentUrl || currentUrlRef.current || '';
+    const isShorts = isYouTubeShortsUrl(activeUrl);
+    const isYouTubeFamily = isYouTubeFamilyContext(getCacheFamilyContext(activeUrl));
+    console.log(
+      '[DIAG][LIFECYCLE_REPAIR]',
+      'action=recover_enter',
+      'reason=' + reason,
+      'url=' + toDiagUrl(activeUrl),
+      'shorts=' + String(isShorts),
+      'youtube=' + String(isYouTubeFamily),
+      'navId=' + activeNavIdRef.current,
+      'pageEpoch=' + webViewPageEpochRef.current,
+    );
+    clearLoadEndInjectTimer();
+    clearPendingReinjectTimer();
+    clearLifecycleRecoveryTimers();
+    injectionInFlightRef.current = false;
+    blurReadyRef.current = false;
+    didInjectAfterSettingsLoadedRef.current = false;
+    exitPendingReinject(`${reason}:enter`, activeUrl);
+    moderationNavGenerationRef.current += 1;
+    pendingRequestsRef.current.clear();
+    shortsReqSeenEpochRef.current = null;
+    shortsScopedReqSeenRef.current = null;
+    shortsAckNoReqRecoverEpochRef.current = null;
+    shortsLegacyFallbackRef.current.lastReqSentAt = 0;
+    shortsLegacyFallbackRef.current.lastReqTimeoutAt = 0;
+    shortsLegacyFallbackRef.current.untilMs = 0;
+    shortsLegacyFallbackRef.current.reason = reason;
+    disarmShortsFirstEntryLatch(`${reason}:recover`);
+    disarmShortsLegacyFallbackProbe(`${reason}:recover`);
+    if (opts?.clearCache !== false) {
+      moderationBridge.clearCache({
+        reason,
+        previousFamily: getCacheFamilyContext(activeUrl),
+        nextFamily: getCacheFamilyContext(activeUrl),
+        navId: activeNavIdRef.current,
+        pageEpoch: webViewPageEpochRef.current,
+      });
+    }
+    if (opts?.clearShorts !== false && isShorts) {
+      const safeReason = escapeForJs(reason || 'host_lifecycle_repair');
+      if (executeScript) {
+        await executeScript(`
+          (function() {
+            try {
+              if (typeof window.__MW_SHORTS_REENTRY_REFRESH__ === 'function') {
+                return window.__MW_SHORTS_REENTRY_REFRESH__('${safeReason}');
+              }
+              return 'NO_HOOK';
+            } catch (e) {
+              return 'ERR:' + String(e);
+            }
+          })();
+        `).catch(() => undefined);
+      }
+    }
+    if (opts?.forceResync !== false && isYouTubeFamily && executeScript) {
+      await clearStaleOwnershipAtBoundary(executeScript, reason, activeUrl);
+    }
+    resetInjectionReadiness(reason);
+    blurPendingRef.current = null;
+    blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
+    if (opts?.rescan === true && shouldInjectModeration) {
+      scheduleLifecycleRecoveryScans(reason, activeUrl);
+    }
+  }, [
+    clearLoadEndInjectTimer,
+    clearPendingReinjectTimer,
+    clearStaleOwnershipAtBoundary,
+    executeScript,
+    exitPendingReinject,
+    moderationBridge,
+    resetInjectionReadiness,
+    scheduleLifecycleRecoveryScans,
+    shouldInjectModeration,
+    webViewState.currentUrl,
+    webViewState.isOpen,
+  ]);
   
   const {
     currentView,
@@ -1133,6 +1282,7 @@ export const NativeWebViewBrowser = () => {
     scriptExecutor: (script: string) => Promise<string | null>,
     reason: string,
     urlHint?: string,
+    force?: boolean,
   ) => {
     if (!ENABLE_SIGNAL_PIPELINE) {
       return;
@@ -1160,9 +1310,11 @@ export const NativeWebViewBrowser = () => {
     }
     const now = Date.now();
     const recentlyInjectedSameUrl =
+      !force &&
       injectionDoneRef.current &&
       !!targetUrl &&
       lastInjectedUrlRef.current === targetUrl &&
+      lastInjectedPageEpochRef.current === webViewPageEpochRef.current &&
       now - lastInjectionAtRef.current < 2000;
 
     if (injectionInFlightRef.current || recentlyInjectedSameUrl) {
@@ -1486,6 +1638,12 @@ export const NativeWebViewBrowser = () => {
     executeScript,
     setFlashGuardState,
   } = useNativeWebView({
+    onBeforeReload: (url) => recoverWebViewLifecycle('native_reload_preflight', url, {
+      clearCache: true,
+      clearShorts: true,
+      forceResync: true,
+      rescan: false,
+    }),
     onLoadStart: (url) => {
       console.log('[DIAG][LOAD] stage=start url=' + toDiagUrl(url));
       console.log('[Browser] ======= LOAD START =======');
@@ -1505,27 +1663,19 @@ export const NativeWebViewBrowser = () => {
       }
       logHostLayerDiagnostics('load_start');
       setIsLoading(true);
-      clearLoadEndInjectTimer();
-      injectionInFlightRef.current = false;
-      resetInjectionReadiness('navigation_load_start');
-      blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
-      const canDeferLoadStartReset =
-        pendingReinjectRef.current?.active === true &&
-        isYouTubeFamilyContext(getCacheFamilyContext(url));
-      if (canDeferLoadStartReset) {
-        logSafeResetDiag('safe_reset_deferred', 'navigation_load_start_pending_reinject', url);
-        queueCurrentBlurState('navigation_load_start_deferred');
-      } else {
-        exitPendingReinject('navigation_load_start', url);
-        setCentralBlurState(false, 'navigation_load_start');
-      }
+      void recoverWebViewLifecycle('navigation_load_start', url, {
+        clearCache: true,
+        clearShorts: true,
+        forceResync: true,
+        rescan: false,
+      });
       setFlashGuardState?.(true, 'navigation_start');
       // Teardown first, then inject to avoid __MW_ACTIVE__ races.
       if (!skipBootstrapLoadStart && executeScript) {
         void (async () => {
           await clearStaleOwnershipAtBoundary(executeScript, 'onLoadStart', url);
           await teardownWebViewScheduling('navigation_start', url).catch(() => undefined);
-          await injectModerationScript(executeScript, 'onLoadStart', url);
+          await injectModerationScript(executeScript, 'onLoadStart', url, true);
         })();
       }
     },
@@ -1549,13 +1699,19 @@ export const NativeWebViewBrowser = () => {
       setFlashGuardState?.(false, 'load_end');
       if (!ENABLE_SIGNAL_PIPELINE) return;
       if (skipBootstrapLoadEnd) return;
+      void recoverWebViewLifecycle('navigation_load_end', url, {
+        clearCache: false,
+        clearShorts: false,
+        forceResync: false,
+        rescan: true,
+      });
       
       // Inject moderation script after page fully loads
       if (!injectionDoneRef.current) {
         // Small delay to ensure DOM is ready
         clearLoadEndInjectTimer();
         loadEndInjectTimerRef.current = setTimeout(async () => {
-          await injectModerationScript(executeScript, 'onLoadEnd', url);
+          await injectModerationScript(executeScript, 'onLoadEnd', url, true);
           if (ENABLE_DOM_BLUR && executeScript) {
             await executeScript(`
               (function() {
@@ -1619,11 +1775,12 @@ export const NativeWebViewBrowser = () => {
       logHostLayerDiagnostics('url_change');
       setUrlInput(url);
       navigate('browse', url, url);
-      // Reset injection for new page navigation
-      clearLoadEndInjectTimer();
-      injectionInFlightRef.current = false;
-      resetInjectionReadiness('url_change');
-      blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
+      void recoverWebViewLifecycle('url_change', url, {
+        clearCache: true,
+        clearShorts: true,
+        forceResync: true,
+        rescan: true,
+      });
       if (shortsIdChanged && executeScript) {
         const safeReason = escapeForJs('shorts_url_change_hard_reset');
         void executeScript(`
@@ -1672,7 +1829,6 @@ export const NativeWebViewBrowser = () => {
         navId: activeNavIdRef.current,
         pageEpoch: webViewPageEpochRef.current,
       });
-      injectionInFlightRef.current = false;
       resetInjectionReadiness('webview_closed');
       blurPendingRef.current = null;
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
@@ -2767,6 +2923,8 @@ export const NativeWebViewBrowser = () => {
       clearTimeout(timeoutId);
       setFlashGuardState?.(false, 'moderation_epoch_stale');
       flashLog('disarm stale epoch');
+      void requestCurrentSurfaceRescan('stale_epoch_rejected', activeUrl);
+      scheduleLifecycleRecoveryScans('stale_epoch_rejected', activeUrl);
       return;
     }
     if (stickyShortsMode && requestSovereignId && requestSovereignId !== activeSovereignId) {
@@ -2814,6 +2972,8 @@ export const NativeWebViewBrowser = () => {
           'hard_kill_nav_mismatch_recover',
           SHORTS_LEGACY_FALLBACK_ENTRY_PROBE_MS,
         );
+        void requestCurrentSurfaceRescan('stale_nav_mismatch_rejected', activeUrl);
+        scheduleLifecycleRecoveryScans('stale_nav_mismatch_rejected', activeUrl);
         return;
       }
       console.warn(
@@ -2844,6 +3004,8 @@ export const NativeWebViewBrowser = () => {
       clearTimeout(timeoutId);
       setFlashGuardState?.(false, 'moderation_sovereign_stale');
       flashLog('disarm stale sovereign');
+      void requestCurrentSurfaceRescan('stale_sovereign_rejected', activeUrl);
+      scheduleLifecycleRecoveryScans('stale_sovereign_rejected', activeUrl);
       return;
     }
     if (requestEpoch !== null && requestEpoch !== activeEpoch && guardedRelaxedEpochBypassAllowed) {
@@ -3365,7 +3527,9 @@ export const NativeWebViewBrowser = () => {
           injectionDoneRef.current = true;
           lastInjectedUrlRef.current = activeUrl;
           lastInjectionAtRef.current = Date.now();
+          lastInjectedPageEpochRef.current = Number(webViewPageEpochRef.current) || 0;
           exitPendingReinject('readiness_ack', activeUrl);
+          scheduleLifecycleRecoveryScans('readiness_ack', activeUrl);
         }
         console.log(
           '[MW-Host][ACK] MW_INJECTED_ACK',
@@ -3601,7 +3765,9 @@ export const NativeWebViewBrowser = () => {
           injectionDoneRef.current = true;
           lastInjectedUrlRef.current = activeUrl;
           lastInjectionAtRef.current = Date.now();
+          lastInjectedPageEpochRef.current = Number(webViewPageEpochRef.current) || 0;
           exitPendingReinject('readiness_blur_ready', activeUrl);
+          scheduleLifecycleRecoveryScans('readiness_blur_ready', activeUrl);
         }
         blurReadyRef.current = true;
         console.log(
@@ -4624,15 +4790,10 @@ export const NativeWebViewBrowser = () => {
       return;
     }
     if (currentView === 'browse' && isNative && webViewState.isOpen) {
-      const reloadUrl = webViewState.currentUrl || currentUrlRef.current || '';
-      resetInjectionReadiness('manual_reload_preflight');
-      blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
-      setCentralBlurState(false, 'manual_reload_preflight');
-      await teardownWebViewScheduling('manual_reload_preflight', reloadUrl).catch(() => undefined);
       await webViewReload();
       return;
     }
-  }, [readerContent, currentView, searchQuery, isNative, webViewState.isOpen, webViewState.currentUrl, handleReaderMode, handleSearch, webViewReload, setCentralBlurState, resetInjectionReadiness, teardownWebViewScheduling]);
+  }, [readerContent, currentView, searchQuery, isNative, webViewState.isOpen, handleReaderMode, handleSearch, webViewReload]);
 
   const handleHome = useCallback(async () => {
     teardownWebViewScheduling('home_reset', webViewState.currentUrl).catch(() => undefined);

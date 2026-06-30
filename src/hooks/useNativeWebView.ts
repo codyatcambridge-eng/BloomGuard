@@ -227,6 +227,7 @@ export interface UseNativeWebViewOptions {
   onLoadEnd?: (url: string) => void;
   onLoadError?: (url: string, error: string) => void;
   onUrlChange?: (url: string) => void;
+  onBeforeReload?: (url: string) => void | Promise<void>;
   onNavigationRequest?: (url: string) => Promise<boolean> | boolean; // Return false to block navigation
   onClose?: () => void;
   onMessageFromWebview?: (payload: unknown) => void;
@@ -244,6 +245,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     onLoadEnd,
     onLoadError,
     onUrlChange,
+    onBeforeReload,
     onNavigationRequest,
     onClose,
     onMessageFromWebview,
@@ -1013,13 +1015,14 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     if (!isNative || !state.currentUrl) return;
 
     try {
+      await onBeforeReload?.(state.currentUrl);
       await InAppBrowser.reload();
       setState(prev => ({ ...prev, isLoading: true }));
       void setFlashGuardState(true, 'manual_reload');
     } catch (error) {
       console.error('[NativeWebView] Reload error:', error);
     }
-  }, [isNative, state.currentUrl, setFlashGuardState]);
+  }, [isNative, state.currentUrl, onBeforeReload, setFlashGuardState]);
 
   // Set URL without full navigation (for redirects)
   const setUrl = useCallback(async (url: string) => {

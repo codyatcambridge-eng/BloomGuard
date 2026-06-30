@@ -12611,6 +12611,17 @@ export function generateModerationScript(config: InjectionConfig): string {
       state.pendingRequests.clear();
       state.pending.forEach((_item, itemId) => clearPendingItem(itemId, 'host_epoch_resync'));
       state.pendingBySrc.clear();
+      state.safeResolved.clear();
+      state.safeResolvedAt.clear();
+      state.blurred.clear();
+      state.scanned.clear();
+      state.elements.clear();
+      state.revealed.clear();
+      state.revealedMeta.clear();
+      resetShortsBlurContext('host_epoch_resync');
+      resetBlurState('host_epoch_resync');
+      sweepOrphanedModeOverlays('host_epoch_resync');
+      refreshAdaptiveShortsOverlayWatch('host_epoch_resync');
 
       state.pageEpoch = nextEpoch;
       console.log(
@@ -12630,6 +12641,13 @@ export function generateModerationScript(config: InjectionConfig): string {
   window.__MW_SHORTS_REENTRY_REFRESH__ = function(reason) {
     try {
       return refreshShortsFreshnessOnReentry(reason || 'host_shorts_reentry', { force: true }) ? 'OK' : 'SKIP';
+    } catch (e) {
+      return 'ERR';
+    }
+  };
+  window.__MW_SCAN_ACTIVE_SHORTS__ = function(reason) {
+    try {
+      return scanActiveShortsPlayerContainer(reason || 'host_scan_active_shorts') ? 'OK' : 'SKIP';
     } catch (e) {
       return 'ERR';
     }
