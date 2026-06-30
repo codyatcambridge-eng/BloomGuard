@@ -3175,6 +3175,12 @@ export function generateModerationScript(config: InjectionConfig): string {
     const watchBound = refreshAdaptiveShortsOverlayWatch('reentry:' + (reason || 'unknown'));
     const nextCandidate = getAdaptiveActiveShortsCandidateIdentity();
     logActiveShortsCandidateIdentity('reentry:' + (reason || 'unknown'), nextCandidate, true);
+    if (nextCandidate && nextCandidate.container && nextCandidate.container.isConnected) {
+      triggerAdaptiveShortsTargetedRescan('reentry_immediate:' + (reason || 'unknown'), nextCandidate, {
+        force: true,
+        immediate: true,
+      });
+    }
     if (!watchBound) {
       triggerAdaptiveShortsTargetedRescan('reentry_fallback:' + (reason || 'unknown'), nextCandidate, {
         force: true,
