@@ -4991,6 +4991,11 @@ export const NativeWebViewBrowser = () => {
     );
   }
 
+  const isBrowserWebViewBlank =
+    isNative &&
+    webViewState.isOpen &&
+    (!webViewState.currentUrl || isBootstrapBlankUrl(webViewState.currentUrl));
+
   // Main browser view
   return (
     <div className="min-h-screen bg-background flex flex-col">
@@ -5072,17 +5077,23 @@ export const NativeWebViewBrowser = () => {
         ) : currentView === 'browse' ? (
           // Native WebView is handled externally - show placeholder when WebView is open
           isNative && webViewState.isOpen ? (
-            <div className="absolute inset-0 flex items-center justify-center bg-background">
-              <div className="text-center">
-                <Loader2 className="w-8 h-8 mx-auto mb-3 text-aqua animate-spin" />
-                <p className="text-sm text-muted-foreground font-display tracking-wider">
-                  BROWSING IN WEBVIEW
-                </p>
-                <p className="text-xs text-silver mt-2 max-w-xs mx-auto truncate px-4">
-                  {webViewState.currentUrl}
-                </p>
+            isBrowserWebViewBlank ? (
+              <div className="absolute inset-0 overflow-y-auto bg-background">
+                <SafeBrowserHomepage onSearch={handleSearch} isSearching={isSearching} />
               </div>
-            </div>
+            ) : (
+              <div className="absolute inset-0 flex items-center justify-center bg-background">
+                <div className="text-center">
+                  <Loader2 className="w-8 h-8 mx-auto mb-3 text-aqua animate-spin" />
+                  <p className="text-sm text-muted-foreground font-display tracking-wider">
+                    BROWSING IN WEBVIEW
+                  </p>
+                  <p className="text-xs text-silver mt-2 max-w-xs mx-auto truncate px-4">
+                    {webViewState.currentUrl}
+                  </p>
+                </div>
+              </div>
+            )
           ) : (
             // Web fallback message
             <div className="absolute inset-0 flex items-center justify-center p-6 bg-background">
