@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, render } from '@testing-library/react';
-import NativeWebViewBrowser from '@/components/browser/NativeWebViewBrowser';
-import { nativeBrowserHarness, resetNativeBrowserHarness } from './native-webview-browser-test-kit';
+import { getNativeBrowserHarness, resetNativeBrowserHarness } from './native-webview-browser-test-kit';
+import { NativeWebViewBrowser } from '@/components/browser/NativeWebViewBrowser';
+
+const nativeBrowserHarness = getNativeBrowserHarness();
 
 afterEach(() => {
   vi.useRealTimers();
@@ -27,13 +29,22 @@ describe('stale safe result triggers rescan', () => {
         nonce: 'test-nonce',
         timestamp: Date.now(),
       });
-      await vi.runAllTimersAsync();
+      await vi.advanceTimersByTimeAsync(1100);
     });
 
     const scripts = nativeBrowserHarness.executeScriptCalls.join('\n');
-    expect(nativeBrowserHarness.clearCacheCalls.length).toBeGreaterThan(0);
+    expect(
+      nativeBrowserHarness.postMessageCalls.some((call) => {
+        const message = call as { type?: string; results?: Array<{ category?: string }> };
+        return (
+          message?.type === 'gc-moderation-result' &&
+          message.results?.some((result) =>
+            result.category === 'safe_epoch_stale' || result.category === 'safe_sovereign_stale'
+          )
+        );
+      })
+    ).toBe(false);
     expect(scripts).toContain('__MW_SCAN_FULL__');
     expect(scripts).toContain('__MW_SCAN_YT__');
   });
 });
-

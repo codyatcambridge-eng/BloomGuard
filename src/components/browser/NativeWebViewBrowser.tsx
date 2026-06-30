@@ -714,6 +714,8 @@ export const NativeWebViewBrowser = () => {
   const webViewActiveInstanceIdRef = useRef<number | null>(null);
   const webViewListenersAttachedRef = useRef(false);
   const lifecycleRecoveryTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const executeScriptRef = useRef<typeof executeScript | null>(null);
+  const webViewIsOpenRef = useRef(false);
   const pendingReinjectRef = useRef<{
     active: boolean;
     navId: number;
@@ -751,11 +753,12 @@ export const NativeWebViewBrowser = () => {
   }, []);
 
   const requestCurrentSurfaceRescan = useCallback(async (reason: string, urlHint?: string) => {
-    if (!isNative || !webViewState.isOpen || !executeScript) return false;
-    const activeUrl = urlHint || webViewState.currentUrl || currentUrlRef.current || '';
+    const scriptExecutor = executeScriptRef.current;
+    if (!isNative || !webViewIsOpenRef.current || !scriptExecutor) return false;
+    const activeUrl = urlHint || currentUrlRef.current || '';
     const safeReason = escapeForJs(reason || 'host_current_surface_rescan');
     const isShorts = isYouTubeShortsUrl(activeUrl);
-    const result = await executeScript(`
+    const result = await scriptExecutor(`
       (function() {
         try {
           var reason = '${safeReason}';
@@ -779,20 +782,21 @@ export const NativeWebViewBrowser = () => {
       '[DIAG][LIFECYCLE_REPAIR]',
       'action=current_surface_rescan',
       'reason=' + reason,
-      'url=' + toDiagUrl(activeUrl),
+      'url=' + (activeUrl || 'unknown'),
       'result=' + String(result || 'null'),
     );
     return true;
-  }, [executeScript, isNative, toDiagUrl, webViewState.currentUrl, webViewState.isOpen]);
+  }, [isNative]);
 
   const scheduleLifecycleRecoveryScans = useCallback((reason: string, urlHint?: string) => {
-    if (!isNative || !webViewState.isOpen || !executeScript) return;
+    const scriptExecutor = executeScriptRef.current;
+    if (!isNative || !webViewIsOpenRef.current || !scriptExecutor) return;
     clearLifecycleRecoveryTimers();
     const delays = [100, 500, 1000];
     delays.forEach((delayMs) => {
       const timer = setTimeout(() => {
-        const activeUrl = urlHint || webViewState.currentUrl || currentUrlRef.current || '';
-        if (!webViewState.isOpen || !executeScript) return;
+        const activeUrl = urlHint || currentUrlRef.current || '';
+        if (!webViewIsOpenRef.current || !executeScriptRef.current) return;
         void requestCurrentSurfaceRescan(`${reason}:${delayMs}ms`, activeUrl);
       }, delayMs);
       lifecycleRecoveryTimersRef.current.push(timer);
@@ -802,16 +806,16 @@ export const NativeWebViewBrowser = () => {
       'action=scan_schedule',
       'reason=' + reason,
       'timers=' + delays.join(','),
-      'url=' + toDiagUrl(urlHint || webViewState.currentUrl || currentUrlRef.current || ''),
+      'url=' + (urlHint || currentUrlRef.current || 'unknown'),
     );
-  }, [clearLifecycleRecoveryTimers, executeScript, isNative, requestCurrentSurfaceRescan, toDiagUrl, webViewState.currentUrl, webViewState.isOpen]);
+  }, [clearLifecycleRecoveryTimers, isNative, requestCurrentSurfaceRescan]);
 
-  const recoverWebViewLifecycle = useCallback(async (
+  const recoverWebViewLifecycle = async (
     reason: string,
     urlHint?: string,
     opts?: { rescan?: boolean; clearCache?: boolean; clearShorts?: boolean; forceResync?: boolean },
   ) => {
-    const activeUrl = urlHint || webViewState.currentUrl || currentUrlRef.current || '';
+    const activeUrl = urlHint || currentUrlRef.current || '';
     const isShorts = isYouTubeShortsUrl(activeUrl);
     const isYouTubeFamily = isYouTubeFamilyContext(getCacheFamilyContext(activeUrl));
     console.log(
@@ -853,8 +857,9 @@ export const NativeWebViewBrowser = () => {
     }
     if (opts?.clearShorts !== false && isShorts) {
       const safeReason = escapeForJs(reason || 'host_lifecycle_repair');
-      if (executeScript) {
-        await executeScript(`
+      const scriptExecutor = executeScriptRef.current;
+      if (scriptExecutor) {
+        await scriptExecutor(`
           (function() {
             try {
               if (typeof window.__MW_SHORTS_REENTRY_REFRESH__ === 'function') {
@@ -868,8 +873,11 @@ export const NativeWebViewBrowser = () => {
         `).catch(() => undefined);
       }
     }
-    if (opts?.forceResync !== false && isYouTubeFamily && executeScript) {
-      await clearStaleOwnershipAtBoundary(executeScript, reason, activeUrl);
+    if (opts?.forceResync !== false && isYouTubeFamily) {
+      const scriptExecutor = executeScriptRef.current;
+      if (scriptExecutor) {
+        await clearStaleOwnershipAtBoundary(scriptExecutor, reason, activeUrl);
+      }
     }
     resetInjectionReadiness(reason);
     blurPendingRef.current = null;
@@ -877,19 +885,7 @@ export const NativeWebViewBrowser = () => {
     if (opts?.rescan === true && shouldInjectModeration) {
       scheduleLifecycleRecoveryScans(reason, activeUrl);
     }
-  }, [
-    clearLoadEndInjectTimer,
-    clearPendingReinjectTimer,
-    clearStaleOwnershipAtBoundary,
-    executeScript,
-    exitPendingReinject,
-    moderationBridge,
-    resetInjectionReadiness,
-    scheduleLifecycleRecoveryScans,
-    shouldInjectModeration,
-    webViewState.currentUrl,
-    webViewState.isOpen,
-  ]);
+  };
   
   const {
     currentView,
@@ -1847,7 +1843,8 @@ export const NativeWebViewBrowser = () => {
     },
     getListenerDiagContext: getWebViewListenerDiagContext,
   });
-  const executeScriptRef = useRef(executeScript);
+  executeScriptRef.current = executeScript;
+  webViewIsOpenRef.current = webViewState.isOpen;
 
   const requestShortsReentryRefresh = useCallback(async (
     reason: string,
@@ -2903,22 +2900,6 @@ export const NativeWebViewBrowser = () => {
         diagUrl
       );
 
-      const staleResults = items.map(item => ({
-        itemId: item.itemId,
-        src: item.src,
-        shouldBlur: false,
-        category: 'safe_epoch_stale',
-        confidence: 0,
-        severity: 'safe' as ModerationSeverity,
-      }));
-
-      try {
-        const staleMessage = createResultMessage(requestId, staleResults, nonce, requestEpoch ?? undefined);
-        await postMessageToWebView(staleMessage as unknown as Record<string, unknown>);
-      } catch {
-        // Fail-open by design for stale requests.
-      }
-
       pendingRequestsRef.current.delete(requestId);
       clearTimeout(timeoutId);
       setFlashGuardState?.(false, 'moderation_epoch_stale');
@@ -2986,20 +2967,6 @@ export const NativeWebViewBrowser = () => {
         'pageEpoch=' + activeEpoch,
         'url=' + (activeUrl || 'unknown'),
       );
-      const staleResults = items.map(item => ({
-        itemId: item.itemId,
-        src: item.src,
-        shouldBlur: false,
-        category: 'safe_sovereign_stale',
-        confidence: 0,
-        severity: 'safe' as ModerationSeverity,
-      }));
-      try {
-        const staleMessage = createResultMessage(requestId, staleResults, nonce, requestEpoch ?? undefined);
-        await postMessageToWebView(staleMessage as unknown as Record<string, unknown>);
-      } catch {
-        // Fail-open by design for stale requests.
-      }
       pendingRequestsRef.current.delete(requestId);
       clearTimeout(timeoutId);
       setFlashGuardState?.(false, 'moderation_sovereign_stale');

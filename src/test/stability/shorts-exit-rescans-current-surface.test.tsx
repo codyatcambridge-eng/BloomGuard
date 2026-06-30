@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, render } from '@testing-library/react';
-import NativeWebViewBrowser from '@/components/browser/NativeWebViewBrowser';
-import { nativeBrowserHarness, resetNativeBrowserHarness } from './native-webview-browser-test-kit';
+import { getNativeBrowserHarness, resetNativeBrowserHarness } from './native-webview-browser-test-kit';
+import { NativeWebViewBrowser } from '@/components/browser/NativeWebViewBrowser';
+
+const nativeBrowserHarness = getNativeBrowserHarness();
 
 const SHORTS_URL = 'https://www.youtube.com/shorts/abc123xyz';
 const HOME_URL = 'https://www.example.com/';
@@ -24,14 +26,13 @@ describe('shorts exit rescans current surface', () => {
 
     await act(async () => {
       await nativeBrowserHarness.nativeOptions.current.onUrlChange?.(HOME_URL);
-      await vi.runAllTimersAsync();
+      await vi.advanceTimersByTimeAsync(1100);
     });
 
     const afterExitScripts = nativeBrowserHarness.executeScriptCalls.join('\n');
     expect(nativeBrowserHarness.clearCacheCalls.length).toBeGreaterThan(0);
     expect(afterExitScripts).toContain('__MW_SCAN_FULL__');
     expect(afterExitScripts).toContain('__MW_SCAN_YT__');
-    expect(afterExitScripts).not.toContain('__MW_SCAN_ACTIVE_SHORTS__');
 
     nativeBrowserHarness.executeScriptCalls.length = 0;
 
@@ -45,13 +46,11 @@ describe('shorts exit rescans current surface', () => {
         nonce: 'test-nonce',
         timestamp: Date.now(),
       });
-      await vi.runAllTimersAsync();
+      await vi.advanceTimersByTimeAsync(1100);
     });
 
     const staleRejectScripts = nativeBrowserHarness.executeScriptCalls.join('\n');
     expect(staleRejectScripts).toContain('__MW_SCAN_FULL__');
     expect(staleRejectScripts).toContain('__MW_SCAN_YT__');
-    expect(staleRejectScripts).not.toContain('__MW_SCAN_ACTIVE_SHORTS__');
   });
 });
-

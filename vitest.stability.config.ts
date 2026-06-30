@@ -17,7 +17,7 @@ export default defineConfig({
     },
     globals: true,
     setupFiles: ["./src/test/setup.ts"],
-    include: ["src/test/stability/**/*.test.ts"],
+    include: ["src/test/stability/**/*.test.ts", "src/test/stability/**/*.test.tsx"],
   },
   resolve: {
     alias: { "@": path.resolve(__dirname, "./src") },

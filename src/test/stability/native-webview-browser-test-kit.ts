@@ -1,7 +1,7 @@
 import React from 'react';
 import { vi } from 'vitest';
 
-export const nativeBrowserHarness = vi.hoisted(() => {
+const nativeBrowserHarness = vi.hoisted(() => {
   const executeScriptCalls: string[] = [];
   const postMessageCalls: unknown[] = [];
   const clearCacheCalls: unknown[] = [];
@@ -82,6 +82,10 @@ export const nativeBrowserHarness = vi.hoisted(() => {
   };
 });
 
+export function getNativeBrowserHarness() {
+  return nativeBrowserHarness;
+}
+
 vi.mock('@/hooks/useCapacitor', () => ({
   useCapacitor: () => ({ isNative: true }),
 }));
@@ -92,6 +96,21 @@ vi.mock('@/hooks/useContentProtection', () => ({
     isChecking: false,
   }),
 }));
+
+vi.mock('@/hooks/useOnDeviceModeration', () => ({
+  useOnDeviceModeration: () => ({
+    isReady: true,
+    isLoading: false,
+    modelState: 'ready',
+    classifyImage: vi.fn(),
+    classifyFile: vi.fn(),
+    clearCache: vi.fn(),
+  }),
+}));
+
+if (typeof document !== 'undefined' && typeof document.elementsFromPoint !== 'function') {
+  (document as Document & { elementsFromPoint: (x: number, y: number) => Element[] }).elementsFromPoint = () => [];
+}
 
 vi.mock('@/hooks/useDeviceId', () => ({
   useDeviceId: () => 'device-test-id',
@@ -256,4 +275,3 @@ vi.mock('@/components/browser/LabelListener', () => ({
 export function resetNativeBrowserHarness(): void {
   nativeBrowserHarness.reset();
 }
-
