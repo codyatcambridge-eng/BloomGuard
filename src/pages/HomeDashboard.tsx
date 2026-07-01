@@ -31,6 +31,7 @@ const HomeDashboard = () => {
           <p className="mt-1 text-xs text-gold/80 tracking-[0.25em] uppercase">Pixel</p>
           <p className="mt-1 text-xs text-gold/80 tracking-[0.25em] uppercase">Lake</p>
           <p className="mt-1 text-xs text-gold/80 tracking-[0.25em] uppercase">Coder</p>
+          <p className="mt-1 text-xs text-gold/80 tracking-[0.25em] uppercase">Beer</p>
           <p className="mt-1 text-xs text-gold/80 tracking-[0.25em] uppercase">codytry</p>
           {isActive && (
             <p className="mt-2 text-xs text-silver/70">

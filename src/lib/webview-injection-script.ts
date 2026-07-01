@@ -7810,6 +7810,16 @@ export function generateModerationScript(config: InjectionConfig): string {
       'src=' + String(overlaySrc || '').substring(0, 160)
     );
 
+    if (anchor) {
+      scheduleRevealOverlayRepair(
+        anchor,
+        overlaySrc,
+        (anchor.dataset && anchor.dataset.mwCategory) || 'flagged',
+        (anchor.dataset && anchor.dataset.mwItemId) || getDiagItemKey(overlaySrc),
+        'visibility_guard:' + rejectReason
+      );
+    }
+
     try {
       overlay.style.display = 'none';
       overlay.style.pointerEvents = 'none';
@@ -8101,6 +8111,68 @@ export function generateModerationScript(config: InjectionConfig): string {
       timerState.revealOverlayRetryTimeout = null;
       scheduleShortsRevealOverlayReposition('retry:' + (reason || 'unknown'));
     }, 120);
+  }
+
+  function findAnyRevealOverlayForNode(node, src) {
+    if (!node || node.nodeType !== 1) return null;
+    const nodeId = getDiagNodeId(node);
+    const srcKey = String(src || '');
+    const overlays = document.querySelectorAll('.mw-reveal-overlay');
+    for (let i = 0; i < overlays.length; i += 1) {
+      const overlay = overlays[i];
+      if (!overlay || !overlay.isConnected || !overlay.dataset) continue;
+      if (overlay.dataset.mwNodeId === nodeId) return overlay;
+      if (srcKey && overlay.dataset.mwFor === srcKey) return overlay;
+    }
+    return null;
+  }
+
+  function scheduleRevealOverlayRepair(node, src, category, itemId, reason) {
+    if (!isVisualModerationActive()) return false;
+    if (timerState.paused || timerState.teardownDone) return false;
+    if (!node || node.nodeType !== 1) return false;
+    if (String((node.dataset && node.dataset.mwModerated) || '') !== 'blurred') return false;
+
+    const existingOverlay = findAnyRevealOverlayForNode(node, src);
+    if (existingOverlay) {
+      if (node.__mwRevealRepairTimerId) {
+        try { clearTimeout(node.__mwRevealRepairTimerId); } catch (e) {}
+        node.__mwRevealRepairTimerId = null;
+      }
+      if (node.dataset) node.dataset.mwRevealRepairRetryCount = '0';
+      return true;
+    }
+
+    const retryCountRaw = Number((node.dataset && node.dataset.mwRevealRepairRetryCount) || '0');
+    const retryCount = Number.isFinite(retryCountRaw) ? retryCountRaw : 0;
+    if (retryCount >= 3) return false;
+    if (node.__mwRevealRepairTimerId) return true;
+
+    const retryDelays = [50, 250, 1000];
+    const delay = retryDelays[Math.min(retryCount, retryDelays.length - 1)];
+    if (node.dataset) node.dataset.mwRevealRepairRetryCount = String(retryCount + 1);
+
+    node.__mwRevealRepairTimerId = setTimeout(function() {
+      node.__mwRevealRepairTimerId = null;
+      if (!isVisualModerationActive() || timerState.paused || timerState.teardownDone) return;
+      if (!node || node.nodeType !== 1) return;
+      if (String((node.dataset && node.dataset.mwModerated) || '') !== 'blurred') return;
+      if (!node.isConnected) {
+        scheduleRevealOverlayRepair(node, src, category, itemId, 'retry_disconnected:' + String(reason || 'unknown'));
+        return;
+      }
+      if (findAnyRevealOverlayForNode(node, src)) {
+        if (node.dataset) node.dataset.mwRevealRepairRetryCount = '0';
+        return;
+      }
+      createRevealOverlay(node, src, category || 'flagged', itemId, false);
+      if (!findAnyRevealOverlayForNode(node, src)) {
+        scheduleRevealOverlayRepair(node, src, category, itemId, 'retry_missing_overlay:' + String(reason || 'unknown'));
+        return;
+      }
+      if (node.dataset) node.dataset.mwRevealRepairRetryCount = '0';
+    }, delay);
+    return true;
   }
 
   function cancelShortsRevealOverlayReposition(reason) {
@@ -8717,10 +8789,12 @@ export function generateModerationScript(config: InjectionConfig): string {
       element.dataset.mwHasOverlay = 'false';
       if (element.__mwDeferTimerId) { clearTimeout(element.__mwDeferTimerId); element.__mwDeferTimerId = null; }
       if (element.__mwMismatchTimerId) { clearTimeout(element.__mwMismatchTimerId); element.__mwMismatchTimerId = null; }
+      if (element.__mwRevealRepairTimerId) { clearTimeout(element.__mwRevealRepairTimerId); element.__mwRevealRepairTimerId = null; }
       if (nextModeratedState) {
         element.dataset.mwModerated = nextModeratedState;
       }
       element.dataset.mwPreblurClear = 'true';
+      element.dataset.mwRevealRepairRetryCount = '0';
       element.dataset.mwOverlayOwnerToken = '';
       element.dataset.mwShortsOwnerToken = '';
       clearAuthoritativeHardBlur(element);
@@ -9884,6 +9958,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       element.dataset.mwHasOverlay = 'false';
     }
     if (!element.isConnected) {
+      scheduleRevealOverlayRepair(element, src, category, itemId, 'disconnected');
       if (attemptShortsReresolve('disconnected')) return;
       diagNodeLifecycleLog('createRevealOverlay.skip_disconnected', element, '');
       diagLog(
@@ -9906,6 +9981,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     const parent = element.parentElement;
     if (!shortsMode && !parent) {
+      scheduleRevealOverlayRepair(element, src, category, itemId, 'missing_parent');
       if (attemptShortsReresolve('missing_parent')) return;
       diagNodeLifecycleLog('createRevealOverlay.skip_no_parent', element, '');
       diagLog(
@@ -9925,7 +10001,10 @@ export function generateModerationScript(config: InjectionConfig): string {
       return;
     }
     const overlayParent = usePortalOverlay ? ensureRevealPortal() : (resolveNonShortsRevealOverlayParent(element) || parent);
-    if (!overlayParent) return;
+    if (!overlayParent) {
+      scheduleRevealOverlayRepair(element, src, category, itemId, 'missing_overlay_parent');
+      return;
+    }
     const overlayCountBefore = document.querySelectorAll('.mw-reveal-overlay').length;
     const itemKey = getDiagItemKey(src);
     let parentLooksBlurred = false;
@@ -10312,6 +10391,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     element.dataset.mwHasOverlay = 'true';
     if (!enforceRevealOverlayVisibilityGuard(overlay, element, 'createRevealOverlay_created')) {
+      scheduleRevealOverlayRepair(element, src, category, itemId, 'visibility_guard_reject');
       return;
     }
     const overlayCountAfter = document.querySelectorAll('.mw-reveal-overlay').length;

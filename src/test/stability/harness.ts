@@ -205,6 +205,13 @@ export interface MWTestProbe {
   healActiveShortsBlurredNodeReveal: (reason: string) => boolean;
   healNonShortsBlurredNodeReveal: (reason: string) => boolean;
   refreshShortsFreshnessOnReentry: (reason: string) => boolean;
+  scheduleRevealOverlayRepair: (
+    node: Element,
+    src: string,
+    category: string,
+    itemId?: string,
+    reason?: string,
+  ) => boolean;
   markRevealedForSource: (src: string, element: Element, reason: string) => unknown;
   applyBlur: (
     element: Element,
@@ -280,6 +287,7 @@ export function injectScript(): InjectionResult {
     healActiveShortsBlurredNodeReveal: healActiveShortsBlurredNodeReveal,
     healNonShortsBlurredNodeReveal: healNonShortsBlurredNodeReveal,
     refreshShortsFreshnessOnReentry: refreshShortsFreshnessOnReentry,
+    scheduleRevealOverlayRepair: scheduleRevealOverlayRepair,
     markRevealedForSource: markRevealedForSource,
     applyBlur: applyBlur,
     enforceRevealOverlayVisibilityGuard: enforceRevealOverlayVisibilityGuard,
