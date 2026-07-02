@@ -14,7 +14,7 @@
  * production function. Uses the test-only probe.
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach } from 'vitest';
 import {
   buildCard,
   stampPositiveBlur,
@@ -28,8 +28,13 @@ const SHORTS_ID = 'ShortsVideoX1';
 
 let injection: InjectionResult;
 
+beforeEach(() => {
+  window.history.pushState({}, '', 'https://m.youtube.com/');
+});
+
 afterEach(() => {
   injection?.cleanup();
+  window.history.pushState({}, '', 'https://m.youtube.com/');
 });
 
 describe('T6: Shorts Contamination Gate', () => {

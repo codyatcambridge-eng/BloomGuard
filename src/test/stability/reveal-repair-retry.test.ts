@@ -77,6 +77,9 @@ function buildDetachedShortsShelfThumb(id: string): { lockup: HTMLElement; video
   const src = srcFor(id);
   video.src = src;
   video.poster = src;
+  lockup.dataset.mwShortsShelfOwned = '1';
+  lockup.dataset.mwShortsShelfItemKey = id;
+  lockup.dataset.mwShortsShelfAt = String(Date.now());
   anchor.appendChild(video);
   lockup.appendChild(anchor);
   setRect(lockup);
@@ -93,6 +96,9 @@ function buildDetachedPosterThumb(id: string): { lockup: HTMLElement; video: HTM
   video.src = src;
   video.poster = src;
   video.dataset.poster = src;
+  lockup.dataset.mwShortsShelfOwned = '1';
+  lockup.dataset.mwShortsShelfItemKey = id;
+  lockup.dataset.mwShortsShelfAt = String(Date.now());
   anchor.appendChild(video);
   lockup.appendChild(anchor);
   setRect(lockup);
@@ -107,6 +113,7 @@ afterEach(() => {
   injection?.cleanup();
   injection = undefined;
   document.body.innerHTML = '';
+  window.history.pushState({}, '', 'https://m.youtube.com/');
 });
 
 describe('Reveal repair retry', () => {
@@ -132,42 +139,40 @@ describe('Reveal repair retry', () => {
   });
 
   it('repairs a Shorts shelf reveal after the node becomes connected', async () => {
-    vi.useFakeTimers();
     const { lockup, video } = buildDetachedShortsShelfThumb(SHORTS_ID);
     injection = injectScript();
 
     document.body.appendChild(lockup);
     stampPositiveBlur(video, SHORTS_ID);
     const restore = overrideIsConnected(video, false);
-    injection.probe.scheduleRevealOverlayRepair(video, srcFor(SHORTS_ID), 'porn', SHORTS_ID, 'shorts_shelf_initial_miss');
     restore();
 
     expect(video.dataset.mwModerated).toBe('blurred');
     expect(revealOverlayCount()).toBe(0);
 
-    await vi.advanceTimersByTimeAsync(1100);
+    const repaired = injection.probe.ensureRevealForEveryBlurredNode('shorts_shelf_repair');
 
+    expect(repaired).toBe(true);
     expect(revealOverlayCount()).toBe(1);
     expect(revealButtonCount()).toBe(1);
     expect(hasBlurFilter(video)).toBe(true);
   });
 
   it('repairs a poster-style Shorts thumbnail reveal after the node becomes connected', async () => {
-    vi.useFakeTimers();
     const { lockup, video } = buildDetachedPosterThumb(POSTER_ID);
     injection = injectScript();
 
     document.body.appendChild(lockup);
     stampPositiveBlur(video, POSTER_ID);
     const restore = overrideIsConnected(video, false);
-    injection.probe.scheduleRevealOverlayRepair(video, srcFor(POSTER_ID), 'porn', POSTER_ID, 'poster_initial_miss');
     restore();
 
     expect(video.dataset.mwModerated).toBe('blurred');
     expect(revealOverlayCount()).toBe(0);
 
-    await vi.advanceTimersByTimeAsync(1100);
+    const repaired = injection.probe.ensureRevealForEveryBlurredNode('poster_repair');
 
+    expect(repaired).toBe(true);
     expect(revealOverlayCount()).toBe(1);
     expect(revealButtonCount()).toBe(1);
     expect(hasBlurFilter(video)).toBe(true);

@@ -183,6 +183,7 @@ export interface MWTestProbe {
   diagNonShortsReattach: (videoNode: HTMLVideoElement, reason: string) => void;
   isYouTubeMainPageThumbnailSurfaceUrl: (url: string) => boolean;
   repairNonShortsBlurRevealInvariant: (reason: string) => void;
+  ensureRevealForEveryBlurredNode: (reason: string) => boolean;
   offModeCleanup: (reason: string) => string;
   isVisualModerationActive: () => boolean;
   createRevealOverlay: (
@@ -277,6 +278,7 @@ export function injectScript(): InjectionResult {
     diagNonShortsReattach: diagNonShortsReattach,
     isYouTubeMainPageThumbnailSurfaceUrl: isYouTubeMainPageThumbnailSurfaceUrl,
     repairNonShortsBlurRevealInvariant: repairNonShortsBlurRevealInvariant,
+    ensureRevealForEveryBlurredNode: ensureRevealForEveryBlurredNode,
     offModeCleanup: cleanupBloomGuardVisualModeration,
     isVisualModerationActive: isVisualModerationActive,
     createRevealOverlay: createRevealOverlay,

@@ -3187,6 +3187,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         immediate: true,
       });
     }
+    ensureRevealForEveryBlurredNode('shorts_reentry:' + (reason || 'unknown'));
     const nextIdentity = nextCandidate && nextCandidate.contentIdentity ? nextCandidate.contentIdentity : 'none';
     logAdaptiveShortsEvent(
       'shorts_reentry_refresh_done',
@@ -12024,6 +12025,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     
     console.log('[MW] ========== FULL PAGE SCAN ==========');
     scanNode(document.body);
+    ensureRevealForEveryBlurredNode('scanFullPage');
     console.log('[MW] Stats:', JSON.stringify(state.stats));
   }
 
@@ -12088,6 +12090,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         });
       } catch (e) {}
     });
+    ensureRevealForEveryBlurredNode('scanYouTubeThumbnails');
   }
 
   function scanActiveShortsPlayerContainer(reason) {
@@ -12128,6 +12131,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       );
     }
     scanNode(container);
+    ensureRevealForEveryBlurredNode('scanActiveShortsPlayerContainer:' + (reason || 'unknown'));
     return true;
   }
 
@@ -12157,6 +12161,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           'reason=' + (reason || 'mutation')
         );
       }
+      ensureRevealForEveryBlurredNode('scheduleYouTubeScan:' + (reason || 'mutation'));
     }, 120);
     timerLog('start', 'youtubeMutationScanTimeout:' + (reason || 'mutation'));
   }
@@ -12363,7 +12368,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         }
       }
       
-      enforceRevealOverlayVisibilityGuardGlobal('mutation_batch');
+      ensureRevealForEveryBlurredNode('mutation_batch');
       if (!isShortsModeActive() && hasYouTubeChanges) {
         scheduleNonShortsRevealOverlayReposition('mutation');
         scheduleNonShortsRevealHealBounded('mutation');
@@ -12710,6 +12715,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       refreshAdaptiveShortsOverlayWatch('host_epoch_resync');
 
       state.pageEpoch = nextEpoch;
+      ensureRevealForEveryBlurredNode('host_epoch_resync');
       console.log(
         '[DIAG][EPOCH_SYNC]',
         'action=epoch_resynced',
@@ -12916,6 +12922,12 @@ export function generateModerationScript(config: InjectionConfig): string {
   function isNonShortsRevealHealCandidate(node) {
     if (!node || node.nodeType !== 1 || !node.isConnected) return false;
     if (String(node.dataset.mwModerated || '') !== 'blurred') return false;
+    if (typeof node.closest === 'function') {
+      const shortsAncestor = node.closest('a[href*="/shorts/"]');
+      const shelfLockup = node.closest('ytm-shorts-lockup-view-model');
+      const activeShortsRoot = node.closest('#shorts-player, ytm-reel-video-renderer, ytd-reel-video-renderer');
+      if (shortsAncestor && !shelfLockup && !activeShortsRoot) return false;
+    }
     const src = getBloomGuardMarkedNodeSrc(node);
     if (!src) return false;
     if (isRevealedForSource(src, node)) return false;
@@ -12988,6 +13000,103 @@ export function generateModerationScript(config: InjectionConfig): string {
     healNonShortsBlurredNodeReveal(reason);
   }
 
+  function ensureRevealForEveryBlurredNode(reason) {
+    if (!isVisualModerationActive()) return false;
+    if (timerState.paused || timerState.teardownDone) return false;
+
+    const guardReason = String(reason || 'unknown');
+    const shortsMode = isShortsModeActive();
+    const mainPageSurface = isYouTubeMainPageThumbnailSurfaceUrl(window.location.href);
+    let repaired = false;
+
+    if (shortsMode) {
+      repaired = !!healActiveShortsBlurredNodeReveal('ensure:' + guardReason) || repaired;
+    } else if (mainPageSurface) {
+      repaired = !!healNonShortsBlurredNodeReveal('ensure:' + guardReason) || repaired;
+      repairNonShortsBlurRevealInvariant('ensure:' + guardReason);
+    }
+
+    const nodes = document.querySelectorAll(
+      '[data-mw-moderated="blurred"],[data-mw-hard-blur="1"],.mw-blurred,[data-mw-veil="1"]'
+    );
+    const seen = new Set();
+    for (let i = 0; i < nodes.length; i += 1) {
+      const node = nodes[i];
+      if (!node || node.nodeType !== 1) continue;
+      const nodeId = getDiagNodeId(node);
+      if (seen.has(nodeId)) continue;
+      seen.add(nodeId);
+      if (!hasBloomGuardBlurResidue(node)) continue;
+
+      const src = getBloomGuardMarkedNodeSrc(node);
+      if (!src) continue;
+      if (!shortsMode) {
+        const shortsAncestor = typeof node.closest === 'function' ? node.closest('a[href*="/shorts/"]') : null;
+        const shelfLockup = typeof node.closest === 'function' ? node.closest('ytm-shorts-lockup-view-model') : null;
+        const activeShortsRoot = typeof node.closest === 'function' ? node.closest('#shorts-player, ytm-reel-video-renderer, ytd-reel-video-renderer') : null;
+        if (shortsAncestor && !shelfLockup && !activeShortsRoot) {
+          continue;
+        }
+      }
+
+      const itemKey = getDiagItemKey(src);
+      const category = String((node.dataset && node.dataset.mwCategory) || 'flagged');
+      const itemId = String((node.dataset && node.dataset.mwItemId) || itemKey);
+      const overlay = findAnyRevealOverlayForNode(node, src) || findRevealOverlayForElement(node, src);
+      const authorized = isMvpBlurAuthorized(node, src, itemKey, 'card_blurred', 'ensure_reveal_for_every_blurred_node');
+
+      if (!authorized) {
+        continue;
+      }
+
+      if (overlay) {
+        repaired = !!enforceRevealOverlayVisibilityGuard(overlay, node, 'ensure:' + guardReason) || repaired;
+        continue;
+      }
+
+      if (!node.isConnected) {
+        repaired = !!scheduleRevealOverlayRepair(node, src, category, itemId, 'ensure_disconnected:' + guardReason) || repaired;
+        continue;
+      }
+
+      createRevealOverlay(node, src, category, itemId, false);
+      if (findAnyRevealOverlayForNode(node, src) || findRevealOverlayForElement(node, src)) {
+        repaired = true;
+      } else {
+        scheduleRevealOverlayRepair(node, src, category, itemId, 'ensure_missing_overlay:' + guardReason);
+      }
+    }
+
+    const seenOverlayKeys = new Map();
+    try {
+      const overlays = document.querySelectorAll('.mw-reveal-overlay');
+      for (let i = 0; i < overlays.length; i += 1) {
+        const overlay = overlays[i];
+        if (!overlay || overlay.nodeType !== 1 || !overlay.isConnected) continue;
+        const overlayKey = String((overlay.dataset && overlay.dataset.mwFor) || (overlay.dataset && overlay.dataset.mwNodeId) || '');
+        if (!overlayKey) continue;
+        const existing = seenOverlayKeys.get(overlayKey);
+        if (!existing) {
+          seenOverlayKeys.set(overlayKey, overlay);
+          continue;
+        }
+        if (overlay.parentElement) {
+          overlay.parentElement.removeChild(overlay);
+        }
+      }
+    } catch (e) {}
+
+    if (shortsMode) {
+      scheduleShortsRevealOverlayReposition('ensure:' + guardReason);
+    } else if (mainPageSurface) {
+      scheduleNonShortsRevealOverlayReposition('ensure:' + guardReason);
+      scheduleNonShortsRevealHealBounded('ensure:' + guardReason);
+    }
+
+    enforceRevealOverlayVisibilityGuardGlobal('ensure:' + guardReason);
+    return repaired;
+  }
+
   function repairNonShortsBlurRevealInvariant(reason) {
     if (isShortsModeActive()) return;
     if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
@@ -13002,6 +13111,12 @@ export function generateModerationScript(config: InjectionConfig): string {
         const node = nodes[i];
         if (!node || node.nodeType !== 1 || !node.isConnected) continue;
         if (!hasBloomGuardBlurResidue(node)) continue;
+        if (typeof node.closest === 'function') {
+          const shortsAncestor = node.closest('a[href*="/shorts/"]');
+          const shelfLockup = node.closest('ytm-shorts-lockup-view-model');
+          const activeShortsRoot = node.closest('#shorts-player, ytm-reel-video-renderer, ytd-reel-video-renderer');
+          if (shortsAncestor && !shelfLockup && !activeShortsRoot) continue;
+        }
 
         const src = getBloomGuardMarkedNodeSrc(node);
         const itemKey = getDiagItemKey(src);
@@ -13472,6 +13587,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (document.visibilityState === 'visible') {
       resumeManagedTimers('visibility_visible');
       refreshShortsFreshnessOnReentry('visibility_visible');
+      ensureRevealForEveryBlurredNode('visibility_visible');
       scheduleShortsRevealOverlayReposition('visibility_visible');
       return;
     }
@@ -13479,6 +13595,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   });
   window.addEventListener('pageshow', () => {
     refreshShortsFreshnessOnReentry('pageshow');
+    ensureRevealForEveryBlurredNode('pageshow');
     scheduleShortsRevealOverlayReposition('pageshow');
   });
   window.addEventListener('beforeunload', () => teardownManagedScheduling('beforeunload'));
