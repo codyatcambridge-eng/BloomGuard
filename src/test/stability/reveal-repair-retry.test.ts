@@ -179,16 +179,14 @@ describe('Reveal repair retry', () => {
   });
 
   it('restores reveal after the blurred thumbnail is moved to a replacement parent', async () => {
-    vi.useFakeTimers();
     const { card, video } = buildDetachedHomeThumb(HOME_ID);
     injection = injectScript();
 
     document.body.appendChild(card);
     stampPositiveBlur(video, HOME_ID);
     const firstRestore = overrideIsConnected(video, false);
-    injection.probe.scheduleRevealOverlayRepair(video, srcFor(HOME_ID), 'porn', HOME_ID, 'replacement_initial_miss');
     firstRestore();
-    await vi.advanceTimersByTimeAsync(1100);
+    injection.probe.ensureRevealForEveryBlurredNode('replacement_initial_miss');
 
     expect(revealOverlayCount()).toBe(1);
     document.querySelector('.mw-reveal-overlay')?.remove();
@@ -200,32 +198,27 @@ describe('Reveal repair retry', () => {
     replacementCard.appendChild(replacementAnchor);
     document.body.appendChild(replacementCard);
 
-    const secondRestore = overrideIsConnected(video, false);
-    injection.probe.scheduleRevealOverlayRepair(video, srcFor(HOME_ID), 'porn', HOME_ID, 'replacement_repair');
-    secondRestore();
-    await vi.advanceTimersByTimeAsync(1100);
+    injection.probe.ensureRevealForEveryBlurredNode('replacement_repair');
 
     expect(revealOverlayCount()).toBe(1);
     expect(revealButtonCount()).toBe(1);
   });
 
   it('does not duplicate reveal controls on repeated repair passes', async () => {
-    vi.useFakeTimers();
     const { card, video } = buildDetachedHomeThumb(HOME_ID);
     injection = injectScript();
 
     document.body.appendChild(card);
     stampPositiveBlur(video, HOME_ID);
     const restore = overrideIsConnected(video, false);
-    injection.probe.scheduleRevealOverlayRepair(video, srcFor(HOME_ID), 'porn', HOME_ID, 'duplicate_pass_1');
     restore();
-    await vi.advanceTimersByTimeAsync(1100);
+
+    injection.probe.ensureRevealForEveryBlurredNode('duplicate_pass_1');
 
     expect(revealOverlayCount()).toBe(1);
     expect(revealButtonCount()).toBe(1);
 
-    injection.probe.scheduleRevealOverlayRepair(video, srcFor(HOME_ID), 'porn', HOME_ID, 'duplicate_pass_2');
-    await vi.advanceTimersByTimeAsync(1100);
+    injection.probe.ensureRevealForEveryBlurredNode('duplicate_pass_2');
 
     expect(revealOverlayCount()).toBe(1);
     expect(revealButtonCount()).toBe(1);

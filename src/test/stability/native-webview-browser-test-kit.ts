@@ -33,6 +33,15 @@ const nativeBrowserHarness = vi.hoisted(() => {
 
   const executeScript = vi.fn(async (script: string) => {
     executeScriptCalls.push(script);
+    if (script.includes("MW_BLUR_COMMAND") && script.includes("PING")) {
+      nativeOptions.current?.onMessageFromWebview?.({
+        type: 'MW_BLUR_READY',
+        reason: 'ping',
+        url: nativeState.currentUrl,
+        pageEpoch: 1,
+        timestamp: Date.now(),
+      });
+    }
     return 'OK';
   });
 

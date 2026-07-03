@@ -326,6 +326,13 @@ export const NativeWebViewBrowser = () => {
     timestamp: Date.now(),
   });
   const blurReadyRef = useRef(false);
+  const runtimePingWaiterRef = useRef<{
+    source: string;
+    activeUrl: string;
+    activePageEpoch: number;
+    resolve: (confirmed: boolean) => void;
+    timeoutId: ReturnType<typeof setTimeout> | null;
+  } | null>(null);
   const blurReadyDedupeRef = useRef<{ key: string; at: number }>({ key: '', at: 0 });
   const blurPendingRef = useRef<{ enabled: boolean; reason: string; timestamp: number } | null>(null);
   const blurRetryTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -732,6 +739,9 @@ export const NativeWebViewBrowser = () => {
   const messageFromWebViewHandlerRef = useRef<((payload: unknown) => void) | null>(null);
 
   const resetInjectionReadiness = useCallback((reason: string) => {
+    const waiter = runtimePingWaiterRef.current;
+    if (waiter && waiter.timeoutId) clearTimeout(waiter.timeoutId);
+    runtimePingWaiterRef.current = null;
     injectionDoneRef.current = false;
     nonBootstrapAckObservedRef.current = false;
     epochContextCurrentRef.current = false;
@@ -1708,18 +1718,7 @@ export const NativeWebViewBrowser = () => {
         clearLoadEndInjectTimer();
         loadEndInjectTimerRef.current = setTimeout(async () => {
           await injectModerationScript(executeScript, 'onLoadEnd', url, true);
-          if (ENABLE_DOM_BLUR && executeScript) {
-            await executeScript(`
-              (function() {
-                try {
-                  window.postMessage({ type: 'MW_BLUR_COMMAND', command: 'PING', timestamp: Date.now(), reason: 'host_onLoadEnd' }, '*');
-                  return 'OK';
-                } catch (e) {
-                  return 'ERR';
-                }
-              })();
-            `);
-          }
+          await waitForConfirmedRuntimePing('host_onLoadEnd', url);
           loadEndInjectTimerRef.current = null;
         }, 80);
         console.log(
@@ -2274,6 +2273,58 @@ export const NativeWebViewBrowser = () => {
     `);
   }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, executeScript]);
 
+  const clearRuntimePingWaiter = useCallback((reason: string) => {
+    const waiter = runtimePingWaiterRef.current;
+    if (!waiter) return;
+    if (waiter.timeoutId) clearTimeout(waiter.timeoutId);
+    runtimePingWaiterRef.current = null;
+    console.log(
+      '[DIAG][INJECT]',
+      'action=runtime_ping_waiter_clear',
+      'reason=' + reason,
+      'source=' + waiter.source,
+      'navId=' + activeNavIdRef.current,
+      'pageEpoch=' + webViewPageEpochRef.current,
+      'url=' + (waiter.activeUrl || currentUrlRef.current || 'unknown'),
+    );
+  }, []);
+
+  const waitForConfirmedRuntimePing = useCallback(async (source: string, urlHint?: string): Promise<boolean> => {
+    if (!ENABLE_DOM_BLUR) return true;
+    if (!isNative || !webViewState.isOpen || !executeScript) return false;
+    const activeUrl = urlHint || webViewState.currentUrl || currentUrlRef.current || '';
+    if (blurReadyRef.current) {
+      return true;
+    }
+
+    clearRuntimePingWaiter('replace_waiter');
+    return await new Promise<boolean>((resolve) => {
+      const timeoutId = setTimeout(() => {
+        const waiter = runtimePingWaiterRef.current;
+        if (waiter && waiter.source === source && waiter.activeUrl === activeUrl) {
+          runtimePingWaiterRef.current = null;
+          console.warn(
+            '[DIAG][INJECT]',
+            'action=runtime_ping_timeout',
+            'source=' + source,
+            'navId=' + activeNavIdRef.current,
+            'pageEpoch=' + webViewPageEpochRef.current,
+            'url=' + (activeUrl || 'unknown'),
+          );
+          resolve(false);
+        }
+      }, 700);
+      runtimePingWaiterRef.current = {
+        source,
+        activeUrl,
+        activePageEpoch: webViewPageEpochRef.current,
+        resolve,
+        timeoutId,
+      };
+      void requestBlurHandshake(source);
+    });
+  }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, webViewState.currentUrl, executeScript, requestBlurHandshake, clearRuntimePingWaiter]);
+
   const flushBlurStateToWebView = useCallback(async () => {
     if (!ENABLE_DOM_BLUR) return;
     if (!isNative || !webViewState.isOpen || !executeScript) return;
@@ -2288,7 +2339,7 @@ export const NativeWebViewBrowser = () => {
       'flushEnabled=' + pending.enabled,
       'flushReason=' + pending.reason,
       'navId=' + activeNavIdRef.current,
-      'pageEpoch=' + activePageEpochRef.current,
+      'pageEpoch=' + webViewPageEpochRef.current,
       'url=' + (webViewState.currentUrl || currentUrlRef.current || 'unknown'),
     );
     const stateMessage = createBlurOverlayStateMessage(pending.enabled, pending.reason);
@@ -2391,7 +2442,11 @@ export const NativeWebViewBrowser = () => {
             webViewState.currentUrl || currentUrlRef.current || '',
           );
         }
-        requestBlurHandshake('host_visible');
+        const pingConfirmed = await waitForConfirmedRuntimePing(
+          'host_visible',
+          webViewState.currentUrl || currentUrlRef.current || '',
+        );
+        if (!pingConfirmed) return;
         queueCurrentBlurState('host_visible_resync');
         flushBlurStateToWebView();
       })();
@@ -2410,6 +2465,7 @@ export const NativeWebViewBrowser = () => {
     webViewState.currentUrl,
     executeScript,
     requestBlurHandshake,
+    waitForConfirmedRuntimePing,
     queueCurrentBlurState,
     flushBlurStateToWebView,
     probeInjectedScriptLiveness,
@@ -2459,9 +2515,7 @@ export const NativeWebViewBrowser = () => {
 
     const reinjectAndPing = async () => {
       await injectModerationScript(executeScript, 'settings_loaded_reinject_or_urlchange', urlHint);
-      if (ENABLE_DOM_BLUR) {
-        await requestBlurHandshake('settings_loaded_reinject_or_urlchange');
-      }
+      await waitForConfirmedRuntimePing('settings_loaded_reinject_or_urlchange', urlHint);
     };
 
     console.log(
@@ -2528,6 +2582,7 @@ export const NativeWebViewBrowser = () => {
     webViewState.currentUrl,
     executeScript,
     injectModerationScript,
+    waitForConfirmedRuntimePing,
   ]);
 
   useEffect(() => {
@@ -2654,16 +2709,17 @@ export const NativeWebViewBrowser = () => {
     if (!isNative || !webViewState.isOpen) return;
     const timer = setInterval(() => {
       if (!blurReadyRef.current) {
-        requestBlurHandshake('ready_poll');
+        void waitForConfirmedRuntimePing('ready_poll', webViewState.currentUrl || currentUrlRef.current || '');
       }
     }, 800);
     return () => clearInterval(timer);
-  }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, requestBlurHandshake]);
+  }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, webViewState.currentUrl, waitForConfirmedRuntimePing]);
 
   useEffect(() => {
     return () => {
       clearLoadEndInjectTimer();
       clearPendingReinjectTimer();
+      clearRuntimePingWaiter('component_unmount');
       pendingReinjectRef.current = null;
       if (shortsAckNoReqRecoverTimerRef.current) {
         clearTimeout(shortsAckNoReqRecoverTimerRef.current);
@@ -2674,7 +2730,7 @@ export const NativeWebViewBrowser = () => {
         clearTimeout(blurRetryTimerRef.current);
       }
     };
-  }, [clearLoadEndInjectTimer, clearPendingReinjectTimer, disarmShortsFirstEntryLatch]);
+  }, [clearLoadEndInjectTimer, clearPendingReinjectTimer, clearRuntimePingWaiter, disarmShortsFirstEntryLatch]);
 
   // ==================== MODERATION MESSAGE HANDLING ====================
   // 
@@ -3490,14 +3546,6 @@ export const NativeWebViewBrowser = () => {
           activeUrl,
           activePageEpoch: activeEpoch,
         });
-        if (readinessVerdict.accepted) {
-          injectionDoneRef.current = true;
-          lastInjectedUrlRef.current = activeUrl;
-          lastInjectionAtRef.current = Date.now();
-          lastInjectedPageEpochRef.current = Number(webViewPageEpochRef.current) || 0;
-          exitPendingReinject('readiness_ack', activeUrl);
-          scheduleLifecycleRecoveryScans('readiness_ack', activeUrl);
-        }
         console.log(
           '[MW-Host][ACK] MW_INJECTED_ACK',
           'source=' + source,
@@ -3690,6 +3738,7 @@ export const NativeWebViewBrowser = () => {
 
       if (ENABLE_DOM_BLUR && isBlurOverlayReadyMessage(message)) {
         const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
+        const activeEpoch = webViewPageEpochRef.current;
         const readyUrl = String(typedMessage.url || activeUrl || '');
         if (isBootstrapBlankUrl(readyUrl)) {
           console.log(
@@ -3726,26 +3775,39 @@ export const NativeWebViewBrowser = () => {
         }
         const readinessVerdict = getInjectionReadinessVerdict(typedMessage, {
           activeUrl,
-          activePageEpoch: webViewPageEpochRef.current,
+          activePageEpoch: activeEpoch,
         });
         if (readinessVerdict.accepted) {
-          injectionDoneRef.current = true;
-          lastInjectedUrlRef.current = activeUrl;
-          lastInjectionAtRef.current = Date.now();
-          lastInjectedPageEpochRef.current = Number(webViewPageEpochRef.current) || 0;
-          exitPendingReinject('readiness_blur_ready', activeUrl);
-          scheduleLifecycleRecoveryScans('readiness_blur_ready', activeUrl);
+          const runtimePingWaiter = runtimePingWaiterRef.current;
+          const runtimePingMatched =
+            !!runtimePingWaiter &&
+            runtimePingWaiter.activeUrl === activeUrl &&
+            runtimePingWaiter.activePageEpoch === activeEpoch;
+          if (runtimePingMatched) {
+            if (runtimePingWaiter.timeoutId) clearTimeout(runtimePingWaiter.timeoutId);
+            runtimePingWaiterRef.current = null;
+            runtimePingWaiter.resolve(true);
+            blurReadyRef.current = true;
+            injectionDoneRef.current = true;
+            lastInjectedUrlRef.current = activeUrl;
+            lastInjectionAtRef.current = Date.now();
+            lastInjectedPageEpochRef.current = Number(webViewPageEpochRef.current) || 0;
+            exitPendingReinject('readiness_ping_confirmed', activeUrl);
+            scheduleLifecycleRecoveryScans('readiness_ping_confirmed', activeUrl);
+          }
         }
-        blurReadyRef.current = true;
         console.log(
           '[MW-Host] Blur overlay READY:',
           String(typedMessage.reason || 'ready'),
           String(typedMessage.url || ''),
           'readiness=' + readinessVerdict.reason,
+          'runtimePingAwaiting=' + String(!!runtimePingWaiterRef.current),
           'injectionDone=' + String(injectionDoneRef.current),
         );
-        queueCurrentBlurState('webview_ready_sync');
-        await flushBlurStateToWebView();
+        if (!runtimePingWaiterRef.current) {
+          queueCurrentBlurState('webview_ready_sync');
+          await flushBlurStateToWebView();
+        }
         return;
       }
 
@@ -5093,7 +5155,7 @@ export const NativeWebViewBrowser = () => {
                   </p>
                 </div>
               </div>
-            )
+      )
           ) : (
             // Web fallback message
             <div className="absolute inset-0 flex items-center justify-center p-6 bg-background">

@@ -29,6 +29,7 @@ describe('reload toggle state rehydration', () => {
 
     const scripts = nativeBrowserHarness.executeScriptCalls.join('\n');
     expect(scripts).toContain('window.__MW_SYNC_HOST_CONTEXT__');
+    expect(scripts).toContain("command: 'PING'");
     expect(scripts).toContain('__MW_SCAN_FULL__');
     expect(scripts).toContain('__MW_SCAN_YT__');
     expect(nativeBrowserHarness.browserHeaderProps.current?.isProtected).toBe(true);

@@ -1402,10 +1402,22 @@ export function generateModerationScript(config: InjectionConfig): string {
 
     window.addEventListener('popstate', function() { sendBlurReady('popstate'); triggerNavRescan('popstate'); });
     window.addEventListener('hashchange', function() { sendBlurReady('hashchange'); });
-    window.addEventListener('pageshow', function() { sendBlurReady('pageshow'); });
-    window.addEventListener('load', function() { sendBlurReady('load'); });
+    window.addEventListener('pageshow', function() {
+      sendBlurReady('pageshow');
+      ensureRevealForEveryBlurredNode('pageshow');
+      clearBootSoftVeil('pageshow');
+    });
+    window.addEventListener('load', function() {
+      sendBlurReady('load');
+      ensureRevealForEveryBlurredNode('load');
+      clearBootSoftVeil('load');
+    });
     document.addEventListener('visibilitychange', function() {
-      if (!document.hidden) sendBlurReady('visibility');
+      if (!document.hidden) {
+        sendBlurReady('visibility');
+        ensureRevealForEveryBlurredNode('visibility');
+        clearBootSoftVeil('visibility');
+      }
     });
   }
 
@@ -9651,6 +9663,12 @@ export function generateModerationScript(config: InjectionConfig): string {
         }
       }
     }
+    const existingOverlayMatch = findAnyRevealOverlayForNode(element, src) || findRevealOverlayForElement(element, src);
+    if (existingOverlayMatch) {
+      setRevealOverlayAnchorTarget(existingOverlayMatch, element, 'createRevealOverlay_reuse');
+      enforceRevealOverlayVisibilityGuard(existingOverlayMatch, element, 'createRevealOverlay_reuse');
+      return;
+    }
     const attemptShortsReresolve = function(reason) {
       if (!allowReresolve) return false;
       const resolvedTargetInfo = resolveShortsStableBlurTarget(element, src);
@@ -12026,6 +12044,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     console.log('[MW] ========== FULL PAGE SCAN ==========');
     scanNode(document.body);
     ensureRevealForEveryBlurredNode('scanFullPage');
+    clearBootSoftVeil('scanFullPage');
     console.log('[MW] Stats:', JSON.stringify(state.stats));
   }
 
@@ -12631,6 +12650,24 @@ export function generateModerationScript(config: InjectionConfig): string {
     const style = document.createElement('style');
     style.id = 'mw-moderation-styles';
     style.textContent = \`
+      html.mw-softveil-pending ytd-thumbnail img,
+      html.mw-softveil-pending ytd-rich-item-renderer img,
+      html.mw-softveil-pending ytd-video-renderer img,
+      html.mw-softveil-pending ytd-compact-video-renderer img,
+      html.mw-softveil-pending ytd-grid-video-renderer img,
+      html.mw-softveil-pending ytm-rich-item-renderer img,
+      html.mw-softveil-pending ytm-media-item img,
+      html.mw-softveil-pending ytm-shorts-lockup-view-model img,
+      html.mw-softveil-pending ytm-shorts-lockup-view-model video,
+      html.mw-softveil-pending ytm-reel-video-renderer video,
+      html.mw-softveil-pending ytd-reel-video-renderer video,
+      html.mw-softveil-pending .yt-core-image,
+      html.mw-softveil-pending yt-image img,
+      html.mw-softveil-pending yt-img-shadow,
+      html.mw-softveil-pending .g-img img {
+        filter: blur(8px) saturate(.9) brightness(.98) !important;
+        -webkit-filter: blur(8px) saturate(.9) brightness(.98) !important;
+      }
       .mw-reveal-overlay {
         position: absolute !important;
         inset: 0 !important;
@@ -12664,6 +12701,17 @@ export function generateModerationScript(config: InjectionConfig): string {
     \`;
     document.head.appendChild(style);
     console.log('[MW] CSS styles injected');
+  }
+  if (document.documentElement) {
+    document.documentElement.classList.add('mw-softveil-pending');
+  }
+
+  function clearBootSoftVeil(reason) {
+    if (!document.documentElement) return;
+    if (document.documentElement.classList.contains('mw-softveil-pending')) {
+      document.documentElement.classList.remove('mw-softveil-pending');
+      console.log('[DIAG][SOFT_VEIL]', 'action=clear', 'reason=' + (reason || 'unknown'), 'url=' + window.location.href);
+    }
   }
 
   // Expose targeted rescan hooks for the host (NativeWebViewBrowser)
@@ -13167,6 +13215,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       CONFIG.enabled = false;
       CONFIG.scanEnabled = false;
       CONFIG.flashShieldV1 = false;
+      if (document.documentElement) document.documentElement.classList.remove('mw-softveil-pending');
       document.documentElement.classList.remove(FLASH_SHIELD_CLASS);
       stopFlashShieldRuntime();
       disableFlashShieldRuntime();
@@ -13541,6 +13590,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     pauseManagedTimers(reason || 'teardown');
     stopAdaptiveShortsOverlayWatch('teardown:' + (reason || 'unknown'));
     stopFlashShieldRuntime();
+    if (document.documentElement) {
+      document.documentElement.classList.remove('mw-softveil-pending');
+    }
     if (timerState.mainScrollHandler) {
       window.removeEventListener('scroll', timerState.mainScrollHandler);
       timerState.mainScrollHandler = null;
