@@ -820,6 +820,18 @@ export const NativeWebViewBrowser = () => {
     );
   }, [clearLifecycleRecoveryTimers, isNative, requestCurrentSurfaceRescan]);
 
+  const isHomepageSurfaceUrl = useCallback((value?: string) => {
+    if (!value) return false;
+    if (!isYouTubeDomainUrl(value)) return false;
+    try {
+      const parsed = new URL(value);
+      const path = parsed.pathname || '/';
+      return path === '/' || path === '/feed' || path === '/feed/subscriptions';
+    } catch {
+      return false;
+    }
+  }, []);
+
   const recoverWebViewLifecycle = async (
     reason: string,
     urlHint?: string,
@@ -1714,16 +1726,16 @@ export const NativeWebViewBrowser = () => {
       
       // Inject moderation script after page fully loads
       if (!injectionDoneRef.current) {
-        // Small delay to ensure DOM is ready
         clearLoadEndInjectTimer();
+        const loadEndDelayMs = isHomepageSurfaceUrl(url) ? 25 : 80;
         loadEndInjectTimerRef.current = setTimeout(async () => {
-          await injectModerationScript(executeScript, 'onLoadEnd', url, true);
-          await waitForConfirmedRuntimePing('host_onLoadEnd', url);
+          await injectAndConfirmRuntime('onLoadEnd', url, true);
           loadEndInjectTimerRef.current = null;
-        }, 80);
+        }, loadEndDelayMs);
         console.log(
           '[MW-Host][Timer] start',
           'name=loadEndInjectTimer',
+          'delayMs=' + loadEndDelayMs,
           'navId=' + activeNavIdRef.current,
           'url=' + (url || 'unknown'),
         );
@@ -2325,6 +2337,20 @@ export const NativeWebViewBrowser = () => {
     });
   }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, webViewState.currentUrl, executeScript, requestBlurHandshake, clearRuntimePingWaiter]);
 
+  const injectAndConfirmRuntime = useCallback(async (
+    reason: string,
+    urlHint?: string,
+    force?: boolean,
+  ) => {
+    const scriptExecutor = executeScriptRef.current;
+    const activeUrl = urlHint || currentUrlRef.current || '';
+    if (!scriptExecutor) return false;
+    await injectModerationScript(scriptExecutor, reason, activeUrl, force);
+    await waitForConfirmedRuntimePing(reason, activeUrl);
+    scheduleLifecycleRecoveryScans('cold_launch_bootstrap', activeUrl);
+    return true;
+  }, [injectModerationScript, scheduleLifecycleRecoveryScans, waitForConfirmedRuntimePing]);
+
   const flushBlurStateToWebView = useCallback(async () => {
     if (!ENABLE_DOM_BLUR) return;
     if (!isNative || !webViewState.isOpen || !executeScript) return;
@@ -2573,7 +2599,7 @@ export const NativeWebViewBrowser = () => {
       'isOpen=' + webViewState.isOpen,
       'url=' + urlHint.substring(0, 80),
     );
-    injectModerationScript(executeScript, 'settings_loaded_reinject', urlHint).catch(() => undefined);
+    void injectAndConfirmRuntime('settings_loaded_reinject', urlHint, true);
   }, [
     ENABLE_SIGNAL_PIPELINE,
     settingsLoaded,
@@ -2582,6 +2608,7 @@ export const NativeWebViewBrowser = () => {
     webViewState.currentUrl,
     executeScript,
     injectModerationScript,
+    injectAndConfirmRuntime,
     waitForConfirmedRuntimePing,
   ]);
 

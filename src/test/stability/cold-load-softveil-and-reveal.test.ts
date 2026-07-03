@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { buildCard, injectScript, type InjectionResult } from './harness';
+import { buildCard, injectScript, stampPositiveBlur, type InjectionResult } from './harness';
 
 const HOME_ID = 'dQw4w9WgXcQ';
 
@@ -13,15 +13,15 @@ afterEach(() => {
 });
 
 describe('cold load soft veil and reveal repair', () => {
-  it('keeps the boot veil until the first scan and repairs reveal on load and visibility events', () => {
+  it('keeps a cold-open homepage thumbnail blurred and repairs reveal on load and visibility events', () => {
     const { video } = buildCard('ytm-rich-item-renderer', HOME_ID);
+    stampPositiveBlur(video, HOME_ID);
     injection = injectScript();
 
     expect(document.getElementById('mw-moderation-styles')?.textContent).toContain('mw-softveil-pending');
     expect(document.documentElement.classList.contains('mw-softveil-pending')).toBe(false);
-
-    injection.probe.applyBlur(video, video.src, 'porn', 40, HOME_ID, 'classifier_positive');
-    document.querySelector('.mw-reveal-overlay')?.remove();
+    expect(video.dataset.mwModerated).toBe('blurred');
+    expect(document.querySelector('.mw-reveal-overlay')).not.toBeNull();
 
     (window as Window & { __MW_SCAN_FULL__?: () => void }).__MW_SCAN_FULL__?.();
 

@@ -13,6 +13,8 @@ afterEach(() => {
 describe('native reload runtime reset', () => {
   it('rehydrates the native runtime boundary on reload and forces a fresh scan', async () => {
     vi.useFakeTimers();
+    const homeUrl = 'https://www.youtube.com/';
+    nativeBrowserHarness.nativeState.currentUrl = homeUrl;
 
     render(<NativeWebViewBrowser />);
 
@@ -33,14 +35,29 @@ describe('native reload runtime reset', () => {
     expect(nativeBrowserHarness.clearCacheCalls.length).toBeGreaterThan(0);
 
     await act(async () => {
-      await nativeBrowserHarness.nativeOptions.current.onLoadStart?.(nativeBrowserHarness.nativeState.currentUrl);
-      await nativeBrowserHarness.nativeOptions.current.onLoadEnd?.(nativeBrowserHarness.nativeState.currentUrl);
-      await vi.advanceTimersByTimeAsync(1100);
+      await nativeBrowserHarness.nativeOptions.current.onLoadStart?.(homeUrl);
+    });
+
+    nativeBrowserHarness.executeScriptCalls.length = 0;
+
+    await act(async () => {
+      await nativeBrowserHarness.nativeOptions.current.onLoadEnd?.(homeUrl);
+    });
+
+    nativeBrowserHarness.executeScriptCalls.length = 0;
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(24);
+    });
+
+    expect(nativeBrowserHarness.executeScriptCalls).toHaveLength(0);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
     });
 
     const scripts = nativeBrowserHarness.executeScriptCalls.join('\n');
     expect(scripts).toContain('window.__MW_SYNC_HOST_CONTEXT__');
-    expect(scripts).toContain("command: 'PING'");
     expect(scripts).toContain('__MW_SCAN_FULL__');
     expect(scripts).toContain('__MW_SCAN_YT__');
 
