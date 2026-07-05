@@ -1723,6 +1723,15 @@ export const NativeWebViewBrowser = () => {
         forceResync: false,
         rescan: true,
       });
+
+      if (isHomepageSurfaceUrl(url)) {
+        setTimeout(() => {
+          void injectAndConfirmRuntime('cold_homepage_force', url, true);
+        }, 0);
+        setTimeout(() => {
+          void injectAndConfirmRuntime('cold_homepage_force', url, true);
+        }, 150);
+      }
       
       // Inject moderation script after page fully loads
       if (!injectionDoneRef.current) {

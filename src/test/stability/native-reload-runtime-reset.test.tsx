@@ -44,13 +44,21 @@ describe('native reload runtime reset', () => {
       await nativeBrowserHarness.nativeOptions.current.onLoadEnd?.(homeUrl);
     });
 
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    const immediateScripts = nativeBrowserHarness.executeScriptCalls.join('\n');
+    expect(immediateScripts).toContain('cold_homepage_force');
+    expect(immediateScripts).toContain('__MW_SYNC_HOST_CONTEXT__');
+
     nativeBrowserHarness.executeScriptCalls.length = 0;
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(24);
     });
 
-    expect(nativeBrowserHarness.executeScriptCalls).toHaveLength(0);
+    expect(nativeBrowserHarness.executeScriptCalls.join('\n')).not.toContain('cold_homepage_force');
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1);

@@ -12202,6 +12202,11 @@ export function generateModerationScript(config: InjectionConfig): string {
     const observer = new MutationObserver(mutations => {
       if (timerState.paused) return;
       if (!CONFIG.scanEnabled && !CONFIG.flashShieldV1) return;
+
+      if (!coldBootstrapMutationPrimed) {
+        coldBootstrapMutationPrimed = true;
+        runColdBootstrapScan('mutation_observer');
+      }
       
       let hasYouTubeChanges = false;
       shortsAttrMode = reevaluateShortsObserverMode('mutation_batch', window.location.href).mode;
@@ -12829,21 +12834,37 @@ export function generateModerationScript(config: InjectionConfig): string {
     timerLog('start', label + ':' + delayMs + 'ms');
   }
 
-  function runBootstrapFullScan(reason) {
+  let coldBootstrapFallbackScheduled = false;
+  let coldBootstrapMutationPrimed = false;
+
+  function hasDetectedThumbnailNodeYet() {
+    try {
+      return !!document.querySelector(
+        'ytd-thumbnail,ytd-rich-item-renderer,ytd-video-renderer,ytd-compact-video-renderer,ytd-grid-video-renderer,ytd-shelf-renderer,#thumbnail,.yt-core-image,yt-image,yt-img-shadow,ytm-rich-item-renderer,ytm-media-item,ytm-shorts-lockup-view-model,ytm-shorts-shelf-renderer,ytd-shorts-shelf-renderer,ytd-reel-shelf-renderer,ytm-rich-shelf-renderer,ytd-rich-shelf-renderer'
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  function runColdBootstrapScan(reason) {
     if (timerState.teardownDone) return;
     if (typeof window.__MW_SCAN_FULL__ === 'function') {
       window.__MW_SCAN_FULL__();
-      ensureRevealForEveryBlurredNode('bootstrap:' + reason + ':immediate');
+      ensureRevealForEveryBlurredNode('cold_bootstrap');
     }
-    const delayedId = setTimeout(() => {
-      if (timerState.paused || timerState.teardownDone) return;
-      if (typeof window.__MW_SCAN_FULL__ === 'function') {
-        window.__MW_SCAN_FULL__();
-        ensureRevealForEveryBlurredNode('bootstrap:' + reason + ':300ms');
-      }
-    }, 300);
-    timerState.initialTimeouts.push(delayedId);
-    timerLog('start', 'bootstrapFullScan:' + reason + ':300ms');
+    if (!coldBootstrapFallbackScheduled) {
+      coldBootstrapFallbackScheduled = true;
+      scheduleInitTimeout('coldBootstrapFallback', () => {
+        coldBootstrapFallbackScheduled = false;
+        if (timerState.paused || timerState.teardownDone) return;
+        if (!hasDetectedThumbnailNodeYet() && typeof window.__MW_SCAN_FULL__ === 'function') {
+          window.__MW_SCAN_FULL__();
+          ensureRevealForEveryBlurredNode('cold_bootstrap');
+        }
+      }, 400);
+    }
+    timerLog('start', 'coldBootstrapFullScan:' + reason);
   }
 
   // Initial scan – run immediately to pre-blur anything already in the DOM.
@@ -12854,19 +12875,13 @@ export function generateModerationScript(config: InjectionConfig): string {
   // Also rescan on load to catch late resources without delaying first blur.
   if (document.readyState === 'complete') {
     diagLogLifecycleSnapshot('page_load_end', 'document_ready_complete', lastUrl, window.location.href);
-    runBootstrapFullScan('ready_complete');
+    runColdBootstrapScan('ready_complete');
   } else {
-    let bootstrapQueued = false;
-    const queueBootstrapFullScan = (reason) => {
-      if (bootstrapQueued) return;
-      bootstrapQueued = true;
-      runBootstrapFullScan(reason);
-    };
     const onLoadScan = () => {
       if (timerState.teardownDone) return;
       diagLogLifecycleSnapshot('page_load_end', 'window_load_event', lastUrl, window.location.href);
       scanFullPage();
-      queueBootstrapFullScan('load');
+      runColdBootstrapScan('load');
       if (isYouTube()) {
         scheduleInitTimeout('loadYouTubeScan', scanYouTubeThumbnails, 200);
         const shelfOwnedCards = document.querySelectorAll('.' + OWNED_POSITIVE_CARD_CLASS);
@@ -12886,7 +12901,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     const onDomContentLoaded = () => {
       if (timerState.teardownDone) return;
       diagLogLifecycleSnapshot('page_load_end', 'domcontentloaded', lastUrl, window.location.href);
-      queueBootstrapFullScan('domcontentloaded');
+      runColdBootstrapScan('domcontentloaded');
     };
     window.addEventListener('DOMContentLoaded', onDomContentLoaded, { once: true });
     window.addEventListener('load', onLoadScan);
