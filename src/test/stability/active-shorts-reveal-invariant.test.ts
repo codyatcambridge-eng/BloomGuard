@@ -4,6 +4,7 @@ import { injectScript, type InjectionResult } from './harness';
 const POSITIVE_ID = 'dQw4w9WgXcQ';
 const SECOND_ID = 'aBcD1234xyZ';
 const THIRD_ID = 'zYxW9876qwe';
+const FOURTH_ID = 'qWeRtY12345';
 
 function srcFor(id: string): string {
   return `https://i.ytimg.com/vi/${id}/hqdefault.jpg`;
@@ -54,9 +55,55 @@ function revealButton(): HTMLButtonElement | null {
   return document.querySelector('.mw-reveal-btn');
 }
 
+function flashShortsOverlays(): HTMLElement[] {
+  return Array.from(document.querySelectorAll('.mw-flash-shorts-overlay')) as HTMLElement[];
+}
+
 function hasBlurFilter(el: HTMLElement): boolean {
   const f = (el.style.getPropertyValue('filter') || el.style.filter || '').toLowerCase();
   return f.includes('blur(');
+}
+
+function enableFlashShieldFixture(): void {
+  const setFlash = (window as unknown as { __MW_FLASH_SHIELD_SET__?: (enabled: boolean) => string })
+    .__MW_FLASH_SHIELD_SET__;
+  setFlash?.(true);
+  const debug = (window as unknown as { __MW_DEBUG__?: { config?: { flashShieldV1?: boolean; scanEnabled?: boolean } } })
+    .__MW_DEBUG__;
+  if (debug?.config) {
+    debug.config.flashShieldV1 = true;
+    debug.config.scanEnabled = true;
+  }
+  injection?.probe.markFlashShieldShortsCandidate();
+}
+
+function addFlashOverlay(frame: HTMLElement): HTMLElement {
+  const overlay = document.createElement('div');
+  overlay.className = 'mw-flash-shorts-overlay';
+  overlay.setAttribute('aria-hidden', 'true');
+  frame.appendChild(overlay);
+  return overlay;
+}
+
+function clearPendingFixtureState(): void {
+  const debug = (window as unknown as {
+    __MW_DEBUG__?: {
+      state?: {
+        pending?: Map<unknown, unknown>;
+        pendingBySrc?: Map<unknown, unknown>;
+        pendingRequests?: Map<unknown, { timeoutId?: ReturnType<typeof setTimeout> }>;
+      };
+      batchQueue?: () => unknown[];
+    };
+  }).__MW_DEBUG__;
+  debug?.state?.pending?.clear();
+  debug?.state?.pendingBySrc?.clear();
+  debug?.state?.pendingRequests?.forEach(req => {
+    if (req?.timeoutId) clearTimeout(req.timeoutId);
+  });
+  debug?.state?.pendingRequests?.clear();
+  const queue = debug?.batchQueue?.();
+  if (Array.isArray(queue)) queue.length = 0;
 }
 
 let injection: InjectionResult | undefined;
@@ -205,5 +252,111 @@ describeOnYouTube('Active Shorts blur/reveal invariant', () => {
     expect(revealOverlays()).toHaveLength(0);
     expect(document.querySelector('.mw-correction-overlay')).toBeNull();
     expect(injection.logs.some((line) => line.includes('posting gc-label-request'))).toBe(false);
+  });
+
+  it('Flash Shield safe stamp survives source-only active Shorts churn', () => {
+    const { frame, video } = buildActiveShort(POSITIVE_ID);
+    injection = injectScript({ flashShieldV1: true });
+    enableFlashShieldFixture();
+
+    injection.probe.clearFlashShieldResolution(video, 'safe');
+    expect(video.dataset.mwModerated).toBe('safe');
+    expect(video.dataset.mwVeil).toBeUndefined();
+    expect(flashShortsOverlays()).toHaveLength(0);
+
+    video.setAttribute('src', 'blob:https://m.youtube.com/source-only-playback-url');
+    injection.probe.markFlashShieldShortsCandidate();
+
+    expect(frame.dataset.mwModerated).toBe('safe');
+    expect(video.dataset.mwModerated).toBe('safe');
+    expect(video.dataset.mwVeil).toBeUndefined();
+    expect(flashShortsOverlays()).toHaveLength(0);
+  });
+
+  it('Flash Shield genuine active Short change clears previous safe stamps', () => {
+    const { frame, video } = buildActiveShort(POSITIVE_ID);
+    injection = injectScript({ flashShieldV1: true });
+    enableFlashShieldFixture();
+
+    injection.probe.clearFlashShieldResolution(video, 'safe');
+    expect(video.dataset.mwModerated).toBe('safe');
+
+    window.history.pushState({}, '', `https://m.youtube.com/shorts/${SECOND_ID}`);
+    frame.setAttribute('data-video-id', SECOND_ID);
+    video.setAttribute('src', srcFor(SECOND_ID));
+    video.setAttribute('poster', srcFor(SECOND_ID));
+    injection.probe.markFlashShieldShortsCandidate();
+
+    expect(video.dataset.mwModerated).toBeUndefined();
+    expect(video.dataset.mwVeil).toBe('1');
+    expect(flashShortsOverlays()).toHaveLength(1);
+  });
+
+  it('Flash Shield safe resolution clears the active Shorts overlay owner', () => {
+    const { frame, video } = buildActiveShort(POSITIVE_ID);
+    injection = injectScript({ flashShieldV1: true });
+    enableFlashShieldFixture();
+    video.dataset.mwVeil = '1';
+    addFlashOverlay(frame);
+
+    injection.probe.clearFlashShieldResolution(video, 'safe');
+
+    expect(video.dataset.mwModerated).toBe('safe');
+    expect(video.dataset.mwVeil).toBeUndefined();
+    expect(frame.dataset.mwModerated).toBe('safe');
+    expect(flashShortsOverlays()).toHaveLength(0);
+  });
+
+  it('Flash Shield fail-opens a veiled active Short that never queues', () => {
+    vi.useFakeTimers();
+    const { frame, video } = buildActiveShort(POSITIVE_ID);
+    injection = injectScript({ flashShieldV1: true });
+    enableFlashShieldFixture();
+    video.removeAttribute('data-mw-moderated');
+    frame.removeAttribute('data-mw-moderated');
+    clearPendingFixtureState();
+    video.dataset.mwVeil = '1';
+    addFlashOverlay(frame);
+    injection.probe.maybeArmFlashShieldShortsWatchdog(
+      frame,
+      video,
+      injection.probe.getFlashShieldShortsIdentity(frame, video),
+    );
+
+    expect(video.dataset.mwVeil).toBe('1');
+    expect(flashShortsOverlays()).toHaveLength(1);
+    expect(injection.probe.isVisualModerationActive()).toBe(true);
+
+    vi.advanceTimersByTime(4100);
+
+    expect(frame.dataset.mwModerated).toBe('timeout-safe');
+    expect(video.dataset.mwModerated).toBe('timeout-safe');
+    expect(video.dataset.mwVeil).toBeUndefined();
+    expect(flashShortsOverlays()).toHaveLength(0);
+  });
+
+  it('Flash Shield watchdog does not clear a risky active Short verdict', () => {
+    vi.useFakeTimers();
+    const { frame, video, src } = buildActiveShort(FOURTH_ID);
+    injection = injectScript({ flashShieldV1: true });
+    enableFlashShieldFixture();
+    video.removeAttribute('data-mw-moderated');
+    frame.removeAttribute('data-mw-moderated');
+    clearPendingFixtureState();
+    video.dataset.mwVeil = '1';
+    addFlashOverlay(frame);
+    injection.probe.maybeArmFlashShieldShortsWatchdog(
+      frame,
+      video,
+      injection.probe.getFlashShieldShortsIdentity(frame, video),
+    );
+
+    injection.probe.applyBlur(video, src, 'porn', 40, FOURTH_ID, 'classifier_positive');
+
+    vi.advanceTimersByTime(4100);
+
+    expect(frame.dataset.mwModerated).toBe('blurred');
+    expect(frame.dataset.mwModerated).not.toBe('timeout-safe');
+    expect(flashShortsOverlays()).toHaveLength(1);
   });
 });

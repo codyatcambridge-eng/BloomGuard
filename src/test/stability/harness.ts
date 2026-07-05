@@ -228,6 +228,14 @@ export interface MWTestProbe {
     phase: string,
   ) => boolean;
   reapplyOwnedContainerBlur: (card: Element, reason: string) => void;
+  markFlashShieldShortsCandidate: () => void;
+  clearFlashShieldResolution: (element: Element, nextState: string) => void;
+  getFlashShieldShortsIdentity: (frame: Element, media: Element) => string;
+  maybeArmFlashShieldShortsWatchdog: (
+    frame: Element,
+    media: Element,
+    identity: string,
+  ) => void;
 }
 
 export interface InjectionResult {
@@ -249,7 +257,7 @@ export interface InjectionResult {
  * Window URL is pre-configured by vitest.stability.config.ts to
  * https://m.youtube.com/ — no location stub needed here.
  */
-export function injectScript(): InjectionResult {
+export function injectScript(options: { flashShieldV1?: boolean; enabled?: boolean } = {}): InjectionResult {
   // Reset any previous injection
   (window as Record<string, unknown>).__MW_ACTIVE__ = false;
   delete (window as Record<string, unknown>).__MW_NON_SHORTS_REATTACH_CONTEXT__;
@@ -264,7 +272,9 @@ export function injectScript(): InjectionResult {
   const rawScript = generateModerationScript({
     sensitivity: 3,
     blurStrength: 40,
-    enabled: true,
+    enabled: options.enabled ?? true,
+    scanEnabled: (options.enabled ?? true) || options.flashShieldV1 === true,
+    flashShieldV1: options.flashShieldV1 === true,
     nonce: TEST_NONCE,
     blockingMode: 'mvp',
     pageEpoch: TEST_PAGE_EPOCH,
@@ -294,6 +304,10 @@ export function injectScript(): InjectionResult {
     applyBlur: applyBlur,
     enforceRevealOverlayVisibilityGuard: enforceRevealOverlayVisibilityGuard,
     reapplyOwnedContainerBlur: reapplyOwnedContainerBlur,
+    markFlashShieldShortsCandidate: markFlashShieldShortsCandidate,
+    clearFlashShieldResolution: clearFlashShieldResolution,
+    getFlashShieldShortsIdentity: getFlashShieldShortsIdentity,
+    maybeArmFlashShieldShortsWatchdog: maybeArmFlashShieldShortsWatchdog,
   };
   `;
 

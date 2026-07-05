@@ -970,6 +970,10 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function getFlashShieldShortsIdentity(frame, media) {
+    return getFlashShieldShortsStableIdentity(frame, media);
+  }
+
+  function getFlashShieldShortsStableIdentity(frame, media) {
     const shortsId = getCurrentShortsUrlId() || 'none';
     const mediaId = media && media.getAttribute
       ? String(media.getAttribute('data-video-id') || media.getAttribute('data-item-id') || '')
@@ -977,10 +981,87 @@ export function generateModerationScript(config: InjectionConfig): string {
     const frameId = frame && frame.getAttribute
       ? String(frame.getAttribute('data-video-id') || frame.getAttribute('data-item-id') || frame.getAttribute('data-id') || '')
       : '';
-    const source = media
-      ? String(media.currentSrc || media.getAttribute('src') || media.getAttribute('poster') || '')
-      : '';
-    return [shortsId, mediaId || frameId || 'none', source || 'none'].join('|');
+    const frameNodeId = frame ? getDiagNodeId(frame) : 'none';
+    return [shortsId, mediaId || frameId || 'none', frameNodeId || 'none'].join('|');
+  }
+
+  function getFlashShieldShortsSourceIdentity(media) {
+    if (!media) return 'none';
+    return String(media.currentSrc || media.getAttribute('src') || media.getAttribute('poster') || '') || 'none';
+  }
+
+  function getFlashShieldShortsOverlayOwnerForTarget(target) {
+    if (!target || target.nodeType !== 1) return null;
+    try {
+      if (
+        target.classList &&
+        target.classList.contains(FLASH_SHIELD_SHORTS_OVERLAY_CLASS) &&
+        target.parentElement
+      ) {
+        return target.parentElement;
+      }
+      if (typeof target.querySelector === 'function') {
+        const direct = target.querySelector(':scope > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS);
+        if (direct) return target;
+      }
+      if (typeof target.closest === 'function') {
+        const frame = target.closest('[data-mw-flash-frame="1"],#shorts-player,ytm-reel-video-renderer,ytd-reel-video-renderer,ytm-shorts-lockup-view-model-v2,ytm-shorts-lockup-view-model');
+        if (frame && frame.querySelector && frame.querySelector(':scope > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS)) {
+          return frame;
+        }
+      }
+      const activeFrame = getFlashShieldActiveShortsFrame();
+      if (activeFrame && activeFrame.querySelector && activeFrame.querySelector(':scope > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS)) {
+        if (activeFrame === target || (typeof activeFrame.contains === 'function' && activeFrame.contains(target))) {
+          return activeFrame;
+        }
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function releaseFlashShieldShortsVeil(target, nextState) {
+    if (!target || target.nodeType !== 1) return;
+    try {
+      const stateName = nextState || 'safe';
+      const nodes = [];
+      nodes.push(target);
+      if (typeof target.querySelectorAll === 'function') {
+        target.querySelectorAll('[data-mw-veil="1"],[data-mw-flash-positive="1"]').forEach(function(node) {
+          nodes.push(node);
+        });
+      }
+      const overlayOwner = getFlashShieldShortsOverlayOwnerForTarget(target);
+      if (overlayOwner && nodes.indexOf(overlayOwner) === -1) nodes.push(overlayOwner);
+      const activeFrame = getFlashShieldActiveShortsFrame();
+      if (
+        activeFrame &&
+        activeFrame.isConnected &&
+        (activeFrame === target || activeFrame === overlayOwner || (typeof activeFrame.contains === 'function' && activeFrame.contains(target))) &&
+        nodes.indexOf(activeFrame) === -1
+      ) {
+        nodes.push(activeFrame);
+      }
+      nodes.forEach(function(node) {
+        if (!node || node.nodeType !== 1) return;
+        node.dataset.mwModerated = stateName;
+        node.removeAttribute('data-mw-veil');
+        node.removeAttribute('data-mw-flash-positive');
+        if (stateName !== 'blurred') {
+          clearAuthoritativeHardBlur(node);
+        }
+      });
+      const owners = [];
+      if (overlayOwner) owners.push(overlayOwner);
+      if (activeFrame && owners.indexOf(activeFrame) === -1) owners.push(activeFrame);
+      if (target && owners.indexOf(target) === -1) owners.push(target);
+      owners.forEach(function(owner) {
+        if (!owner || owner.nodeType !== 1 || typeof owner.querySelectorAll !== 'function') return;
+        owner.querySelectorAll(':scope > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS).forEach(function(overlay) {
+          overlay.remove();
+        });
+      });
+    } catch (e) {}
   }
 
   function ensureFlashShieldShortsOverlay(frame, identity) {
@@ -1003,6 +1084,87 @@ export function generateModerationScript(config: InjectionConfig): string {
     return overlay;
   }
 
+  function hasPendingFlashShieldShortsClassification(frame, media) {
+    try {
+      const sourceValues = [];
+      if (media) {
+        sourceValues.push(media.currentSrc, media.getAttribute && media.getAttribute('src'), media.getAttribute && media.getAttribute('poster'), media.dataset && media.dataset.mwSrc);
+      }
+      if (frame && frame.dataset) sourceValues.push(frame.dataset.mwSrc);
+      for (let i = 0; i < sourceValues.length; i += 1) {
+        const normalized = normalizeUrl(sourceValues[i] || '');
+        if (normalized && state.pendingBySrc.has(normalized)) return true;
+      }
+      let hasPending = false;
+      state.pending.forEach(function(pending) {
+        if (hasPending || !pending || !pending.element) return;
+        const el = pending.element;
+        if (
+          el === media ||
+          el === frame ||
+          (frame && typeof frame.contains === 'function' && frame.contains(el)) ||
+          (el && typeof el.contains === 'function' && media && el.contains(media))
+        ) {
+          hasPending = true;
+        }
+      });
+      return hasPending;
+    } catch (e) {
+      return true;
+    }
+  }
+
+  function clearFlashShieldShortsWatchdog(reason) {
+    if (timerState.flashShieldShortsWatchdogTimer) {
+      clearTimeout(timerState.flashShieldShortsWatchdogTimer);
+      timerState.flashShieldShortsWatchdogTimer = null;
+    }
+    timerState.flashShieldShortsWatchdogIdentity = '';
+    timerLog('stop', 'flashShieldShortsWatchdog:' + (reason || 'unknown'));
+  }
+
+  function maybeArmFlashShieldShortsWatchdog(frame, media, identity) {
+    if (!CONFIG.flashShieldV1 || !isShortsModeActive() || timerState.teardownDone) return;
+    if (!frame || !media || !frame.isConnected || !media.isConnected) return;
+    const hasVeil = media.dataset.mwVeil === '1' || !!(frame.querySelector && frame.querySelector(':scope > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS));
+    const verdict = String(media.dataset.mwModerated || frame.dataset.mwModerated || '');
+    if (!hasVeil || verdict) {
+      if (timerState.flashShieldShortsWatchdogIdentity === identity) {
+        clearFlashShieldShortsWatchdog('resolved_or_unveiled');
+      }
+      return;
+    }
+    if (hasPendingFlashShieldShortsClassification(frame, media)) {
+      if (timerState.flashShieldShortsWatchdogIdentity === identity) {
+        clearFlashShieldShortsWatchdog('pending_classification');
+      }
+      return;
+    }
+    if (timerState.flashShieldShortsWatchdogTimer && timerState.flashShieldShortsWatchdogIdentity === identity) return;
+    clearFlashShieldShortsWatchdog('rearm');
+    timerState.flashShieldShortsWatchdogIdentity = identity;
+    timerState.flashShieldShortsWatchdogTimer = setTimeout(function() {
+      timerState.flashShieldShortsWatchdogTimer = null;
+      const armedIdentity = timerState.flashShieldShortsWatchdogIdentity;
+      timerState.flashShieldShortsWatchdogIdentity = '';
+      if (!CONFIG.flashShieldV1 || timerState.teardownDone || !isShortsModeActive()) return;
+      const currentFrame = getFlashShieldActiveShortsFrame();
+      if (!currentFrame || !currentFrame.isConnected) return;
+      const currentMedia = currentFrame.querySelector('video.html5-main-video, video, img');
+      if (!currentMedia || !currentMedia.isConnected) return;
+      const currentIdentity = getFlashShieldShortsStableIdentity(currentFrame, currentMedia);
+      if (currentIdentity !== armedIdentity) return;
+      const currentVerdict = String(currentMedia.dataset.mwModerated || currentFrame.dataset.mwModerated || '');
+      if (currentVerdict || hasPendingFlashShieldShortsClassification(currentFrame, currentMedia)) return;
+      const stillVeiled = currentMedia.dataset.mwVeil === '1' || !!(currentFrame.querySelector && currentFrame.querySelector(':scope > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS));
+      if (!stillVeiled) return;
+      releaseFlashShieldShortsVeil(currentMedia, 'timeout-safe');
+      currentFrame.dataset.mwModerated = 'timeout-safe';
+      currentMedia.dataset.mwModerated = 'timeout-safe';
+    }, FLASH_SHIELD_SHORTS_WATCHDOG_MS);
+    timerLog('start', 'flashShieldShortsWatchdog');
+  }
+
   function markFlashShieldShortsCandidate() {
     if (!CONFIG.flashShieldV1 || !isShortsModeActive()) return;
     try {
@@ -1013,8 +1175,10 @@ export function generateModerationScript(config: InjectionConfig): string {
       const media = frame.querySelector('video.html5-main-video, video, img');
       if (!media) return;
       const identity = getFlashShieldShortsIdentity(frame, media);
+      const sourceIdentity = getFlashShieldShortsSourceIdentity(media);
       const previousIdentity = String(frame.dataset.mwFlashIdentity || '');
       if (previousIdentity && previousIdentity !== identity) {
+        clearFlashShieldShortsWatchdog('identity_change');
         frame.removeAttribute('data-mw-moderated');
         frame.removeAttribute('data-mw-flash-positive');
         media.removeAttribute('data-mw-moderated');
@@ -1029,8 +1193,16 @@ export function generateModerationScript(config: InjectionConfig): string {
       frame.dataset.mwFlashIdentity = identity;
       frame.dataset.mwFlashFrame = '1';
       media.dataset.mwFlashIdentity = identity;
-      if (media.dataset.mwModerated !== 'blurred') media.dataset.mwVeil = '1';
-      ensureFlashShieldShortsOverlay(frame, identity);
+      media.dataset.mwFlashSourceIdentity = sourceIdentity;
+      if (media.dataset.mwModerated !== 'blurred' && media.dataset.mwModerated !== 'safe' && media.dataset.mwModerated !== 'revealed' && media.dataset.mwModerated !== 'timeout-safe') {
+        media.dataset.mwVeil = '1';
+        ensureFlashShieldShortsOverlay(frame, identity);
+      } else if (media.dataset.mwModerated === 'safe' || media.dataset.mwModerated === 'revealed' || media.dataset.mwModerated === 'timeout-safe') {
+        releaseFlashShieldShortsVeil(media, media.dataset.mwModerated);
+      } else {
+        ensureFlashShieldShortsOverlay(frame, identity);
+      }
+      maybeArmFlashShieldShortsWatchdog(frame, media, identity);
     } catch (e) {}
   }
 
@@ -1051,6 +1223,12 @@ export function generateModerationScript(config: InjectionConfig): string {
       const resolved = isShortsModeActive() ? resolveShortsStableBlurTarget(element, element.dataset.mwSrc || '') : null;
       const target = resolved && resolved.target && resolved.target.isConnected ? resolved.target : element;
       target.dataset.mwModerated = nextState;
+      if (isShortsModeActive() && (nextState === 'safe' || nextState === 'revealed' || nextState === 'timeout-safe')) {
+        releaseFlashShieldShortsVeil(element, nextState);
+        if (target !== element) releaseFlashShieldShortsVeil(target, nextState);
+        clearFlashShieldShortsWatchdog('resolution_' + nextState);
+        return;
+      }
       target.removeAttribute('data-mw-flash-frame');
       if (typeof target.querySelector === 'function') {
         const overlay = target.querySelector(':scope > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS);
@@ -1072,6 +1250,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function disableFlashShieldRuntime() {
+    clearFlashShieldShortsWatchdog('disable_flash_shield');
     document.documentElement.classList.remove(FLASH_SHIELD_CLASS);
     document.querySelectorAll('[data-mw-flash-positive="1"]').forEach(function(node) {
       clearAllBlurAndOverlay(
@@ -1934,10 +2113,13 @@ export function generateModerationScript(config: InjectionConfig): string {
     flashShieldRafId: null,
     flashShieldBurstRafId: null,
     flashShieldObserver: null,
+    flashShieldShortsWatchdogTimer: null,
+    flashShieldShortsWatchdogIdentity: '',
     initialTimeouts: [],
     paused: document.visibilityState !== 'visible',
     teardownDone: false,
   };
+  const FLASH_SHIELD_SHORTS_WATCHDOG_MS = 4000;
   const isYouTubeHost = HOSTNAME.includes('youtube.com') || HOSTNAME.includes('youtu.be');
   const MAX_PENDING_ITEMS = isYouTubeHost ? 220 : 140;
   const MAX_BATCH_QUEUE_ITEMS = isYouTubeHost ? 180 : 120;
@@ -2641,6 +2823,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (batchTimer) activeTimerNames.push('batchTimer');
     if (mutationScanTimer) activeTimerNames.push('mutationScanTimer');
     if (adaptiveShortsWatchState.pendingRescanTimer) activeTimerNames.push('adaptiveShortsRescanTimeout');
+    if (timerState.flashShieldShortsWatchdogTimer) activeTimerNames.push('flashShieldShortsWatchdog');
     if (adaptiveShortsWatchState.observer) activeTimerNames.push('adaptiveShortsOverlayObserver');
     const activeInstanceId = window.__MW_ACTIVE_INSTANCE_ID__ || 'none';
     console.log(
@@ -12587,6 +12770,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (timerState.revealOverlayRepositionRaf) count++;
     if (timerState.nonShortsRevealOverlayRepositionRaf) count++;
     if (adaptiveShortsWatchState.pendingRescanTimer) count++;
+    if (timerState.flashShieldShortsWatchdogTimer) count++;
     if (adaptiveShortsWatchState.observer) count++;
     count += timerState.initialTimeouts.length;
     if (batchTimer) count++;
@@ -13458,6 +13642,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function stopFlashShieldRuntime() {
+    clearFlashShieldShortsWatchdog('stop_flash_shield_runtime');
     if (timerState.flashShieldInterval) {
       clearInterval(timerState.flashShieldInterval);
       timerState.flashShieldInterval = null;
@@ -13557,6 +13742,7 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function stopManagedTimers(reason) {
     stopAdaptiveShortsOverlayWatch('stopManagedTimers:' + (reason || 'unknown'));
+    clearFlashShieldShortsWatchdog('stopManagedTimers:' + (reason || 'unknown'));
     clearNamedInterval('legacyResultsInterval', reason);
     clearNamedInterval('urlChangeInterval', reason);
     clearNamedInterval('youtubePeriodicInterval', reason);
