@@ -19,6 +19,9 @@ const nativeBrowserHarness = vi.hoisted(() => {
 
   const browserHeaderProps = { current: null as any };
   const nativeOptions = { current: null as any };
+  const scriptResponder = {
+    current: null as null | ((script: string) => string | null | undefined),
+  };
 
   const reload = vi.fn(async () => {
     lifecycleLog.push('reload:start');
@@ -33,6 +36,8 @@ const nativeBrowserHarness = vi.hoisted(() => {
 
   const executeScript = vi.fn(async (script: string) => {
     executeScriptCalls.push(script);
+    const customResult = scriptResponder.current?.(script);
+    if (typeof customResult === 'string') return customResult;
     if (script.includes("MW_BLUR_COMMAND") && script.includes("PING")) {
       nativeOptions.current?.onMessageFromWebview?.({
         type: 'MW_BLUR_READY',
@@ -62,6 +67,7 @@ const nativeBrowserHarness = vi.hoisted(() => {
     lifecycleLog.length = 0;
     browserHeaderProps.current = null;
     nativeOptions.current = null;
+    scriptResponder.current = null;
     nativeState.isOpen = true;
     nativeState.currentUrl = 'https://www.youtube.com/watch?v=initial';
     nativeState.isLoading = false;
@@ -83,6 +89,7 @@ const nativeBrowserHarness = vi.hoisted(() => {
     nativeState,
     browserHeaderProps,
     nativeOptions,
+    scriptResponder,
     reload,
     executeScript,
     postMessageToWebView,

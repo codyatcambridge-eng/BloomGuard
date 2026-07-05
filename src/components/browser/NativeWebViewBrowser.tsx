@@ -1348,112 +1348,112 @@ export const NativeWebViewBrowser = () => {
     }
 
     injectionInFlightRef.current = true;
-    console.log(
-      '[DIAG][INJECT] start',
-      'reason=' + reason,
-      'navId=' + navId,
-      'url=' + (targetUrl || 'unknown'),
-    );
-    const activeInstanceId = (
-      typeof webViewActiveInstanceIdRef.current === 'number' &&
-      Number.isFinite(webViewActiveInstanceIdRef.current)
-    ) ? webViewActiveInstanceIdRef.current : null;
-    const escapedReason = escapeForJs(reason || 'unknown');
-    const hostContextSyncScript = `
-      (function() {
-        try {
-          window.__MW_ACTIVE_INSTANCE_ID__ = ${activeInstanceId === null ? 'null' : String(activeInstanceId)};
-          window.__MW_HOST_NAV_ID__ = ${navId};
-          window.__MW_HOST_PAGE_EPOCH__ = ${webViewPageEpochRef.current};
-          var syncResult = 'NO_HOOK';
-          if (typeof window.__MW_SYNC_HOST_CONTEXT__ === 'function') {
-            syncResult = window.__MW_SYNC_HOST_CONTEXT__({
-              navId: ${navId},
-              pageEpoch: ${webViewPageEpochRef.current},
-              reason: '${escapedReason}'
-            });
-          }
-          return JSON.stringify({
-            hostContext: 'OK',
-            syncResult: String(syncResult || 'NO_HOOK'),
-            navId: ${navId},
-            pageEpoch: ${webViewPageEpochRef.current}
-          });
-        } catch (e) {
-          return JSON.stringify({
-            hostContext: 'ERR',
-            error: String(e)
-          });
-        }
-      })();
-    `;
-    const hostContextSyncResult = await scriptExecutor(hostContextSyncScript);
-    let syncResult = 'NO_HOOK';
     try {
-      const parsed = JSON.parse(String(hostContextSyncResult || '{}')) as { syncResult?: string };
-      syncResult = String(parsed.syncResult || 'NO_HOOK');
-    } catch {
-      syncResult = String(hostContextSyncResult || 'NO_HOOK');
-    }
-    const syncApplied = syncResult === 'OK_EPOCH_RESYNCED' || syncResult === 'OK_NO_CHANGE';
-    console.log(
-      '[DIAG][INJECT] host_context_sync',
-      'reason=' + reason,
-      'navId=' + navId,
-      'pageEpoch=' + webViewPageEpochRef.current,
-      'activeInstanceId=' + (activeInstanceId ?? 'none'),
-      'syncResult=' + syncResult,
-      'url=' + (targetUrl || 'unknown'),
-    );
-    if (syncApplied) {
-      epochContextCurrentRef.current = true;
-      relaxedEpochBypassHookStableRef.current =
-        nonBootstrapAckObservedRef.current && epochContextCurrentRef.current;
       console.log(
-        '[DIAG][EPOCH_SYNC][HOST]',
-        'action=sync_applied_awaiting_readiness',
+        '[DIAG][INJECT] start',
         'reason=' + reason,
-        'syncResult=' + syncResult,
         'navId=' + navId,
-        'pageEpoch=' + webViewPageEpochRef.current,
         'url=' + (targetUrl || 'unknown'),
       );
-      return;
-    }
-    const config = {
-      ...getModerationConfig(),
-      enabled: isRuntimeModerationEnabled,
-      scanEnabled: shouldInjectModeration,
-      pageEpoch: webViewPageEpochRef.current,
-      diagYouTubeShorts: localSettings.diag_youtube_shorts === true && isYouTubeUrl(targetUrl),
-    };
-    console.log(
-      '[MW-Inject][Config]',
-      'enabled=' + config.enabled,
-      'sensitivity=' + config.sensitivity,
-      'blockingMode=' + config.blockingMode,
-      'nonce=' + String(config.nonce || '').substring(0, 10),
-      'settingsLoaded=' + settingsLoaded,
-      'reason=' + reason,
-    );
-    // Full moderation script: request scanning + host bridge + DOM blur/reveal behavior.
-    const mainScript = generateModerationScript(config);
-    const noHookFallbackKey = [
-      String(navId),
-      String(webViewPageEpochRef.current),
-      String(targetUrl || 'unknown'),
-    ].join('|');
-    const markNoHookRecoveryAttempt = () => {
-      const attemptedRecoveries = noHookFallbackRecoverKeysRef.current;
-      if (attemptedRecoveries.has(noHookFallbackKey)) return false;
-      attemptedRecoveries.add(noHookFallbackKey);
-      if (attemptedRecoveries.size > 256) {
-        attemptedRecoveries.clear();
-        attemptedRecoveries.add(noHookFallbackKey);
+      const activeInstanceId = (
+        typeof webViewActiveInstanceIdRef.current === 'number' &&
+        Number.isFinite(webViewActiveInstanceIdRef.current)
+      ) ? webViewActiveInstanceIdRef.current : null;
+      const escapedReason = escapeForJs(reason || 'unknown');
+      const hostContextSyncScript = `
+        (function() {
+          try {
+            window.__MW_ACTIVE_INSTANCE_ID__ = ${activeInstanceId === null ? 'null' : String(activeInstanceId)};
+            window.__MW_HOST_NAV_ID__ = ${navId};
+            window.__MW_HOST_PAGE_EPOCH__ = ${webViewPageEpochRef.current};
+            var syncResult = 'NO_HOOK';
+            if (typeof window.__MW_SYNC_HOST_CONTEXT__ === 'function') {
+              syncResult = window.__MW_SYNC_HOST_CONTEXT__({
+                navId: ${navId},
+                pageEpoch: ${webViewPageEpochRef.current},
+                reason: '${escapedReason}'
+              });
+            }
+            return JSON.stringify({
+              hostContext: 'OK',
+              syncResult: String(syncResult || 'NO_HOOK'),
+              navId: ${navId},
+              pageEpoch: ${webViewPageEpochRef.current}
+            });
+          } catch (e) {
+            return JSON.stringify({
+              hostContext: 'ERR',
+              error: String(e)
+            });
+          }
+        })();
+      `;
+      const hostContextSyncResult = await scriptExecutor(hostContextSyncScript);
+      let syncResult = 'NO_HOOK';
+      try {
+        const parsed = JSON.parse(String(hostContextSyncResult || '{}')) as { syncResult?: string };
+        syncResult = String(parsed.syncResult || 'NO_HOOK');
+      } catch {
+        syncResult = String(hostContextSyncResult || 'NO_HOOK');
       }
-      return true;
-    };
-    try {
+      const syncApplied = syncResult === 'OK_EPOCH_RESYNCED' || syncResult === 'OK_NO_CHANGE';
+      console.log(
+        '[DIAG][INJECT] host_context_sync',
+        'reason=' + reason,
+        'navId=' + navId,
+        'pageEpoch=' + webViewPageEpochRef.current,
+        'activeInstanceId=' + (activeInstanceId ?? 'none'),
+        'syncResult=' + syncResult,
+        'url=' + (targetUrl || 'unknown'),
+      );
+      if (syncApplied) {
+        epochContextCurrentRef.current = true;
+        relaxedEpochBypassHookStableRef.current =
+          nonBootstrapAckObservedRef.current && epochContextCurrentRef.current;
+        console.log(
+          '[DIAG][EPOCH_SYNC][HOST]',
+          'action=sync_applied_awaiting_readiness',
+          'reason=' + reason,
+          'syncResult=' + syncResult,
+          'navId=' + navId,
+          'pageEpoch=' + webViewPageEpochRef.current,
+          'url=' + (targetUrl || 'unknown'),
+        );
+        return;
+      }
+      const config = {
+        ...getModerationConfig(),
+        enabled: isRuntimeModerationEnabled,
+        scanEnabled: shouldInjectModeration,
+        pageEpoch: webViewPageEpochRef.current,
+        diagYouTubeShorts: localSettings.diag_youtube_shorts === true && isYouTubeUrl(targetUrl),
+      };
+      console.log(
+        '[MW-Inject][Config]',
+        'enabled=' + config.enabled,
+        'sensitivity=' + config.sensitivity,
+        'blockingMode=' + config.blockingMode,
+        'nonce=' + String(config.nonce || '').substring(0, 10),
+        'settingsLoaded=' + settingsLoaded,
+        'reason=' + reason,
+      );
+      // Full moderation script: request scanning + host bridge + DOM blur/reveal behavior.
+      const mainScript = generateModerationScript(config);
+      const noHookFallbackKey = [
+        String(navId),
+        String(webViewPageEpochRef.current),
+        String(targetUrl || 'unknown'),
+      ].join('|');
+      const markNoHookRecoveryAttempt = () => {
+        const attemptedRecoveries = noHookFallbackRecoverKeysRef.current;
+        if (attemptedRecoveries.has(noHookFallbackKey)) return false;
+        attemptedRecoveries.add(noHookFallbackKey);
+        if (attemptedRecoveries.size > 256) {
+          attemptedRecoveries.clear();
+          attemptedRecoveries.add(noHookFallbackKey);
+        }
+        return true;
+      };
       const injectResult = await scriptExecutor(mainScript);
       const injectResultText = String(injectResult || '');
       const alreadyActive = injectResultText.includes('MW_ALREADY_ACTIVE');
@@ -1723,15 +1723,6 @@ export const NativeWebViewBrowser = () => {
         forceResync: false,
         rescan: true,
       });
-
-      if (isHomepageSurfaceUrl(url)) {
-        setTimeout(() => {
-          void injectAndConfirmRuntime('cold_homepage_force', url, true);
-        }, 0);
-        setTimeout(() => {
-          void injectAndConfirmRuntime('cold_homepage_force', url, true);
-        }, 150);
-      }
       
       // Inject moderation script after page fully loads
       if (!injectionDoneRef.current) {
