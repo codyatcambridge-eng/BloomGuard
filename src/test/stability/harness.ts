@@ -222,12 +222,18 @@ export interface MWTestProbe {
     itemId: string,
     mvpProof?: string,
   ) => void;
+  applyKnownMainCardVerdictToMedia: (media: Element, reason: string) => string;
+  applyOwnedSafeCardClass: (card: Element, reason: string, itemKey?: string) => void;
   enforceRevealOverlayVisibilityGuard: (
     overlay: Element,
     anchorHint: Element | null,
     phase: string,
   ) => boolean;
   reapplyOwnedContainerBlur: (card: Element, reason: string) => void;
+  reapplyOwnedContainerBlurFromMutationNode: (node: Element, reason: string) => void;
+  markFlashShieldCandidates: (root: Element | Document) => void;
+  scanImgElement: (img: HTMLImageElement) => void;
+  scanVideoPoster: (video: HTMLVideoElement) => void;
   markFlashShieldShortsCandidate: () => void;
   clearFlashShieldResolution: (element: Element, nextState: string) => void;
   getFlashShieldShortsIdentity: (frame: Element, media: Element) => string;
@@ -302,8 +308,14 @@ export function injectScript(options: { flashShieldV1?: boolean; enabled?: boole
     scheduleRevealOverlayRepair: scheduleRevealOverlayRepair,
     markRevealedForSource: markRevealedForSource,
     applyBlur: applyBlur,
+    applyKnownMainCardVerdictToMedia: applyKnownMainCardVerdictToMedia,
+    applyOwnedSafeCardClass: applyOwnedSafeCardClass,
     enforceRevealOverlayVisibilityGuard: enforceRevealOverlayVisibilityGuard,
     reapplyOwnedContainerBlur: reapplyOwnedContainerBlur,
+    reapplyOwnedContainerBlurFromMutationNode: reapplyOwnedContainerBlurFromMutationNode,
+    markFlashShieldCandidates: markFlashShieldCandidates,
+    scanImgElement: scanImgElement,
+    scanVideoPoster: scanVideoPoster,
     markFlashShieldShortsCandidate: markFlashShieldShortsCandidate,
     clearFlashShieldResolution: clearFlashShieldResolution,
     getFlashShieldShortsIdentity: getFlashShieldShortsIdentity,

@@ -921,6 +921,8 @@ export function generateModerationScript(config: InjectionConfig): string {
         const img = imgs[i];
         if (!img || img.dataset.mwVeil === '1') continue;
         if (img.hasAttribute('data-mw-moderated')) continue;
+        const knownCardVerdict = applyKnownMainCardVerdictToMedia(img, 'flash_shield_candidate');
+        if (knownCardVerdict === 'safe' || knownCardVerdict === 'blurred') continue;
         const rect = img.getBoundingClientRect();
         if (rect.width >= 120 && rect.height >= 60) {
           img.dataset.mwVeil = '1';
@@ -4236,7 +4238,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
   }
 
-  function applyOwnedPositiveCardClass(card, itemKey, reason) {
+  function applyOwnedPositiveCardClass(card, itemKey, reason, src) {
     if (!card || card.nodeType !== 1) return;
     if (isShortsModeActive()) return;
     if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
@@ -4256,8 +4258,14 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (card.dataset) {
       card.dataset.mwOwnedPositive = '1';
       card.dataset.mwOwnedPositiveItemKey = String(itemKey || 'unknown');
+      card.dataset.mwOwnedPositiveSrc = String(src || '');
       card.dataset.mwOwnedPositiveAt = String(Date.now());
       card.dataset.mwOwnedPositiveReason = String(reason || 'unknown');
+      card.dataset.mwOwnedSafe = '0';
+      card.dataset.mwOwnedSafeItemKey = '';
+      card.dataset.mwOwnedSafeAt = '';
+      card.dataset.mwOwnedSafeReason = '';
+      card.dataset.mwOwnedSafeEpoch = '';
     }
     if (isShortsShelfOwnedCard(card)) {
       console.log(
@@ -4269,18 +4277,25 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
   }
 
-  function applyOwnedSafeCardClass(card, reason) {
+  function applyOwnedSafeCardClass(card, reason, itemKey) {
     if (!card || card.nodeType !== 1) return;
     if (isShortsModeActive()) return;
     if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
     ensureOwnedCardStyle();
     card.classList.remove(OWNED_POSITIVE_CARD_CLASS);
     card.classList.add(OWNED_SAFE_CARD_CLASS);
+    const resolvedItemKey = String(itemKey || getMvpCardHrefItemKey(card) || 'unknown');
     if (card.dataset) {
       card.dataset.mwOwnedPositive = '0';
       card.dataset.mwOwnedPositiveItemKey = '';
+      card.dataset.mwOwnedPositiveSrc = '';
       card.dataset.mwOwnedPositiveAt = '';
       card.dataset.mwOwnedPositiveReason = String(reason || 'unknown');
+      card.dataset.mwOwnedSafe = '1';
+      card.dataset.mwOwnedSafeItemKey = resolvedItemKey;
+      card.dataset.mwOwnedSafeAt = String(Date.now());
+      card.dataset.mwOwnedSafeReason = String(reason || 'unknown');
+      card.dataset.mwOwnedSafeEpoch = String(state.pageEpoch || 0);
     }
     if (isShortsShelfOwnedCard(card)) {
       console.log(
@@ -4289,6 +4304,109 @@ export function generateModerationScript(config: InjectionConfig): string {
         'reason=' + String(reason || 'unknown')
       );
     }
+  }
+
+  function getOwnedMainCardVerdictForNode(node) {
+    if (!node || node.nodeType !== 1) return null;
+    if (isShortsModeActive()) return null;
+    if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return null;
+    const card = getOwnedCardContainerFromNode(node);
+    if (!card || !card.dataset || isBroadShortsShelfContainerCard(card)) return null;
+    const hrefKey = getMvpCardHrefItemKey(card);
+    if (!hrefKey || hrefKey === 'unknown') return null;
+    const safeKey = String(card.dataset.mwOwnedSafeItemKey || '');
+    const safeEpoch = String(card.dataset.mwOwnedSafeEpoch || '');
+    if (
+      card.classList &&
+      card.classList.contains(OWNED_SAFE_CARD_CLASS) &&
+      card.dataset.mwOwnedSafe === '1' &&
+      safeKey === hrefKey &&
+      (!safeEpoch || safeEpoch === String(state.pageEpoch || 0))
+    ) {
+      return { card: card, verdict: 'safe', itemKey: hrefKey };
+    }
+    const positiveKey = String(
+      card.dataset.mwOwnedPositiveItemKey ||
+      card.dataset.mwMvpPositiveItemKey ||
+      card.dataset.mwMvpPositiveHrefKey ||
+      ''
+    );
+    const positiveEpoch = String(card.dataset.mwMvpPositiveEpoch || '');
+    if (
+      card.classList &&
+      card.classList.contains(OWNED_POSITIVE_CARD_CLASS) &&
+      !card.classList.contains(OWNED_SAFE_CARD_CLASS) &&
+      card.dataset.mwOwnedPositive === '1' &&
+      positiveKey === hrefKey &&
+      (!positiveEpoch || positiveEpoch === String(state.pageEpoch || 0))
+    ) {
+      return { card: card, verdict: 'blurred', itemKey: hrefKey };
+    }
+    return null;
+  }
+
+  function clearMediaVeilAndPendingStateForKnownCard(media, stateName) {
+    if (!media || media.nodeType !== 1 || !media.dataset) return;
+    media.dataset.mwModerated = stateName;
+    media.removeAttribute('data-mw-veil');
+    media.removeAttribute('data-mw-preblur-clear');
+    media.classList.remove('mw-softblur');
+    if (stateName !== 'blurred') {
+      media.classList.remove('mw-blurred');
+      media.style.removeProperty('filter');
+      media.style.removeProperty('-webkit-filter');
+      media.style.removeProperty('backdrop-filter');
+      media.style.removeProperty('-webkit-backdrop-filter');
+      clearAuthoritativeHardBlur(media);
+    }
+  }
+
+  function isKnownMainCardMediaCandidate(card, media, itemKey) {
+    if (!card || !media || media.nodeType !== 1) return false;
+    if (typeof card.contains === 'function' && !card.contains(media)) return false;
+    if (isLikelyAvatarLike(media)) return false;
+    const tag = String(media.tagName || '').toUpperCase();
+    if (tag === 'VIDEO') return true;
+    const mediaSrc = String(
+      (media.currentSrc && String(media.currentSrc)) ||
+      (media.src && String(media.src)) ||
+      (media.poster && String(media.poster)) ||
+      ((media.dataset && (media.dataset.src || media.dataset.mwSrc || media.dataset.mwOrigSrc || media.dataset.mwOrigPoster)) || '')
+    );
+    const mediaItemKey = getDiagItemKey(mediaSrc);
+    if (itemKey && itemKey !== 'unknown' && mediaItemKey === itemKey) return true;
+    const link = (typeof media.closest === 'function')
+      ? media.closest('a[href*="/watch"], a[href*="/shorts/"]')
+      : null;
+    if (link && getMvpCardHrefItemKey(link) === itemKey) return true;
+    const dims = getElementDimensions(media);
+    return dims.width >= 120 && dims.height >= 60;
+  }
+
+  function applyKnownMainCardVerdictToCardMedia(card, reason) {
+    if (!card || card.nodeType !== 1 || typeof card.querySelectorAll !== 'function') return 0;
+    let applied = 0;
+    const mediaNodes = card.querySelectorAll('img,video,yt-image img,yt-img-shadow img,.yt-core-image');
+    for (let i = 0; i < mediaNodes.length; i += 1) {
+      const result = applyKnownMainCardVerdictToMedia(mediaNodes[i], reason || 'known_card_media');
+      if (result === 'safe' || result === 'blurred') applied += 1;
+    }
+    return applied;
+  }
+
+  function applyKnownMainCardVerdictToMedia(media, reason) {
+    const known = getOwnedMainCardVerdictForNode(media);
+    if (!known) return '';
+    if (!isKnownMainCardMediaCandidate(known.card, media, known.itemKey)) return '';
+    if (known.verdict === 'safe') {
+      clearMediaVeilAndPendingStateForKnownCard(media, 'safe');
+      return 'safe';
+    }
+    if (known.verdict === 'blurred') {
+      reapplyOwnedContainerBlur(known.card, reason || 'known_card_verdict');
+      return 'blurred';
+    }
+    return '';
   }
 
   function reapplyOwnedContainerBlur(card, reason) {
@@ -4343,6 +4461,11 @@ export function generateModerationScript(config: InjectionConfig): string {
         card.dataset.mwMvpPositiveHrefKey
       )) || 'unknown'
     );
+    const currentCardItemKey = getMvpCardHrefItemKey(card);
+    const cardIdentityOwned =
+      ownedItemKey !== 'unknown' &&
+      currentCardItemKey !== 'unknown' &&
+      ownedItemKey === currentCardItemKey;
     const mediaNodes = card.querySelectorAll('img,video,yt-image img,yt-img-shadow img,.yt-core-image');
     const nodeList = [];
     let skippedSafeCount = 0;
@@ -4377,14 +4500,18 @@ export function generateModerationScript(config: InjectionConfig): string {
         }
         const mediaItemKey = getDiagItemKey(mediaSrc);
         const mediaHardKey = String((media.dataset && media.dataset.mwHardBlurItemKey) || 'unknown');
+        const ownedPositiveSrc = String((card.dataset && card.dataset.mwOwnedPositiveSrc) || '');
+        const stableRevealSrc = ownedPositiveSrc || mediaSrc;
         const isExistingHardBlur = (
           moderatedState === 'blurred' ||
           String((media.dataset && media.dataset.mwHardBlur) || '0') === '1' ||
           (media.classList && media.classList.contains('mw-blurred'))
         );
+        const isCardMediaCandidate = isKnownMainCardMediaCandidate(card, media, ownedItemKey);
         const identityOwned =
           ownedItemKey !== 'unknown' &&
           (
+            (cardIdentityOwned && isCardMediaCandidate) ||
             mediaItemKey === ownedItemKey ||
             mediaHardKey === ownedItemKey
           );
@@ -4392,11 +4519,30 @@ export function generateModerationScript(config: InjectionConfig): string {
           skippedUnownedCount += 1;
           continue;
         }
-        media.style.setProperty('filter', 'blur(40px)', 'important');
-        media.style.setProperty('-webkit-filter', 'blur(40px)', 'important');
-        media.style.setProperty('backdrop-filter', 'blur(40px)', 'important');
-        media.style.setProperty('-webkit-backdrop-filter', 'blur(40px)', 'important');
-        media.dataset.mwModerated = 'blurred';
+        const currentFilter = String(media.style.getPropertyValue('filter') || media.style.filter || '').toLowerCase();
+        const currentWebkitFilter = String(media.style.getPropertyValue('-webkit-filter') || '').toLowerCase();
+        const currentBackdrop = String(media.style.getPropertyValue('backdrop-filter') || '').toLowerCase();
+        const currentWebkitBackdrop = String(media.style.getPropertyValue('-webkit-backdrop-filter') || '').toLowerCase();
+        if (currentFilter.indexOf('blur(40px)') === -1) media.style.setProperty('filter', 'blur(40px)', 'important');
+        if (currentWebkitFilter.indexOf('blur(40px)') === -1) media.style.setProperty('-webkit-filter', 'blur(40px)', 'important');
+        if (currentBackdrop.indexOf('blur(40px)') === -1) media.style.setProperty('backdrop-filter', 'blur(40px)', 'important');
+        if (currentWebkitBackdrop.indexOf('blur(40px)') === -1) media.style.setProperty('-webkit-backdrop-filter', 'blur(40px)', 'important');
+        if (media.dataset.mwModerated !== 'blurred') media.dataset.mwModerated = 'blurred';
+        if (stableRevealSrc && media.dataset.mwSrc !== stableRevealSrc) media.dataset.mwSrc = stableRevealSrc;
+        const stableItemId = ownedItemKey !== 'unknown' ? ownedItemKey : String((media.dataset && media.dataset.mwItemId) || '');
+        if (stableItemId && media.dataset.mwItemId !== stableItemId) media.dataset.mwItemId = stableItemId;
+        if (!media.dataset.mwCategory) media.dataset.mwCategory = 'flagged';
+        const normalizedStableRevealSrc = normalizeUrl(stableRevealSrc || '') || '';
+        if (
+          stableRevealSrc &&
+          (
+            media.dataset.mwHardBlur !== '1' ||
+            media.dataset.mwHardBlurSrc !== normalizedStableRevealSrc ||
+            media.dataset.mwHardBlurItemKey !== getDiagItemKey(stableRevealSrc)
+          )
+        ) {
+          markAuthoritativeHardBlur(media, stableRevealSrc);
+        }
         reapplyCount += 1;
         // Guarantee a reveal overlay exists — reapply path skips applyBlur so overlay is never created otherwise
         if (media.isConnected) {
@@ -4460,8 +4606,14 @@ export function generateModerationScript(config: InjectionConfig): string {
         if (!card.dataset) continue;
         card.dataset.mwOwnedPositive = '';
         card.dataset.mwOwnedPositiveItemKey = '';
+        card.dataset.mwOwnedPositiveSrc = '';
         card.dataset.mwOwnedPositiveAt = '';
         card.dataset.mwOwnedPositiveReason = why;
+        card.dataset.mwOwnedSafe = '';
+        card.dataset.mwOwnedSafeItemKey = '';
+        card.dataset.mwOwnedSafeAt = '';
+        card.dataset.mwOwnedSafeReason = why;
+        card.dataset.mwOwnedSafeEpoch = '';
         card.dataset.mwMvpPositiveOwned = '';
         card.dataset.mwMvpPositiveItemKey = '';
         card.dataset.mwMvpPositiveHrefKey = '';
@@ -4504,9 +4656,17 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
     const directCard = getOwnedCardContainerFromNode(node);
     if (directCard) {
+      const directKnown = getOwnedMainCardVerdictForNode(node);
+      if (directKnown && directKnown.verdict === 'safe') {
+        applyKnownMainCardVerdictToCardMedia(directCard, reason + ':known_safe_card');
+      }
       reapplyOwnedContainerBlur(directCard, reason + ':closest');
     }
     if (typeof node.querySelectorAll === 'function') {
+      const safeCards = node.querySelectorAll('.' + OWNED_SAFE_CARD_CLASS);
+      for (let i = 0; i < safeCards.length; i += 1) {
+        applyKnownMainCardVerdictToCardMedia(safeCards[i], reason + ':safe_descendant');
+      }
       const ownedCards = node.querySelectorAll('.' + OWNED_POSITIVE_CARD_CLASS);
       for (let i = 0; i < ownedCards.length; i += 1) {
         reapplyOwnedContainerBlur(ownedCards[i], reason + ':descendant');
@@ -9470,7 +9630,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (_mvpProof === 'classifier_positive' && !shortsMode && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
         const ownershipCard = getOwnedCardContainerFromNode(element);
         if (ownershipCard) {
-          applyOwnedPositiveCardClass(ownershipCard, getDiagItemKey(src), 'classifier_positive');
+          applyOwnedPositiveCardClass(ownershipCard, getDiagItemKey(src), 'classifier_positive', src);
         }
       }
       if (CONFIG.mvpPositiveCardOwnershipV1 && (_mvpProof === 'classifier_positive') && !shortsMode && isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) {
@@ -11348,7 +11508,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           if (mvpMainSurface) {
             const safeCard = getOwnedCardContainerFromNode(element);
             if (safeCard) {
-              applyOwnedSafeCardClass(safeCard, 'classifier_safe');
+              applyOwnedSafeCardClass(safeCard, 'classifier_safe', getDiagItemKey(src));
             }
           }
           if (wasInSoftBlur && !finalBlur) {
@@ -11859,6 +12019,11 @@ export function generateModerationScript(config: InjectionConfig): string {
       diagScanRunLog('scanImgElement', img, '', false, 'reason=no_src');
       return;
     }
+    const knownCardVerdict = applyKnownMainCardVerdictToMedia(img, 'scan_img_known_card');
+    if (knownCardVerdict === 'safe' || knownCardVerdict === 'blurred') {
+      diagScanRunLog('scanImgElement', img, src, false, 'reason=known_card_' + knownCardVerdict);
+      return;
+    }
     const prevSrc = img.dataset.mwLastScanSrc || '';
     diagShortsRecycleLog(img, 'src', prevSrc, src);
     if (img.dataset.mwScanned === 'true' && img.dataset.mwLastScanSrc === src) {
@@ -11991,6 +12156,13 @@ export function generateModerationScript(config: InjectionConfig): string {
     const videoCurrentSrc = String((video && video.currentSrc) || (video && video.src) || '').substring(0, 180);
     const activeShortsVideo = isActiveVisibleShortsVideo(video);
     const shortsFrameKey = activeShortsVideo ? getShortsFrameScanKey(video) : '';
+    if (!activeShortsVideo) {
+      const knownCardVerdict = applyKnownMainCardVerdictToMedia(video, 'scan_video_known_card');
+      if (knownCardVerdict === 'safe' || knownCardVerdict === 'blurred') {
+        diagScanRunLog('scanVideoPoster', video, videoCurrentSrc || String((video && video.poster) || ''), false, 'reason=known_card_' + knownCardVerdict);
+        return;
+      }
+    }
     if (activeShortsVideo) {
       diagLogScanSource(
         'active_shorts_detected',
@@ -13449,7 +13621,15 @@ export function generateModerationScript(config: InjectionConfig): string {
           card.classList.remove(OWNED_POSITIVE_CARD_CLASS);
           card.classList.remove(OWNED_SAFE_CARD_CLASS);
           card.removeAttribute('data-mw-owned-positive');
+          card.removeAttribute('data-mw-owned-positive-item-key');
+          card.removeAttribute('data-mw-owned-positive-src');
+          card.removeAttribute('data-mw-owned-positive-at');
+          card.removeAttribute('data-mw-owned-positive-reason');
           card.removeAttribute('data-mw-owned-safe');
+          card.removeAttribute('data-mw-owned-safe-item-key');
+          card.removeAttribute('data-mw-owned-safe-at');
+          card.removeAttribute('data-mw-owned-safe-reason');
+          card.removeAttribute('data-mw-owned-safe-epoch');
           card.removeAttribute('data-mw-owned-item-key');
           card.removeAttribute('data-mw-owned-href-key');
           card.removeAttribute('data-mw-owned-epoch');
