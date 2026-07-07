@@ -2691,7 +2691,10 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (queryId) return String(queryId);
       const shortsMatch = String(parsed.pathname || '').match(/\\/shorts\\/([^/?#]+)/);
       if (shortsMatch && shortsMatch[1]) return String(shortsMatch[1]);
-      const viMatch = String(parsed.pathname || '').match(/\\/vi(?:_webp)?\\/([^/]+)/);
+      // an_webp is YouTube's animated hover/inline-preview asset; it carries the
+      // same videoId as the /vi/ static thumbnail and MUST resolve to the same
+      // identity, or the preview swap breaks every identity-gated blur guard.
+      const viMatch = String(parsed.pathname || '').match(/\\/(?:vi(?:_webp)?|an_webp)\\/([^/]+)/);
       if (viMatch && viMatch[1]) return String(viMatch[1]);
     } catch (e) {}
     return '';
@@ -6639,7 +6642,9 @@ export function generateModerationScript(config: InjectionConfig): string {
         if (queryId) return queryId;
         const shortsMatch = String(parsed.pathname || '').match(/\\/shorts\\/([^/?#]+)/);
         if (shortsMatch && shortsMatch[1]) return shortsMatch[1];
-        const viMatch = String(parsed.pathname || '').match(/\\/vi(?:_webp)?\\/([^/]+)/);
+        // Keep in sync with getYouTubeAssetVideoId: an_webp animated previews
+        // share the /vi/ static thumbnail's videoId and identity.
+        const viMatch = String(parsed.pathname || '').match(/\\/(?:vi(?:_webp)?|an_webp)\\/([^/]+)/);
         if (viMatch && viMatch[1]) return viMatch[1];
       }
     } catch (e) {}
@@ -12689,6 +12694,10 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       [data-mw-moderated="blurred"] {
         transition: filter 0.34s ease !important;
+      }
+      [data-mw-moderated="blurred"][data-mw-hard-blur="1"],
+      .mw-blurred[data-mw-hard-blur="1"] {
+        transition: none !important;
       }
       .mw-softblur {
         transition: filter 0.24s ease !important;

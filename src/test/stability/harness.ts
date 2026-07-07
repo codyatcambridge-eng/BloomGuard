@@ -228,6 +228,8 @@ export interface MWTestProbe {
     phase: string,
   ) => boolean;
   reapplyOwnedContainerBlur: (card: Element, reason: string) => void;
+  getDiagItemKey: (src: string) => string;
+  getYouTubeAssetVideoId: (src: string) => string;
   checkUrlChange: () => void;
   runBootstrapFullScan: (reason: string) => void;
   scheduleForegroundBootstrapRescan: (reason: string) => void;
@@ -304,6 +306,8 @@ export function injectScript(): InjectionResult {
     applyBlur: applyBlur,
     enforceRevealOverlayVisibilityGuard: enforceRevealOverlayVisibilityGuard,
     reapplyOwnedContainerBlur: reapplyOwnedContainerBlur,
+    getDiagItemKey: getDiagItemKey,
+    getYouTubeAssetVideoId: getYouTubeAssetVideoId,
     checkUrlChange: checkUrlChange,
     runBootstrapFullScan: runBootstrapFullScan,
     scheduleForegroundBootstrapRescan: scheduleForegroundBootstrapRescan,
