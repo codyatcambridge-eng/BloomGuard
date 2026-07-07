@@ -1934,6 +1934,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     flashShieldRafId: null,
     flashShieldBurstRafId: null,
     flashShieldObserver: null,
+    foregroundRescanTimer: null,
     initialTimeouts: [],
     paused: document.visibilityState !== 'visible',
     teardownDone: false,
@@ -12836,6 +12837,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       ensureRevealForEveryBlurredNode('bootstrap:' + reason + ':immediate');
     }
     const delayedId = setTimeout(() => {
+      // Self-remove the fired handle (same pattern as scheduleInitTimeout) so
+      // repeated bootstrap calls cannot grow the tracking array unbounded.
+      timerState.initialTimeouts = timerState.initialTimeouts.filter(t => t !== delayedId);
       if (timerState.paused || timerState.teardownDone) return;
       if (typeof window.__MW_SCAN_FULL__ === 'function') {
         window.__MW_SCAN_FULL__();
@@ -12844,6 +12848,24 @@ export function generateModerationScript(config: InjectionConfig): string {
     }, 300);
     timerState.initialTimeouts.push(delayedId);
     timerLog('start', 'bootstrapFullScan:' + reason + ':300ms');
+  }
+
+  // Bounded foreground rescan: at most ONE pending timer at a time (re-arming
+  // replaces the previous one), one-shot, gated on teardown/pause/active state.
+  // Wired to visibilitychange:visible and pageshow so app foreground and
+  // bfcache back/forward restores re-run the existing bootstrap scan.
+  function scheduleForegroundBootstrapRescan(reason) {
+    if (timerState.teardownDone || !isVisualModerationActive()) return;
+    if (timerState.foregroundRescanTimer) {
+      clearTimeout(timerState.foregroundRescanTimer);
+      timerState.foregroundRescanTimer = null;
+    }
+    timerState.foregroundRescanTimer = setTimeout(function() {
+      timerState.foregroundRescanTimer = null;
+      if (timerState.paused || timerState.teardownDone || !isVisualModerationActive()) return;
+      runBootstrapFullScan('foreground:' + (reason || 'visible'));
+    }, 250);
+    timerLog('start', 'foregroundRescan:' + (reason || 'visible'));
   }
 
   // Initial scan – run immediately to pre-blur anything already in the DOM.
@@ -13296,6 +13318,10 @@ export function generateModerationScript(config: InjectionConfig): string {
           node.removeAttribute('data-mw-shorts-stable-selector');
           node.removeAttribute('data-mw-has-overlay');
           node.setAttribute('data-mw-moderated', 'safe');
+          // Erase one-shot scan dedupe stamps so the next On-mode bootstrap
+          // rescan re-queues this node instead of bailing on duplicate_src —
+          // Off must not poison the next On (AGENTS.md §7).
+          clearElementScanDedupeMarkers(node, cleanupReason);
           clearShortsBlurContextForNode(node, cleanupReason);
         } catch (e) {}
       });
@@ -13566,6 +13592,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     clearNamedTimeout('youtubeScrollTimeout', reason);
     clearNamedTimeout('youtubeMutationScanTimeout', reason);
     clearNamedTimeout('revealOverlayRetryTimeout', reason);
+    clearNamedTimeout('foregroundRescanTimer', reason);
     cancelShortsRevealOverlayReposition(reason || 'stopManagedTimers');
     if (batchTimer) {
       clearTimeout(batchTimer);
@@ -13665,6 +13692,11 @@ export function generateModerationScript(config: InjectionConfig): string {
       window.__MW_REVEAL_TAP_INTERCEPTOR__ = false;
     }
     window.__MW_ACTIVE__ = false;
+    // A torn-down instance must not answer the host's context sync: a live hook
+    // on a dead instance makes injectModerationScript short-circuit (OK_NO_CHANGE)
+    // and skip full re-injection, leaving protection dead after Off→On or
+    // foreground recovery until a hard page load.
+    window.__MW_SYNC_HOST_CONTEXT__ = null;
   }
 
   document.addEventListener('visibilitychange', () => {
@@ -13673,6 +13705,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       refreshShortsFreshnessOnReentry('visibility_visible');
       ensureRevealForEveryBlurredNode('visibility_visible');
       scheduleShortsRevealOverlayReposition('visibility_visible');
+      scheduleForegroundBootstrapRescan('visibility_visible');
       return;
     }
     pauseManagedTimers('visibility_hidden');
@@ -13681,6 +13714,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     refreshShortsFreshnessOnReentry('pageshow');
     ensureRevealForEveryBlurredNode('pageshow');
     scheduleShortsRevealOverlayReposition('pageshow');
+    scheduleForegroundBootstrapRescan('pageshow');
   });
   window.addEventListener('beforeunload', () => teardownManagedScheduling('beforeunload'));
   window.addEventListener('pagehide', () => teardownManagedScheduling('pagehide'));

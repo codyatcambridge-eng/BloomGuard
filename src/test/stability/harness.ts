@@ -228,6 +228,16 @@ export interface MWTestProbe {
     phase: string,
   ) => boolean;
   reapplyOwnedContainerBlur: (card: Element, reason: string) => void;
+  checkUrlChange: () => void;
+  runBootstrapFullScan: (reason: string) => void;
+  scheduleForegroundBootstrapRescan: (reason: string) => void;
+  countActiveTimerHandles: () => number;
+  getTimerSnapshot: () => {
+    foregroundRescanTimer: boolean;
+    initialTimeouts: number;
+    paused: boolean;
+    teardownDone: boolean;
+  };
 }
 
 export interface InjectionResult {
@@ -294,6 +304,18 @@ export function injectScript(): InjectionResult {
     applyBlur: applyBlur,
     enforceRevealOverlayVisibilityGuard: enforceRevealOverlayVisibilityGuard,
     reapplyOwnedContainerBlur: reapplyOwnedContainerBlur,
+    checkUrlChange: checkUrlChange,
+    runBootstrapFullScan: runBootstrapFullScan,
+    scheduleForegroundBootstrapRescan: scheduleForegroundBootstrapRescan,
+    countActiveTimerHandles: countActiveTimerHandles,
+    getTimerSnapshot: function() {
+      return {
+        foregroundRescanTimer: !!timerState.foregroundRescanTimer,
+        initialTimeouts: timerState.initialTimeouts.length,
+        paused: timerState.paused,
+        teardownDone: timerState.teardownDone,
+      };
+    },
   };
   `;
 

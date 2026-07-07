@@ -11,6 +11,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:stability": "vitest run --config vitest.stability.config.ts",
+    "test:golden": "vitest run --config vitest.stability.config.ts",
+    "check:frozen": "node scripts/check-frozen.mjs",
     "test:watch": "vitest"
   },
   "dependencies": {
