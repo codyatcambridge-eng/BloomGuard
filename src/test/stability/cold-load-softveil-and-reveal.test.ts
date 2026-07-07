@@ -43,4 +43,55 @@ describe('cold load soft veil and reveal repair', () => {
 
     expect(document.querySelector('.mw-reveal-overlay')).not.toBeNull();
   });
+
+  it('does not permanently dedupe a first-load thumbnail that is not measured yet', () => {
+    const videoId = 'coldTopFeed123';
+    const card = document.createElement('ytm-rich-item-renderer');
+    const anchor = document.createElement('a');
+    anchor.href = `/watch?v=${videoId}`;
+    const img = document.createElement('img');
+    img.src = `https://i.ytimg.com/vi/${videoId}/hq720.jpg`;
+    Object.defineProperty(img, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({
+        width: 0,
+        height: 0,
+        top: 0,
+        bottom: 0,
+        left: 0,
+        right: 0,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }),
+    });
+    anchor.appendChild(img);
+    card.appendChild(anchor);
+    document.body.appendChild(card);
+
+    injection = injectScript();
+
+    expect(img.dataset.mwScanned).not.toBe('true');
+    expect(img.dataset.mwLastScanSrc || '').toBe('');
+
+    Object.defineProperty(img, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({
+        width: 320,
+        height: 180,
+        top: 0,
+        bottom: 180,
+        left: 0,
+        right: 320,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }),
+    });
+
+    (window as Window & { __MW_SCAN_FULL__?: () => void }).__MW_SCAN_FULL__?.();
+
+    expect(img.dataset.mwScanned).toBe('true');
+    expect(img.dataset.mwLastScanSrc).toBe(img.src);
+  });
 });

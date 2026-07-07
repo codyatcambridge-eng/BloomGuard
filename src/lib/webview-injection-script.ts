@@ -11688,6 +11688,13 @@ export function generateModerationScript(config: InjectionConfig): string {
       diagScanRunLog('scanImgElement', img, src, false, 'reason=duplicate_src');
       return;
     }
+
+    if (isTinyImage(img)) {
+      state.stats.skippedTiny++;
+      logShortsScanSkip('tinyExcluded_unstamped', null, src, 'img');
+      diagScanRunLog('scanImgElement', img, src, false, 'reason=tiny_unstamped');
+      return;
+    }
     
     img.dataset.mwScanned = 'true';
     img.dataset.mwLastScanSrc = src;
