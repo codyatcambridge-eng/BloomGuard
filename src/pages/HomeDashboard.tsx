@@ -20,23 +20,7 @@ const HomeDashboard = () => {
         <header className="text-center mb-8">
           <h1 className="font-display text-3xl tracking-wider text-gold">Bloom Guard</h1>
           <p className="text-[10px] text-gold/50 tracking-[0.3em] uppercase mt-0.5">Miracle Worker</p>
-          <p className="mt-1 text-xs text-gold/60 tracking-[0.25em] uppercase">Mac</p>
-          <p className="mt-1 text-xs text-gold/60 tracking-[0.25em] uppercase">test run</p>
-          <p className="mt-1 text-xs text-gold/60 tracking-[0.25em] uppercase">plants</p>
-          <p className="mt-1 text-xs text-gold/60 tracking-[0.25em] uppercase">BLOOMS</p>
-          <p className="mt-1 text-xs text-gold/60 tracking-[0.25em] uppercase">Wobble</p>
-          <p className="mt-1 text-[10px] text-techBlue tracking-[0.24em] uppercase">velocity</p>
-          <p className="mt-1 text-[10px] text-techBlue tracking-[0.24em] uppercase">JIM1</p>
           <p className="mt-2 text-silver">Welcome back!</p>
-          <p className="mt-1 text-xs text-gold/80 tracking-[0.25em] uppercase">Pixel</p>
-          <p className="mt-1 text-xs text-gold/80 tracking-[0.25em] uppercase">Lake</p>
-          <p className="mt-1 text-xs text-gold/80 tracking-[0.25em] uppercase">Coder</p>
-          <p className="mt-1 text-xs text-gold/80 tracking-[0.25em] uppercase">Beer</p>
-          <p className="mt-1 text-xs text-gold/80 tracking-[0.25em] uppercase">NEWS</p>
-          <p className="mt-1 text-xs text-gold/80 tracking-[0.25em] uppercase">codytry</p>
-          <p className="mt-1 text-xs text-gold/80 tracking-[0.25em] uppercase">Sick</p>
-          <p className="mt-1 text-xs text-gold/80 tracking-[0.25em] uppercase">Bryce</p>
-          <p className="mt-1 text-xs text-gold/80 tracking-[0.25em] uppercase">DJ</p>
           {isActive && (
             <p className="mt-2 text-xs text-silver/70">
               Break active: {remainingFormatted}
