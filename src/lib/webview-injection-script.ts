@@ -485,6 +485,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   const FLASH_SHIELD_STYLE_ID = 'mw-flash-shield';
   const FLASH_SHIELD_CLASS = 'mw-flash-shield-on';
   const FLASH_SHIELD_SHORTS_OVERLAY_CLASS = 'mw-flash-shorts-overlay';
+  const FLASH_SHIELD_SHORTS_VEIL_TIMEOUT_MS = 4000;
 
   const HEURISTIC_CACHE_KEY = 'mw_heuristic_cache';
   const HEURISTIC_CACHE_LIMIT = 32;
@@ -1048,8 +1049,47 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (!hasResolvedVerdict) {
         media.dataset.mwVeil = '1';
         ensureFlashShieldShortsOverlay(frame, identity);
+        armShortsVeilTimeout(identity);
       }
     } catch (e) {}
+  }
+
+  // Bounded stuck-veil escape hatch: if the active Short's veil never resolves
+  // (classification lost), stamp timeout-safe — the existing veil CSS releases
+  // on that state, so a full-screen blur can never persist without a reveal
+  // path (AGENTS.md section 2). One replace-on-rearm timer, no intervals.
+  function armShortsVeilTimeout(identity) {
+    if (!CONFIG.flashShieldV1 || timerState.teardownDone) return;
+    if (timerState.shortsVeilTimeoutTimer && timerState.shortsVeilTimeoutIdentity === identity) return;
+    if (timerState.shortsVeilTimeoutTimer) {
+      clearTimeout(timerState.shortsVeilTimeoutTimer);
+      timerState.shortsVeilTimeoutTimer = null;
+    }
+    timerState.shortsVeilTimeoutIdentity = identity;
+    timerState.shortsVeilTimeoutTimer = setTimeout(function() {
+      timerState.shortsVeilTimeoutTimer = null;
+      const armedIdentity = timerState.shortsVeilTimeoutIdentity;
+      timerState.shortsVeilTimeoutIdentity = '';
+      if (!CONFIG.flashShieldV1 || timerState.teardownDone || !isShortsModeActive()) return;
+      const frame = getFlashShieldActiveShortsFrame();
+      if (!frame || !frame.isConnected) return;
+      const media = frame.querySelector('video.html5-main-video, video, img');
+      if (!media || !media.isConnected) return;
+      if (getFlashShieldShortsIdentity(frame, media) !== armedIdentity) return;
+      const verdict = String(media.dataset.mwModerated || frame.dataset.mwModerated || '');
+      if (verdict) return;
+      const stillVeiled =
+        media.dataset.mwVeil === '1' ||
+        !!(frame.querySelector && frame.querySelector(':scope > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS));
+      if (!stillVeiled) return;
+      media.dataset.mwModerated = 'timeout-safe';
+      frame.dataset.mwModerated = 'timeout-safe';
+      media.removeAttribute('data-mw-veil');
+      const overlay = frame.querySelector(':scope > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS);
+      if (overlay) overlay.remove();
+      console.log('[DIAG][FLASH_SHIELD] shorts_veil_timeout_release', 'identity=' + armedIdentity);
+    }, FLASH_SHIELD_SHORTS_VEIL_TIMEOUT_MS);
+    timerLog('start', 'shortsVeilTimeout');
   }
 
   function scheduleFlashShieldShortsBurst(reason) {
@@ -1061,6 +1101,65 @@ export function generateModerationScript(config: InjectionConfig): string {
         markFlashShieldShortsCandidate();
       }, delayMs);
     });
+  }
+
+  const diagFlashReleaseCounters = {
+    fallback_used: 0,
+    missed_disconnected: 0,
+  };
+
+  // Identity-matched live-frame fallback: a verdict whose element was swapped
+  // out mid-classification (reel recycle) otherwise lands on a disconnected
+  // node and the LIVE player keeps its veil forever — a pending veil has no
+  // reveal path, so a missed release is an inescapable full-screen blur
+  // (AGENTS.md section 2). Only a live frame whose veil identity matches the
+  // dead element's may be released; a mismatch means the verdict belongs to a
+  // different Short and releasing would expose unclassified content.
+  function maybeReleaseFlashShieldVeilForLiveFrame(deadElement, nextState) {
+    if (!CONFIG.flashShieldV1 || !isShortsModeActive()) return false;
+    try {
+      const liveFrame = getFlashShieldActiveShortsFrame();
+      if (!liveFrame || !liveFrame.isConnected) return false;
+      const liveMedia = liveFrame.querySelector('video.html5-main-video, video, img');
+      if (!liveMedia || !liveMedia.isConnected) return false;
+      const liveVerdict = String(liveMedia.dataset.mwModerated || liveFrame.dataset.mwModerated || '');
+      if (liveVerdict) return false;
+      const stillVeiled =
+        liveMedia.dataset.mwVeil === '1' ||
+        !!liveFrame.querySelector(':scope > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS);
+      if (!stillVeiled) return false;
+      const deadIdentity = String((deadElement.dataset && deadElement.dataset.mwFlashIdentity) || '');
+      const liveIdentity = getFlashShieldShortsIdentity(liveFrame, liveMedia);
+      if (!deadIdentity || deadIdentity !== liveIdentity) {
+        diagFlashReleaseCounters.missed_disconnected += 1;
+        if (DIAG_ENABLED || DIAG_YT_BLUR) {
+          console.log(
+            '[DIAG][FLASH_SHIELD] release_fallback_identity_mismatch',
+            'dead=' + (deadIdentity || 'none'),
+            'live=' + liveIdentity,
+            'missedCount=' + diagFlashReleaseCounters.missed_disconnected
+          );
+        }
+        return false;
+      }
+      liveMedia.dataset.mwModerated = nextState;
+      liveFrame.dataset.mwModerated = nextState;
+      liveMedia.removeAttribute('data-mw-veil');
+      const overlay = liveFrame.querySelector(':scope > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS);
+      if (overlay) overlay.remove();
+      diagFlashReleaseCounters.fallback_used += 1;
+      if (DIAG_ENABLED || DIAG_YT_BLUR) {
+        console.log(
+          '[DIAG][FLASH_SHIELD] release_fallback_used',
+          'identity=' + liveIdentity,
+          'nextState=' + nextState,
+          'usedCount=' + diagFlashReleaseCounters.fallback_used
+        );
+      }
+      return true;
+    } catch (e) {
+      return false;
+    }
   }
 
   function clearFlashShieldResolution(element, nextState) {
@@ -1086,6 +1185,12 @@ export function generateModerationScript(config: InjectionConfig): string {
       veiled.forEach(function(node) {
         node.dataset.mwModerated = nextState;
       });
+      if (
+        (nextState === 'safe' || nextState === 'timeout-safe') &&
+        (!element.isConnected || !target.isConnected)
+      ) {
+        maybeReleaseFlashShieldVeilForLiveFrame(element, nextState);
+      }
     } catch (e) {}
   }
 
@@ -1953,6 +2058,8 @@ export function generateModerationScript(config: InjectionConfig): string {
     flashShieldBurstRafId: null,
     flashShieldObserver: null,
     foregroundRescanTimer: null,
+    shortsVeilTimeoutTimer: null,
+    shortsVeilTimeoutIdentity: '',
     initialTimeouts: [],
     paused: document.visibilityState !== 'visible',
     teardownDone: false,
@@ -13518,6 +13625,11 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function stopFlashShieldRuntime() {
+    if (timerState.shortsVeilTimeoutTimer) {
+      clearTimeout(timerState.shortsVeilTimeoutTimer);
+      timerState.shortsVeilTimeoutTimer = null;
+      timerState.shortsVeilTimeoutIdentity = '';
+    }
     if (timerState.flashShieldInterval) {
       clearInterval(timerState.flashShieldInterval);
       timerState.flashShieldInterval = null;
@@ -13627,6 +13739,8 @@ export function generateModerationScript(config: InjectionConfig): string {
     clearNamedTimeout('youtubeMutationScanTimeout', reason);
     clearNamedTimeout('revealOverlayRetryTimeout', reason);
     clearNamedTimeout('foregroundRescanTimer', reason);
+    clearNamedTimeout('shortsVeilTimeoutTimer', reason);
+    timerState.shortsVeilTimeoutIdentity = '';
     cancelShortsRevealOverlayReposition(reason || 'stopManagedTimers');
     if (batchTimer) {
       clearTimeout(batchTimer);
