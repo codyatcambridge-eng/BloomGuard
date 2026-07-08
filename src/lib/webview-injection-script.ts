@@ -486,6 +486,28 @@ export function generateModerationScript(config: InjectionConfig): string {
   const FLASH_SHIELD_CLASS = 'mw-flash-shield-on';
   const FLASH_SHIELD_SHORTS_OVERLAY_CLASS = 'mw-flash-shorts-overlay';
   const FLASH_SHIELD_SHORTS_VEIL_TIMEOUT_MS = 4000;
+  const FLASH_SHIELD_SHORTS_VERDICT_MEMORY_MAX = 50;
+  // Session verdict memory (instance-local, safe-class verdicts only): a Short
+  // this instance already resolved must never be re-veiled — swipe-backs,
+  // recycled frames, and media-node swaps otherwise produce a pointless
+  // ~100ms veil blip while the warm classifier re-confirms known content.
+  // Instance-local means mode changes / Off->On / refresh (all of which
+  // re-inject) naturally start with an empty memory.
+  const flashShieldShortsVerdictMemory = new Map();
+
+  function rememberShortsVerdict(shortsId, verdict) {
+    if (!shortsId || shortsId === 'none') return;
+    if (verdict !== 'safe' && verdict !== 'timeout-safe') return;
+    if (flashShieldShortsVerdictMemory.has(shortsId)) {
+      flashShieldShortsVerdictMemory.delete(shortsId);
+    }
+    flashShieldShortsVerdictMemory.set(shortsId, verdict);
+    while (flashShieldShortsVerdictMemory.size > FLASH_SHIELD_SHORTS_VERDICT_MEMORY_MAX) {
+      const oldest = flashShieldShortsVerdictMemory.keys().next();
+      if (oldest.done) break;
+      flashShieldShortsVerdictMemory.delete(oldest.value);
+    }
+  }
 
   const HEURISTIC_CACHE_KEY = 'mw_heuristic_cache';
   const HEURISTIC_CACHE_LIMIT = 32;
@@ -1073,10 +1095,36 @@ export function generateModerationScript(config: InjectionConfig): string {
         mediaVerdict === 'revealed' ||
         mediaVerdict === 'timeout-safe';
       if (!hasResolvedVerdict) {
-        media.dataset.mwVeil = '1';
-        ensureFlashShieldShortsOverlay(frame, identity);
-        armShortsVeilTimeout(identity);
+        // Session memory: this Short was already resolved safe-class by this
+        // instance — stamp the verdict instead of re-veiling known content.
+        const rememberedVerdict = flashShieldShortsVerdictMemory.get(currentShortsId);
+        if (rememberedVerdict === 'safe' || rememberedVerdict === 'timeout-safe') {
+          media.dataset.mwModerated = rememberedVerdict;
+          frame.dataset.mwModerated = rememberedVerdict;
+          frame.querySelectorAll(':scope > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS).forEach(function(leftover) {
+            if (leftover.dataset.mwVeilReleasing !== '1') fadeOutAndRemoveFlashShortsOverlay(leftover);
+          });
+        } else {
+          if (!media.dataset.mwVeilAt) media.dataset.mwVeilAt = String(Date.now());
+          media.dataset.mwVeil = '1';
+          ensureFlashShieldShortsOverlay(frame, identity);
+          armShortsVeilTimeout(identity);
+        }
       }
+    } catch (e) {}
+  }
+
+  function diagLogVeilLifetime(media, reason) {
+    try {
+      const veiledAt = Number(media && media.dataset && media.dataset.mwVeilAt);
+      if (media && media.removeAttribute) media.removeAttribute('data-mw-veil-at');
+      if (!DIAG_ENABLED && !DIAG_YT_BLUR) return;
+      if (!Number.isFinite(veiledAt) || veiledAt <= 0) return;
+      console.log(
+        '[DIAG][FLASH_SHIELD] veil_lifetime_ms',
+        'ms=' + (Date.now() - veiledAt),
+        'reason=' + (reason || 'unknown')
+      );
     } catch (e) {}
   }
 
@@ -1108,11 +1156,14 @@ export function generateModerationScript(config: InjectionConfig): string {
         media.dataset.mwVeil === '1' ||
         !!(frame.querySelector && frame.querySelector(':scope > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS));
       if (!stillVeiled) return;
+      diagLogVeilLifetime(media, 'timeout_release');
       media.dataset.mwModerated = 'timeout-safe';
       frame.dataset.mwModerated = 'timeout-safe';
       media.removeAttribute('data-mw-veil');
-      const overlay = frame.querySelector(':scope > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS);
-      if (overlay) fadeOutAndRemoveFlashShortsOverlay(overlay);
+      frame.querySelectorAll(':scope > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS).forEach(function(overlay) {
+        if (overlay.dataset.mwVeilReleasing !== '1') fadeOutAndRemoveFlashShortsOverlay(overlay);
+      });
+      rememberShortsVerdict(armedIdentity.split('|')[0], 'timeout-safe');
       console.log('[DIAG][FLASH_SHIELD] shorts_veil_timeout_release', 'identity=' + armedIdentity);
     }, FLASH_SHIELD_SHORTS_VEIL_TIMEOUT_MS);
     timerLog('start', 'shortsVeilTimeout');
@@ -1168,11 +1219,14 @@ export function generateModerationScript(config: InjectionConfig): string {
         }
         return false;
       }
+      diagLogVeilLifetime(liveMedia, 'fallback_' + nextState);
       liveMedia.dataset.mwModerated = nextState;
       liveFrame.dataset.mwModerated = nextState;
       liveMedia.removeAttribute('data-mw-veil');
-      const overlay = liveFrame.querySelector(':scope > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS);
-      if (overlay) fadeOutAndRemoveFlashShortsOverlay(overlay);
+      liveFrame.querySelectorAll(':scope > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS).forEach(function(overlay) {
+        if (overlay.dataset.mwVeilReleasing !== '1') fadeOutAndRemoveFlashShortsOverlay(overlay);
+      });
+      rememberShortsVerdict(liveIdentity.split('|')[0], nextState);
       diagFlashReleaseCounters.fallback_used += 1;
       if (DIAG_ENABLED || DIAG_YT_BLUR) {
         console.log(
@@ -1195,9 +1249,10 @@ export function generateModerationScript(config: InjectionConfig): string {
       const target = resolved && resolved.target && resolved.target.isConnected ? resolved.target : element;
       target.dataset.mwModerated = nextState;
       target.removeAttribute('data-mw-flash-frame');
-      if (typeof target.querySelector === 'function') {
-        const overlay = target.querySelector(':scope > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS);
-        if (overlay) fadeOutAndRemoveFlashShortsOverlay(overlay);
+      if (typeof target.querySelectorAll === 'function') {
+        target.querySelectorAll(':scope > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS).forEach(function(overlay) {
+          if (overlay.dataset.mwVeilReleasing !== '1') fadeOutAndRemoveFlashShortsOverlay(overlay);
+        });
       }
       if (target.dataset.mwFlashPositive === '1') {
         target.removeAttribute('data-mw-flash-positive');
@@ -1211,6 +1266,24 @@ export function generateModerationScript(config: InjectionConfig): string {
       veiled.forEach(function(node) {
         node.dataset.mwModerated = nextState;
       });
+      // Stamp the element's own flash frame too: a media node swapped in
+      // after release would otherwise see an unstamped frame and re-veil.
+      const flashFrame = (typeof element.closest === 'function')
+        ? element.closest('[data-mw-flash-frame="1"]')
+        : null;
+      if (flashFrame && flashFrame.dataset) flashFrame.dataset.mwModerated = nextState;
+      if (nextState === 'safe' || nextState === 'timeout-safe') {
+        diagLogVeilLifetime(element, 'resolution_' + nextState);
+        const identitySeed = String(
+          (element.dataset && element.dataset.mwFlashIdentity) ||
+          (flashFrame && flashFrame.dataset && flashFrame.dataset.mwFlashIdentity) ||
+          ''
+        );
+        rememberShortsVerdict(
+          identitySeed ? identitySeed.split('|')[0] : (getCurrentShortsUrlId() || ''),
+          nextState
+        );
+      }
       if (
         (nextState === 'safe' || nextState === 'timeout-safe') &&
         (!element.isConnected || !target.isConnected)
@@ -13436,6 +13509,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       CONFIG.enabled = false;
       CONFIG.scanEnabled = false;
       CONFIG.flashShieldV1 = false;
+      flashShieldShortsVerdictMemory.clear();
       if (document.documentElement) document.documentElement.classList.remove('mw-softveil-pending');
       document.documentElement.classList.remove(FLASH_SHIELD_CLASS);
       stopFlashShieldRuntime();
