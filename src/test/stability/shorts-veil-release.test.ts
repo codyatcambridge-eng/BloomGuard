@@ -40,7 +40,10 @@ function buildActiveShort(videoId: string): ShortsFixture {
 }
 
 function veilOverlayCount(): number {
-  return document.querySelectorAll('.mw-flash-shorts-overlay').length;
+  // Overlays mid-fade (data-mw-veil-releasing) are visually released.
+  return document.querySelectorAll(
+    '.mw-flash-shorts-overlay:not([data-mw-veil-releasing="1"])',
+  ).length;
 }
 
 /** A classified node YouTube already swapped out of the reel (disconnected). */
@@ -113,6 +116,52 @@ describe('P2: disconnected-verdict live-frame fallback release', () => {
 
     // Verdict stays 'safe' (first resolution wins); fallback is a no-op.
     expect(String(video.dataset.mwModerated || frame.dataset.mwModerated || '')).toBe('safe');
+  });
+});
+
+describe('P4: smooth veil release', () => {
+  it('overlay carries a 200ms opacity transition and resolved frames fade instead of snapping', () => {
+    window.history.pushState({}, '', shortsUrl(SHORTS_ID));
+    buildActiveShort(SHORTS_ID);
+    injection = injectScript({ flashShieldV1: true });
+
+    const styleText = document.getElementById('mw-flash-shield')?.textContent || '';
+    expect(styleText).toContain('transition: opacity 200ms ease !important');
+    // Resolved states hide via opacity (fade), not an instant display:none.
+    expect(styleText).not.toContain('display: none !important');
+  });
+
+  it('released overlay fades then is removed; next Short gets a FRESH overlay', () => {
+    window.history.pushState({}, '', shortsUrl(SHORTS_ID));
+    const { frame, video } = buildActiveShort(SHORTS_ID);
+    vi.useFakeTimers();
+    injection = injectScript({ flashShieldV1: true });
+
+    injection.probe.markFlashShieldShortsCandidate();
+    const firstOverlay = document.querySelector('.mw-flash-shorts-overlay') as HTMLElement;
+    injection.probe.clearFlashShieldResolution(video, 'safe');
+
+    // Old overlay is fading, not instantly gone.
+    expect(firstOverlay.dataset.mwVeilReleasing).toBe('1');
+    expect(firstOverlay.isConnected).toBe(true);
+
+    // Swipe to the next Short while the old overlay fades: candidate must
+    // create a NEW opaque overlay, never reuse the transparent fading one.
+    window.history.pushState({}, '', shortsUrl('nExTsHoRt99'));
+    frame.setAttribute('data-video-id', 'nExTsHoRt99');
+    injection.probe.markFlashShieldShortsCandidate();
+
+    const overlays = document.querySelectorAll('.mw-flash-shorts-overlay');
+    expect(veilOverlayCount()).toBe(1);
+    const fresh = Array.from(overlays).find(
+      (o) => (o as HTMLElement).dataset.mwVeilReleasing !== '1',
+    ) as HTMLElement;
+    expect(fresh).toBeTruthy();
+    expect(fresh).not.toBe(firstOverlay);
+
+    // Fade completes: the old overlay is removed from the DOM.
+    vi.advanceTimersByTime(300);
+    expect(firstOverlay.isConnected).toBe(false);
   });
 });
 
