@@ -479,21 +479,25 @@ export function generateModerationScript(config: InjectionConfig): string {
     CONFIG.sensitivity > 0 ? CONFIG.sensitivity : (CONFIG.flashShieldV1 ? FLASH_SHIELD_SCAN_LEVEL : 0)
   );
 
-  // Active Shorts only: raise weak-score floors to cut false positives
-  // (observed: Porn ~0.40 / Sexy ~0.10 still getting host blur at dial thr 0.50/0.65).
-  // Math.max keeps stricter dials (Strict/Max) at least as protective as the floor.
-  // Does NOT change home/feed/watch threshold tables.
-  const ACTIVE_SHORTS_THRESHOLD_FLOOR = { porn: 0.58, sexy: 0.72, hentai: 0.55 };
+  // FREEZE-OVERRIDE (accuracy): Active Shorts use the SAME dial thresholds as MVP Candidate 1
+  // baseline (MVPcandidate1-baseline). Elevated floors (0.58/0.72) caused ~6/10 FNs on true
+  // positives and are DISABLED for decisioning. Residual diag only reports what a floor
+  // would have done — it must not veto blur.
+  // Home/feed still use effectiveThresholds unchanged.
+  const ACTIVE_SHORTS_FP_FLOOR_DIAG_ONLY = { porn: 0.58, sexy: 0.72, hentai: 0.55 };
+  const ACTIVE_SHORTS_FP_GUARD_DECISION_ENABLED = false;
   function getActiveShortsThresholds() {
+    // Match baseline: dial thresholds only (no elevated Shorts floor).
     const base = effectiveThresholds || getThresholdsForLevel(CONFIG.sensitivity || 0);
     return {
-      porn: Math.max(Number(base.porn) || 0, ACTIVE_SHORTS_THRESHOLD_FLOOR.porn),
-      sexy: Math.max(Number(base.sexy) || 0, ACTIVE_SHORTS_THRESHOLD_FLOOR.sexy),
-      hentai: Math.max(Number(base.hentai) || 0, ACTIVE_SHORTS_THRESHOLD_FLOOR.hentai),
+      porn: Number(base.porn) || 0,
+      sexy: Number(base.sexy) || 0,
+      hentai: Number(base.hentai) || 0,
     };
   }
   function getRequestThresholdsForSurface() {
-    return isShortsModeActive() ? getActiveShortsThresholds() : effectiveThresholds;
+    // Always send dial thresholds (baseline parity). Shorts no longer inflate request thr.
+    return effectiveThresholds;
   }
 
   // Flash Shield consts (early for init use; full functions defined later)
@@ -7238,8 +7242,8 @@ export function generateModerationScript(config: InjectionConfig): string {
     const context = shortsBlurContextByContainer.get(container);
     if (!context || !context.src) return;
     const targetNode = context.targetNode && context.targetNode.nodeType === 1 ? context.targetNode : null;
-    // Stale identity / weak-score residual guard (swipe + epoch races).
-    // Never re-apply blur for a different Shorts id or below Shorts FP floors.
+    // Stale identity guard (swipe + epoch races). URL mismatch clears ownership;
+    // epoch mismatch skips heal without unblurring valid positives.
     if (isShortsHealthContextStale(context, targetNode)) {
       logShortsHealthEvent(
         'shorts_health_stale_skip',
@@ -7252,24 +7256,11 @@ export function generateModerationScript(config: InjectionConfig): string {
         ' stampedEpoch=' + String((targetNode && targetNode.dataset && targetNode.dataset.mwPageEpoch) || 'none')
       );
       const liveId = getCurrentShortsUrlId() || '';
+      // Only clear ownership on Shorts id swap. Epoch mismatch: skip heal, do not
+      // unblur (prevents FN clears of still-valid positives after nav epoch churn).
       if (context.shortsUrlId && liveId && String(context.shortsUrlId) !== String(liveId)) {
         try {
           clearShortsOwnedBlurAndOverlayByContext(context, 'shorts_health_stale_url');
-        } catch (e) {}
-        deleteShortsBlurContextEntry(container);
-      } else if (
-        targetNode &&
-        targetNode.isConnected &&
-        String(targetNode.dataset && targetNode.dataset.mwModerated || '') === 'blurred'
-      ) {
-        // Weak residual FP: clear blur rather than re-heal pairing for false positives.
-        try {
-          clearAllBlurAndOverlay(
-            targetNode,
-            context.src || '',
-            'shorts_health_fp_residual_clear',
-            'safe'
-          );
         } catch (e) {}
         deleteShortsBlurContextEntry(container);
       }
@@ -9335,13 +9326,15 @@ export function generateModerationScript(config: InjectionConfig): string {
     return { shouldBlur: true, reason: null };
   }
 
-  // Active Shorts only FP guard — does not touch home/feed authorization.
-  // Applied after host/policy decisions so weak Porn/Sexy scores cannot keep a blur.
+  // Active Shorts FP guard — DIAGNOSTICS by default (decision veto OFF).
+  // When ACTIVE_SHORTS_FP_GUARD_DECISION_ENABLED is false, never suppresses blur;
+  // only logs would-suppress for accuracy forensics vs MVPcandidate1-baseline.
   function applyActiveShortsFalsePositiveGuard(shouldApplyBlur, predictedLabel, unsafeScores, decisionReason) {
     if (!isShortsModeActive() || !shouldApplyBlur) {
-      return { shouldBlur: !!shouldApplyBlur, reason: decisionReason || null };
+      return { shouldBlur: !!shouldApplyBlur, reason: decisionReason || null, wouldSuppress: false, suppressReason: null };
     }
-    const thr = getActiveShortsThresholds();
+    const dialThr = getActiveShortsThresholds();
+    const floorThr = ACTIVE_SHORTS_FP_FLOOR_DIAG_ONLY;
     const porn = toFiniteNumber(unsafeScores && unsafeScores.porn);
     const sexy = toFiniteNumber(unsafeScores && unsafeScores.sexy);
     const hentai = toFiniteNumber(unsafeScores && unsafeScores.hentai);
@@ -9349,32 +9342,54 @@ export function generateModerationScript(config: InjectionConfig): string {
     const sexyScore = sexy === null ? 0 : sexy;
     const label = normalizePolicyCategory(predictedLabel);
 
-    // Strong explicit override still allowed (true positives well above floor).
-    if (maxExplicit >= Math.max(thr.porn, 0.8) || sexyScore >= Math.max(thr.sexy, 0.85)) {
-      return { shouldBlur: true, reason: decisionReason || null };
+    let suppressReason = null;
+    if (maxExplicit >= Math.max(floorThr.porn, 0.8) || sexyScore >= Math.max(floorThr.sexy, 0.85)) {
+      suppressReason = null;
+    } else if (label === 'sexy' || label === 'thirst' || label === 'swimwear' || label === 'shirtless' ||
+        label === 'shirtless_male' || label === 'bikini' || label === 'sports_bra' || label === 'swim_trunks') {
+      if (sexyScore < floorThr.sexy && maxExplicit < floorThr.porn) {
+        suppressReason = 'shorts_fp_guard_weak_suggestive';
+      }
+    } else if (label === 'porn' || label === 'hentai') {
+      if (maxExplicit < floorThr.porn) {
+        suppressReason = 'shorts_fp_guard_weak_explicit';
+      }
+    } else if (maxExplicit < floorThr.porn && sexyScore < floorThr.sexy) {
+      suppressReason = 'shorts_fp_guard_below_floor';
     }
 
-    if (label === 'sexy' || label === 'thirst' || label === 'swimwear' || label === 'shirtless' ||
-        label === 'shirtless_male' || label === 'bikini' || label === 'sports_bra' || label === 'swim_trunks') {
-      if (sexyScore < thr.sexy && maxExplicit < thr.porn) {
-        return { shouldBlur: false, reason: 'shorts_fp_guard_weak_suggestive' };
-      }
+    if (suppressReason) {
+      console.warn(
+        '[MW-ACTIVE-SHORTS-ACCURACY-DIAG]',
+        'event=fp_floor_would_suppress',
+        'decisionEnabled=' + String(ACTIVE_SHORTS_FP_GUARD_DECISION_ENABLED),
+        'suppressReason=' + suppressReason,
+        'label=' + label,
+        'porn=' + String(porn),
+        'sexy=' + String(sexy),
+        'hentai=' + String(hentai),
+        'dialThr=' + JSON.stringify(dialThr),
+        'floorThr=' + JSON.stringify(floorThr),
+        'priorReason=' + String(decisionReason || 'none')
+      );
     }
-    if (label === 'porn' || label === 'hentai') {
-      if (maxExplicit < thr.porn) {
-        return { shouldBlur: false, reason: 'shorts_fp_guard_weak_explicit' };
-      }
+
+    if (ACTIVE_SHORTS_FP_GUARD_DECISION_ENABLED && suppressReason) {
+      return { shouldBlur: false, reason: suppressReason, wouldSuppress: true, suppressReason: suppressReason };
     }
-    // Catch-all: neither explicit nor sexy clears the Shorts floor.
-    if (maxExplicit < thr.porn && sexyScore < thr.sexy) {
-      return { shouldBlur: false, reason: 'shorts_fp_guard_below_floor' };
-    }
-    return { shouldBlur: true, reason: decisionReason || null };
+    return {
+      shouldBlur: true,
+      reason: decisionReason || null,
+      wouldSuppress: !!suppressReason,
+      suppressReason: suppressReason,
+    };
   }
 
   function isShortsHealthContextStale(context, targetNode) {
     if (!context) return true;
     const liveId = getCurrentShortsUrlId() || '';
+    // Swipe identity mismatch only — do NOT clear positives based on score floors
+    // (that recreated FN regression after fe3a1c28).
     if (context.shortsUrlId && liveId && String(context.shortsUrlId) !== String(liveId)) {
       return true;
     }
@@ -9382,18 +9397,6 @@ export function generateModerationScript(config: InjectionConfig): string {
       const stampedEpoch = String(targetNode.dataset.mwPageEpoch || '');
       if (stampedEpoch && stampedEpoch !== String(state.pageEpoch || 0)) {
         return true;
-      }
-      // Residual weak scores: do not re-heal blur for known FP band.
-      const porn = toFiniteNumber(targetNode.dataset.mwPornScore);
-      const sexy = toFiniteNumber(targetNode.dataset.mwSexyScore);
-      const hentai = toFiniteNumber(targetNode.dataset.mwHentaiScore);
-      if (porn !== null || sexy !== null || hentai !== null) {
-        const thr = getActiveShortsThresholds();
-        const maxExplicit = Math.max(porn === null ? 0 : porn, hentai === null ? 0 : hentai);
-        const sexyScore = sexy === null ? 0 : sexy;
-        if (maxExplicit < thr.porn && sexyScore < thr.sexy) {
-          return true;
-        }
       }
     }
     return false;
@@ -11273,8 +11276,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       const predictedLabel = TRACE_UNSAFE_LABELS.has(normalizedCategory)
         ? normalizedCategory
         : ((strongestUnsafeLabel && strongestUnsafeLabel.label) || topPrediction.label || normalizedCategory || 'unknown');
-      // Active Shorts use elevated floors for local threshold comparison only.
-      const surfaceThresholds = isShortsModeActive() ? getActiveShortsThresholds() : effectiveThresholds;
+      // Baseline parity: dial thresholds only (no Shorts elevated floors on decision thr).
+      const surfaceThresholds = effectiveThresholds;
       const thresholdUsed = Object.prototype.hasOwnProperty.call(surfaceThresholds, predictedLabel)
         ? surfaceThresholds[predictedLabel]
         : null;
@@ -11379,7 +11382,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         decisionReason = policyDecision.reason;
       }
 
-      // Active Shorts FP guard (call-site only; does not rewrite sacred authz bodies).
+      // Active Shorts FP guard: decision veto OFF (diag only) after FN regression.
       const shortsFpDecision = applyActiveShortsFalsePositiveGuard(
         shouldApplyBlur,
         predictedLabel,
@@ -11389,18 +11392,6 @@ export function generateModerationScript(config: InjectionConfig): string {
       shouldApplyBlur = shortsFpDecision.shouldBlur;
       if (shortsFpDecision.reason && shortsFpDecision.reason !== decisionReason) {
         decisionReason = shortsFpDecision.reason;
-        if (isShortsModeActive()) {
-          console.warn(
-            '[MW-ACTIVE-SHORTS-FP-GUARD]',
-            'itemId=' + String(itemId || 'none'),
-            'predicted=' + String(predictedLabel || 'unknown'),
-            'porn=' + String(unsafeScores.porn),
-            'sexy=' + String(unsafeScores.sexy),
-            'hentai=' + String(unsafeScores.hentai),
-            'thr=' + JSON.stringify(getActiveShortsThresholds()),
-            'reason=' + String(decisionReason || 'none')
-          );
-        }
       }
       
       const dialActive = CONFIG.enabled && CONFIG.sensitivity > 0;
@@ -11410,9 +11401,32 @@ export function generateModerationScript(config: InjectionConfig): string {
         (predictedLabel === 'sexy' && sexyScoreForAction > 0.8);
       const dynamicBlurCandidate = rawCategory === 'swimwear' || (predictedLabel === 'sexy' && sexyScoreForAction < 0.8);
       let finalBlur = CONFIG.forcedBlur || (shouldApplyBlur && dialActive);
-      // Hard override still subject to Shorts FP floors via maxExplicit path above;
-      // only allow hard override when scores clear the 0.8 bar (already above floors).
       const flashPositive = CONFIG.flashShieldV1 && shouldApplyBlur;
+      if (isShortsModeActive()) {
+        console.warn(
+          '[MW-ACTIVE-SHORTS-ACCURACY-DIAG]',
+          'event=verdict',
+          'itemId=' + String(itemId || 'none'),
+          'predicted=' + String(predictedLabel || 'unknown'),
+          'hostShouldBlur=' + String(!!shouldBlur),
+          'shouldApplyBlur=' + String(!!shouldApplyBlur),
+          'finalBlur=' + String(!!finalBlur),
+          'flashPositive=' + String(!!flashPositive),
+          'porn=' + String(unsafeScores.porn),
+          'sexy=' + String(unsafeScores.sexy),
+          'hentai=' + String(unsafeScores.hentai),
+          'dialThr=' + JSON.stringify(getActiveShortsThresholds()),
+          'thresholdUsed=' + String(thresholdUsed === null ? 'n/a' : thresholdUsed),
+          'labelScore=' + String(labelScoreUsed === null ? 'n/a' : labelScoreUsed),
+          'thresholdHit=' + String(thresholdHit),
+          'anatomicalThr=' + String(CONFIG.anatomicalThreshold),
+          'fpWouldSuppress=' + String(!!shortsFpDecision.wouldSuppress),
+          'fpSuppressReason=' + String(shortsFpDecision.suppressReason || 'none'),
+          'decisionReason=' + String(decisionReason || 'none'),
+          'sensitivity=' + String(CONFIG.sensitivity),
+          'url=' + String(window.location.href || '').substring(0, 160)
+        );
+      }
       // FREEZE-OVERRIDE: hard overrides remain owned by the main dial; Flash-only positives
       // use applyFlashShieldPositive below and never enter applyBlur.
       if (hardBlurOverride && dialActive) {
