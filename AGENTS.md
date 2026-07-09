@@ -277,6 +277,138 @@ Manual validation must confirm:
 - Off mode removes blur everywhere
 - turning protection back on restores proper scanning
 
+## Behavior Freeze Guardrails
+
+When a behavior reaches the MVP definition across the required pages, routes, and lifecycle states, the agent must explicitly recommend freezing that behavior before further patches.
+
+This exists to prevent regression loops where stable behavior gets repeatedly modified after it already satisfies the MVP contract. Stable systems should be protected, not endlessly patched.
+
+### Freeze Candidates
+
+Freeze candidates include, but are not limited to:
+
+- thumbnail blur/reveal stability
+- active Shorts blur/reveal stability
+- Flash Shield pre-blur and release behavior
+- page routing and lifecycle stability
+- Off mode cleanup
+- classifier accuracy
+- profile/channel-origin Shorts coverage
+- watch page recommendation behavior
+- search results behavior
+- home feed behavior
+
+### Freeze Eligibility
+
+A behavior is freeze-eligible when:
+
+1. It satisfies the MVP definition in AGENTS.md.
+2. It satisfies the sacred behavior rules in FROZEN.md.
+3. It passes required manual QA on all relevant pages, routes, and lifecycle transitions.
+4. It passes available automated tests, or remaining failures are clearly classified as non-blocking.
+5. It does not reproduce known historical bugs.
+6. It survives the required long-session test or an explicitly labeled accelerated lifecycle/shelf-life proxy.
+7. User-facing behavior is stable enough that further changes are more likely to create regression risk than meaningful value.
+
+### Required Freeze Signal
+
+When a behavior is freeze-eligible, the agent must output this exact phrase:
+
+"FREEZE SIGNAL: [behavior name] appears to satisfy MVP requirements. Recommend freezing this behavior before further patches."
+
+The freeze signal must include:
+
+- behavior name
+- pages/routes tested
+- evidence supporting freeze
+- known remaining risks
+- exact files/functions to protect
+- recommended freeze tag or branch name
+- what future work may still modify
+- what future work must not modify
+
+### Required Warning Language
+
+When a behavior passes MVP requirements, agents must not silently continue patching.
+
+They must explicitly tell the user:
+
+"This behavior is now a freeze candidate. Further changes may create more regression risk than value."
+
+Then the agent must recommend one of:
+
+- freeze now
+- run one final defined QA pass, then freeze
+- hold freeze only because of a named reproducible blocker
+
+### Patch Discipline After Freeze
+
+After a behavior is frozen, future agents must not modify it unless:
+
+1. A reproducible bug is found in that exact behavior.
+2. The bug is a true MVP blocker.
+3. The patch is scoped only to that bug.
+4. The patch includes rollback instructions.
+5. The patch compares behavior against the frozen baseline.
+6. The patch reports every sacred file touched.
+7. The patch reruns the required regression checklist.
+
+Concrete examples:
+
+- If active Shorts blur/reveal is frozen, do not rewrite active Shorts lifecycle to fix general classifier accuracy.
+- If thumbnail blur/reveal is frozen, do not change reveal overlay creation to tune thresholds.
+- If Flash Shield is frozen, do not rewrite Flash Shield handoff to fix unrelated page accuracy.
+- If home/feed behavior is frozen, do not risk it while fixing profile/channel-origin Shorts.
+- If Off mode cleanup is frozen, do not broadly alter cleanup unless Off mode itself has a reproducible blocker.
+
+### Accuracy Freeze Rule
+
+Classifier accuracy is also freezeable.
+
+Once classifier accuracy reaches the MVP definition across required pages and routing contexts, the agent must recommend freezing the accuracy configuration.
+
+Accuracy freeze may protect:
+
+- thresholds
+- model selection
+- category mapping
+- confidence logic
+- frame/poster sampling strategy
+- page-specific accuracy exceptions
+- route-specific scanning behavior that affects classification
+
+After accuracy is frozen, future accuracy changes require:
+
+- a new branch from the frozen tag
+- before/after evidence
+- a rollback plan
+- a report of every protected file touched
+- regression testing against frozen blur/reveal behavior
+
+### Current Protected Behavior Baseline
+
+The current protected behavior baseline is:
+
+- tag: `phase0-behavior-freeze-2026-07-09`
+- commit: `7e576a30c64fd06b85ceb5914064ac8a57157a29`
+- source tag: `mvp.333tUOFF`
+
+This baseline protects:
+
+- thumbnail discovery
+- blur application
+- reveal overlay
+- Flash Shield
+- active Shorts behavior
+- route lifecycle
+- Off mode cleanup
+- settings plumbing
+- stability tests
+
+Future agents must compare surgical patches against this baseline.
+
+This baseline is a protected behavior rollback point, not a claim that every MVP issue is solved.
+
 ## 12. Agent Behavior Rules
 
 When working on this repo:
