@@ -91,6 +91,33 @@ const isYouTubeShortsUrl = (value?: string) => {
   }
 };
 
+// Profile/channel Shorts tab routes (player may be active while URL is not /shorts/ID).
+// Keep separate from isYouTubeShortsUrl so getUrlFamily / main-surface logic stays feed-safe.
+const isYouTubeProfileOrChannelShortsRoute = (value?: string): boolean => {
+  if (!value) return false;
+  try {
+    const parsed = new URL(value);
+    const host = parsed.hostname.toLowerCase();
+    if (!(host === 'youtube.com' || host === 'www.youtube.com' || host === 'm.youtube.com')) {
+      return false;
+    }
+    const path = parsed.pathname || '/';
+    return (
+      /^\/@[^/]+\/shorts(?:\/|$)/i.test(path) ||
+      /^\/channel\/[^/]+\/shorts(?:\/|$)/i.test(path) ||
+      /^\/c\/[^/]+\/shorts(?:\/|$)/i.test(path)
+    );
+  } catch {
+    return false;
+  }
+};
+
+// Host lifecycle surface for first-entry / reentry / force-seed / sticky Shorts epoch grace.
+// Closes SKIP_NOT_SHORTS on profile-origin active Shorts without widening home/feed family.
+const isHostActiveShortsLifecycleUrl = (value?: string): boolean => {
+  return isYouTubeShortsUrl(value) || isYouTubeProfileOrChannelShortsRoute(value);
+};
+
 const isDiagYtBlurEnabledForUrl = (value?: string) => {
   if (!isYouTubeShortsUrl(value)) return false;
   if (typeof window === 'undefined') return false;
@@ -1637,10 +1664,15 @@ export const NativeWebViewBrowser = () => {
           })();
         `).catch(() => undefined);
       }
-      if (isYouTubeShortsUrl(url)) {
+      if (isHostActiveShortsLifecycleUrl(url)) {
         const sinceLastReq = Date.now() - shortsLegacyFallbackRef.current.lastReqSentAt;
         if (sinceLastReq > SHORTS_LEGACY_FALLBACK_REQ_GRACE_MS || shortsIdChanged) {
-          armShortsLegacyFallbackProbe('shorts_url_change_uncertain', SHORTS_LEGACY_FALLBACK_ENTRY_PROBE_MS);
+          armShortsLegacyFallbackProbe(
+            isYouTubeProfileOrChannelShortsRoute(url)
+              ? 'shorts_url_change_uncertain_profile_origin'
+              : 'shorts_url_change_uncertain',
+            SHORTS_LEGACY_FALLBACK_ENTRY_PROBE_MS,
+          );
         }
       }
       if (shouldDeferSafeReset) {
@@ -1700,7 +1732,16 @@ export const NativeWebViewBrowser = () => {
   ): Promise<string> => {
     if (!isNative || !webViewState.isOpen || !executeScript) return 'SKIP_HOST';
     const activeUrl = urlHint || webViewState.currentUrl || currentUrlRef.current || '';
-    if (!isYouTubeShortsUrl(activeUrl)) return 'SKIP_NOT_SHORTS';
+    // FREEZE-OVERRIDE: profile/channel Shorts lifecycle (not pure /shorts) must not SKIP_NOT_SHORTS.
+    if (!isHostActiveShortsLifecycleUrl(activeUrl)) return 'SKIP_NOT_SHORTS';
+    if (isYouTubeProfileOrChannelShortsRoute(activeUrl)) {
+      console.warn(
+        '[DIAG][SHORTS_REENTRY][HOST]',
+        'action=profile_origin_lifecycle_gate',
+        'reason=' + reason,
+        'url=' + toDiagUrl(activeUrl),
+      );
+    }
     const navId = activeNavIdRef.current || 0;
     const now = Date.now();
     const previous = shortsReentryRefreshRef.current;
@@ -1746,6 +1787,7 @@ export const NativeWebViewBrowser = () => {
       'reason=' + reason,
       'navId=' + navId,
       'url=' + toDiagUrl(activeUrl),
+      'profileOrigin=' + String(isYouTubeProfileOrChannelShortsRoute(activeUrl)),
       'result=' + resultToken,
     );
     return resultToken;
@@ -1757,7 +1799,8 @@ export const NativeWebViewBrowser = () => {
   ): Promise<string> => {
     if (!isNative || !webViewState.isOpen || !executeScript) return 'SKIP_HOST';
     const activeUrl = urlHint || webViewState.currentUrl || currentUrlRef.current || '';
-    if (!isYouTubeShortsUrl(activeUrl)) return 'SKIP_NOT_SHORTS';
+    // FREEZE-OVERRIDE: allow force-seed on profile/channel Shorts routes.
+    if (!isHostActiveShortsLifecycleUrl(activeUrl)) return 'SKIP_NOT_SHORTS';
     const navId = activeNavIdRef.current || 0;
     const safeReason = escapeForJs(reason || 'host_force_first_entry');
     const result = await executeScript(`
@@ -1779,6 +1822,7 @@ export const NativeWebViewBrowser = () => {
       'reason=' + reason,
       'navId=' + navId,
       'url=' + toDiagUrl(activeUrl),
+      'profileOrigin=' + String(isYouTubeProfileOrChannelShortsRoute(activeUrl)),
       'result=' + resultToken,
     );
     return resultToken;
@@ -1789,6 +1833,7 @@ export const NativeWebViewBrowser = () => {
     urlHint?: string,
   ): boolean => {
     const activeUrl = urlHint || webViewState.currentUrl || currentUrlRef.current || '';
+    // Pure /shorts/ID only — profile routes lack a stable video id in the path.
     if (!isYouTubeShortsUrl(activeUrl)) return false;
     const activeVideoId = getYouTubeShortsId(activeUrl);
     if (!activeVideoId || activeVideoId === 'none') return false;
@@ -1803,17 +1848,28 @@ export const NativeWebViewBrowser = () => {
 
   useEffect(() => {
     const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
-    const inShorts = isYouTubeShortsUrl(activeUrl);
+    // FREEZE-OVERRIDE: treat profile/channel Shorts routes as lifecycle entry surface.
+    const inShorts = isHostActiveShortsLifecycleUrl(activeUrl);
     const wasInShorts = shortsModeActiveRef.current;
     shortsModeActiveRef.current = inShorts;
     if (inShorts && !wasInShorts) {
-      armShortsFirstEntryLatch('shorts_entry_transition', activeUrl);
+      const entryReason = isYouTubeProfileOrChannelShortsRoute(activeUrl)
+        ? 'shorts_entry_transition_profile_origin'
+        : 'shorts_entry_transition';
+      if (isYouTubeProfileOrChannelShortsRoute(activeUrl)) {
+        console.warn(
+          '[DIAG][SHORTS_REENTRY][HOST]',
+          'action=profile_origin_entry_transition',
+          'url=' + toDiagUrl(activeUrl),
+        );
+      }
+      armShortsFirstEntryLatch(entryReason, activeUrl);
       const sinceLastReq = Date.now() - shortsLegacyFallbackRef.current.lastReqSentAt;
       if (sinceLastReq > SHORTS_LEGACY_FALLBACK_REQ_GRACE_MS) {
         armShortsLegacyFallbackProbe('shorts_entry_uncertain', SHORTS_LEGACY_FALLBACK_ENTRY_PROBE_MS);
       }
-      if (markShortsFirstEntryReentryRequested('shorts_entry_transition', activeUrl)) {
-        void requestShortsReentryRefresh('shorts_entry_transition', activeUrl, true)
+      if (markShortsFirstEntryReentryRequested(entryReason, activeUrl)) {
+        void requestShortsReentryRefresh(entryReason, activeUrl, true)
           .then((resultToken) => {
             if (
               resultToken === 'null' ||
@@ -1821,8 +1877,8 @@ export const NativeWebViewBrowser = () => {
               resultToken === 'SKIP' ||
               resultToken.startsWith('ERR')
             ) {
-              if (markShortsFirstEntryForceRequested('shorts_entry_transition_force_seed', activeUrl)) {
-                void forceFirstEntryShortsRequest('shorts_entry_transition_force_seed', activeUrl);
+              if (markShortsFirstEntryForceRequested(entryReason + '_force_seed', activeUrl)) {
+                void forceFirstEntryShortsRequest(entryReason + '_force_seed', activeUrl);
               }
             }
           })
@@ -1844,15 +1900,19 @@ export const NativeWebViewBrowser = () => {
     markShortsFirstEntryForceRequested,
     requestShortsReentryRefresh,
     forceFirstEntryShortsRequest,
+    toDiagUrl,
   ]);
 
   useEffect(() => {
     if (!webViewState.isOpen) return;
     const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
-    if (!isYouTubeShortsUrl(activeUrl)) return;
-    armShortsFirstEntryLatch('webview_open_shorts', activeUrl);
-    if (markShortsFirstEntryReentryRequested('webview_open_shorts', activeUrl)) {
-      void requestShortsReentryRefresh('webview_open_shorts', activeUrl, false)
+    if (!isHostActiveShortsLifecycleUrl(activeUrl)) return;
+    const openReason = isYouTubeProfileOrChannelShortsRoute(activeUrl)
+      ? 'webview_open_shorts_profile_origin'
+      : 'webview_open_shorts';
+    armShortsFirstEntryLatch(openReason, activeUrl);
+    if (markShortsFirstEntryReentryRequested(openReason, activeUrl)) {
+      void requestShortsReentryRefresh(openReason, activeUrl, false)
         .then((resultToken) => {
           if (
             resultToken === 'null' ||
@@ -1860,8 +1920,8 @@ export const NativeWebViewBrowser = () => {
             resultToken === 'SKIP' ||
             resultToken.startsWith('ERR')
           ) {
-            if (markShortsFirstEntryForceRequested('webview_open_shorts_force_seed', activeUrl)) {
-              void forceFirstEntryShortsRequest('webview_open_shorts_force_seed', activeUrl);
+            if (markShortsFirstEntryForceRequested(openReason + '_force_seed', activeUrl)) {
+              void forceFirstEntryShortsRequest(openReason + '_force_seed', activeUrl);
             }
           }
         })
@@ -2541,7 +2601,8 @@ export const NativeWebViewBrowser = () => {
     messageSovereignId?: string,
   ) => {
     if (messageEpoch === null) return true;
-    if (!isYouTubeShortsUrl(activeUrl)) {
+    // Profile-origin Shorts share active-Shorts epoch grace with pure /shorts.
+    if (!isHostActiveShortsLifecycleUrl(activeUrl)) {
       return messageEpoch === activeEpoch;
     }
 
@@ -2600,7 +2661,7 @@ export const NativeWebViewBrowser = () => {
     activeUrl: string,
     messageSovereignId?: string,
   ): boolean => {
-    if (!isYouTubeShortsUrl(activeUrl)) return false;
+    if (!isHostActiveShortsLifecycleUrl(activeUrl)) return false;
     if (messageEpoch === null || messageEpoch !== activeEpoch) return false;
     const activeSovereignId = getSovereignIdForContext(activeUrl, activeNavIdRef.current, activeEpoch);
     return doesSovereignContextMatchWhenPresent(messageSovereignId, activeSovereignId);
@@ -2624,7 +2685,7 @@ export const NativeWebViewBrowser = () => {
     const activeEpoch = webViewPageEpochRef.current;
     const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
     const activeSovereignId = getSovereignIdForContext(activeUrl, activeNavIdRef.current, activeEpoch);
-    const stickyShortsMode = isYouTubeShortsUrl(activeUrl);
+    const stickyShortsMode = isHostActiveShortsLifecycleUrl(activeUrl);
     const relaxedYouTubeEpochMode = isYouTubeDomainUrl(activeUrl) && !stickyShortsMode;
     const isActiveEpochRequest = isGraceEpochAcceptedForActiveShortsVideo(
       requestEpoch,
@@ -3568,7 +3629,8 @@ export const NativeWebViewBrowser = () => {
           );
           return;
         }
-        const shortsReadyContext = isYouTubeShortsUrl(activeUrl) || isYouTubeShortsUrl(readyUrl);
+        const shortsReadyContext =
+          isHostActiveShortsLifecycleUrl(activeUrl) || isHostActiveShortsLifecycleUrl(readyUrl);
         if (shortsReadyContext) {
           const readyKey = [
             String(activeNavIdRef.current),
@@ -3795,7 +3857,7 @@ export const NativeWebViewBrowser = () => {
       return;
     }
     const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
-    const stickyShortsMode = isYouTubeShortsUrl(activeUrl);
+    const stickyShortsMode = isHostActiveShortsLifecycleUrl(activeUrl);
     const isNonShortsYouTubeContext = isYouTubeDomainUrl(activeUrl) && !stickyShortsMode;
     const pollContextKey = String(activeNavIdRef.current) + ':' + getUrlFamily(activeUrl);
     if (isNonShortsYouTubeContext && legacyPollSelfDisabledContextRef.current === pollContextKey) {
