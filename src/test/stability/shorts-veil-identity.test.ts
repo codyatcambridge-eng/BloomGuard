@@ -39,7 +39,10 @@ function buildActiveShort(videoId: string): ShortsFixture {
 }
 
 function veilOverlayCount(): number {
-  return document.querySelectorAll('.mw-flash-shorts-overlay').length;
+  // Overlays mid-fade (data-mw-veil-releasing) are visually released.
+  return document.querySelectorAll(
+    '.mw-flash-shorts-overlay:not([data-mw-veil-releasing="1"])',
+  ).length;
 }
 
 let injection: InjectionResult | null = null;

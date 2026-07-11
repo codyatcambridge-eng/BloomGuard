@@ -910,11 +910,14 @@ export function generateModerationScript(config: InjectionConfig): string {
       '  backdrop-filter: blur(22px) saturate(0.82) !important;',
       '  -webkit-backdrop-filter: blur(22px) saturate(0.82) !important;',
       '  background: rgba(8,8,10,0.22) !important;',
+      /* C1/P4: pending-veil release must read as a deliberate fade, not a snap. */
+      '  transition: opacity 200ms ease !important;',
       '}',
       'html.' + FLASH_SHIELD_CLASS + ' [data-mw-moderated="safe"] > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS + ',',
       'html.' + FLASH_SHIELD_CLASS + ' [data-mw-moderated="revealed"] > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS + ',',
       'html.' + FLASH_SHIELD_CLASS + ' [data-mw-moderated="timeout-safe"] > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS + ' {',
-      '  display: none !important;',
+      '  opacity: 0 !important;',
+      '  pointer-events: none !important;',
       '}',
       'html.' + FLASH_SHIELD_CLASS + ' [data-mw-moderated="safe"] [data-mw-veil="1"],',
       'html.' + FLASH_SHIELD_CLASS + ' [data-mw-moderated="revealed"] [data-mw-veil="1"],',
@@ -1021,7 +1024,11 @@ export function generateModerationScript(config: InjectionConfig): string {
     let overlay = null;
     for (let i = 0; i < frame.children.length; i += 1) {
       const child = frame.children[i];
-      if (child.classList && child.classList.contains(FLASH_SHIELD_SHORTS_OVERLAY_CLASS)) {
+      if (
+        child.classList &&
+        child.classList.contains(FLASH_SHIELD_SHORTS_OVERLAY_CLASS) &&
+        child.dataset.mwVeilReleasing !== '1'
+      ) {
         overlay = child;
         break;
       }
@@ -1034,6 +1041,25 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     overlay.dataset.mwFlashIdentity = identity;
     return overlay;
+  }
+
+  // C1/P4: Fade the pending veil out over 200ms, then remove the node. A
+  // releasing overlay is marked so candidate passes create a fresh overlay for
+  // the next Short instead of reusing a transparent one.
+  function fadeOutAndRemoveFlashShortsOverlay(overlay) {
+    if (!overlay || overlay.nodeType !== 1) return;
+    try {
+      overlay.dataset.mwVeilReleasing = '1';
+      overlay.style.setProperty('opacity', '0', 'important');
+      overlay.style.setProperty('pointer-events', 'none', 'important');
+      setTimeout(function() {
+        try {
+          if (overlay.parentElement) overlay.parentElement.removeChild(overlay);
+        } catch (e) {}
+      }, 240);
+    } catch (e) {
+      try { overlay.remove(); } catch (e2) {}
+    }
   }
 
   function markFlashShieldShortsCandidate() {
@@ -1138,7 +1164,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       frame.dataset.mwModerated = 'timeout-safe';
       media.removeAttribute('data-mw-veil');
       const overlay = frame.querySelector(':scope > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS);
-      if (overlay) overlay.remove();
+      if (overlay) fadeOutAndRemoveFlashShortsOverlay(overlay);
       console.log('[DIAG][FLASH_SHIELD] shorts_veil_timeout_release', 'identity=' + armedIdentity);
     }, FLASH_SHIELD_SHORTS_VEIL_TIMEOUT_MS);
     timerLog('start', 'shortsVeilTimeout');
@@ -1199,7 +1225,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       liveFrame.dataset.mwModerated = nextState;
       liveMedia.removeAttribute('data-mw-veil');
       const overlay = liveFrame.querySelector(':scope > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS);
-      if (overlay) overlay.remove();
+      if (overlay) fadeOutAndRemoveFlashShortsOverlay(overlay);
       diagFlashReleaseCounters.fallback_used += 1;
       if (DIAG_ENABLED || DIAG_YT_BLUR) {
         console.log(
@@ -1224,7 +1250,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       target.removeAttribute('data-mw-flash-frame');
       if (typeof target.querySelector === 'function') {
         const overlay = target.querySelector(':scope > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS);
-        if (overlay) overlay.remove();
+        if (overlay) fadeOutAndRemoveFlashShortsOverlay(overlay);
       }
       if (target.dataset.mwFlashPositive === '1') {
         target.removeAttribute('data-mw-flash-positive');
