@@ -296,6 +296,7 @@ export interface MWTestProbe {
   getTimerSnapshot: () => {
     shortsVeilTimeoutTimer: boolean;
   };
+  getShortsVerdictMemorySize: () => number;
 }
 
 export interface InjectionResult {
@@ -374,6 +375,9 @@ export function injectScript(configOverrides?: Partial<InjectionConfig>): Inject
       return {
         shortsVeilTimeoutTimer: !!timerState.shortsVeilTimeoutTimer,
       };
+    },
+    getShortsVerdictMemorySize: function() {
+      return flashShieldShortsVerdictMemory.size;
     },
   };
   `;
