@@ -13897,6 +13897,32 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
   };
 
+  // Stale-portal hygiene: the reveal portal is parented to documentElement and
+  // survives re-injection (only Off-mode cleanup removes it). This instance owns
+  // no overlays yet, so any overlay found in the portal now belongs to a dead
+  // instance. Left in place, its stale owner token can collide with this
+  // instance's node ids and trip createRevealOverlay's existing_owner_mismatch
+  // path, which unblurs a valid positive. Blur stamps are untouched here; the
+  // heal/repair paths recreate paired reveals for surviving blur.
+  (function purgeStalePortalOverlaysOnInit() {
+    try {
+      const portal = document.getElementById(REVEAL_PORTAL_ID);
+      if (!portal) return;
+      const staleOverlays = portal.querySelectorAll('.mw-reveal-overlay');
+      let removed = 0;
+      for (let i = 0; i < staleOverlays.length; i += 1) {
+        const overlay = staleOverlays[i];
+        if (overlay && overlay.parentElement) {
+          overlay.parentElement.removeChild(overlay);
+          removed += 1;
+        }
+      }
+      if (removed > 0) {
+        console.log('[DIAG][REVEAL_UI] init_stale_portal_purge', 'removed=' + removed);
+      }
+    } catch (e) {}
+  })();
+
   hydrateRevealStateFromStorage();
   startManagedTimers('init');
   if (CONFIG.flashShieldV1) startFlashShieldRuntime();

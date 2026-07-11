@@ -207,6 +207,35 @@ describe('Active Shorts blur/reveal pairing — INVARIANTS (must stay green)', (
   });
 });
 
+describe('Injection bootstrap — stale portal hygiene (C2a)', () => {
+  it('a fresh injection purges stale reveal overlays left in the portal by a previous instance', () => {
+    // The reveal portal lives on document.documentElement and survives
+    // re-injection (only Off-mode cleanup removes it). Stale overlays from a
+    // dead instance can collide with the new instance's diag node ids and
+    // trigger createRevealOverlay's existing_owner_mismatch destruction path
+    // (unblurs a true positive). A new instance owns no overlays by
+    // definition, so anything found in the portal at init is stale.
+    const SHORTS_ID = nextShortsId();
+    pushShortsUrl(SHORTS_ID);
+    buildActiveShortsPlayer(SHORTS_ID);
+
+    // Forge the previous instance's surviving portal + overlay.
+    const stalePortal = document.createElement('div');
+    stalePortal.id = 'mw-reveal-portal';
+    const staleOverlay = document.createElement('div');
+    staleOverlay.className = 'mw-reveal-overlay';
+    staleOverlay.dataset.mwNodeId = 'n1';
+    staleOverlay.dataset.mwShortsOwnerToken = 'shorts_owner|dead|instance|token';
+    stalePortal.appendChild(staleOverlay);
+    document.documentElement.appendChild(stalePortal);
+
+    injection = injectScript();
+
+    const portal = document.getElementById('mw-reveal-portal');
+    expect(portal?.querySelectorAll('.mw-reveal-overlay').length ?? 0).toBe(0);
+  });
+});
+
 describe('Active Shorts orphan blur — KNOWN DEFECT (redirect dead-end) [INVERT-ON-C2-FIX]', () => {
   // These tests assert the CURRENT WRONG behavior. They exist so that:
   //  (a) any accidental change to this code path fails the suite loudly, and
