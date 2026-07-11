@@ -289,6 +289,13 @@ export interface MWTestProbe {
   getFlashShieldShortsIdentity: (frame: Element | null, media: Element | null) => string;
   markFlashShieldShortsCandidate: () => void;
   clearFlashShieldResolution: (element: Element, nextState: string) => void;
+  getFlashReleaseCounters: () => {
+    flash_release_fallback_used: number;
+    flash_release_missed_disconnected: number;
+  };
+  getTimerSnapshot: () => {
+    shortsVeilTimeoutTimer: boolean;
+  };
 }
 
 export interface InjectionResult {
@@ -357,6 +364,17 @@ export function injectScript(configOverrides?: Partial<InjectionConfig>): Inject
     getFlashShieldShortsIdentity: getFlashShieldShortsIdentity,
     markFlashShieldShortsCandidate: markFlashShieldShortsCandidate,
     clearFlashShieldResolution: clearFlashShieldResolution,
+    getFlashReleaseCounters: function() {
+      return {
+        flash_release_fallback_used: diagFlashReleaseCounters.fallback_used,
+        flash_release_missed_disconnected: diagFlashReleaseCounters.missed_disconnected,
+      };
+    },
+    getTimerSnapshot: function() {
+      return {
+        shortsVeilTimeoutTimer: !!timerState.shortsVeilTimeoutTimer,
+      };
+    },
   };
   `;
 
