@@ -160,6 +160,66 @@ export function clearReattachCooldown(video: HTMLVideoElement): void {
 }
 
 // ---------------------------------------------------------------------------
+// Active Shorts fixtures (Step 0 regression net)
+// ---------------------------------------------------------------------------
+
+export interface ActiveShortsFixture {
+  player: HTMLElement;
+  frame: HTMLElement;
+  video: HTMLVideoElement;
+  src: string;
+}
+
+/**
+ * Builds the active Shorts player shell that production selectors resolve:
+ *   #shorts-player > ytm-reel-video-renderer[aria-hidden="false"] > video
+ * The video carries the oardefault poster URL for the given Shorts id so
+ * doesShortsContainerMatchSrc matches the frame for that src.
+ *
+ * NOTE: navigate to a /shorts/<id> URL (pushShortsUrl) BEFORE injectScript so
+ * isShortsModeActive() is true during script bootstrap.
+ */
+export function buildActiveShortsPlayer(shortsId: string): ActiveShortsFixture {
+  const src = `https://i.ytimg.com/vi/${shortsId}/oardefault.jpg`;
+  const player = document.createElement('div');
+  player.id = 'shorts-player';
+  const frame = document.createElement('ytm-reel-video-renderer');
+  frame.setAttribute('aria-hidden', 'false');
+  const video = document.createElement('video') as HTMLVideoElement;
+  video.src = src;
+  video.poster = src;
+  frame.appendChild(video);
+  player.appendChild(frame);
+  document.body.appendChild(player);
+  return { player, frame, video, src };
+}
+
+/** Stamp blur residue on a node as applyBlur leaves it on active Shorts. */
+export function stampShortsBlurResidue(
+  node: HTMLElement,
+  src: string,
+  itemId: string,
+  category = 'porn',
+): void {
+  node.dataset.mwModerated = 'blurred';
+  node.dataset.mwCategory = category;
+  node.dataset.mwSrc = src;
+  node.dataset.mwItemId = itemId;
+  node.classList.add('mw-blurred');
+  node.style.setProperty('filter', 'blur(40px)', 'important');
+}
+
+/** Navigate jsdom to an active-Shorts URL (same origin, no reload). */
+export function pushShortsUrl(shortsId: string): void {
+  window.history.pushState({}, '', `/shorts/${shortsId}`);
+}
+
+/** Restore the default main-feed URL configured by vitest.stability.config.ts. */
+export function restoreMainFeedUrl(): void {
+  window.history.pushState({}, '', '/');
+}
+
+// ---------------------------------------------------------------------------
 // Script injection with test-only probe
 // ---------------------------------------------------------------------------
 
@@ -210,6 +270,23 @@ export interface MWTestProbe {
     itemId: string,
     mvpProof?: string,
   ) => void;
+  // --- Active Shorts reveal-pairing / veil probes (additive, Step 0 regression net) ---
+  isShortsModeActive: () => boolean;
+  getActiveShortsPlayerContainer: () => Element | null;
+  resolveShortsStableBlurTarget: (
+    node: Element,
+    src: string,
+  ) => { target: Element | null; selectorUsed: string } | null;
+  healActiveShortsRevealPairing: (
+    targetNode: Element,
+    src: string,
+    category: string,
+    itemId: string,
+    reason: string,
+  ) => boolean;
+  runShortsHealthHealForContainer: (container: Element, reason: string) => void;
+  findRevealOverlayForElement: (element: Element, src: string) => Element | null;
+  getFlashShieldShortsIdentity: (frame: Element | null, media: Element | null) => string;
 }
 
 export interface InjectionResult {
@@ -268,6 +345,13 @@ export function injectScript(): InjectionResult {
     processLegacyResults: processLegacyResults,
     scanActiveShortsPlayerContainer: scanActiveShortsPlayerContainer,
     applyBlur: applyBlur,
+    isShortsModeActive: isShortsModeActive,
+    getActiveShortsPlayerContainer: getActiveShortsPlayerContainer,
+    resolveShortsStableBlurTarget: resolveShortsStableBlurTarget,
+    healActiveShortsRevealPairing: healActiveShortsRevealPairing,
+    runShortsHealthHealForContainer: runShortsHealthHealForContainer,
+    findRevealOverlayForElement: findRevealOverlayForElement,
+    getFlashShieldShortsIdentity: getFlashShieldShortsIdentity,
   };
   `;
 
@@ -295,6 +379,19 @@ export function injectScript(): InjectionResult {
       (window as Record<string, unknown>).__MW_ACTIVE__ = false;
       delete (window as Record<string, unknown>).__MW_TEST_PROBE__;
       document.body.innerHTML = '';
+      // The reveal portal is appended to document.documentElement (NOT body),
+      // so clearing body leaves stale overlays behind. A stale overlay from a
+      // previous injection instance can collide with a new instance's diag
+      // node ids ("n1","n2",...) and trigger createRevealOverlay's
+      // existing_owner_mismatch destruction path — poisoning later tests.
+      document.getElementById('mw-reveal-portal')?.remove();
+      document.querySelectorAll('.mw-reveal-overlay, .mw-reveal-btn').forEach(n => n.remove());
+      document.documentElement.className = '';
+      try {
+        window.localStorage.clear();
+      } catch {
+        /* defensive */
+      }
       consoleSpy.mockRestore();
       vi.restoreAllMocks();
     },
