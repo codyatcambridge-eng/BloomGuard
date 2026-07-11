@@ -261,13 +261,13 @@ describe('Active Shorts orphan blur — KNOWN DEFECT (redirect dead-end) [INVERT
     expect(anyRevealOverlay()).toBeNull();
   });
 
-  it('stale blurred stamp is left on the video after tap-to-reveal [INVERT-ON-STALE-STAMP-FIX]', () => {
-    // After the orphan heal, BOTH nodes carry mwModerated='blurred'. Tapping
-    // reveal marks only the frame 'revealed'. The <video> keeps a stale
-    // 'blurred' stamp. Harmless to inline styles, but the Flash Shield
-    // stylesheet blurs any active-reel video whose data-mw-moderated is not
-    // safe/revealed/timeout-safe — so on device, while the shield is armed,
-    // this stale stamp can visually re-blur a Short the user just revealed.
+  it('tap-to-reveal clears same-src residue stamps on sibling nodes (C2c)', () => {
+    // Historical defect (inverted by the C2c fix): after the orphan heal,
+    // BOTH nodes carried mwModerated='blurred'; tapping reveal marked only
+    // the frame 'revealed', leaving a stale 'blurred' stamp on the <video>.
+    // The Flash Shield stylesheet blurs any active-reel video whose
+    // data-mw-moderated is not safe/revealed/timeout-safe — so on device the
+    // stale stamp could visually RE-BLUR a Short the user just revealed.
     const SHORTS_ID = nextShortsId();
     pushShortsUrl(SHORTS_ID);
     const { video, src } = buildActiveShortsPlayer(SHORTS_ID);
@@ -280,8 +280,34 @@ describe('Active Shorts orphan blur — KNOWN DEFECT (redirect dead-end) [INVERT
     expect(btn).not.toBeNull();
     btn?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
 
-    // [INVERT-ON-STALE-STAMP-FIX] → expect(video.dataset.mwModerated).toBe('revealed');
-    expect(video.dataset.mwModerated).toBe('blurred');
+    // The user's reveal must clear the residue stamp too, or the veil CSS
+    // re-blurs the Short while the shield is armed.
+    expect(video.dataset.mwModerated).toBe('revealed');
+  });
+
+  it('reveal residue sweep does NOT touch a different-src blurred node in the same container (C2c negative control)', () => {
+    const SHORTS_ID = nextShortsId();
+    pushShortsUrl(SHORTS_ID);
+    const { frame, video, src } = buildActiveShortsPlayer(SHORTS_ID);
+    injection = injectScript();
+
+    // A second node inside the same frame holding blur for DIFFERENT content
+    // (e.g. recycled slot) must keep its blur through an unrelated reveal.
+    const otherNode = document.createElement('img');
+    const otherSrc = 'https://i.ytimg.com/vi/OtherShort99/oardefault.jpg';
+    otherNode.src = otherSrc;
+    otherNode.dataset.mwModerated = 'blurred';
+    otherNode.dataset.mwSrc = otherSrc;
+    (frame as HTMLElement).appendChild(otherNode);
+
+    stampShortsBlurResidue(video, src, SHORTS_ID);
+    injection.probe.healActiveShortsRevealPairing(video, src, 'porn', SHORTS_ID, 'test_ctrl');
+
+    const btn = document.querySelector('.mw-reveal-btn') as HTMLElement | null;
+    btn?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+
+    // Unrelated content keeps its blur stamp: reveals never leak across src.
+    expect(otherNode.dataset.mwModerated).toBe('blurred');
   });
 
   it('stale overlay owner token is REPLACED without unblurring the positive (C2b fail-closed)', () => {

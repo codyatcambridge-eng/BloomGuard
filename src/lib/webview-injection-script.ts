@@ -9860,6 +9860,39 @@ export function generateModerationScript(config: InjectionConfig): string {
         } else {
           clearAllBlurAndOverlay(element, src, 'removeBlur_reveal', 'revealed');
         }
+        // C2c: a reveal must also clear same-src residue stamps on sibling
+        // nodes in the same stable container (e.g. the <video> that first
+        // held blur before ownership migrated to the frame). A leftover
+        // 'blurred' stamp matches the Flash Shield veil CSS
+        // (video:not([data-mw-moderated="safe"]):not(...revealed)...) and can
+        // visually re-blur a Short the user just revealed. Scoped fail-closed:
+        // same container AND identical mwSrc only — different-src nodes keep
+        // their blur untouched.
+        try {
+          const residueScope = (element.closest && element.closest(SHORTS_STABLE_CONTAINER_TAG_SELECTOR)) || element;
+          const residueNodes = residueScope && typeof residueScope.querySelectorAll === 'function'
+            ? residueScope.querySelectorAll('[data-mw-moderated="blurred"]')
+            : [];
+          for (let i = 0; i < residueNodes.length; i += 1) {
+            const residue = residueNodes[i];
+            if (!residue || residue === element || residue.nodeType !== 1) continue;
+            const residueSrc = String((residue.dataset && residue.dataset.mwSrc) || '');
+            if (!residueSrc || !src || residueSrc !== src) continue;
+            residue.dataset.mwModerated = 'revealed';
+            residue.style.removeProperty('filter');
+            residue.style.removeProperty('-webkit-filter');
+            residue.style.removeProperty('backdrop-filter');
+            residue.style.removeProperty('-webkit-backdrop-filter');
+            residue.classList.remove('mw-softblur');
+            residue.classList.remove('mw-blurred');
+            console.log(
+              '[DIAG][BLUR] residue_stamp_revealed',
+              'itemKey=' + getDiagItemKey(src),
+              'node=' + getDiagNodeId(residue),
+              'reason=removeBlur_same_src_residue'
+            );
+          }
+        } catch (e) {}
       } else {
         element.style.removeProperty('filter');
         element.style.removeProperty('-webkit-filter');
