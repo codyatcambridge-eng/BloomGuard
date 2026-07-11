@@ -10211,7 +10211,24 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (shortsMode) {
         const existingOwnerToken = String(existingOverlay.dataset.mwShortsOwnerToken || '');
         if (!shortsOwnerToken || existingOwnerToken !== shortsOwnerToken) {
-          clearAllBlurAndOverlay(element, src, 'createRevealOverlay_existing_owner_mismatch', 'safe');
+          // FAIL-CLOSED (C2b): an overlay bookkeeping mismatch must never
+          // unblur a positive. Discard the stale overlay (dead instance /
+          // node-id collision / prior Short) and rebuild a fresh one for the
+          // still-blurred element. Recursion is bounded: with the stale
+          // overlay removed, the retry cannot re-enter this branch.
+          try {
+            if (existingOverlay.parentElement) {
+              existingOverlay.parentElement.removeChild(existingOverlay);
+            }
+          } catch (e) {}
+          element.dataset.mwHasOverlay = 'false';
+          console.log(
+            '[DIAG][REVEAL_UI] overlay_replaced_stale_owner',
+            'node=' + getDiagNodeId(element),
+            'existingToken=' + existingOwnerToken.substring(0, 120),
+            'currentToken=' + String(shortsOwnerToken || '').substring(0, 120)
+          );
+          createRevealOverlay(element, src, category, itemId, false);
           return;
         }
       }

@@ -284,17 +284,12 @@ describe('Active Shorts orphan blur — KNOWN DEFECT (redirect dead-end) [INVERT
     expect(video.dataset.mwModerated).toBe('blurred');
   });
 
-  it('stale overlay owner token DESTROYS valid blur and marks it safe [INVERT-ON-MISMATCH-HANDLER-FIX]', () => {
-    // createRevealOverlay's existing-overlay check: if the overlay found for
-    // this element carries a different shorts owner token, it calls
-    // clearAllBlurAndOverlay(element, src, 'createRevealOverlay_existing_owner_mismatch', 'safe')
-    // — i.e., a bookkeeping mismatch UNBLURS A TRUE POSITIVE and stamps it
-    // safe, instead of replacing the stale overlay. Reachable in production:
-    // the reveal portal lives on document.documentElement and is only purged
-    // by Off-mode cleanup, so overlays from a previous injection instance
-    // survive re-injection while diag node ids ("n1","n2",...) reset and
-    // collide. The fix direction is fail-closed: discard the stale overlay
-    // and create a fresh one, never unblur.
+  it('stale overlay owner token is REPLACED without unblurring the positive (C2b fail-closed)', () => {
+    // Historical defect (inverted by the C2b fix): when the overlay found for
+    // this element carried a different shorts owner token, createRevealOverlay
+    // called clearAllBlurAndOverlay(..., 'safe') — a bookkeeping mismatch
+    // unblurred a TRUE POSITIVE and stamped it safe. Fail-closed behavior:
+    // discard the stale overlay, rebuild a fresh one, never unblur.
     const SHORTS_ID = nextShortsId();
     pushShortsUrl(SHORTS_ID);
     const { frame, src } = buildActiveShortsPlayer(SHORTS_ID);
@@ -311,10 +306,11 @@ describe('Active Shorts orphan blur — KNOWN DEFECT (redirect dead-end) [INVERT
 
     injection.probe.createRevealOverlay(frame, src, 'porn', SHORTS_ID);
 
-    // CURRENT WRONG BEHAVIOR: the positive is unblurred and marked safe.
-    // [INVERT-ON-MISMATCH-HANDLER-FIX] → expect((frame as HTMLElement).dataset.mwModerated).toBe('blurred');
-    //                                    expect(anyRevealOverlay()).not.toBeNull();
-    expect((frame as HTMLElement).dataset.mwModerated).toBe('safe');
-    expect(anyRevealOverlay()).toBeNull();
+    // FAIL-CLOSED: blur holds, and a usable reveal overlay exists.
+    expect((frame as HTMLElement).dataset.mwModerated).toBe('blurred');
+    expect(
+      ((frame as HTMLElement).style.getPropertyValue('filter') || '').includes('blur('),
+    ).toBe(true);
+    expect(anyRevealOverlay()).not.toBeNull();
   });
 });
