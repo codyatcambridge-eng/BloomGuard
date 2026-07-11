@@ -9,7 +9,7 @@
  */
 
 import { vi } from 'vitest';
-import { generateModerationScript } from '@/lib/webview-injection-script';
+import { generateModerationScript, type InjectionConfig } from '@/lib/webview-injection-script';
 
 // ---------------------------------------------------------------------------
 // Sacred selector constants — replicated from production lines 2969-2987.
@@ -287,6 +287,8 @@ export interface MWTestProbe {
   runShortsHealthHealForContainer: (container: Element, reason: string) => void;
   findRevealOverlayForElement: (element: Element, src: string) => Element | null;
   getFlashShieldShortsIdentity: (frame: Element | null, media: Element | null) => string;
+  markFlashShieldShortsCandidate: () => void;
+  clearFlashShieldResolution: (element: Element, nextState: string) => void;
 }
 
 export interface InjectionResult {
@@ -308,7 +310,7 @@ export interface InjectionResult {
  * Window URL is pre-configured by vitest.stability.config.ts to
  * https://m.youtube.com/ — no location stub needed here.
  */
-export function injectScript(): InjectionResult {
+export function injectScript(configOverrides?: Partial<InjectionConfig>): InjectionResult {
   // Reset any previous injection
   (window as Record<string, unknown>).__MW_ACTIVE__ = false;
   delete (window as Record<string, unknown>).__MW_NON_SHORTS_REATTACH_CONTEXT__;
@@ -327,6 +329,7 @@ export function injectScript(): InjectionResult {
     nonce: TEST_NONCE,
     blockingMode: 'mvp',
     pageEpoch: TEST_PAGE_EPOCH,
+    ...(configOverrides || {}),
   });
 
   // Inject probe code before the IIFE's closing return — production file untouched.
@@ -352,6 +355,8 @@ export function injectScript(): InjectionResult {
     runShortsHealthHealForContainer: runShortsHealthHealForContainer,
     findRevealOverlayForElement: findRevealOverlayForElement,
     getFlashShieldShortsIdentity: getFlashShieldShortsIdentity,
+    markFlashShieldShortsCandidate: markFlashShieldShortsCandidate,
+    clearFlashShieldResolution: clearFlashShieldResolution,
   };
   `;
 

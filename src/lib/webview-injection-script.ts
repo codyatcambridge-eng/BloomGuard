@@ -157,10 +157,9 @@ export function generateFlashShieldBootstrap(enabled: boolean): string {
         if (!nodeId && frame && frame.getAttribute) {
           nodeId = frame.getAttribute('data-video-id') || frame.getAttribute('data-item-id') || frame.getAttribute('data-id') || '';
         }
-        var source = media
-          ? String(media.currentSrc || media.getAttribute('src') || media.getAttribute('poster') || '')
-          : '';
-        return [shortsId, nodeId || 'none', source || 'none'].join('|');
+        // C1/P1 (bootstrap copy): media source churns during normal playback
+        // of the SAME Short — it must not participate in the identity.
+        return [shortsId, nodeId || 'none'].join('|');
       }
       function ensureShortsOverlay(frame, identity) {
         var overlay = null;
@@ -186,7 +185,11 @@ export function generateFlashShieldBootstrap(enabled: boolean): string {
         if (!media) return;
         var identity = getShortsIdentity(frame, media);
         var previousIdentity = String(frame.dataset.mwFlashIdentity || '');
-        if (previousIdentity && previousIdentity !== identity) {
+        // C1/P1 (bootstrap copy): wipe verdicts only on a real Short change
+        // (URL id segment), never for drift within the same Short.
+        var previousShortsId = previousIdentity ? previousIdentity.split('|')[0] : '';
+        var currentShortsId = identity.split('|')[0];
+        if (previousIdentity && previousIdentity !== identity && previousShortsId !== currentShortsId) {
           frame.removeAttribute('data-mw-moderated');
           media.removeAttribute('data-mw-moderated');
           media.removeAttribute('data-mw-preblur-clear');
@@ -197,10 +200,17 @@ export function generateFlashShieldBootstrap(enabled: boolean): string {
         frame.dataset.mwFlashIdentity = identity;
         frame.dataset.mwFlashFrame = '1';
         media.dataset.mwFlashIdentity = identity;
-        if (media.getAttribute('data-mw-moderated') !== 'blurred') {
+        // C1/P1 (bootstrap copy): veil only the unresolved window.
+        var bootstrapVerdict = String(media.getAttribute('data-mw-moderated') || frame.getAttribute('data-mw-moderated') || '');
+        var bootstrapResolved =
+          bootstrapVerdict === 'blurred' ||
+          bootstrapVerdict === 'safe' ||
+          bootstrapVerdict === 'revealed' ||
+          bootstrapVerdict === 'timeout-safe';
+        if (!bootstrapResolved) {
           media.dataset.mwVeil = '1';
+          ensureShortsOverlay(frame, identity);
         }
-        ensureShortsOverlay(frame, identity);
       }
       function startShortsBurst() {
         if (burstRaf || typeof requestAnimationFrame !== 'function') return;
@@ -989,6 +999,12 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function getFlashShieldShortsIdentity(frame, media) {
+    // C1/P1: Identity must be stable for the lifetime of one active Short. The
+    // media source (poster -> blob/stream, quality swaps) changes during NORMAL
+    // playback of the SAME Short; including it made every source churn look
+    // like a new Short, wiping the verdict and re-veiling mid-playback (the
+    // full-screen blur flash). Only the Shorts URL id and the player's own
+    // video/item id may participate.
     const shortsId = getCurrentShortsUrlId() || 'none';
     const mediaId = media && media.getAttribute
       ? String(media.getAttribute('data-video-id') || media.getAttribute('data-item-id') || '')
@@ -996,10 +1012,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     const frameId = frame && frame.getAttribute
       ? String(frame.getAttribute('data-video-id') || frame.getAttribute('data-item-id') || frame.getAttribute('data-id') || '')
       : '';
-    const source = media
-      ? String(media.currentSrc || media.getAttribute('src') || media.getAttribute('poster') || '')
-      : '';
-    return [shortsId, mediaId || frameId || 'none', source || 'none'].join('|');
+    return [shortsId, mediaId || frameId || 'none'].join('|');
   }
 
   function ensureFlashShieldShortsOverlay(frame, identity) {
@@ -1049,7 +1062,12 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       const identity = getFlashShieldShortsIdentity(frame, media);
       const previousIdentity = String(frame.dataset.mwFlashIdentity || '');
-      if (previousIdentity && previousIdentity !== identity) {
+      // C1/P1: Verdicts may only be wiped when the SHORT itself changed (URL
+      // id segment), never for identity drift within the same Short — wiping
+      // a resolved verdict mid-playback re-veils the whole player (blur flash).
+      const previousShortsId = previousIdentity ? previousIdentity.split('|')[0] : '';
+      const currentShortsId = identity.split('|')[0];
+      if (previousIdentity && previousIdentity !== identity && previousShortsId !== currentShortsId) {
         frame.removeAttribute('data-mw-moderated');
         frame.removeAttribute('data-mw-flash-positive');
         media.removeAttribute('data-mw-moderated');
@@ -1064,8 +1082,18 @@ export function generateModerationScript(config: InjectionConfig): string {
       frame.dataset.mwFlashIdentity = identity;
       frame.dataset.mwFlashFrame = '1';
       media.dataset.mwFlashIdentity = identity;
-      if (media.dataset.mwModerated !== 'blurred') media.dataset.mwVeil = '1';
-      ensureFlashShieldShortsOverlay(frame, identity);
+      // C1/P1: Veil + overlay may only cover the unresolved window. Re-adding
+      // them to an already-resolved Short re-covers the player after release.
+      const mediaVerdict = String(media.dataset.mwModerated || frame.dataset.mwModerated || '');
+      const hasResolvedVerdict =
+        mediaVerdict === 'blurred' ||
+        mediaVerdict === 'safe' ||
+        mediaVerdict === 'revealed' ||
+        mediaVerdict === 'timeout-safe';
+      if (!hasResolvedVerdict) {
+        media.dataset.mwVeil = '1';
+        ensureFlashShieldShortsOverlay(frame, identity);
+      }
       warnProfileOriginShortsDiag(
         'flash_shield_engaged',
         'identity=' + String(identity || 'none').substring(0, 220) +

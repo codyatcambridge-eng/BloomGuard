@@ -44,7 +44,11 @@ describe('Shorts veil identity — media-source churn [KNOWN DEFECT]', () => {
     expect(a).toContain(SHORTS_ID);
   });
 
-  it('identity CHURNS when only the media source changes mid-playback [INVERT-ON-C1-P1]', () => {
+  it('identity is STABLE when only the media source changes mid-playback (C1/P1)', () => {
+    // Historical defect (inverted by the C1/P1 port): the identity included
+    // the media source, so normal playback source churn (poster -> blob,
+    // quality swaps) minted a new veil identity, wiped the verdict, and
+    // re-veiled a SAFE Short mid-playback — the full-screen blur flash.
     pushShortsUrl(SHORTS_ID);
     const { frame, video } = buildActiveShortsPlayer(SHORTS_ID);
     injection = injectScript();
@@ -55,10 +59,7 @@ describe('Shorts veil identity — media-source churn [KNOWN DEFECT]', () => {
 
     const after = injection.probe.getFlashShieldShortsIdentity(frame, video);
 
-    // CURRENT WRONG BEHAVIOR: source churn mints a new veil identity, which
-    // re-arms the veil on a Short that was already verdicted safe.
-    // [INVERT-ON-C1-P1] → expect(after).toBe(before);
-    expect(after).not.toBe(before);
+    expect(after).toBe(before);
   });
 
   it('identity DOES change when the Shorts URL id changes (this part must survive the C1 port)', () => {
