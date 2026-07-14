@@ -12092,28 +12092,53 @@ export function generateModerationScript(config: InjectionConfig): string {
       // ======== Neutral fast-pass removed (strict mode) ========
 
       
-      // ======== DIAL-FIRST DECISION ========
-      // FREEZE-OVERRIDE (accuracy): when porn/sexy/hentai scores exist, dial thr is
-      // the single source of truth for home + active Shorts. Prior host_safe_preserved
-      // (dial<3) and forceUnsafe swimwear made the dial feel black-and-white.
+      // ======== DECISION (home dial thr + Active Shorts host OR dial) ========
+      // FREEZE-OVERRIDE (accuracy): dial-only override of host caused Active Shorts FNs.
+      // NSFWJS often returns 0/tiny scores on all channels; treating that as "has scores"
+      // then dialAnyHit=false wiped host swimwear/thirst/segmentation positives.
+      // Active Shorts: host positive OR dial thr hit. Anatomical must not unblur host positives.
       let shouldApplyBlur = shouldBlur;
       let decisionReason = hostDecisionReason || reason || '';
       const forceUnsafe = FORCE_UNSAFE_CATEGORIES.has(rawCategory);
-      const anyUnsafeScore =
-        (unsafeScores.porn !== null && Number.isFinite(unsafeScores.porn)) ||
-        (unsafeScores.sexy !== null && Number.isFinite(unsafeScores.sexy)) ||
-        (unsafeScores.hentai !== null && Number.isFinite(unsafeScores.hentai));
-      // Hit if ANY unsafe channel exceeds its dial thr (not only predicted top label).
+      const shortsDecision = isShortsModeActive();
+      const thrTable = shortsDecision ? getActiveShortsThresholds() : surfaceThresholds;
+      const pornScoreN = unsafeScores.porn;
+      const sexyScoreN = unsafeScores.sexy;
+      const hentaiScoreN = unsafeScores.hentai;
+      const maxUnsafeScore = Math.max(
+        pornScoreN === null ? 0 : pornScoreN,
+        sexyScoreN === null ? 0 : sexyScoreN,
+        hentaiScoreN === null ? 0 : hentaiScoreN
+      );
+      // Ignore noise-zero prediction bags (0,0,0) — those are not real thr signals.
+      const hasMeaningfulScores = maxUnsafeScore > 0.02;
       const dialAnyHit =
-        (unsafeScores.porn !== null && unsafeScores.porn > Number(surfaceThresholds.porn)) ||
-        (unsafeScores.sexy !== null && unsafeScores.sexy > Number(surfaceThresholds.sexy)) ||
-        (unsafeScores.hentai !== null && unsafeScores.hentai > Number(surfaceThresholds.hentai));
+        (pornScoreN !== null && pornScoreN > Number(thrTable.porn)) ||
+        (sexyScoreN !== null && sexyScoreN > Number(thrTable.sexy)) ||
+        (hentaiScoreN !== null && hentaiScoreN > Number(thrTable.hentai));
 
-      if (anyUnsafeScore) {
-        shouldApplyBlur = !!dialAnyHit;
+      if (shortsDecision) {
+        // Protective OR: never drop a host positive on Active Shorts.
+        shouldApplyBlur = !!shouldBlur || !!dialAnyHit;
+        if (shouldBlur && dialAnyHit) {
+          decisionReason = thresholdHit ? (predictedLabel + '>=thr') : 'host_and_dial_hit';
+        } else if (shouldBlur) {
+          decisionReason = forceUnsafe
+            ? 'host_force_unsafe_shorts'
+            : (hostDecisionReason || reason || 'host_blur_preserved_shorts');
+        } else if (dialAnyHit) {
+          decisionReason = thresholdHit ? (predictedLabel + '>=thr') : 'dial_any_channel_hit';
+        } else {
+          decisionReason = 'shorts_safe_host_and_dial';
+        }
+      } else if (hasMeaningfulScores) {
+        // Home: dial thr primary; keep force-unsafe host positives (swimwear family).
+        shouldApplyBlur = !!dialAnyHit || (!!shouldBlur && forceUnsafe);
         decisionReason = dialAnyHit
           ? (thresholdHit ? (predictedLabel + '>=thr') : 'dial_any_channel_hit')
-          : 'dial_all_channels_below';
+          : (shouldBlur && forceUnsafe
+              ? 'forceUnsafeCategory/' + rawCategory
+              : 'dial_all_channels_below');
       } else if (forceUnsafe && shouldBlur) {
         shouldApplyBlur = true;
         decisionReason = 'forceUnsafeCategory/' + rawCategory;
@@ -12128,18 +12153,22 @@ export function generateModerationScript(config: InjectionConfig): string {
         decisionReason = decisionReason || (shouldBlur ? 'host_blur' : 'host_safe');
       }
 
-      const anatomicalDecision = applyAnatomicalThreshold(
-        shouldApplyBlur,
-        predictedLabel || '',
-        unsafeScores,
-        forceUnsafe,
-      );
-      shouldApplyBlur = anatomicalDecision.shouldBlur;
-      if (anatomicalDecision.reason) {
-        decisionReason = anatomicalDecision.reason;
-        if (CONFIG.debug) {
-          const scoreUsed = predictedLabel === 'sexy' ? unsafeScores.sexy : unsafeScores.porn;
-          console.log('[MW] ANATOMICAL LOGIC:', decisionReason, 'label=' + predictedLabel, 'score=' + String(scoreUsed), 'thr=' + CONFIG.anatomicalThreshold);
+      // Anatomical softens dial-only hits; never unblur host-positive Active Shorts.
+      const skipAnatomicalForHostShortsPositive = shortsDecision && !!shouldBlur && !!shouldApplyBlur;
+      if (!skipAnatomicalForHostShortsPositive) {
+        const anatomicalDecision = applyAnatomicalThreshold(
+          shouldApplyBlur,
+          predictedLabel || '',
+          unsafeScores,
+          forceUnsafe,
+        );
+        shouldApplyBlur = anatomicalDecision.shouldBlur;
+        if (anatomicalDecision.reason) {
+          decisionReason = anatomicalDecision.reason;
+          if (CONFIG.debug) {
+            const scoreUsed = predictedLabel === 'sexy' ? unsafeScores.sexy : unsafeScores.porn;
+            console.log('[MW] ANATOMICAL LOGIC:', decisionReason, 'label=' + predictedLabel, 'score=' + String(scoreUsed), 'thr=' + CONFIG.anatomicalThreshold);
+          }
         }
       }
       

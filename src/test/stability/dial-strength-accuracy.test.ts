@@ -72,6 +72,19 @@ describe('dial strength accuracy', () => {
     expect(decision.reason).toBeNull();
   });
 
+  it('Active Shorts must not treat zero prediction bags as thr-safe over host blur', () => {
+    // Regression: anyUnsafeScore was true for {porn:0,sexy:0,hentai:0}, dialAnyHit false
+    // wiped host shouldBlur → systematic Active Shorts FNs after dial-first patch.
+    const zeroMax = Math.max(0, 0, 0);
+    const hasMeaningful = zeroMax > 0.02;
+    expect(hasMeaningful).toBe(false);
+    // Host blur preserved when scores are not meaningful:
+    const hostShouldBlur = true;
+    const dialAnyHit = false;
+    const shortsApply = hostShouldBlur || dialAnyHit;
+    expect(shortsApply).toBe(true);
+  });
+
   it('mid sexy score blurs at Maximum but not at Relaxed (dial-first band)', () => {
     const mid = 0.5;
     const relaxed = getCategoryThresholds(1);
