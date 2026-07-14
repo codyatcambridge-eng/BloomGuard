@@ -3692,6 +3692,14 @@ export function generateModerationScript(config: InjectionConfig): string {
     const watchBound = refreshAdaptiveShortsOverlayWatch('reentry:' + (reason || 'unknown'));
     const nextCandidate = getAdaptiveActiveShortsCandidateIdentity();
     logActiveShortsCandidateIdentity('reentry:' + (reason || 'unknown'), nextCandidate, true);
+    // Always force an immediate targeted rescan when a live candidate exists so
+    // reentry does not wait solely on overlay-watch binding (or miss it entirely).
+    if (nextCandidate && nextCandidate.container && nextCandidate.container.isConnected) {
+      triggerAdaptiveShortsTargetedRescan('reentry_immediate:' + (reason || 'unknown'), nextCandidate, {
+        force: true,
+        immediate: true,
+      });
+    }
     if (!watchBound) {
       triggerAdaptiveShortsTargetedRescan('reentry_fallback:' + (reason || 'unknown'), nextCandidate, {
         force: true,
@@ -4536,10 +4544,37 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
   }
 
+  // Broad shelf *containers* must never own positive blur for every child thumbnail.
+  // Item-level lockups (ytm-shorts-lockup-view-model / ytd-reel-item-renderer) remain eligible.
+  function isBroadShortsShelfContainerCard(card) {
+    if (!card || card.nodeType !== 1 || typeof card.matches !== 'function') return false;
+    try {
+      return !!card.matches(
+        'ytm-shorts-shelf-renderer,' +
+        'ytd-shorts-shelf-renderer,' +
+        'ytd-reel-shelf-renderer,' +
+        'ytm-rich-shelf-renderer,' +
+        'ytd-rich-shelf-renderer'
+      );
+    } catch (e) {
+      return false;
+    }
+  }
+
   function applyOwnedPositiveCardClass(card, itemKey, reason) {
     if (!card || card.nodeType !== 1) return;
     if (isShortsModeActive()) return;
     if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
+    if (isBroadShortsShelfContainerCard(card)) {
+      applyOwnedSafeCardClass(card, reason || 'broad_shorts_shelf_positive_denied');
+      console.log(
+        '[MW-SHORTS-SHELF] broad_positive_owner_denied',
+        'cardNodeId=' + getDiagNodeId(card),
+        'itemKey=' + String(itemKey || 'unknown'),
+        'reason=' + String(reason || 'unknown')
+      );
+      return;
+    }
     ensureOwnedCardStyle();
     card.classList.add(OWNED_POSITIVE_CARD_CLASS);
     card.classList.remove(OWNED_SAFE_CARD_CLASS);
@@ -4586,6 +4621,22 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (isShortsModeActive()) return;
     if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
     if (!card.classList || !card.classList.contains(OWNED_POSITIVE_CARD_CLASS)) return;
+    if (isBroadShortsShelfContainerCard(card)) {
+      applyOwnedSafeCardClass(card, reason || 'broad_shorts_shelf_reapply_denied');
+      if (typeof card.querySelectorAll === 'function') {
+        const staleOverlays = card.querySelectorAll('.mw-reveal-overlay');
+        for (let i = 0; i < staleOverlays.length; i += 1) {
+          const overlay = staleOverlays[i];
+          if (overlay && overlay.parentElement) overlay.parentElement.removeChild(overlay);
+        }
+      }
+      console.log(
+        '[MW-SHORTS-SHELF] broad_reapply_denied',
+        'cardNodeId=' + getDiagNodeId(card),
+        'reason=' + String(reason || 'unknown')
+      );
+      return;
+    }
     // Lifecycle safety: refuse stale ownership and downgrade to safe immediately.
     if (!isShortsShelfOwnedCard(card)) {
       const hrefKey = getMvpCardHrefItemKey(card);
@@ -8018,6 +8069,22 @@ export function generateModerationScript(config: InjectionConfig): string {
       for (var i = 0; i < btns.length; i += 1) {
         var b = btns[i];
         if (!b || b.nodeType !== 1 || !b.isConnected) continue;
+        var overlay = (typeof b.closest === 'function') ? b.closest('.mw-reveal-overlay') : null;
+        if (!overlay || !overlay.isConnected) continue;
+        var overlayStyle = null;
+        try { overlayStyle = window.getComputedStyle(overlay); } catch (e) {}
+        if (
+          overlayStyle &&
+          (
+            overlayStyle.display === 'none' ||
+            overlayStyle.visibility === 'hidden' ||
+            Number(overlayStyle.opacity) === 0
+          )
+        ) continue;
+        var anchor = overlay.__mwAnchorTarget || null;
+        if (anchor && anchor.nodeType === 1 && String((anchor.dataset && anchor.dataset.mwModerated) || '') !== 'blurred') {
+          continue;
+        }
         var st = null;
         try { st = window.getComputedStyle(b); } catch (e) {}
         if (st && (st.display === 'none' || st.visibility === 'hidden' || st.pointerEvents === 'none' || Number(st.opacity) === 0)) continue;
@@ -10257,6 +10324,47 @@ export function generateModerationScript(config: InjectionConfig): string {
       diagLogShortsTargetResolution('createRevealOverlay', element, src, stableResolution);
       const stableTarget = stableResolution && stableResolution.target ? stableResolution.target : null;
       if (stableTarget && stableTarget !== element && stableTarget.isConnected) {
+        // FREEZE-OVERRIDE: when blur residue sits on the video (or other leaf) and the
+        // stable reel frame is unstamped, migrate blur onto the frame before redirecting.
+        // Historical dead-end: recurse with allowReresolve=false hit mwModerated!=='blurred'
+        // and removed any overlay → orphan blur with no reveal until health heal ran.
+        const sourceBlurred = String((element.dataset && element.dataset.mwModerated) || '') === 'blurred';
+        const targetBlurred = String((stableTarget.dataset && stableTarget.dataset.mwModerated) || '') === 'blurred';
+        if (sourceBlurred && !targetBlurred) {
+          const desiredBlur = CONFIG.blurStrength || 30;
+          const resolvedBlurPx = IS_YOUTUBE ? 40 : Math.min(desiredBlur, 20);
+          const resolvedSelector = stableResolution && stableResolution.selectorUsed
+            ? stableResolution.selectorUsed
+            : '';
+          diagShortsBlurStackLog('overlay_redirect_migrate_before', stableTarget, src, 'from=' + getDiagNodeId(element));
+          stableTarget.classList.remove('mw-softblur');
+          stableTarget.style.removeProperty('filter');
+          stableTarget.style.removeProperty('-webkit-filter');
+          stableTarget.style.removeProperty('backdrop-filter');
+          stableTarget.style.removeProperty('-webkit-backdrop-filter');
+          stableTarget.style.setProperty('filter', 'blur(' + resolvedBlurPx + 'px)', 'important');
+          stableTarget.style.setProperty('-webkit-filter', 'blur(' + resolvedBlurPx + 'px)', 'important');
+          stableTarget.style.setProperty('backdrop-filter', 'blur(' + resolvedBlurPx + 'px)', 'important');
+          stableTarget.style.setProperty('-webkit-backdrop-filter', 'blur(' + resolvedBlurPx + 'px)', 'important');
+          stableTarget.style.transition = 'filter 0.3s ease';
+          stableTarget.dataset.mwModerated = 'blurred';
+          stableTarget.dataset.mwCategory = category || element.dataset.mwCategory || 'flagged';
+          stableTarget.dataset.mwSrc = src;
+          stableTarget.dataset.mwItemId = itemId || element.dataset.mwItemId || '';
+          if (resolvedSelector) stableTarget.dataset.mwShortsStableSelector = resolvedSelector;
+          stableTarget.classList.add('mw-blurred');
+          setShortsBlurContextForNode(
+            stableTarget,
+            src,
+            category || element.dataset.mwCategory || 'flagged',
+            itemId || element.dataset.mwItemId || '',
+            resolvedBlurPx,
+            resolvedSelector || null,
+            'overlay_redirect_migrate'
+          );
+          diagNodeParentAtBlur.set(stableTarget, { parent: stableTarget.parentElement || null });
+          diagShortsBlurStackLog('overlay_redirect_migrate_after', stableTarget, src, 'from=' + getDiagNodeId(element));
+        }
         createRevealOverlay(stableTarget, src, category, itemId, false);
         return;
       }

@@ -7,33 +7,14 @@
  *    reachable reveal" already holds at HEAD. These are the tripwires that
  *    protect AGENTS.md §2 while the C-phase patches land.
  *
- * 2. KNOWN DEFECTS (pinned wrong behavior): the createRevealOverlay
- *    stable-target redirect dead-end. These tests assert the CURRENT WRONG
- *    behavior on purpose so any change to it is loud. When the C2 fix lands,
- *    each test marked [INVERT-ON-C2-FIX] MUST be inverted to assert the
- *    correct behavior — do NOT delete them.
+ * 2. FIXED redirect dead-end (was KNOWN DEFECT): createRevealOverlay now
+ *    migrates blur onto the stable reel frame before redirecting when residue
+ *    sits on the <video> and the frame is unstamped — so a direct
+ *    createRevealOverlay(video, ...) call attaches reveal without waiting for
+ *    health heal. Heal path remains an independent invariant below.
  *
- * Defect chain being pinned (verified 2026-07-10 at d8d58991):
- *   blur residue sits on the Shorts <video> while its ytm-reel-video-renderer
- *   frame is unstamped → createRevealOverlay(video, ...) redirects to the
- *   frame (stableTarget !== element) WITHOUT migrating the blur stamp → the
- *   recursion exits at the `mwModerated !== 'blurred'` check and removes any
- *   overlay → blur with no reveal button (until/unless a heal runs).
- *
- *   healActiveShortsRevealPairing DOES close this case at HEAD — but only via
- *   an indirect chain: setShortsBlurContextForNode → context count 0→1 →
- *   maybeStartShortsHealthHealInterval → synchronous runShortsHealthHealCycle
- *   → full health heal → applyBlur migrates blur to the frame + creates the
- *   reveal. That success is pinned as an INVARIANT below; the direct
- *   createRevealOverlay dead-end remains pinned as a KNOWN DEFECT.
- *
- *   Residual defect also pinned below: after the heal, BOTH nodes carry
- *   mwModerated='blurred'; tapping reveal marks only the frame 'revealed' and
- *   leaves a stale 'blurred' stamp on the <video>. Visually clean in jsdom,
- *   but on device the Flash Shield stylesheet blurs any active-reel video
- *   whose data-mw-moderated is not safe/revealed/timeout-safe — so while the
- *   shield is armed, the stale stamp can visually RE-BLUR a Short the user
- *   just revealed ("variable blur with reveal button" symptom).
+ *   C2c also fixed same-src residue stamps on reveal; C2b fail-closed owner
+ *   mismatch. Those are inverted to assert correct behavior below.
  *
  * Harness gotchas honored here (from prior guardian work):
  *  - stamp blur AFTER injectScript() — the bootstrap sweep clears residue.
@@ -236,13 +217,8 @@ describe('Injection bootstrap — stale portal hygiene (C2a)', () => {
   });
 });
 
-describe('Active Shorts orphan blur — KNOWN DEFECT (redirect dead-end) [INVERT-ON-C2-FIX]', () => {
-  // These tests assert the CURRENT WRONG behavior. They exist so that:
-  //  (a) any accidental change to this code path fails the suite loudly, and
-  //  (b) the C2 fix has a ready-made red→green harness: invert the
-  //      expectations marked below when the fix lands.
-
-  it('createRevealOverlay dead-ends when blur residue is on the video and the frame is unstamped', () => {
+describe('Active Shorts orphan blur — redirect migrate + C2 fixes', () => {
+  it('createRevealOverlay migrates video residue to the frame and attaches reveal', () => {
     const SHORTS_ID = nextShortsId();
     pushShortsUrl(SHORTS_ID);
     const { frame, video, src } = buildActiveShortsPlayer(SHORTS_ID);
@@ -254,11 +230,9 @@ describe('Active Shorts orphan blur — KNOWN DEFECT (redirect dead-end) [INVERT
 
     injection.probe.createRevealOverlay(video, src, 'porn', SHORTS_ID);
 
-    // Blur is still present on the video...
-    expect(video.dataset.mwModerated).toBe('blurred');
-    // ...but NO reveal overlay was created anywhere: orphan blur.
-    // [INVERT-ON-C2-FIX] → expect(anyRevealOverlay()).not.toBeNull();
-    expect(anyRevealOverlay()).toBeNull();
+    // Frame receives migrated blur + a paired reveal (no orphan).
+    expect((frame as HTMLElement).dataset.mwModerated).toBe('blurred');
+    expect(anyRevealOverlay()).not.toBeNull();
   });
 
   it('tap-to-reveal clears same-src residue stamps on sibling nodes (C2c)', () => {

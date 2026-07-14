@@ -297,6 +297,8 @@ export interface MWTestProbe {
     shortsVeilTimeoutTimer: boolean;
   };
   getShortsVerdictMemorySize: () => number;
+  reapplyOwnedContainerBlur: (card: Element, reason: string) => void;
+  refreshShortsFreshnessOnReentry: (reason: string, options?: { force?: boolean; resetContext?: boolean }) => boolean;
 }
 
 export interface InjectionResult {
@@ -379,6 +381,8 @@ export function injectScript(configOverrides?: Partial<InjectionConfig>): Inject
     getShortsVerdictMemorySize: function() {
       return flashShieldShortsVerdictMemory.size;
     },
+    reapplyOwnedContainerBlur: reapplyOwnedContainerBlur,
+    refreshShortsFreshnessOnReentry: refreshShortsFreshnessOnReentry,
   };
   `;
 
