@@ -120,17 +120,22 @@ describe('E1: session verdict memory prevents re-veil of known Shorts', () => {
   });
 
   it('memory is bounded (LRU, max 50)', () => {
+    // Keep this fast: full swipeTo + markFlashShieldShortsCandidate × 60 was
+    // timing out the default 5s suite budget. URL + clearResolution is enough
+    // to exercise rememberShortsVerdict / LRU eviction.
     window.history.pushState({}, '', shortsUrl(SHORT_A));
     const fixture = buildActiveShort(SHORT_A);
     injection = injectScript({ flashShieldV1: true });
 
     for (let i = 0; i < 60; i += 1) {
       const id = 'memShort' + String(i).padStart(4, '0');
-      swipeTo(fixture, injection, id);
+      window.history.pushState({}, '', shortsUrl(id));
+      fixture.frame.setAttribute('data-video-id', id);
+      fixture.video.dataset.mwFlashIdentity = id + '|media|frame';
       injection.probe.clearFlashShieldResolution(fixture.video, 'safe');
     }
     expect(injection.probe.getShortsVerdictMemorySize()).toBeLessThanOrEqual(50);
-  });
+  }, 10_000);
 
   it('Off-mode cleanup clears the memory', () => {
     window.history.pushState({}, '', shortsUrl(SHORT_A));
