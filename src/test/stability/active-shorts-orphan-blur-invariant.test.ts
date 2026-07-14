@@ -235,6 +235,36 @@ describe('Active Shorts orphan blur — redirect migrate + C2 fixes', () => {
     expect(anyRevealOverlay()).not.toBeNull();
   });
 
+  it('owner-token mismatch does NOT unblur a positive (fail-closed pairing)', () => {
+    // Historical intermittent defect: after one mismatch retry, createRevealOverlay
+    // called clearAllBlurAndOverlay(..., 'safe') — leaving no blur and no reveal,
+    // or racing with re-apply and producing blur-without-reveal. Fail-closed:
+    // realign tokens and keep blur + attach reveal.
+    const SHORTS_ID = nextShortsId();
+    pushShortsUrl(SHORTS_ID);
+    const { frame, src } = buildActiveShortsPlayer(SHORTS_ID);
+    injection = injectScript();
+
+    stampShortsBlurResidue(frame, src, SHORTS_ID);
+    injection.probe.createRevealOverlay(frame, src, 'porn', SHORTS_ID);
+    expect(anyRevealOverlay()).not.toBeNull();
+    expect((frame as HTMLElement).dataset.mwModerated).toBe('blurred');
+
+    // Force a second create with a poisoned element owner token (swipe mid-attach).
+    (frame as HTMLElement).dataset.mwShortsOwnerToken = 'shorts_owner|stale|poison|token';
+    (frame as HTMLElement).dataset.mwOwnerMismatchCount = '1';
+    (frame as HTMLElement).dataset.mwOwnerMismatchRetryScheduled = 'false';
+
+    injection.probe.createRevealOverlay(frame, src, 'porn', SHORTS_ID);
+
+    // FAIL-CLOSED: blur holds and a reveal path exists.
+    expect((frame as HTMLElement).dataset.mwModerated).toBe('blurred');
+    expect(
+      ((frame as HTMLElement).style.getPropertyValue('filter') || '').includes('blur('),
+    ).toBe(true);
+    expect(anyRevealOverlay()).not.toBeNull();
+  });
+
   it('tap-to-reveal clears same-src residue stamps on sibling nodes (C2c)', () => {
     // Historical defect (inverted by the C2c fix): after the orphan heal,
     // BOTH nodes carried mwModerated='blurred'; tapping reveal marked only

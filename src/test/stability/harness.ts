@@ -299,6 +299,11 @@ export interface MWTestProbe {
   getShortsVerdictMemorySize: () => number;
   reapplyOwnedContainerBlur: (card: Element, reason: string) => void;
   refreshShortsFreshnessOnReentry: (reason: string, options?: { force?: boolean; resetContext?: boolean }) => boolean;
+  performShortsExitSurfaceCleanup: (reason: string) => {
+    removedFlashOverlays: number;
+    clearedVeilMarks: number;
+    clearedPlayerResidue: number;
+  };
 }
 
 export interface InjectionResult {
@@ -383,6 +388,7 @@ export function injectScript(configOverrides?: Partial<InjectionConfig>): Inject
     },
     reapplyOwnedContainerBlur: reapplyOwnedContainerBlur,
     refreshShortsFreshnessOnReentry: refreshShortsFreshnessOnReentry,
+    performShortsExitSurfaceCleanup: performShortsExitSurfaceCleanup,
   };
   `;
 

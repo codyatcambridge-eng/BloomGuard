@@ -1889,6 +1889,43 @@ export const NativeWebViewBrowser = () => {
     if (!inShorts && wasInShorts) {
       disarmShortsLegacyFallbackProbe('shorts_exit');
       disarmShortsFirstEntryLatch('shorts_exit');
+      // FREEZE-OVERRIDE: host-side exit cleanup so frosted/white home after Shorts
+      // is cleared even if inject SPA poll is delayed.
+      if (executeScript) {
+        void executeScript(`
+          (function() {
+            try {
+              if (typeof window.__MW_SHORTS_EXIT_CLEANUP__ === 'function') {
+                var r = window.__MW_SHORTS_EXIT_CLEANUP__('host_shorts_exit');
+                return typeof r === 'string' ? r : JSON.stringify(r || {});
+              }
+              return 'NO_HOOK';
+            } catch (e) {
+              return 'ERR:' + String(e && e.message ? e.message : e);
+            }
+          })();
+        `).then((result) => {
+          console.log('[DIAG][SHORTS_EXIT][HOST] cleanup_result=' + String(result || 'null'));
+        }).catch((error) => {
+          console.warn('[DIAG][SHORTS_EXIT][HOST] cleanup_error', error);
+        });
+        // Second pass after YouTube finishes swapping the feed DOM.
+        window.setTimeout(() => {
+          if (!executeScript) return;
+          void executeScript(`
+            (function() {
+              try {
+                if (typeof window.__MW_SHORTS_EXIT_CLEANUP__ === 'function') {
+                  return JSON.stringify(window.__MW_SHORTS_EXIT_CLEANUP__('host_shorts_exit_400ms') || {});
+                }
+                return 'NO_HOOK';
+              } catch (e) {
+                return 'ERR';
+              }
+            })();
+          `).catch(() => undefined);
+        }, 400);
+      }
     }
   }, [
     webViewState.currentUrl,
@@ -1901,6 +1938,7 @@ export const NativeWebViewBrowser = () => {
     requestShortsReentryRefresh,
     forceFirstEntryShortsRequest,
     toDiagUrl,
+    executeScript,
   ]);
 
   useEffect(() => {
@@ -1961,6 +1999,65 @@ export const NativeWebViewBrowser = () => {
     currentView,
     webViewState.isOpen,
   ]);
+
+  // FREEZE-OVERRIDE (accuracy): push dial live into the active injection + flush
+  // thr-keyed caches. Without this, MW_ALREADY_ACTIVE reinject left old thr and
+  // Relaxed looked identical to Maximum.
+  const lastAppliedDialRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!settingsLoaded || !isNative || !webViewState.isOpen || !executeScript) return;
+    const level = localSettings.blur_dial;
+    // Skip re-fire for the same level; reset when webview closes so reopen re-applies.
+    if (lastAppliedDialRef.current === level) return;
+    lastAppliedDialRef.current = level;
+    moderationBridge.clearCache({
+      reason: 'blur_dial_change_' + level,
+      previousFamily: 'dial',
+      nextFamily: 'dial_' + level,
+    });
+    void executeScript(`
+      (function() {
+        try {
+          if (typeof window.__MW_APPLY_SENSITIVITY__ === 'function') {
+            return window.__MW_APPLY_SENSITIVITY__(${level}, 'host_dial_slider');
+          }
+          window.postMessage({
+            type: 'MW_BLUR_COMMAND',
+            command: 'SET_SENSITIVITY',
+            level: ${level},
+            reason: 'host_dial_slider',
+            timestamp: Date.now()
+          }, '*');
+          return 'POSTED';
+        } catch (e) {
+          return 'ERR:' + String(e && e.message ? e.message : e);
+        }
+      })();
+    `).then((result) => {
+      console.log(
+        '[DIAG][DIAL]',
+        'action=apply_sensitivity',
+        'level=' + level,
+        'result=' + String(result || 'null'),
+      );
+    }).catch((error) => {
+      console.warn('[DIAG][DIAL] apply_sensitivity_error', error);
+    });
+  }, [
+    settingsLoaded,
+    isNative,
+    webViewState.isOpen,
+    executeScript,
+    localSettings.blur_dial,
+    // Intentionally omit moderationBridge object identity — only dial should re-fire.
+    moderationBridge.clearCache,
+  ]);
+
+  useEffect(() => {
+    if (!webViewState.isOpen) {
+      lastAppliedDialRef.current = null;
+    }
+  }, [webViewState.isOpen]);
 
   const probeWebViewOverlayState = useCallback(async (reason: string) => {
     if (!isNative || !webViewState.isOpen || !executeScript) return;

@@ -259,10 +259,12 @@ const loadSegmentationModel = async (): Promise<BodyPixModel | null> => {
 
 const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
 
-const toDialBucket = (thresholds: AIThresholds): 'relaxed' | 'medium' | 'strict' => {
+const toDialBucket = (thresholds: AIThresholds): 'relaxed' | 'medium' | 'strict' | 'maximum' => {
+  // Map from dial thr tables: 0.85 / 0.65 / 0.45 / 0.25
   if (thresholds.sexy >= 0.8) return 'relaxed';
-  if (thresholds.sexy >= 0.5) return 'medium';
-  return 'strict';
+  if (thresholds.sexy >= 0.55) return 'medium';
+  if (thresholds.sexy >= 0.35) return 'strict';
+  return 'maximum';
 };
 
 const computeNsfwRisk = (porn: number, sexy: number, hentai: number): number => {
@@ -284,7 +286,7 @@ const isLikelySkinPixel = (r: number, g: number, b: number): boolean => {
 };
 
 const getSkinRatioThresholdForDial = (
-  dialBucket: 'relaxed' | 'medium' | 'strict',
+  dialBucket: 'relaxed' | 'medium' | 'strict' | 'maximum',
   settings: {
     segmentationSkinRatioRelaxed: number;
     segmentationSkinRatioMedium: number;
@@ -293,7 +295,9 @@ const getSkinRatioThresholdForDial = (
 ): number => {
   if (dialBucket === 'relaxed') return settings.segmentationSkinRatioRelaxed;
   if (dialBucket === 'medium') return settings.segmentationSkinRatioMedium;
-  return settings.segmentationSkinRatioStrict;
+  if (dialBucket === 'strict') return settings.segmentationSkinRatioStrict;
+  // Maximum: slightly more aggressive than strict skin gate
+  return Math.max(0.08, settings.segmentationSkinRatioStrict * 0.85);
 };
 
 const getImageDimensions = (image: HTMLImageElement | HTMLCanvasElement): { width: number; height: number } => {
@@ -731,9 +735,14 @@ export const useOnDeviceModeration = () => {
 
       // Handle string URL input
       if (typeof imageSource === 'string') {
-        cacheKey = imageSource;
-        const cacheDomain = getCacheDomainContext(cacheKey);
-        const cacheFamily = getCacheFamilyContext(cacheKey);
+        // FREEZE-OVERRIDE (accuracy): include dial thr in cache key so Relaxed≠Maximum.
+        cacheKey =
+          imageSource +
+          '|p' + String(thresholds.porn) +
+          '|s' + String(thresholds.sexy) +
+          '|h' + String(thresholds.hentai);
+        const cacheDomain = getCacheDomainContext(imageSource);
+        const cacheFamily = getCacheFamilyContext(imageSource);
         const previousHitDomain = cacheDiagRef.current.lastHitDomain;
         const siteSwitchedSincePriorHit = !!previousHitDomain && previousHitDomain !== cacheDomain;
         
@@ -838,7 +847,7 @@ export const useOnDeviceModeration = () => {
       const drawingScore = predMap['drawing'] || 0;
       const nsfwRisk = computeNsfwRisk(pornScore, sexyScore, hentaiScore);
       const dialBucket = toDialBucket(thresholds);
-      const strictMode = dialBucket === 'strict';
+      const strictMode = dialBucket === 'strict' || dialBucket === 'maximum';
       const inGrayZone = nsfwRisk >= SEGMENTATION_GRAY_ZONE_MIN && nsfwRisk <= SEGMENTATION_GRAY_ZONE_MAX;
       const forceStageB = consumeStageBForceNextCount();
       const liveDevOverride = import.meta.env.DEV ? readDevSegmentationSignalOverride() : null;
@@ -1248,9 +1257,11 @@ export const useOnDeviceModeration = () => {
       const explicitOverride = nsfwRisk >= NSFW_EXPLICIT_OVERRIDE_THRESHOLD;
 
       // ==== SWIMWEAR/SHIRTLESS LOGIC ====
-      // If Sexy is high and skin-density is high (with weak clothing signal), mark as unsafe.
+      // FREEZE-OVERRIDE (accuracy): use dial sexy thr (not fixed 0.55) so Relaxed≠Maximum.
+      // Still require skin-density + weak clothing so this is not a pure sexy shortcut.
+      const swimwearSexyGate = Math.max(Number(thresholds.sexy) || SWIMWEAR_SEXY_THRESHOLD, 0.15);
       const isSwimwearShirtless =
-        sexyScore > SWIMWEAR_SEXY_THRESHOLD &&
+        sexyScore > swimwearSexyGate &&
         signals.skinDensity >= MIN_SKIN_DENSITY_FOR_SWIMWEAR &&
         !signals.hasClothing;
 

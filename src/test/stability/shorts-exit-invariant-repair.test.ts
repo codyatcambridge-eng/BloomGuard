@@ -55,4 +55,52 @@ describe('Shorts exit blur/reveal invariant repair', () => {
     expect(hasBlurFilter(video)).toBe(true);
     expect(document.querySelector('.mw-reveal-overlay')).not.toBeNull();
   });
+
+  it('clears stuck Shorts flash overlay + player residue that white-screen home after exit', () => {
+    // Simulate YouTube keeping #shorts-player mounted under home after exit.
+    const player = document.createElement('div');
+    player.id = 'shorts-player';
+    const frame = document.createElement('ytm-reel-video-renderer');
+    frame.setAttribute('selected', '');
+    frame.dataset.mwFlashFrame = '1';
+    const video = document.createElement('video');
+    video.dataset.mwVeil = '1';
+    video.dataset.mwModerated = 'blurred';
+    video.classList.add('mw-blurred');
+    video.style.setProperty('filter', 'blur(40px)', 'important');
+    const flashOverlay = document.createElement('div');
+    flashOverlay.className = 'mw-flash-shorts-overlay';
+    flashOverlay.style.cssText = 'position:absolute;inset:0;z-index:9999;background:rgba(255,255,255,0.8)';
+    frame.appendChild(video);
+    frame.appendChild(flashOverlay);
+    player.appendChild(frame);
+    document.body.appendChild(player);
+
+    // Full-page inject overlay stuck enabled (frosted white screen).
+    const pageOverlay = document.createElement('div');
+    pageOverlay.id = 'mw-blur-overlay';
+    pageOverlay.className = 'mw-enabled';
+    pageOverlay.style.cssText = 'position:fixed;inset:0;opacity:1;display:block';
+    document.body.appendChild(pageOverlay);
+
+    // Portal reveal leftover from active Shorts.
+    const portal = document.createElement('div');
+    portal.id = 'mw-reveal-portal';
+    const portalOv = document.createElement('div');
+    portalOv.className = 'mw-reveal-overlay';
+    portal.appendChild(portalOv);
+    document.documentElement.appendChild(portal);
+
+    injection = injectScript();
+    // URL is home (harness default) — exit cleanup should run for still-mounted player.
+    const result = injection.probe.performShortsExitSurfaceCleanup('test_white_screen_exit');
+
+    expect(result.removedFlashOverlays).toBeGreaterThanOrEqual(1);
+    expect(document.querySelector('.mw-flash-shorts-overlay')).toBeNull();
+    expect(video.dataset.mwVeil).toBeUndefined();
+    expect(frame.dataset.mwFlashFrame).toBeUndefined();
+    expect(hasBlurFilter(video)).toBe(false);
+    expect(pageOverlay.classList.contains('mw-enabled')).toBe(false);
+    expect(portal.querySelector('.mw-reveal-overlay')).toBeNull();
+  });
 });

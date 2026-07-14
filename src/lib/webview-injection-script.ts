@@ -307,7 +307,10 @@ export interface AnatomicalPolicyInput {
   predictedLabel: string;
   sexyScore: number | null;
   pornScore: number | null;
+  hentaiScore?: number | null;
   anatomicalThreshold: number;
+  /** Optional dial thr for this label; anatomical must not raise the bar above dial. */
+  dialThreshold?: number | null;
   forceUnsafe: boolean;
   failClosed: boolean;
   enabled: boolean;
@@ -330,7 +333,14 @@ function normalizePolicyLabel(label: string): string {
 
 function isMvpAllowedPolicyLabel(label: string): boolean {
   const normalized = normalizePolicyLabel(label);
-  return MVP_UNSAFE_CATEGORIES.has(normalized) || normalized === 'porn' || normalized === 'hentai';
+  return (
+    MVP_UNSAFE_CATEGORIES.has(normalized) ||
+    normalized === 'porn' ||
+    normalized === 'hentai' ||
+    normalized === 'sexy' ||
+    normalized === 'suggestive' ||
+    normalized === 'partial_nudity'
+  );
 }
 
 export function applyFailOpenAndModePolicyDecision(input: FailOpenModePolicyInput): { shouldBlur: boolean; reason: string | null } {
@@ -360,11 +370,20 @@ export function applyAnatomicalThresholdDecision(input: AnatomicalPolicyInput): 
   if (!input.shouldApplyBlur || input.forceUnsafe) {
     return { shouldBlur: !!input.shouldApplyBlur, reason: null };
   }
-  if (input.predictedLabel !== 'sexy' && input.predictedLabel !== 'porn') {
+  if (
+    input.predictedLabel !== 'sexy' &&
+    input.predictedLabel !== 'porn' &&
+    input.predictedLabel !== 'hentai'
+  ) {
     return { shouldBlur: !!input.shouldApplyBlur, reason: null };
   }
 
-  const score = input.predictedLabel === 'sexy' ? input.sexyScore : input.pornScore;
+  const score =
+    input.predictedLabel === 'sexy'
+      ? input.sexyScore
+      : input.predictedLabel === 'hentai'
+        ? input.hentaiScore
+        : input.pornScore;
   if (score === null || !Number.isFinite(score)) {
     if (input.failClosed && input.enabled && input.sensitivity > 0) {
       return { shouldBlur: true, reason: input.predictedLabel + '_scoreNaN/failClosed' };
@@ -372,8 +391,13 @@ export function applyAnatomicalThresholdDecision(input: AnatomicalPolicyInput): 
     return { shouldBlur: false, reason: input.predictedLabel + '_scoreNaN/failOpen' };
   }
 
-  if (score < input.anatomicalThreshold) {
-    return { shouldBlur: false, reason: input.predictedLabel + '<anatomicalThreshold' };
+  // Never raise bar above dial thr (dial thr optional; falls back to anatomical only).
+  const dialThr = Number(input.dialThreshold);
+  const keepFloor = Number.isFinite(dialThr)
+    ? Math.min(input.anatomicalThreshold, dialThr)
+    : input.anatomicalThreshold;
+  if (score < keepFloor) {
+    return { shouldBlur: false, reason: input.predictedLabel + '<anatomicalFloor thr=' + keepFloor };
   }
 
   return { shouldBlur: true, reason: null };
@@ -1464,11 +1488,67 @@ export function generateModerationScript(config: InjectionConfig): string {
     applySensitivityLevel(nextLevel, 'floating_toggle_cycle');
   }
 
+  // FREEZE-OVERRIDE (accuracy): immediately apply dial thr to already-stamped nodes
+  // using stored mw*Score datasets so dial-down unblurs without waiting for host.
+  function reevaluateStampedNodesForDial(reason) {
+    const thr = effectiveThresholds || getThresholdsForLevel(CONFIG.sensitivity || 0);
+    let released = 0;
+    let kept = 0;
+    let skipped = 0;
+    try {
+      const nodes = document.querySelectorAll(
+        '[data-mw-moderated="blurred"][data-mw-src], .mw-blurred[data-mw-src]'
+      );
+      for (let i = 0; i < nodes.length; i += 1) {
+        const el = nodes[i];
+        if (!el || el.nodeType !== 1 || !el.isConnected) continue;
+        // Never un-do intentional user reveal.
+        if (String(el.dataset.mwModerated || '') === 'revealed') continue;
+        const porn = toFiniteNumber(el.dataset.mwPornScore);
+        const sexy = toFiniteNumber(el.dataset.mwSexyScore);
+        const hentai = toFiniteNumber(el.dataset.mwHentaiScore);
+        if (porn === null && sexy === null && hentai === null) {
+          skipped += 1;
+          continue;
+        }
+        const hit =
+          (porn !== null && porn > Number(thr.porn)) ||
+          (sexy !== null && sexy > Number(thr.sexy)) ||
+          (hentai !== null && hentai > Number(thr.hentai));
+        const src = String(el.dataset.mwSrc || '');
+        if (!hit) {
+          try {
+            clearAllBlurAndOverlay(el, src, 'dial_reeval_safe:' + (reason || 'unknown'), 'safe');
+            released += 1;
+          } catch (e) {
+            skipped += 1;
+          }
+        } else {
+          kept += 1;
+        }
+      }
+    } catch (e) {}
+    console.log(
+      '[MW][DIAL_REEVAL]',
+      'reason=' + (reason || 'unknown'),
+      'thr=' + JSON.stringify(thr),
+      'released=' + released,
+      'kept=' + kept,
+      'skippedNoScores=' + skipped
+    );
+    return { released: released, kept: kept, skipped: skipped };
+  }
+
+  // FREEZE-OVERRIDE (accuracy): dial must retune live. Host slider previously
+  // reinjected into MW_ALREADY_ACTIVE without updating CONFIG, so Relaxed≈Maximum.
+  // Clear discovery dedupe + rescan with new effectiveThresholds on every change.
   function applySensitivityLevel(level, reason) {
     const normalized = Math.min(4, Math.max(0, Math.round(level)));
-    if (normalized === CONFIG.sensitivity && (normalized > 0) === CONFIG.enabled) {
+    const force = String(reason || '').indexOf('host_dial') === 0 || String(reason || '').indexOf('force_') === 0;
+    if (!force && normalized === CONFIG.sensitivity && (normalized > 0) === CONFIG.enabled) {
       return;
     }
+    const previousLevel = CONFIG.sensitivity;
     CONFIG.sensitivity = normalized;
     CONFIG.enabled = normalized > 0;
     CONFIG.scanEnabled = CONFIG.enabled || CONFIG.flashShieldV1;
@@ -1479,11 +1559,39 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (toggle) {
       updateSensitivityToggleButton(toggle);
     }
-    console.log('[MW] Filter Intensity set to', normalized, 'label=' + getSensitivityLabel(normalized), 'reason=' + (reason || 'toggle'));
-    if (CONFIG.scanEnabled) {
+    // Discovery cache is thr-agnostic — without clearing, dial changes never re-queue.
+    try {
+      if (state && state.scanned && typeof state.scanned.clear === 'function') {
+        state.scanned.clear();
+      }
+    } catch (e) {}
+    console.log(
+      '[MW] Filter Intensity set to',
+      normalized,
+      'label=' + getSensitivityLabel(normalized),
+      'prev=' + previousLevel,
+      'thr=' + JSON.stringify(effectiveThresholds),
+      'reason=' + (reason || 'toggle')
+    );
+    if (normalized === 0) {
+      try {
+        if (typeof cleanupBloomGuardVisualModeration === 'function') {
+          cleanupBloomGuardVisualModeration('sensitivity_off');
+        }
+      } catch (e) {}
+    } else if (CONFIG.scanEnabled) {
+      // Instant dial-down release using stored scores (home + active Shorts).
+      try {
+        reevaluateStampedNodesForDial(reason || 'toggle');
+      } catch (e) {}
       scanFullPage();
       if (isYouTube()) {
         scanYouTubeThumbnails();
+      }
+      if (isShortsModeActive()) {
+        try {
+          scanActiveShortsPlayerContainer('sensitivity_change:' + (reason || 'toggle'));
+        } catch (e) {}
       }
     }
     postToHost({
@@ -1493,6 +1601,13 @@ export function generateModerationScript(config: InjectionConfig): string {
       timestamp: Date.now(),
     });
   }
+
+  try {
+    window.__MW_APPLY_SENSITIVITY__ = function(level, reason) {
+      applySensitivityLevel(level, reason || 'host_dial');
+      return 'OK:' + String(CONFIG.sensitivity);
+    };
+  } catch (e) {}
 
   function sendBlurReady(reason) {
     if (!DOM_OVERLAY_ENABLED) return;
@@ -1533,6 +1648,14 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
     if (message.command === 'PING') {
       sendBlurReady('ping');
+      return true;
+    }
+    if (message.command === 'SET_SENSITIVITY') {
+      const level = Number(message.level);
+      applySensitivityLevel(
+        Number.isFinite(level) ? level : CONFIG.sensitivity,
+        message.reason || 'host_dial_command'
+      );
       return true;
     }
 
@@ -7422,6 +7545,70 @@ export function generateModerationScript(config: InjectionConfig): string {
     runShortsHealthHealForContainer(container, reason || 'interval');
   }
 
+  // FREEZE-OVERRIDE: bounded retry burst for intermittent blur-without-reveal.
+  // Owner-token defer / swipe DOM churn can miss the first createRevealOverlay;
+  // health heal may also be in giveup. These retries only attach reveal — never unblur.
+  function scheduleActiveShortsRevealPairingBurst(targetNode, src, category, itemId, reason) {
+    if (!isShortsModeActive() || !targetNode || targetNode.nodeType !== 1) return;
+    if (targetNode.dataset && targetNode.dataset.mwPairingBurstScheduled === 'true') return;
+    try {
+      if (targetNode.dataset) targetNode.dataset.mwPairingBurstScheduled = 'true';
+    } catch (e) {}
+    const delays = [0, 60, 180, 450, 900, 1600];
+    for (let i = 0; i < delays.length; i += 1) {
+      const delayMs = delays[i];
+      setTimeout(function() {
+        try {
+          if (!isVisualModerationActive() || !isShortsModeActive()) return;
+          if (!targetNode || !targetNode.isConnected) return;
+          if (String((targetNode.dataset && targetNode.dataset.mwModerated) || '') !== 'blurred') return;
+          if (isRevealedForSource(src, targetNode)) return;
+          if (findRevealOverlayForElement(targetNode, src)) {
+            try {
+              if (targetNode.dataset) targetNode.dataset.mwPairingBurstScheduled = 'false';
+            } catch (e2) {}
+            return;
+          }
+          // Clear defer latches so createRevealOverlay can proceed.
+          try {
+            targetNode.dataset.mwOwnerDeferCount = '0';
+            targetNode.dataset.mwOwnerDeferScheduled = 'false';
+            targetNode.dataset.mwOwnerMismatchCount = '0';
+            targetNode.dataset.mwOwnerMismatchRetryScheduled = 'false';
+          } catch (e3) {}
+          healActiveShortsRevealPairing(
+            targetNode,
+            src,
+            category || 'flagged',
+            itemId || '',
+            'pairing_burst:' + (reason || 'unknown') + ':t' + delayMs
+          );
+          if (findRevealOverlayForElement(targetNode, src)) {
+            try {
+              if (targetNode.dataset) targetNode.dataset.mwPairingBurstScheduled = 'false';
+            } catch (e4) {}
+            console.log(
+              '[DIAG][REVEAL_UI] pairing_burst_success',
+              'delayMs=' + delayMs,
+              'reason=' + (reason || 'unknown'),
+              'node=' + getDiagNodeId(targetNode)
+            );
+          } else if (delayMs === delays[delays.length - 1]) {
+            try {
+              if (targetNode.dataset) targetNode.dataset.mwPairingBurstScheduled = 'false';
+            } catch (e5) {}
+            console.warn(
+              '[DIAG][REVEAL_UI] pairing_burst_exhausted',
+              'reason=' + (reason || 'unknown'),
+              'node=' + getDiagNodeId(targetNode),
+              'src=' + String(src || '').substring(0, 120)
+            );
+          }
+        } catch (e) {}
+      }, delayMs);
+    }
+  }
+
   // FREEZE-OVERRIDE (call-site only): surgical active-Shorts reveal pairing heal.
   // Does NOT rewrite createRevealOverlay / resolveShortsStableBlurTarget bodies.
   // Refreshes owner context then invokes the frozen createRevealOverlay on the
@@ -9582,7 +9769,15 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function isMvpAllowedCategory(label) {
     const raw = normalizePolicyCategory(label);
-    return FORCE_UNSAFE_CATEGORIES.has(raw) || isExplicitUnsafeLabel(raw);
+    // FREEZE-OVERRIDE (accuracy): include sexy so dial thr on suggestive content
+    // is not flattened to binary porn/hentai-only. Swimwear family still allowed.
+    return (
+      FORCE_UNSAFE_CATEGORIES.has(raw) ||
+      isExplicitUnsafeLabel(raw) ||
+      raw === 'sexy' ||
+      raw === 'suggestive' ||
+      raw === 'partial_nudity'
+    );
   }
 
   function applyFailOpenAndModePolicy(rawShouldBlur, rawCategory, predictedLabel, isErrorResult) {
@@ -9613,11 +9808,34 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!shouldApplyBlur || forceUnsafe) {
       return { shouldBlur: !!shouldApplyBlur, reason: null };
     }
-    if (normalizedPredicted !== 'sexy' && normalizedPredicted !== 'porn') {
+    if (
+      normalizedPredicted !== 'sexy' &&
+      normalizedPredicted !== 'porn' &&
+      normalizedPredicted !== 'hentai'
+    ) {
       return { shouldBlur: !!shouldApplyBlur, reason: null };
     }
 
-    const score = normalizedPredicted === 'sexy' ? unsafeScores.sexy : unsafeScores.porn;
+    const thrTable = effectiveThresholds || getThresholdsForLevel(CONFIG.sensitivity || 0);
+    const dialThr =
+      normalizedPredicted === 'sexy'
+        ? Number(thrTable.sexy)
+        : normalizedPredicted === 'hentai'
+          ? Number(thrTable.hentai)
+          : Number(thrTable.porn);
+    // FREEZE-OVERRIDE (accuracy): never raise the bar above the dial thr.
+    // Old fixed 0.60 floor made Maximum≈Strict≈binary (scores 0.2–0.59 unblurred).
+    const keepFloor = Math.min(
+      Number(CONFIG.anatomicalThreshold) || 0.6,
+      Number.isFinite(dialThr) ? dialThr : 0.6
+    );
+
+    const score =
+      normalizedPredicted === 'sexy'
+        ? unsafeScores.sexy
+        : normalizedPredicted === 'hentai'
+          ? unsafeScores.hentai
+          : unsafeScores.porn;
     if (score === null || !Number.isFinite(score)) {
       if (CONFIG.failClosed && CONFIG.enabled && CONFIG.sensitivity > 0) {
         return { shouldBlur: true, reason: normalizedPredicted + '_scoreNaN/failClosed' };
@@ -9625,8 +9843,11 @@ export function generateModerationScript(config: InjectionConfig): string {
       return { shouldBlur: false, reason: normalizedPredicted + '_scoreNaN/failOpen' };
     }
 
-    if (score < CONFIG.anatomicalThreshold) {
-      return { shouldBlur: false, reason: normalizedPredicted + '<anatomicalThreshold' };
+    if (score < keepFloor) {
+      return {
+        shouldBlur: false,
+        reason: normalizedPredicted + '<anatomicalFloor thr=' + keepFloor + ' dial=' + dialThr,
+      };
     }
 
     return { shouldBlur: true, reason: null };
@@ -9900,6 +10121,13 @@ export function generateModerationScript(config: InjectionConfig): string {
         }
         // Diagnostics-only: capture residual blur-without-reveal after heal attempt.
         if (element.isConnected && !findRevealOverlayForElement(element, src)) {
+          scheduleActiveShortsRevealPairingBurst(
+            element,
+            src,
+            category || 'flagged',
+            itemId || '',
+            'applyBlur_already_hard_blurred_orphan'
+          );
           const residualOverlayState = getDiagOverlayState(element);
           const residualGap = classifyActiveShortsRevealGap(element, residualOverlayState, {
             reason: 'applyBlur_already_hard_blurred_no_reveal',
@@ -10074,6 +10302,15 @@ export function generateModerationScript(config: InjectionConfig): string {
         );
       }
       if (shortsMode && element.isConnected && !findRevealOverlayForElement(element, src)) {
+        // Variable device orphan: schedule fail-closed pairing burst (home Shorts exit
+        // and swipe races often miss the first createRevealOverlay only).
+        scheduleActiveShortsRevealPairingBurst(
+          element,
+          src,
+          category || 'flagged',
+          itemId || '',
+          'applyBlur_post_create_orphan'
+        );
         const postCreateOverlayState = getDiagOverlayState(element);
         const postCreateGap = classifyActiveShortsRevealGap(element, postCreateOverlayState, {
           reason: 'applyBlur_post_create_no_reveal',
@@ -10503,7 +10740,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           element.dataset.mwOwnerDeferScheduled = 'false';
           shortsOwnerToken = forcedToken;
         } else {
-          // Container not yet resolvable: defer in 100ms steps as a safety net (up to 600ms).
+          // Container not yet resolvable: defer briefly, then fail-closed to pairing burst.
           const deferCountRaw = Number(element.dataset.mwOwnerDeferCount || '0');
           const deferCount = Number.isFinite(deferCountRaw) ? deferCountRaw : 0;
           if (deferCount < 6) {
@@ -10529,17 +10766,40 @@ export function generateModerationScript(config: InjectionConfig): string {
             }
             return;
           }
-          // All defers exhausted; health heal will retry when conditions improve.
+          // FREEZE-OVERRIDE: do NOT leave orphan blur. Force a provisional owner token
+          // and continue into overlay create; pairing burst covers residual races.
           element.dataset.mwOwnerDeferCount = '0';
           element.dataset.mwOwnerDeferScheduled = 'false';
-          if (DIAG_YT_BLUR) {
-            console.log(
-              '[DIAG][REVEAL_OWNER] context_force_failed',
-              'node=' + getDiagNodeId(element),
-              'src=' + String(src || '').substring(0, 180)
+          try {
+            setShortsBlurContextForNode(
+              element,
+              src,
+              category || 'flagged',
+              itemId,
+              null,
+              String(element.dataset.mwShortsStableSelector || '') || null,
+              'createRevealOverlay_defer_exhausted_force'
             );
+          } catch (e) {}
+          const exhaustedCtx = getShortsBlurContextForNode(element);
+          const exhaustedToken = exhaustedCtx && exhaustedCtx.ownerToken ? String(exhaustedCtx.ownerToken) : '';
+          if (exhaustedToken) {
+            element.dataset.mwShortsOwnerToken = exhaustedToken;
+            shortsOwnerToken = exhaustedToken;
+          } else {
+            // Last resort provisional token so overlay attach is not blocked.
+            const provisional = 'shorts_owner|provisional|' + getDiagNodeId(element) + '|' + String(src || '').substring(0, 64);
+            element.dataset.mwShortsOwnerToken = provisional;
+            shortsOwnerToken = provisional;
           }
-          return;
+          console.warn(
+            '[DIAG][REVEAL_OWNER] context_force_proceed',
+            'node=' + getDiagNodeId(element),
+            'token=' + String(shortsOwnerToken || '').substring(0, 120),
+            'src=' + String(src || '').substring(0, 180)
+          );
+          scheduleActiveShortsRevealPairingBurst(element, src, category, itemId, 'context_defer_exhausted');
+          // Fall through to overlay creation with provisional/forced token.
         }
       } else {
         // Both tokens present but different — video transitioned mid-blur.
@@ -10571,10 +10831,36 @@ export function generateModerationScript(config: InjectionConfig): string {
           }
           return;
         }
+        // FREEZE-OVERRIDE (fail-closed): never unblur a positive on owner-token mismatch.
+        // Align element token to the live active context (or provisional) and attach reveal.
         element.dataset.mwOwnerMismatchCount = '0';
         element.dataset.mwOwnerMismatchRetryScheduled = 'false';
-        clearAllBlurAndOverlay(element, src || (activeContext && activeContext.src) || '', 'createRevealOverlay_owner_mismatch', 'safe');
-        return;
+        if (activeOwnerToken) {
+          element.dataset.mwShortsOwnerToken = activeOwnerToken;
+          shortsOwnerToken = activeOwnerToken;
+        } else {
+          try {
+            setShortsBlurContextForNode(
+              element,
+              src,
+              category || 'flagged',
+              itemId,
+              null,
+              String(element.dataset.mwShortsStableSelector || '') || null,
+              'createRevealOverlay_mismatch_force'
+            );
+          } catch (e) {}
+          const fixed = getShortsBlurContextForNode(element);
+          shortsOwnerToken = fixed && fixed.ownerToken ? String(fixed.ownerToken) : String(element.dataset.mwShortsOwnerToken || '');
+          if (shortsOwnerToken) element.dataset.mwShortsOwnerToken = shortsOwnerToken;
+        }
+        console.warn(
+          '[DIAG][REVEAL_OWNER] mismatch_force_align',
+          'node=' + getDiagNodeId(element),
+          'token=' + String(shortsOwnerToken || '').substring(0, 120)
+        );
+        scheduleActiveShortsRevealPairingBurst(element, src, category, itemId, 'owner_token_mismatch');
+        // Fall through — do not clearAllBlurAndOverlay.
       }
     }
     if (DIAG_YT_BLUR && element.dataset.mwModerated !== 'blurred') {
@@ -11723,22 +12009,28 @@ export function generateModerationScript(config: InjectionConfig): string {
       // ======== Neutral fast-pass removed (strict mode) ========
 
       
-      // ======== ANATOMICAL LOGIC ========
-      // Only maintain blur if Sexy or Porn > 0.60
+      // ======== DIAL-FIRST DECISION ========
+      // FREEZE-OVERRIDE (accuracy): when porn/sexy/hentai scores exist, dial thr is
+      // the single source of truth for home + active Shorts. Prior host_safe_preserved
+      // (dial<3) and forceUnsafe swimwear made the dial feel black-and-white.
       let shouldApplyBlur = shouldBlur;
       let decisionReason = hostDecisionReason || reason || '';
       const forceUnsafe = FORCE_UNSAFE_CATEGORIES.has(rawCategory);
+      const anyUnsafeScore =
+        (unsafeScores.porn !== null && Number.isFinite(unsafeScores.porn)) ||
+        (unsafeScores.sexy !== null && Number.isFinite(unsafeScores.sexy)) ||
+        (unsafeScores.hentai !== null && Number.isFinite(unsafeScores.hentai));
+      // Hit if ANY unsafe channel exceeds its dial thr (not only predicted top label).
+      const dialAnyHit =
+        (unsafeScores.porn !== null && unsafeScores.porn > Number(surfaceThresholds.porn)) ||
+        (unsafeScores.sexy !== null && unsafeScores.sexy > Number(surfaceThresholds.sexy)) ||
+        (unsafeScores.hentai !== null && unsafeScores.hentai > Number(surfaceThresholds.hentai));
 
-      // Prefer explicit threshold evaluation when label + score are available.
-      // Directionality: score > threshold => blur.
-      //
-      // Guardrail: preserve host-safe decisions by default.
-      // Only allow threshold-based escalation from safe->blur in strict/max sensitivity
-      // or when failClosed is explicitly enabled.
-      const allowSafeToBlurEscalation = CONFIG.failClosed || CONFIG.sensitivity >= 3;
-      if (!shouldBlur && !allowSafeToBlurEscalation) {
-        shouldApplyBlur = false;
-        decisionReason = 'host_safe_preserved';
+      if (anyUnsafeScore) {
+        shouldApplyBlur = !!dialAnyHit;
+        decisionReason = dialAnyHit
+          ? (thresholdHit ? (predictedLabel + '>=thr') : 'dial_any_channel_hit')
+          : 'dial_all_channels_below';
       } else if (forceUnsafe && shouldBlur) {
         shouldApplyBlur = true;
         decisionReason = 'forceUnsafeCategory/' + rawCategory;
@@ -11748,6 +12040,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       } else if (thresholdUsed !== null && labelScoreUsed === null) {
         shouldApplyBlur = false;
         decisionReason = 'NaN/default';
+      } else {
+        shouldApplyBlur = !!shouldBlur;
+        decisionReason = decisionReason || (shouldBlur ? 'host_blur' : 'host_safe');
       }
 
       const anatomicalDecision = applyAnatomicalThreshold(
@@ -11938,6 +12233,18 @@ export function generateModerationScript(config: InjectionConfig): string {
           markSafeResolved(src);
           // Remove soft blur if result is safe
           removeSoftBlur(element, src);
+          // FREEZE-OVERRIDE (accuracy): dial-down / thr re-eval must clear HARD blur too.
+          // removeSoftBlur alone left hard-blurred positives stuck → dial felt binary.
+          if (
+            preDecisionState === 'blurred' ||
+            element.classList.contains('mw-blurred') ||
+            preDecisionHasBlur ||
+            String(element.dataset.mwModerated || '') === 'blurred'
+          ) {
+            try {
+              clearAllBlurAndOverlay(element, src, 'classifier_safe_or_dial_below:' + (decisionReason || 'safe'), 'safe');
+            } catch (e) {}
+          }
           if (mvpMainSurface) {
             const safeCard = getOwnedCardContainerFromNode(element);
             if (safeCard) {
@@ -13730,6 +14037,132 @@ export function generateModerationScript(config: InjectionConfig): string {
     } catch (e) {}
   }
 
+  // FREEZE-OVERRIDE: Active Shorts exit must not leave a frosted/white home surface.
+  // YouTube often keeps #shorts-player mounted under home. Flash shorts overlays
+  // (absolute inset 0, z-index huge) + full-page mw-blur-overlay + veil stamps
+  // then look like "page not loading" or mass thumbnail blur.
+  function performShortsExitSurfaceCleanup(reason) {
+    const tag = String(reason || 'leave_shorts');
+    let removedFlashOverlays = 0;
+    let clearedVeilMarks = 0;
+    let clearedPlayerResidue = 0;
+    try {
+      // 1) Never leave the fullscreen inject overlay armed on home/results.
+      try {
+        setOverlayEnabled(false, 'shorts_exit:' + tag);
+      } catch (e) {}
+
+      // 2) Kill adaptive shorts watch / health heal so they don't re-stamp residue.
+      try {
+        stopAdaptiveShortsOverlayWatch('shorts_exit:' + tag);
+      } catch (e) {}
+      try {
+        stopShortsHealthHealInterval('shorts_exit:' + tag);
+      } catch (e) {}
+
+      // 3) Remove frosted Shorts player overlays (these are the white-screen culprit).
+      document.querySelectorAll('.' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS).forEach(function(node) {
+        if (node && node.parentElement) {
+          try {
+            node.parentElement.removeChild(node);
+            removedFlashOverlays += 1;
+          } catch (e) {}
+        }
+      });
+
+      // 4) Clear flash/veil marks on the still-mounted Shorts player shell.
+      document.querySelectorAll(
+        '#shorts-player [data-mw-veil="1"],' +
+        '#shorts-player [data-mw-flash-frame="1"],' +
+        '#shorts-player [data-mw-flash-positive="1"],' +
+        'ytm-reel-video-renderer[data-mw-flash-frame="1"],' +
+        'ytd-reel-video-renderer[data-mw-flash-frame="1"],' +
+        'ytm-reel-video-renderer [data-mw-veil="1"],' +
+        'ytd-reel-video-renderer [data-mw-veil="1"]'
+      ).forEach(function(node) {
+        if (!node || node.nodeType !== 1) return;
+        try {
+          if (node.dataset.mwVeil === '1') {
+            node.removeAttribute('data-mw-veil');
+            clearedVeilMarks += 1;
+          }
+          if (node.dataset.mwFlashFrame === '1') {
+            node.removeAttribute('data-mw-flash-frame');
+            clearedVeilMarks += 1;
+          }
+          if (node.dataset.mwFlashPositive === '1') {
+            node.removeAttribute('data-mw-flash-positive');
+          }
+          node.removeAttribute('data-mw-flash-identity');
+        } catch (e) {}
+      });
+
+      // 5) Clear hard/soft blur residue that only belongs to the active Shorts player.
+      // Do NOT touch main-feed owned positives (repairNonShorts handles those carefully).
+      document.querySelectorAll(
+        '#shorts-player video, #shorts-player img, #shorts-player .mw-blurred, #shorts-player .mw-softblur,' +
+        '#shorts-player [data-mw-moderated="blurred"], #shorts-player [data-mw-moderated="softblur"],' +
+        'ytm-reel-video-renderer video, ytd-reel-video-renderer video,' +
+        'ytm-reel-video-renderer.mw-blurred, ytd-reel-video-renderer.mw-blurred'
+      ).forEach(function(node) {
+        if (!node || node.nodeType !== 1 || !node.isConnected) return;
+        // Skip if this node is also a main-feed thumbnail card (rare dual match).
+        try {
+          if (typeof node.closest === 'function') {
+            if (node.closest('ytm-rich-item-renderer, ytd-rich-item-renderer, ytm-video-with-context-renderer, ytd-video-renderer, ytm-compact-video-renderer')) {
+              return;
+            }
+          }
+        } catch (e) {}
+        try {
+          const src = getBloomGuardMarkedNodeSrc(node);
+          if (clearAllBlurAndOverlay(node, src, 'shorts_exit_player_residue:' + tag, 'safe')) {
+            clearedPlayerResidue += 1;
+          } else {
+            node.style.removeProperty('filter');
+            node.style.removeProperty('-webkit-filter');
+            node.style.removeProperty('backdrop-filter');
+            node.style.removeProperty('-webkit-backdrop-filter');
+            node.classList.remove('mw-blurred');
+            node.classList.remove('mw-softblur');
+            node.removeAttribute('data-mw-moderated');
+            clearedPlayerResidue += 1;
+          }
+        } catch (e) {}
+      });
+
+      // 6) Portal reveal overlays must not remain on home (sweep handles mode; force empty).
+      try {
+        const portal = document.getElementById(REVEAL_PORTAL_ID);
+        if (portal) {
+          while (portal.firstChild) portal.removeChild(portal.firstChild);
+        }
+      } catch (e) {}
+
+      // 7) Standard home/results blur↔reveal invariant repair.
+      repairNonShortsBlurRevealInvariant('shorts_exit_cleanup:' + tag);
+    } catch (e) {}
+    console.log(
+      '[DIAG][SHORTS_EXIT_CLEANUP]',
+      'reason=' + tag,
+      'removedFlashOverlays=' + removedFlashOverlays,
+      'clearedVeilMarks=' + clearedVeilMarks,
+      'clearedPlayerResidue=' + clearedPlayerResidue,
+      'url=' + String(window.location.href || '').substring(0, 160)
+    );
+    return {
+      removedFlashOverlays: removedFlashOverlays,
+      clearedVeilMarks: clearedVeilMarks,
+      clearedPlayerResidue: clearedPlayerResidue,
+    };
+  }
+
+  try {
+    window.__MW_SHORTS_EXIT_CLEANUP__ = function(reason) {
+      return performShortsExitSurfaceCleanup(reason || 'host_shorts_exit');
+    };
+  } catch (e) {}
+
   function getBloomGuardMarkedNodeSrc(node) {
     if (!node || node.nodeType !== 1) return '';
     const source = getDiagSourceFields(node);
@@ -13972,12 +14405,20 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (previousIsShorts !== nextIsShorts) {
         sweepOrphanedModeOverlays(nextIsShorts ? 'enter_shorts' : 'leave_shorts');
         if (previousIsShorts && !nextIsShorts) {
-          repairNonShortsBlurRevealInvariant('leave_shorts_immediate');
+          // Immediate aggressive cleanup (flash overlays + player residue + portal).
+          performShortsExitSurfaceCleanup('leave_shorts_immediate');
           scheduleInitTimeout('shortsExitInvariantRepair', function() {
-            repairNonShortsBlurRevealInvariant('leave_shorts_250ms');
+            performShortsExitSurfaceCleanup('leave_shorts_250ms');
           }, 250);
           scheduleInitTimeout('shortsExitInvariantRepair', function() {
-            repairNonShortsBlurRevealInvariant('leave_shorts_1000ms');
+            performShortsExitSurfaceCleanup('leave_shorts_1000ms');
+            // Final home scan so thumbs rehydrate clean after exit.
+            try {
+              if (CONFIG.scanEnabled) {
+                scanFullPage();
+                if (isYouTube()) scanYouTubeThumbnails();
+              }
+            } catch (e) {}
           }, 1000);
         }
       }

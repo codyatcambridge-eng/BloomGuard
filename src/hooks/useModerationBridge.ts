@@ -90,6 +90,14 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
   const { isReady: modelReady, classifyImage, modelState, clearCache: clearOnDeviceCache } = useOnDeviceModeration();
   const { settings, getDialThresholds, isModerationEnabled, getModerationConfig } = useLocalSettings();
 
+  const makeThrCacheKey = useCallback((
+    src: string,
+    thr?: { porn: number; sexy: number; hentai: number },
+  ) => {
+    const t = thr || getDialThresholds();
+    return src + '|p' + String(t.porn) + '|s' + String(t.sexy) + '|h' + String(t.hentai);
+  }, [getDialThresholds]);
+
   // Update ready state when model loads
   useEffect(() => {
     setState(prev => ({ ...prev, isReady: modelReady }));
@@ -195,27 +203,7 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
     const navId = Number.isFinite(context?.navId) ? String(context?.navId) : 'n/a';
     const pageEpoch = Number.isFinite(context?.pageEpoch) ? String(context?.pageEpoch) : 'n/a';
 
-    // Check cache
-    if (resultsCache.current.has(src)) {
-      console.log('[MW-Bridge] Cache hit:', src.substring(0, 50));
-      console.log(
-        '[DIAG][CACHE]',
-        'cache_hit_bridge',
-        'domain=' + cacheDomain,
-        'keyFamily=' + cacheFamily,
-        'domainFamily=' + cacheFamily,
-        'siteSwitchedSincePriorHit=' + siteSwitchedSincePriorHit,
-        'previousHitDomain=' + (previousHitDomain || 'none'),
-        'requestId=' + (context?.requestId || 'n/a'),
-        'itemId=' + (context?.itemId || 'n/a'),
-        'sourceType=' + (context?.sourceType || 'n/a'),
-        'navId=' + navId,
-        'pageEpoch=' + pageEpoch,
-      );
-      cacheDiagRef.current.lastHitDomain = cacheDomain;
-      cacheDiagRef.current.lastHitFamily = cacheFamily;
-      return resultsCache.current.get(src)!;
-    }
+    // Cache is thr-keyed below (src alone made dial changes a no-op).
     console.log(
       '[DIAG][CACHE]',
       'cache_miss_bridge',
@@ -232,6 +220,13 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
     );
 
     const effectiveThresholds = thresholds || getDialThresholds();
+    // FREEZE-OVERRIDE (accuracy): thr must be part of cache key or dial changes
+    // return stale shouldBlur (Relaxed≡Maximum symptom).
+    const thrCacheKey = makeThrCacheKey(src, effectiveThresholds);
+    if (resultsCache.current.has(thrCacheKey)) {
+      console.log('[MW-Bridge] Cache hit (thr-keyed):', src.substring(0, 50));
+      return resultsCache.current.get(thrCacheKey)!;
+    }
     const startTime = performance.now();
 
     try {
@@ -245,7 +240,8 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
       }
 
       const scanResult = convertResult(src, result, inferenceTime);
-      resultsCache.current.set(src, scanResult);
+      resultsCache.current.set(thrCacheKey, scanResult);
+      // Keep src-only key only as last-known (optional); thr-keyed is authoritative.
 
       onSignal?.({
         Porn: scanResult.predictions?.Porn ?? scanResult.predictions?.porn ?? 0,
@@ -276,7 +272,7 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
       console.debug('[MW-Bridge] Scan error:', src.substring(0, 50), errorMsg);
       return null;
     }
-  }, [modelReady, isModerationEnabled, getDialThresholds, classifyImage, convertResult, onImageBlurred, onSignal]);
+  }, [modelReady, isModerationEnabled, getDialThresholds, makeThrCacheKey, classifyImage, convertResult, onImageBlurred, onSignal]);
 
   /**
    * Process scan queue with concurrency limit
@@ -284,7 +280,7 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
   const processQueue = useCallback(async () => {
     while (processingRef.current < maxConcurrent && scanQueue.current.length > 0) {
       const src = scanQueue.current.shift();
-      if (src && !resultsCache.current.has(src)) {
+      if (src && !resultsCache.current.has(makeThrCacheKey(src))) {
         processingRef.current++;
         
         scanImage(src).finally(() => {
@@ -297,14 +293,14 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
         });
       }
     }
-  }, [scanImage]);
+  }, [scanImage, makeThrCacheKey]);
 
   /**
    * Queue an image for scanning
    */
   const queueScan = useCallback((src: string) => {
     if (!src || !src.startsWith('http')) return;
-    if (resultsCache.current.has(src)) return;
+    if (resultsCache.current.has(makeThrCacheKey(src))) return;
     if (scanQueue.current.includes(src)) return;
 
     scanQueue.current.push(src);
@@ -313,7 +309,7 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
       pendingCount: scanQueue.current.length + processingRef.current,
     }));
     processQueue();
-  }, [processQueue]);
+  }, [processQueue, makeThrCacheKey]);
 
   /**
    * Scan multiple images
@@ -339,9 +335,9 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
       setTimeout(checkComplete, 100);
     });
 
-    // Collect results
+    // Collect results (thr-keyed)
     for (const src of sources) {
-      const result = resultsCache.current.get(src);
+      const result = resultsCache.current.get(makeThrCacheKey(src));
       if (result) {
         results.set(src, result);
       }
@@ -358,7 +354,7 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
     });
 
     return results;
-  }, [queueScan, onScanComplete]);
+  }, [queueScan, onScanComplete, makeThrCacheKey]);
 
   /**
    * Handle message from WebView (injected script)
@@ -410,8 +406,8 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
    * Get result for a specific image
    */
   const getResult = useCallback((src: string): ModerationScanResult | undefined => {
-    return resultsCache.current.get(src);
-  }, []);
+    return resultsCache.current.get(makeThrCacheKey(src));
+  }, [makeThrCacheKey]);
 
   /**
    * Clear cache

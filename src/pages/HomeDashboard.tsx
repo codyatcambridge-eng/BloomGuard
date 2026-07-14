@@ -32,6 +32,11 @@ const HomeDashboard = () => {
           <p className="mt-1 text-aqua font-display tracking-wide">Wobble</p>
           <p className="mt-1 text-aqua font-display tracking-wide">good</p>
           <p className="mt-1 text-aqua font-display tracking-wide">changes</p>
+          <p className="mt-1 text-aqua font-display tracking-wide">dialfix</p>
+          <p className="mt-1 text-aqua font-display tracking-wide">Jice</p>
+          <p className="mt-1 text-aqua font-display tracking-wide">dial2</p>
+          <p className="mt-1 text-aqua font-display tracking-wide">pairfix</p>
+          <p className="mt-1 text-aqua font-display tracking-wide">exitfix</p>
           {isActive && (
             <p className="mt-2 text-xs text-silver/70">
               Break active: {remainingFormatted}
