@@ -235,6 +235,31 @@ describe('Active Shorts orphan blur — redirect migrate + C2 fixes', () => {
     expect(anyRevealOverlay()).not.toBeNull();
   });
 
+  it('visibility guard does not strip reveal for blurred Shorts without hard-blur stamp', () => {
+    // Device intermittent: flash/migrate stamp mwModerated=blurred but not
+    // mwHardBlur=1. enforceRevealOverlayVisibilityGuard used to reject as
+    // not_authoritative and remove the portal overlay → blur with no button.
+    const SHORTS_ID = nextShortsId();
+    pushShortsUrl(SHORTS_ID);
+    const { frame, src } = buildActiveShortsPlayer(SHORTS_ID);
+    injection = injectScript();
+
+    stampShortsBlurResidue(frame, src, SHORTS_ID);
+    // Simulate non-authoritative blur stamp (no mwHardBlur).
+    delete (frame as HTMLElement).dataset.mwHardBlur;
+    delete (frame as HTMLElement).dataset.mwHardBlurItemKey;
+    delete (frame as HTMLElement).dataset.mwHardBlurSrc;
+
+    injection.probe.createRevealOverlay(frame, src, 'porn', SHORTS_ID);
+    expect(anyRevealOverlay()).not.toBeNull();
+
+    // Global guard runs on reposition — must not destroy the only reveal path.
+    injection.probe.repositionAllShortsRevealOverlays('test_guard');
+    expect((frame as HTMLElement).dataset.mwModerated).toBe('blurred');
+    expect(anyRevealOverlay()).not.toBeNull();
+    expect(document.querySelector('.mw-reveal-btn')).not.toBeNull();
+  });
+
   it('owner-token mismatch does NOT unblur a positive (fail-closed pairing)', () => {
     // Historical intermittent defect: after one mismatch retry, createRevealOverlay
     // called clearAllBlurAndOverlay(..., 'safe') — leaving no blur and no reveal,

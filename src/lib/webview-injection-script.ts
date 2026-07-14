@@ -1431,6 +1431,15 @@ export function generateModerationScript(config: InjectionConfig): string {
         );
       }
       createRevealOverlay(target, src, category || 'flagged', itemId, false);
+      if (isShortsModeActive() && target.isConnected && !findRevealOverlayForElement(target, src)) {
+        scheduleActiveShortsRevealPairingBurst(
+          target,
+          src || '',
+          category || 'flagged',
+          itemId || '',
+          'flash_shield_positive_orphan'
+        );
+      }
       return true;
     } catch (e) {
       return false;
@@ -8579,19 +8588,79 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!anchor) {
       rejectReason = 'no_anchor';
     } else {
+      // FREEZE-OVERRIDE: Active Shorts blur often lands via flash/migrate paths that
+      // stamp mwModerated=blurred without mwHardBlur. Guard used to strip the reveal
+      // as not_authoritative → blur-without-reveal (device intermittent). Fail-closed:
+      // if still blurred on Shorts, promote authority and keep the reveal paired.
+      const portalMode = String((overlay.dataset && overlay.dataset.mwPortalMode) || '');
+      const shortsPortal =
+        portalOverlay &&
+        (portalMode === 'shorts' || (portalMode !== 'non_shorts' && isShortsModeActive()));
+      const anchorBlurred = String((anchor.dataset && anchor.dataset.mwModerated) || '') === 'blurred';
+      if (shortsPortal && anchorBlurred && !isAuthoritativeHardBlur(anchor)) {
+        try {
+          markAuthoritativeHardBlur(anchor, overlaySrc || (anchor.dataset && anchor.dataset.mwSrc) || '');
+        } catch (e) {}
+      }
+
       const auth = getAuthoritativeIdentityForNode(anchor);
       if (!auth.authoritative) {
-        rejectReason = 'not_authoritative_blur';
+        // Still fail-closed for shorts portal if live blur is present.
+        if (shortsPortal && anchorBlurred) {
+          rejectReason = '';
+        } else {
+          rejectReason = 'not_authoritative_blur';
+        }
       } else if (!doesRevealOverlayIdentityMatch(anchor, overlayIdentity)) {
-        rejectReason = 'identity_mismatch';
+        // On Shorts, identity can churn (poster→blob) while still the same positive.
+        // Prefer keep+rebind over destroying the only reveal escape hatch.
+        if (shortsPortal && anchorBlurred) {
+          try {
+            if (overlaySrc) overlay.dataset.mwFor = String(anchor.dataset.mwSrc || overlaySrc);
+            setRevealOverlayAnchorTarget(overlay, anchor, 'shorts_identity_rebind');
+          } catch (e) {}
+          rejectReason = '';
+        } else {
+          rejectReason = 'identity_mismatch';
+        }
       } else if (!isRevealOverlayScopeValid(overlay, anchor)) {
         rejectReason = 'scope_mismatch';
       } else if (portalOverlay) {
         const ctx = getShortsBlurContextForNode(anchor);
         const token = String((overlay.dataset && overlay.dataset.mwShortsOwnerToken) || '');
-        const portalMode = String((overlay.dataset && overlay.dataset.mwPortalMode) || '');
-        if ((portalMode === 'shorts' || (portalMode !== 'non_shorts' && isShortsModeActive())) && (!ctx || !ctx.ownerToken || !token || token !== String(ctx.ownerToken || ''))) {
-          rejectReason = 'shorts_owner_mismatch';
+        if (
+          (portalMode === 'shorts' || (portalMode !== 'non_shorts' && isShortsModeActive())) &&
+          (!ctx || !ctx.ownerToken || !token || token !== String(ctx.ownerToken || ''))
+        ) {
+          // FREEZE-OVERRIDE: realign tokens instead of removing reveal (orphan blur).
+          if (shortsPortal && anchorBlurred) {
+            try {
+              if (ctx && ctx.ownerToken) {
+                overlay.dataset.mwShortsOwnerToken = String(ctx.ownerToken);
+                anchor.dataset.mwShortsOwnerToken = String(ctx.ownerToken);
+                anchor.dataset.mwOverlayOwnerToken = String(ctx.ownerToken);
+              } else if (token) {
+                // Keep overlay token; force context to match when possible.
+                setShortsBlurContextForNode(
+                  anchor,
+                  overlaySrc || (anchor.dataset && anchor.dataset.mwSrc) || '',
+                  (anchor.dataset && anchor.dataset.mwCategory) || 'flagged',
+                  (anchor.dataset && anchor.dataset.mwItemId) || '',
+                  null,
+                  (anchor.dataset && anchor.dataset.mwShortsStableSelector) || null,
+                  'visibility_guard_token_realign'
+                );
+              }
+            } catch (e) {}
+            rejectReason = '';
+            console.log(
+              '[DIAG][REVEAL_UI] shorts_owner_realign',
+              'overlayId=' + overlayId,
+              'phase=' + String(phase || 'unknown')
+            );
+          } else {
+            rejectReason = 'shorts_owner_mismatch';
+          }
         }
       }
     }
@@ -8835,35 +8904,47 @@ export function generateModerationScript(config: InjectionConfig): string {
     const viewportWidth = Math.max(window.innerWidth || 0, 1);
     const viewportHeight = Math.max(window.innerHeight || 0, 1);
     const visibleRect = getVisibleViewportRect(rect, viewportWidth, viewportHeight);
+    // FREEZE-OVERRIDE: during swipe, rect can be <16px briefly. Hiding the button
+    // made blur look reveal-less. Fall back to viewport center so a tap path always
+    // exists, then keep retrying for correct placement.
+    let placeRect = visibleRect;
+    let usedViewportFallback = false;
     if (visibleRect.width < 16 || visibleRect.height < 16) {
-      overlay.style.display = 'none';
-      setRevealOverlayAnchorTarget(overlay, null, 'position_anchor_not_visible');
-      scheduleShortsRevealOverlayRetry(overlay, 'anchor_not_visible');
+      usedViewportFallback = true;
+      placeRect = {
+        left: 0,
+        top: 0,
+        width: viewportWidth,
+        height: viewportHeight,
+        right: viewportWidth,
+        bottom: viewportHeight,
+      };
+      scheduleShortsRevealOverlayRetry(overlay, 'anchor_not_visible_fallback_center');
       if (DIAG_YT_BLUR) {
         console.log(
-          '[DIAG][REVEAL_POS] hidden',
+          '[DIAG][REVEAL_POS] viewport_fallback',
           'overlayId=' + String((overlay.dataset && overlay.dataset.mwOverlayId) || 'unknown'),
           'reason=' + (reason || 'unknown'),
-          'hideReason=anchor_not_visible',
           'anchorRect=' + Math.round(rect.left) + ',' + Math.round(rect.top) + ',' + Math.round(rect.width) + 'x' + Math.round(rect.height)
         );
       }
-      return false;
     }
     overlay.style.display = 'flex';
-    overlay.dataset.mwPosRetryCount = '0';
-    const centerX = Math.max(24, Math.min(viewportWidth - 24, Math.round(visibleRect.left + (visibleRect.width / 2))));
-    const centerY = Math.max(28, Math.min(viewportHeight - 28, Math.round(visibleRect.top + (visibleRect.height / 2))));
+    if (!usedViewportFallback) overlay.dataset.mwPosRetryCount = '0';
+    const centerX = Math.max(24, Math.min(viewportWidth - 24, Math.round(placeRect.left + (placeRect.width / 2))));
+    const centerY = Math.max(28, Math.min(viewportHeight - 28, Math.round(placeRect.top + (placeRect.height / 2))));
     if (badge && badge.nodeType === 1) {
       badge.style.position = 'absolute';
-      badge.style.left = Math.max(8, Math.min(viewportWidth - 100, Math.round(visibleRect.left + 8))) + 'px';
-      badge.style.top = Math.max(8, Math.min(viewportHeight - 28, Math.round(visibleRect.top + 8))) + 'px';
+      badge.style.left = Math.max(8, Math.min(viewportWidth - 100, Math.round(placeRect.left + 8))) + 'px';
+      badge.style.top = Math.max(8, Math.min(viewportHeight - 28, Math.round(placeRect.top + 8))) + 'px';
     }
     if (btn && btn.nodeType === 1) {
       btn.style.position = 'absolute';
       btn.style.left = centerX + 'px';
       btn.style.top = centerY + 'px';
       btn.style.transform = 'translate(-50%, -50%)';
+      btn.style.pointerEvents = 'auto';
+      btn.style.zIndex = '2147483647';
     }
     const portalMode = String((overlay.dataset && overlay.dataset.mwPortalMode) || '');
     if (DIAG_YT_BLUR) {
@@ -8953,13 +9034,14 @@ export function generateModerationScript(config: InjectionConfig): string {
     if (!isShortsModeActive()) return;
     const retryCountRaw = Number(overlay.dataset.mwPosRetryCount || '0');
     const retryCount = Number.isFinite(retryCountRaw) ? retryCountRaw : 0;
-    if (retryCount >= 24) return;
+    if (retryCount >= 40) return;
     overlay.dataset.mwPosRetryCount = String(retryCount + 1);
-    if (timerState.revealOverlayRetryTimeout) return;
-    timerState.revealOverlayRetryTimeout = setTimeout(function() {
-      timerState.revealOverlayRetryTimeout = null;
+    // Per-overlay timer: a single global timeout dropped retries during swipe churn.
+    if (overlay.__mwPosRetryTimer) return;
+    overlay.__mwPosRetryTimer = setTimeout(function() {
+      overlay.__mwPosRetryTimer = null;
       scheduleShortsRevealOverlayReposition('retry:' + (reason || 'unknown'));
-    }, 120);
+    }, 100);
   }
 
   function cancelShortsRevealOverlayReposition(reason) {
@@ -10590,6 +10672,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           stableTarget.dataset.mwItemId = itemId || element.dataset.mwItemId || '';
           if (resolvedSelector) stableTarget.dataset.mwShortsStableSelector = resolvedSelector;
           stableTarget.classList.add('mw-blurred');
+          markAuthoritativeHardBlur(stableTarget, src);
           setShortsBlurContextForNode(
             stableTarget,
             src,

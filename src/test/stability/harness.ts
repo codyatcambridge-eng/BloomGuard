@@ -304,6 +304,7 @@ export interface MWTestProbe {
     clearedVeilMarks: number;
     clearedPlayerResidue: number;
   };
+  repositionAllShortsRevealOverlays: (reason: string) => void;
 }
 
 export interface InjectionResult {
@@ -389,6 +390,7 @@ export function injectScript(configOverrides?: Partial<InjectionConfig>): Inject
     reapplyOwnedContainerBlur: reapplyOwnedContainerBlur,
     refreshShortsFreshnessOnReentry: refreshShortsFreshnessOnReentry,
     performShortsExitSurfaceCleanup: performShortsExitSurfaceCleanup,
+    repositionAllShortsRevealOverlays: repositionAllShortsRevealOverlays,
   };
   `;
 
