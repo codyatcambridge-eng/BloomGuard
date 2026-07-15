@@ -3949,6 +3949,26 @@ export function generateModerationScript(config: InjectionConfig): string {
       'queued=' + queuedCount,
       'url=' + window.location.href
     );
+    console.warn(
+      '[DIAG][SHORTS_REENTRY]',
+      'action=first_entry_force_seed',
+      'reason=' + (reason || 'unknown'),
+      'navId=' + NAV_ID,
+      'pageEpoch=' + state.pageEpoch,
+      'shortsUrlId=' + (shortsUrlId || 'none'),
+      'queued=' + queuedCount,
+      'url=' + window.location.href
+    );
+    // FREEZE-OVERRIDE (accuracy): after seed, schedule decoded-frame retries so
+    // first-entry poster-safe does not stick until the user scrolls away/back.
+    try {
+      const mediaForRetry = mediaNode && mediaNode.tagName && String(mediaNode.tagName).toUpperCase() === 'VIDEO'
+        ? mediaNode
+        : (container && typeof container.querySelector === 'function' ? container.querySelector('video') : null);
+      if (mediaForRetry) {
+        scheduleActiveShortsFrameRetry(mediaForRetry, getShortsFrameScanKey(mediaForRetry), 'first_entry_force_seed');
+      }
+    } catch (e) {}
     if (queuedCount <= 0) return 'NO_CANDIDATES';
     return 'QUEUED:' + queuedCount;
   }
@@ -12973,6 +12993,99 @@ export function generateModerationScript(config: InjectionConfig): string {
     );
   }
 
+  // FREEZE-OVERRIDE (accuracy): miss-until-scrollback — first entry often samples poster
+  // before the video has pixels. Bound retries for a decoded frame; poster is provisional.
+  const SHORTS_FRAME_RETRY_DELAYS_MS = [200, 500, 1000, 1800];
+  const shortsFrameRetryTimers = new WeakMap(); // video -> timeout id
+  const shortsFrameRetryCounts = new WeakMap(); // video -> attempts for current key
+
+  function isRetriableShortsFrameFailure(reason) {
+    const r = String(reason || '');
+    return (
+      r === 'video_not_ready' ||
+      r === 'video_dimensions_unavailable' ||
+      r === 'frame_data_too_small' ||
+      r === 'draw_image_failed'
+    );
+  }
+
+  function clearShortsFrameRetry(video) {
+    if (!video) return;
+    try {
+      const tid = shortsFrameRetryTimers.get(video);
+      if (tid) {
+        clearTimeout(tid);
+        shortsFrameRetryTimers.delete(video);
+      }
+    } catch (e) {}
+  }
+
+  function scheduleActiveShortsFrameRetry(video, frameKey, reason) {
+    if (!video || !video.isConnected || !isShortsModeActive()) return;
+    if (!isActiveVisibleShortsVideo(video)) return;
+    const key = String(frameKey || getShortsFrameScanKey(video) || '');
+    const prevCount = Number(shortsFrameRetryCounts.get(video) || 0);
+    if (prevCount >= SHORTS_FRAME_RETRY_DELAYS_MS.length) {
+      console.log(
+        '[DIAG][SHORTS_FRAME_RETRY]',
+        'event=exhausted',
+        'reason=' + String(reason || 'unknown'),
+        'key=' + key.substring(0, 120)
+      );
+      return;
+    }
+    // Allow a new capture attempt: clear one-shot stamp so scanVideoPoster retries frame.
+    try {
+      if (video.dataset.mwLastShortsFrameAttemptKey === key) {
+        video.dataset.mwLastShortsFrameAttemptKey = '';
+      }
+      video.dataset.mwShortsAwaitingFrame = '1';
+    } catch (e) {}
+    clearShortsFrameRetry(video);
+    const delay = SHORTS_FRAME_RETRY_DELAYS_MS[prevCount];
+    shortsFrameRetryCounts.set(video, prevCount + 1);
+    const tid = setTimeout(function() {
+      shortsFrameRetryTimers.delete(video);
+      if (timerState.paused || timerState.teardownDone || !isShortsModeActive()) return;
+      if (!video || !video.isConnected || !isActiveVisibleShortsVideo(video)) return;
+      const liveKey = getShortsFrameScanKey(video);
+      if (key && liveKey && key !== liveKey) {
+        // Identity moved on — reset budget for the new short.
+        shortsFrameRetryCounts.delete(video);
+        return;
+      }
+      console.log(
+        '[DIAG][SHORTS_FRAME_RETRY]',
+        'event=fire',
+        'attempt=' + (prevCount + 1),
+        'delayMs=' + delay,
+        'reason=' + String(reason || 'unknown'),
+        'readyState=' + String(video.readyState)
+      );
+      try {
+        scanVideoPoster(video);
+      } catch (e) {}
+    }, delay);
+    shortsFrameRetryTimers.set(video, tid);
+    console.log(
+      '[DIAG][SHORTS_FRAME_RETRY]',
+      'event=scheduled',
+      'attempt=' + (prevCount + 1),
+      'delayMs=' + delay,
+      'reason=' + String(reason || 'unknown')
+    );
+  }
+
+  function markActiveShortsFrameSuccess(video, frameKey) {
+    clearShortsFrameRetry(video);
+    try {
+      shortsFrameRetryCounts.delete(video);
+      video.dataset.mwShortsAwaitingFrame = '0';
+      video.dataset.mwShortsFrameOk = '1';
+      if (frameKey) video.dataset.mwLastShortsFrameSuccessKey = frameKey;
+    } catch (e) {}
+  }
+
   function tryCaptureActiveShortsVideoFrame(video) {
     if (!video || video.nodeType !== 1 || !video.isConnected) {
       return { ok: false, reason: 'invalid_video_node' };
@@ -13051,12 +13164,27 @@ export function generateModerationScript(config: InjectionConfig): string {
         ' frameKey=' + String(shortsFrameKey || '').substring(0, 180) +
         ' currentSrc=' + videoCurrentSrc
       );
+      // Reset retry budget when the active Short identity changes.
+      if (
+        video.dataset.mwLastShortsFrameSuccessKey &&
+        video.dataset.mwLastShortsFrameSuccessKey !== shortsFrameKey
+      ) {
+        try {
+          shortsFrameRetryCounts.delete(video);
+          clearShortsFrameRetry(video);
+          video.dataset.mwShortsFrameOk = '0';
+          video.dataset.mwShortsAwaitingFrame = '0';
+        } catch (e) {}
+      }
       if (video.dataset.mwLastShortsFrameAttemptKey !== shortsFrameKey) {
         video.dataset.mwLastShortsFrameAttemptKey = shortsFrameKey;
         const frameCapture = tryCaptureActiveShortsVideoFrame(video);
         if (frameCapture.ok && frameCapture.src) {
+          // New frame data URL always re-queues (bypass stale poster safe).
+          try { state.scanned.delete(frameCapture.src); } catch (e) {}
           const queuedFrame = queueForScan(frameCapture.src, video, 'video-frame');
           if (queuedFrame) {
+            markActiveShortsFrameSuccess(video, shortsFrameKey);
             diagScanSourceCounters.video_frame_scan_used += 1;
             diagLogScanSource(
               'video_frame_scan_used',
@@ -13085,6 +13213,7 @@ export function generateModerationScript(config: InjectionConfig): string {
             videoCurrentSrc,
             'sourceType=video-frame capture=' + frameCapture.width + 'x' + frameCapture.height
           );
+          scheduleActiveShortsFrameRetry(video, shortsFrameKey, 'frame_queue_rejected');
         } else {
           logScanSourceFallback(
             frameCapture.reason || 'frame_capture_failed',
@@ -13092,9 +13221,19 @@ export function generateModerationScript(config: InjectionConfig): string {
             videoCurrentSrc,
             'sourceType=video-frame'
           );
+          // FREEZE-OVERRIDE (accuracy): do not lock out retries on not-ready video.
+          // Clear one-shot stamp so scheduled retries can re-enter this branch.
+          if (isRetriableShortsFrameFailure(frameCapture.reason)) {
+            try { video.dataset.mwLastShortsFrameAttemptKey = ''; } catch (e) {}
+            scheduleActiveShortsFrameRetry(video, shortsFrameKey, frameCapture.reason || 'frame_capture_failed');
+          }
         }
+      } else if (video.dataset.mwShortsFrameOk === '1') {
+        diagScanRunLog('scanVideoPoster', video, '', false, 'reason=frame_already_succeeded_for_active_key');
       } else {
-        diagScanRunLog('scanVideoPoster', video, '', false, 'reason=frame_attempt_already_done_for_active_key');
+        // Attempt stamped but no success yet — keep retrying if budget remains.
+        scheduleActiveShortsFrameRetry(video, shortsFrameKey, 'attempt_stamped_awaiting_success');
+        diagScanRunLog('scanVideoPoster', video, '', false, 'reason=frame_attempt_pending_retry');
       }
     }
     const poster = video.poster ||
@@ -13166,6 +13305,12 @@ export function generateModerationScript(config: InjectionConfig): string {
         '[DIAG][VIDEO] using_thumbnail_only',
         'src=' + String(poster || '').substring(0, 180)
       );
+    }
+    // FREEZE-OVERRIDE (accuracy): poster-only is provisional on active Shorts until
+    // a decoded frame succeeds (scroll-back catch was a new frame data URL).
+    if (activeShortsVideo && video.dataset.mwShortsFrameOk !== '1') {
+      try { video.dataset.mwShortsAwaitingFrame = '1'; } catch (e) {}
+      scheduleActiveShortsFrameRetry(video, shortsFrameKey, 'poster_provisional');
     }
     
     const queued = queueForScan(poster, video, 'video-poster');
