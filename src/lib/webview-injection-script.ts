@@ -1959,25 +1959,50 @@ export function generateModerationScript(config: InjectionConfig): string {
           reevaluateStampedNodesForDial(reason || 'toggle');
         } catch (e) {}
         if (isShortsModeActive()) {
-          // FREEZE-OVERRIDE (accuracy): dial churn on Active Shorts must re-sample the
-          // live frame — not re-promote stale poster FPs via full feed rediscovery.
+          // FREEZE-OVERRIDE (accuracy): dial thr change on Active Shorts.
+          // Prefer score reeval (already ran). Only wipe frame authority when this
+          // short has no final decoded frame + scores — otherwise every dial tick
+          // re-entered poster/provisional + Flash veil ("frozen short" stall).
+          // Never full-feed poster rediscovery (preserves sacc battery/accuracy).
+          let needPlayerScan = false;
           try {
+            const liveShortsId = getCurrentShortsUrlId() || '';
             document.querySelectorAll('video').forEach(function(v) {
               if (!v || v.nodeType !== 1) return;
               try {
-                if (isActiveVisibleShortsVideo(v)) {
-                  v.dataset.mwLastShortsFrameAttemptKey = '';
-                  v.dataset.mwShortsFrameOk = '0';
-                  v.dataset.mwShortsAwaitingFrame = '1';
-                  v.dataset.mwProvisionalUncertain = '0';
-                  scheduleActiveShortsFrameRetry(v, getShortsFrameScanKey(v), 'dial_change_rescan');
+                if (!isActiveVisibleShortsVideo(v)) return;
+                const hasScores =
+                  toFiniteNumber(v.dataset.mwPornScore) !== null ||
+                  toFiniteNumber(v.dataset.mwSexyScore) !== null ||
+                  toFiniteNumber(v.dataset.mwHentaiScore) !== null;
+                const settledId = String(v.dataset.mwShortsSettledId || '');
+                const hasFinalFrame =
+                  String(v.dataset.mwShortsFrameOk || '') === '1' &&
+                  (!!liveShortsId ? settledId === liveShortsId : !!settledId);
+                if (hasFinalFrame && hasScores) {
+                  // Thr reeval is enough for this identity — keep scanning capacity.
+                  console.log(
+                    '[DIAG][DIAL] shorts_keep_final_frame',
+                    'prev=' + previousLevel,
+                    'next=' + normalized,
+                    'shortsId=' + liveShortsId
+                  );
+                  return;
                 }
+                v.dataset.mwLastShortsFrameAttemptKey = '';
+                v.dataset.mwShortsFrameOk = '0';
+                v.dataset.mwShortsAwaitingFrame = '1';
+                v.dataset.mwProvisionalUncertain = '0';
+                scheduleActiveShortsFrameRetry(v, getShortsFrameScanKey(v), 'dial_change_rescan');
+                needPlayerScan = true;
               } catch (e2) {}
             });
           } catch (e) {}
-          try {
-            scanActiveShortsPlayerContainer('sensitivity_change:' + (reason || 'toggle'));
-          } catch (e) {}
+          if (needPlayerScan) {
+            try {
+              scanActiveShortsPlayerContainer('sensitivity_change:' + (reason || 'toggle'));
+            } catch (e) {}
+          }
         } else {
           scanFullPage();
           if (isYouTube()) {
@@ -13089,9 +13114,11 @@ export function generateModerationScript(config: InjectionConfig): string {
           'url=' + String(window.location.href || '').substring(0, 160)
         );
       }
-      // FREEZE-OVERRIDE: hard overrides remain owned by the main dial; Flash-only positives
-      // use applyFlashShieldPositive below and never enter applyBlur.
-      if (hardBlurOverride && dialActive) {
+      // FREEZE-OVERRIDE: hard overrides remain owned by the main dial on home/results.
+      // FREEZE-OVERRIDE (accuracy / Active Shorts): do NOT re-force finalBlur on Shorts
+      // after channel-evidence decision — score>0.8 override reintroduced sports/dance FPs
+      // and undid sacc2/sacc3 host-confirm cuts. Flash-only positives still use applyFlashShieldPositive.
+      if (hardBlurOverride && dialActive && !isShortsModeActive()) {
         finalBlur = true;
         decisionReason = (decisionReason ? decisionReason + '/' : '') + 'hard_blur';
       } else if (dynamicBlurCandidate) {

@@ -250,6 +250,31 @@ describe('Active Shorts accuracy decision matrix', () => {
     expect(bugReforce).toBe(true); // documents the anti-pattern
   });
 
+  it('sacc4: hardBlurOverride score>0.8 must not re-force after Shorts suppress', () => {
+    // After channel-evidence decision said no hard blur, score>0.8 override must not
+    // force finalBlur on Active Shorts (home still may use hardBlurOverride).
+    const shouldApplyBlur = false;
+    const hardBlurOverride = true; // e.g. sexy 0.85 > 0.8
+    const dialActive = true;
+    const shortsMode = true;
+    const finalBlur =
+      hardBlurOverride && dialActive && !shortsMode ? true : shouldApplyBlur && dialActive;
+    expect(finalBlur).toBe(false);
+    const homeFinalBlur =
+      hardBlurOverride && dialActive && !false ? true : shouldApplyBlur && dialActive;
+    expect(homeFinalBlur).toBe(true);
+  });
+
+  it('sacc4: dial thr change keeps final frame when scores exist (no freeze wipe)', () => {
+    const frameOk = '1';
+    const settledId = 'DialShortABC';
+    const liveId = 'DialShortABC';
+    const hasScores = true;
+    const hasFinalFrame = frameOk === '1' && settledId === liveId;
+    const shouldWipeFrameForDial = !(hasFinalFrame && hasScores);
+    expect(shouldWipeFrameForDial).toBe(false);
+  });
+
   it('per-short battery settle: same identity skips rescan', () => {
     const settledId = 'ShortAAA';
     const liveId = 'ShortAAA';
