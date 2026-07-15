@@ -186,9 +186,22 @@ export const useModerationBridge = (options: UseModerationBridgeOptions = {}) =>
     thresholds?: { porn: number; sexy: number; hentai: number },
     context?: BridgeScanContext,
   ): Promise<ModerationScanResult | null> => {
+    // FREEZE-OVERRIDE (lifecycle): never treat cold-start model lag as a final
+    // "safe" miss. Return an explicit pending category so inject keeps soft blur
+    // and does not dedupe-scan the src until NSFWJS is actually ready.
     if (!modelReady) {
-      console.log('[MW-Bridge] Model not ready, skipping scan');
-      return null;
+      console.log('[MW-Bridge] Model not ready — returning model_not_ready (non-final)');
+      return {
+        src,
+        shouldBlur: false,
+        category: 'model_not_ready',
+        confidence: 0,
+        severity: 'safe',
+        predictions: {},
+        inferenceTime: 0,
+        reason: 'model_not_ready',
+        decisionReason: 'model_not_ready',
+      };
     }
     
     if (!isModerationEnabled()) {

@@ -12079,11 +12079,40 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       
       clearPendingItem(itemId, 'result');
-      const shouldCacheScannedSrc = !(rawCategory === 'safe_epoch_stale' || rawCategory === 'safe_sovereign_stale');
+      // FREEZE-OVERRIDE (lifecycle): model_not_ready / non-final host lag must NOT
+      // enter scanned dedupe or clear soft pre-blur — that was cold-start "no blur".
+      const isNonFinalPendingResult =
+        rawCategory === 'model_not_ready' ||
+        normalizedCategory === 'model_not_ready' ||
+        hostDecisionReason === 'model_not_ready' ||
+        reason === 'model_not_ready';
+      const shouldCacheScannedSrc = !(
+        rawCategory === 'safe_epoch_stale' ||
+        rawCategory === 'safe_sovereign_stale' ||
+        isNonFinalPendingResult
+      );
       if (shouldCacheScannedSrc) {
         state.scanned.add(src);
       } else {
-        clearElementScanDedupeMarkers(element, 'stale_safe_result');
+        clearElementScanDedupeMarkers(element, isNonFinalPendingResult ? 'model_not_ready' : 'stale_safe_result');
+      }
+
+      if (isNonFinalPendingResult) {
+        // Keep soft pre-blur on main surfaces; do not mark safe; wait for model_ready flush.
+        if (element && element.isConnected && !isShortsModeActive()) {
+          try {
+            const pendingSrc = src || getBloomGuardMarkedNodeSrc(element) || '';
+            if (pendingSrc) applySoftBlur(element, pendingSrc, itemId);
+            element.dataset.mwDecisionReason = 'model_not_ready_pending';
+          } catch (e) {}
+        }
+        console.log(
+          '[DIAG][COLD_START]',
+          'event=model_not_ready_keep_soft',
+          'itemId=' + String(itemId || 'none'),
+          'src=' + String(src || '').substring(0, 80)
+        );
+        return;
       }
       
       // Check if result came fast enough to skip blur (semantic delay saved)
@@ -13760,9 +13789,14 @@ export function generateModerationScript(config: InjectionConfig): string {
       
       console.log('[MW] legacy result:', src.substring(0, 50), '-> blur:', shouldBlur, 'cat:', category);
       
-      state.scanned.add(src);
       const rawCategory = normalizePolicyCategory(category);
       const normalizedCategory = normalizeLabel(category);
+      // FREEZE-OVERRIDE (lifecycle): pending model must not finalize as safe/scanned.
+      if (rawCategory === 'model_not_ready' || normalizedCategory === 'model_not_ready') {
+        clearElementScanDedupeMarkers(null, 'legacy_model_not_ready');
+        return;
+      }
+      state.scanned.add(src);
       const errorCategory = rawCategory || normalizedCategory;
       const isError = errorCategory === 'error' || errorCategory === 'timeout' || errorCategory === 'error_fail_closed';
       const policyDecision = applyFailOpenAndModePolicy(!!shouldBlur, rawCategory, rawCategory, isError);
@@ -14029,6 +14063,120 @@ export function generateModerationScript(config: InjectionConfig): string {
       return 'ERR:' + String(e);
     }
   };
+
+  // FREEZE-OVERRIDE (lifecycle): host page-load / refresh rediscovery.
+  // Clears scan dedupe and re-queues candidates without touching sacred applyBlur.
+  window.__MW_LIFECYCLE_RESCAN__ = function(reason) {
+    try {
+      const tag = String(reason || 'lifecycle_rescan');
+      let cleared = 0;
+      try {
+        cleared = state.scanned.size;
+        state.scanned.clear();
+      } catch (e) {}
+      try {
+        // Re-queue model_not_ready soft nodes explicitly.
+        document.querySelectorAll('[data-mw-decision-reason="model_not_ready_pending"],.mw-softblur,[data-mw-moderated="softblur"]').forEach(function(node) {
+          if (!node || node.nodeType !== 1) return;
+          try {
+            clearElementScanDedupeMarkers(node, 'lifecycle_rescan');
+            const src = getBloomGuardMarkedNodeSrc(node);
+            if (src && !isShortsModeActive() && CONFIG.scanEnabled) {
+              applySoftBlur(node, src, node.dataset.mwItemId || '');
+            }
+          } catch (e2) {}
+        });
+      } catch (e) {}
+      if (CONFIG.scanEnabled) {
+        try { scanFullPage(); } catch (e) {}
+        try { if (isYouTube()) scanYouTubeThumbnails(); } catch (e) {}
+        try {
+          if (isShortsModeActive()) scanActiveShortsPlayerContainer('lifecycle_rescan:' + tag);
+        } catch (e) {}
+      }
+      console.log(
+        '[DIAG][LIFECYCLE_RESCAN]',
+        'reason=' + tag,
+        'clearedDedupe=' + cleared,
+        'url=' + String(window.location.href || '').substring(0, 120)
+      );
+      return 'OK:cleared=' + cleared;
+    } catch (e) {
+      return 'ERR:' + String(e && e.message ? e.message : e);
+    }
+  };
+
+  // FREEZE-OVERRIDE (lifecycle): host calls this when NSFWJS becomes ready so
+  // cold-start model_not_ready soft-blur thumbs get a real scan pass.
+  window.__MW_COLD_START_FLUSH__ = function(reason) {
+    try {
+      const tag = String(reason || 'host_model_ready');
+      let clearedDedupe = 0;
+      try {
+        // Allow re-queue of every previously seen src (pending or error paths).
+        clearedDedupe = state.scanned.size;
+        state.scanned.clear();
+      } catch (e) {}
+      try {
+        document.querySelectorAll('[data-mw-decision-reason="model_not_ready_pending"]').forEach(function(node) {
+          if (!node || node.nodeType !== 1) return;
+          try {
+            const src = getBloomGuardMarkedNodeSrc(node);
+            clearElementScanDedupeMarkers(node, 'cold_start_flush');
+            if (src && !isShortsModeActive()) applySoftBlur(node, src, node.dataset.mwItemId || '');
+          } catch (e2) {}
+        });
+      } catch (e) {}
+      if (CONFIG.scanEnabled) {
+        try { scanFullPage(); } catch (e) {}
+        try { if (isYouTube()) scanYouTubeThumbnails(); } catch (e) {}
+      }
+      console.log(
+        '[DIAG][COLD_START]',
+        'event=flush',
+        'reason=' + tag,
+        'clearedDedupe=' + clearedDedupe,
+        'url=' + String(window.location.href || '').substring(0, 120)
+      );
+      return 'OK:cleared=' + clearedDedupe;
+    } catch (e) {
+      return 'ERR:' + String(e && e.message ? e.message : e);
+    }
+  };
+
+  // FREEZE-OVERRIDE (lifecycle): after Active Shorts exit, rehydrate home/results
+  // top-of-feed without leaving void/frost residue.
+    // FREEZE-OVERRIDE (lifecycle): after Active Shorts exit, rehydrate home/results
+  // top-of-feed. Residue cleanup is separate; this pass only re-scans / soft-protects.
+  window.__MW_HOME_FEED_HEAL__ = function(reason) {
+    try {
+      const tag = String(reason || 'home_feed_heal');
+      if (isShortsModeActive()) return 'SKIP_SHORTS';
+      try {
+        // Drop only residual flash shorts overlays if any reappeared.
+        document.querySelectorAll('.' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS).forEach(function(node) {
+          if (node && node.parentElement) node.parentElement.removeChild(node);
+        });
+      } catch (e) {}
+      try {
+        setOverlayEnabled(false, 'home_feed_heal:' + tag);
+      } catch (e) {}
+      try {
+        if (CONFIG.scanEnabled) {
+          scanFullPage();
+          if (isYouTube()) scanYouTubeThumbnails();
+        }
+      } catch (e) {}
+      try {
+        repairNonShortsBlurRevealInvariant('home_feed_heal:' + tag);
+      } catch (e) {}
+      console.log('[DIAG][HOME_FEED_HEAL]', 'reason=' + tag, 'url=' + String(window.location.href || '').substring(0, 120));
+      return 'OK';
+    } catch (e) {
+      return 'ERR';
+    }
+  };
+
 
   // Track SPA URL transitions for lifecycle diagnostics and epoch handling.
   let lastUrl = window.location.href;
@@ -14519,19 +14667,30 @@ export function generateModerationScript(config: InjectionConfig): string {
         if (previousIsShorts && !nextIsShorts) {
           // Immediate aggressive cleanup (flash overlays + player residue + portal).
           performShortsExitSurfaceCleanup('leave_shorts_immediate');
+          // FREEZE-OVERRIDE (lifecycle): multi-pass home feed heal — YouTube top-row
+          // thumbs often paint after 400ms; single cleanup left void/frost residue.
           scheduleInitTimeout('shortsExitInvariantRepair', function() {
             performShortsExitSurfaceCleanup('leave_shorts_250ms');
+            try { if (typeof window.__MW_HOME_FEED_HEAL__ === 'function') window.__MW_HOME_FEED_HEAL__('leave_shorts_250ms'); } catch (e) {}
           }, 250);
+          scheduleInitTimeout('shortsExitHomeHeal', function() {
+            try { if (typeof window.__MW_HOME_FEED_HEAL__ === 'function') window.__MW_HOME_FEED_HEAL__('leave_shorts_800ms'); } catch (e) {}
+          }, 800);
           scheduleInitTimeout('shortsExitInvariantRepair', function() {
             performShortsExitSurfaceCleanup('leave_shorts_1000ms');
-            // Final home scan so thumbs rehydrate clean after exit.
             try {
               if (CONFIG.scanEnabled) {
+                // Clear soft-only scanned misses so top thumbs re-queue after exit.
+                try { state.scanned.clear(); } catch (e) {}
                 scanFullPage();
                 if (isYouTube()) scanYouTubeThumbnails();
               }
             } catch (e) {}
+            try { if (typeof window.__MW_HOME_FEED_HEAL__ === 'function') window.__MW_HOME_FEED_HEAL__('leave_shorts_1000ms'); } catch (e) {}
           }, 1000);
+          scheduleInitTimeout('shortsExitHomeHeal', function() {
+            try { if (typeof window.__MW_HOME_FEED_HEAL__ === 'function') window.__MW_HOME_FEED_HEAL__('leave_shorts_1500ms'); } catch (e) {}
+          }, 1500);
         }
       }
       if (previousIsShorts || nextIsShorts) {

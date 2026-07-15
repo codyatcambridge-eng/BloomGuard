@@ -20,7 +20,10 @@ export type ModerationCategory =
   | 'hentai'
   | 'porn'
   | 'timeout'
-  | 'error';
+  | 'error'
+  /** Host returned before NSFWJS was loaded — not a final safe/unsafe verdict. */
+  | 'model_not_ready'
+  | 'error_fail_closed';
 
 export interface ModerationScanResult {
   src: string;

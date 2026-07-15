@@ -729,6 +729,13 @@ export const NativeWebViewBrowser = () => {
   const duplicateInjectionSkipsRef = useRef(0);
   const noHookFallbackRecoverKeysRef = useRef<Set<string>>(new Set());
   const didInjectAfterSettingsLoadedRef = useRef(false);
+  /** One-shot cold-start rescan after NSFWJS becomes ready for this webview open. */
+  const didColdStartModelFlushRef = useRef(false);
+  /**
+   * FREEZE-OVERRIDE (lifecycle): port of phase0-freeze-rc1 / 1220acc9 recoveryNonce.
+   * Bumping re-arms ColdStartDriver (cold open, dead-script after background, refresh).
+   */
+  const [recoveryNonce, setRecoveryNonce] = useState(0);
   const nonBootstrapAckObservedRef = useRef(false);
   const epochContextCurrentRef = useRef(false);
   const relaxedEpochBypassHookStableRef = useRef(false);
@@ -1156,6 +1163,66 @@ export const NativeWebViewBrowser = () => {
     }
   }, [logLifecycleSnapshot, moderationBridge]);
 
+  // FREEZE-OVERRIDE (lifecycle): force inject-side rediscovery after load/refresh/
+  // already-active inject. Does not touch sacred blur/reveal bodies — only scan queue.
+  const requestLifecycleRescan = useCallback(async (
+    scriptExecutor: ((script: string) => Promise<string | null>) | undefined,
+    reason: string,
+  ) => {
+    if (!scriptExecutor) return;
+    const safeReason = escapeForJs(reason || 'lifecycle_rescan');
+    try {
+      const result = await scriptExecutor(`
+        (function() {
+          try {
+            if (typeof window.__MW_LIFECYCLE_RESCAN__ === 'function') {
+              return String(window.__MW_LIFECYCLE_RESCAN__('${safeReason}') || 'NO_HOOK');
+            }
+            if (typeof window.__MW_COLD_START_FLUSH__ === 'function') {
+              return String(window.__MW_COLD_START_FLUSH__('${safeReason}') || 'NO_HOOK');
+            }
+            if (typeof window.__MW_SCAN_FULL__ === 'function') window.__MW_SCAN_FULL__();
+            if (typeof window.__MW_SCAN_YT__ === 'function') window.__MW_SCAN_YT__();
+            return 'FALLBACK_SCAN';
+          } catch (e) {
+            return 'ERR:' + String(e && e.message ? e.message : e);
+          }
+        })();
+      `);
+      console.log(
+        '[DIAG][LIFECYCLE_RESCAN][HOST]',
+        'reason=' + reason,
+        'result=' + String(result || 'null'),
+        'navId=' + activeNavIdRef.current,
+        'modelReady=' + String(!!moderationBridge.isReady),
+      );
+    } catch (error) {
+      console.warn(
+        '[DIAG][LIFECYCLE_RESCAN][HOST]',
+        'reason=' + reason,
+        'error=' + (error instanceof Error ? error.message : String(error)),
+      );
+    }
+  }, [moderationBridge.isReady]);
+
+  const scheduleLifecycleRescanBurst = useCallback((
+    scriptExecutor: ((script: string) => Promise<string | null>) | undefined,
+    reason: string,
+  ) => {
+    if (!scriptExecutor) return;
+    // Immediate + delayed passes — refresh/first-entry DOM paints late.
+    void requestLifecycleRescan(scriptExecutor, reason + '_t0');
+    window.setTimeout(() => {
+      void requestLifecycleRescan(scriptExecutor, reason + '_t300');
+    }, 300);
+    window.setTimeout(() => {
+      void requestLifecycleRescan(scriptExecutor, reason + '_t800');
+    }, 800);
+    window.setTimeout(() => {
+      void requestLifecycleRescan(scriptExecutor, reason + '_t1500');
+    }, 1500);
+  }, [requestLifecycleRescan]);
+
   const injectModerationScript = useCallback(async (
     scriptExecutor: (script: string) => Promise<string | null>,
     reason: string,
@@ -1186,8 +1253,13 @@ export const NativeWebViewBrowser = () => {
       return;
     }
     const now = Date.now();
+    // FREEZE-OVERRIDE (lifecycle): do not skip reinject while readiness never ACKed.
+    // Cold YouTube launch often reinjects within 2s before MW_INJECTED_ACK lands.
+    const readinessAlive =
+      nonBootstrapAckObservedRef.current === true || blurReadyRef.current === true;
     const recentlyInjectedSameUrl =
       injectionDoneRef.current &&
+      readinessAlive &&
       !!targetUrl &&
       lastInjectedUrlRef.current === targetUrl &&
       now - lastInjectionAtRef.current < 2000;
@@ -1200,7 +1272,13 @@ export const NativeWebViewBrowser = () => {
         'reason=' + reason,
         'targetUrl=' + (targetUrl || 'unknown'),
         'skipCount=' + duplicateInjectionSkipsRef.current,
+        'readinessAlive=' + readinessAlive,
       );
+      // FREEZE-OVERRIDE (lifecycle): even on inject dedupe, force rediscovery so
+      // refresh/load-end late thumbs are not left unscanned.
+      if (recentlyInjectedSameUrl && !injectionInFlightRef.current) {
+        void requestLifecycleRescan(scriptExecutor, 'inject_dedupe_rescan:' + reason);
+      }
       return;
     }
 
@@ -1275,6 +1353,9 @@ export const NativeWebViewBrowser = () => {
         'pageEpoch=' + webViewPageEpochRef.current,
         'url=' + (targetUrl || 'unknown'),
       );
+      // FREEZE-OVERRIDE (lifecycle): epoch sync alone left refresh/first-paint
+      // thumbs unscanned until a later mutation. Force rediscovery.
+      void requestLifecycleRescan(scriptExecutor, 'sync_applied_rescan:' + reason);
       return;
     }
     const config = {
@@ -1369,6 +1450,11 @@ export const NativeWebViewBrowser = () => {
           'pageEpoch=' + webViewPageEpochRef.current,
           'url=' + (targetUrl || 'unknown'),
         );
+        // FREEZE-OVERRIDE (lifecycle): MW_ALREADY_ACTIVE on load-end/refresh must
+        // still rediscover thumbs (DOM often painted after first inject).
+        lastInjectedUrlRef.current = targetUrl;
+        lastInjectionAtRef.current = Date.now();
+        void requestLifecycleRescan(scriptExecutor, 'already_active_rescan:' + reason);
         return;
       }
       if (syncResult === 'NO_HOOK') {
@@ -1439,6 +1525,11 @@ export const NativeWebViewBrowser = () => {
         'navId=' + navId,
         'url=' + (targetUrl || 'unknown'),
       );
+      lastInjectedUrlRef.current = targetUrl;
+      lastInjectionAtRef.current = Date.now();
+      // FREEZE-OVERRIDE (lifecycle): fresh inject often lands before thumbs paint.
+      // Burst rescan covers first YouTube entry + browser refresh regain.
+      scheduleLifecycleRescanBurst(scriptExecutor, 'post_inject:' + reason);
     } catch (error) {
       console.error('[MW-Bridge] Moderation script injection failed:', error);
       console.log(
@@ -1451,7 +1542,17 @@ export const NativeWebViewBrowser = () => {
     } finally {
       injectionInFlightRef.current = false;
     }
-  }, [ENABLE_SIGNAL_PIPELINE, settingsLoaded, isRuntimeModerationEnabled, shouldInjectModeration, getModerationConfig, localSettings.diag_youtube_shorts, exitPendingReinject]);
+  }, [
+    ENABLE_SIGNAL_PIPELINE,
+    settingsLoaded,
+    isRuntimeModerationEnabled,
+    shouldInjectModeration,
+    getModerationConfig,
+    localSettings.diag_youtube_shorts,
+    exitPendingReinject,
+    requestLifecycleRescan,
+    scheduleLifecycleRescanBurst,
+  ]);
 
   const getWebViewListenerDiagContext = useCallback(() => {
     return {
@@ -1577,33 +1678,34 @@ export const NativeWebViewBrowser = () => {
       if (!ENABLE_SIGNAL_PIPELINE) return;
       if (skipBootstrapLoadEnd) return;
       
-      // Inject moderation script after page fully loads
-      if (!injectionDoneRef.current) {
-        // Small delay to ensure DOM is ready
-        clearLoadEndInjectTimer();
-        loadEndInjectTimerRef.current = setTimeout(async () => {
-          await injectModerationScript(executeScript, 'onLoadEnd', url);
-          if (ENABLE_DOM_BLUR && executeScript) {
-            await executeScript(`
-              (function() {
-                try {
-                  window.postMessage({ type: 'MW_BLUR_COMMAND', command: 'PING', timestamp: Date.now(), reason: 'host_onLoadEnd' }, '*');
-                  return 'OK';
-                } catch (e) {
-                  return 'ERR';
-                }
-              })();
-            `);
-          }
-          loadEndInjectTimerRef.current = null;
-        }, 80);
-        console.log(
-          '[MW-Host][Timer] start',
-          'name=loadEndInjectTimer',
-          'navId=' + activeNavIdRef.current,
-          'url=' + (url || 'unknown'),
-        );
-      }
+      // FREEZE-OVERRIDE (lifecycle): always reinject-or-rescan after load end.
+      // Prior gate (`if (!injectionDone)`) skipped load-end when early onLoadStart
+      // inject already set done → refresh regained only after slow mutations.
+      clearLoadEndInjectTimer();
+      loadEndInjectTimerRef.current = setTimeout(async () => {
+        await injectModerationScript(executeScript, 'onLoadEnd', url);
+        if (ENABLE_DOM_BLUR && executeScript) {
+          await executeScript(`
+            (function() {
+              try {
+                window.postMessage({ type: 'MW_BLUR_COMMAND', command: 'PING', timestamp: Date.now(), reason: 'host_onLoadEnd' }, '*');
+                return 'OK';
+              } catch (e) {
+                return 'ERR';
+              }
+            })();
+          `);
+        }
+        // Explicit rescan burst even if inject short-circuited to already-active.
+        scheduleLifecycleRescanBurst(executeScript, 'onLoadEnd:' + (url || 'unknown'));
+        loadEndInjectTimerRef.current = null;
+      }, 80);
+      console.log(
+        '[MW-Host][Timer] start',
+        'name=loadEndInjectTimer',
+        'navId=' + activeNavIdRef.current,
+        'url=' + (url || 'unknown'),
+      );
     },
     onLoadError: (url, error) => {
       console.log('[DIAG][LOAD] stage=error url=' + toDiagUrl(url) + ' error=' + String(error));
@@ -1925,6 +2027,42 @@ export const NativeWebViewBrowser = () => {
             })();
           `).catch(() => undefined);
         }, 400);
+        // FREEZE-OVERRIDE (lifecycle): third pass + home feed heal — top thumbs
+        // often still painting after 400ms (void/frost residual bug).
+        window.setTimeout(() => {
+          if (!executeScript) return;
+          void executeScript(`
+            (function() {
+              try {
+                var out = {};
+                if (typeof window.__MW_SHORTS_EXIT_CLEANUP__ === 'function') {
+                  out.cleanup = window.__MW_SHORTS_EXIT_CLEANUP__('host_shorts_exit_1000ms') || {};
+                }
+                if (typeof window.__MW_HOME_FEED_HEAL__ === 'function') {
+                  out.heal = window.__MW_HOME_FEED_HEAL__('host_shorts_exit_1000ms');
+                }
+                return JSON.stringify(out);
+              } catch (e) {
+                return 'ERR';
+              }
+            })();
+          `).catch(() => undefined);
+        }, 1000);
+        window.setTimeout(() => {
+          if (!executeScript) return;
+          void executeScript(`
+            (function() {
+              try {
+                if (typeof window.__MW_HOME_FEED_HEAL__ === 'function') {
+                  return String(window.__MW_HOME_FEED_HEAL__('host_shorts_exit_1500ms') || 'NO_HOOK');
+                }
+                return 'NO_HOOK';
+              } catch (e) {
+                return 'ERR';
+              }
+            })();
+          `).catch(() => undefined);
+        }, 1500);
       }
     }
   }, [
@@ -2278,6 +2416,23 @@ export const NativeWebViewBrowser = () => {
     `);
   }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, executeScript]);
 
+  // FREEZE-OVERRIDE (lifecycle): port of 1220acc9 forceWebViewRescan.
+  // Prefer __MW_LIFECYCLE_RESCAN__ (HEAD) so soft-protect + dedupe clear stay intact.
+  const forceWebViewRescan = useCallback(async (reason: string) => {
+    if (!ENABLE_DOM_BLUR) return;
+    if (!isNative || !webViewState.isOpen || !executeScript) return;
+    try {
+      await requestLifecycleRescan(executeScript, 'force_rescan:' + reason);
+      console.log(
+        '[MW-Host][ForceRescan]',
+        'reason=' + reason,
+        'navId=' + activeNavIdRef.current,
+      );
+    } catch {
+      /* next probe/heartbeat tick will retry */
+    }
+  }, [ENABLE_DOM_BLUR, isNative, webViewState.isOpen, executeScript, requestLifecycleRescan]);
+
   const flushBlurStateToWebView = useCallback(async () => {
     if (!ENABLE_DOM_BLUR) return;
     if (!isNative || !webViewState.isOpen || !executeScript) return;
@@ -2380,30 +2535,147 @@ export const NativeWebViewBrowser = () => {
     flushBlurStateToWebView();
   }, [ENABLE_DOM_BLUR, blurSyncVersion, isNative, webViewState.isOpen, flushBlurStateToWebView]);
 
+  // FREEZE-OVERRIDE (lifecycle): port ColdStartDriver from MVPCANDIDATE77 / 1220acc9.
+  // Bounded heartbeat re-drives inject until blur handshake proves life (~15s cap).
+  // Re-armed by recoveryNonce (foreground dead / refresh). Host-only; no sacred blur bodies.
   useEffect(() => {
-    if (!ENABLE_DOM_BLUR) return;
-    if (!isNative || !webViewState.isOpen) return;
+    if (!ENABLE_SIGNAL_PIPELINE) return;
+    if (!isNative || !webViewState.isOpen || !executeScript) return;
+    if (!settingsLoaded || !isRuntimeModerationEnabled || !webViewListenersAttached) return;
 
-    const onVisible = () => {
-      void (async () => {
-        const alive = await probeInjectedScriptLiveness('host_visible');
-        if (!alive && executeScript) {
-          resetInjectionReadiness('host_visible_stale_liveness');
-          await injectModerationScript(
-            executeScript,
-            'host_visible_stale_liveness',
-            webViewState.currentUrl || currentUrlRef.current || '',
+    let cancelled = false;
+    let ticks = 0;
+    if (ENABLE_DOM_BLUR) blurReadyRef.current = false;
+
+    const tick = async () => {
+      if (cancelled) return;
+      if (blurReadyRef.current) return;
+      if (ticks >= 12) return; // ~15s safety cap at 1.2s interval
+      ticks += 1;
+
+      let urlHint = webViewState.currentUrl || currentUrlRef.current || '';
+      if (isBootstrapBlankUrl(urlHint)) {
+        try {
+          const raw = await executeScript(
+            '(function(){try{return JSON.stringify(window.location.href);}catch(e){return "";}})();',
           );
+          let real = '';
+          try {
+            real = String(JSON.parse(String(raw || '""')) || '');
+          } catch {
+            real = String(raw || '').replace(/^"|"$/g, '');
+          }
+          if (real && !isBootstrapBlankUrl(real)) urlHint = real;
+        } catch {
+          /* retry next tick */
         }
-        requestBlurHandshake('host_visible');
-        queueCurrentBlurState('host_visible_resync');
-        flushBlurStateToWebView();
-      })();
+      }
+      if (cancelled || isBootstrapBlankUrl(urlHint)) return;
+
+      // Epoch-sync-only must not block a real injection attempt.
+      injectionDoneRef.current = false;
+      console.log(
+        '[MW-Inject][ColdStartDriver]',
+        'tick=' + ticks,
+        'recoveryNonce=' + recoveryNonce,
+        'navId=' + activeNavIdRef.current,
+        'url=' + urlHint.substring(0, 80),
+      );
+      await injectModerationScript(executeScript, 'cold_start_driver', urlHint);
+      if (ENABLE_DOM_BLUR) await requestBlurHandshake('cold_start_driver');
     };
 
+    const timer = window.setInterval(() => {
+      if (cancelled || blurReadyRef.current || ticks >= 12) {
+        window.clearInterval(timer);
+        return;
+      }
+      void tick();
+    }, 1200);
+    void tick();
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [
+    ENABLE_SIGNAL_PIPELINE,
+    ENABLE_DOM_BLUR,
+    isNative,
+    webViewState.isOpen,
+    webViewState.currentUrl,
+    executeScript,
+    settingsLoaded,
+    isRuntimeModerationEnabled,
+    webViewListenersAttached,
+    injectModerationScript,
+    requestBlurHandshake,
+    recoveryNonce,
+  ]);
+
+  // FREEZE-OVERRIDE (lifecycle): P3 foreground / inactivity recovery (1220acc9).
+  // Long background can purge WebView JS or restale YouTube DOM (~1h+ shelf-life bug).
+  // Alive → lifecycle rescan; dead → recoveryNonce re-arms ColdStartDriver.
+  useEffect(() => {
+    if (!ENABLE_DOM_BLUR) return;
+    if (!isNative || !webViewState.isOpen || !executeScript) return;
+    if (!settingsLoaded || !isRuntimeModerationEnabled || !webViewListenersAttached) return;
+
+    const FOREGROUND_PROBE_TIMEOUT_MS = 1200;
+    const FOREGROUND_RECOVERY_MIN_INTERVAL_MS = 4000;
+
+    let probing = false;
+    let cancelled = false;
+    let lastProbeAt = 0;
+
+    const probeAndRecover = async (trigger: string) => {
+      if (cancelled || probing) return;
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+      const now = Date.now();
+      if (now - lastProbeAt < FOREGROUND_RECOVERY_MIN_INTERVAL_MS) return;
+      lastProbeAt = now;
+      probing = true;
+      try {
+        // Prefer handshake proof of life (epoch can drift after long suspend).
+        blurReadyRef.current = false;
+        await requestBlurHandshake('foreground_liveness_probe:' + trigger);
+        const deadline = Date.now() + FOREGROUND_PROBE_TIMEOUT_MS;
+        while (!cancelled && !blurReadyRef.current && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        if (cancelled) return;
+
+        if (blurReadyRef.current) {
+          await forceWebViewRescan('foreground_alive:' + trigger);
+          queueCurrentBlurState('host_visible_resync');
+          await flushBlurStateToWebView();
+        } else {
+          // Fallback probe (sync hook + active flag) before declaring dead.
+          const probeAlive = await probeInjectedScriptLiveness('foreground_fallback:' + trigger);
+          if (probeAlive) {
+            blurReadyRef.current = true;
+            await forceWebViewRescan('foreground_probe_alive:' + trigger);
+            return;
+          }
+          console.log(
+            '[MW-Host][ForegroundRecovery] script_dead reinjecting',
+            'trigger=' + trigger,
+            'navId=' + activeNavIdRef.current,
+          );
+          resetInjectionReadiness('foreground_dead:' + trigger);
+          setRecoveryNonce((n) => n + 1);
+        }
+      } finally {
+        probing = false;
+      }
+    };
+
+    const onVisible = () => {
+      void probeAndRecover('visibilitychange');
+    };
     window.addEventListener('focus', onVisible);
     document.addEventListener('visibilitychange', onVisible);
     return () => {
+      cancelled = true;
       window.removeEventListener('focus', onVisible);
       document.removeEventListener('visibilitychange', onVisible);
     };
@@ -2411,14 +2683,16 @@ export const NativeWebViewBrowser = () => {
     ENABLE_DOM_BLUR,
     isNative,
     webViewState.isOpen,
-    webViewState.currentUrl,
     executeScript,
+    settingsLoaded,
+    isRuntimeModerationEnabled,
+    webViewListenersAttached,
     requestBlurHandshake,
+    forceWebViewRescan,
     queueCurrentBlurState,
     flushBlurStateToWebView,
     probeInjectedScriptLiveness,
     resetInjectionReadiness,
-    injectModerationScript,
   ]);
 
   useEffect(() => {
@@ -2508,6 +2782,7 @@ export const NativeWebViewBrowser = () => {
   useEffect(() => {
     if (webViewState.isOpen) return;
     didInjectAfterSettingsLoadedRef.current = false;
+    didColdStartModelFlushRef.current = false;
   }, [webViewState.isOpen]);
 
   useEffect(() => {
@@ -2532,6 +2807,56 @@ export const NativeWebViewBrowser = () => {
     webViewState.currentUrl,
     executeScript,
     injectModerationScript,
+  ]);
+
+  // FREEZE-OVERRIDE (lifecycle): when NSFWJS becomes ready, flush inject scan
+  // dedupe and force a full/YouTube rescan so cold-start thumbs get real verdicts.
+  useEffect(() => {
+    if (!ENABLE_SIGNAL_PIPELINE) return;
+    if (!isNative || !webViewState.isOpen || !executeScript) return;
+    if (!moderationBridge.isReady) {
+      didColdStartModelFlushRef.current = false;
+      return;
+    }
+    if (didColdStartModelFlushRef.current) return;
+    const urlHint = webViewState.currentUrl || currentUrlRef.current || '';
+    if (!urlHint || isBootstrapBlankUrl(urlHint)) return;
+    if (!isYouTubeDomainUrl(urlHint) && !isYouTubeUrl(urlHint)) {
+      // Still flush once per open when model becomes ready on any page.
+    }
+    didColdStartModelFlushRef.current = true;
+    console.log(
+      '[DIAG][COLD_START][HOST]',
+      'action=model_ready_flush',
+      'url=' + toDiagUrl(urlHint),
+      'navId=' + activeNavIdRef.current,
+    );
+    void executeScript(`
+      (function() {
+        try {
+          if (typeof window.__MW_COLD_START_FLUSH__ === 'function') {
+            return String(window.__MW_COLD_START_FLUSH__('host_model_ready') || 'NO_HOOK');
+          }
+          if (typeof window.__MW_SCAN_FULL__ === 'function') window.__MW_SCAN_FULL__();
+          if (typeof window.__MW_SCAN_YT__ === 'function') window.__MW_SCAN_YT__();
+          return 'FALLBACK_SCAN';
+        } catch (e) {
+          return 'ERR:' + String(e && e.message ? e.message : e);
+        }
+      })();
+    `).then((result) => {
+      console.log('[DIAG][COLD_START][HOST] flush_result=' + String(result || 'null'));
+    }).catch((error) => {
+      console.warn('[DIAG][COLD_START][HOST] flush_error', error);
+    });
+  }, [
+    ENABLE_SIGNAL_PIPELINE,
+    isNative,
+    webViewState.isOpen,
+    webViewState.currentUrl,
+    executeScript,
+    moderationBridge.isReady,
+    toDiagUrl,
   ]);
 
   useEffect(() => {
@@ -3524,6 +3849,11 @@ export const NativeWebViewBrowser = () => {
           lastInjectedUrlRef.current = activeUrl;
           lastInjectionAtRef.current = Date.now();
           exitPendingReinject('readiness_ack', activeUrl);
+          // FREEZE-OVERRIDE (lifecycle): first-entry ACK often arrives before thumbs
+          // paint; burst rescan closes cold YouTube "no blur" window.
+          if (executeScript) {
+            scheduleLifecycleRescanBurst(executeScript, 'ack_accepted');
+          }
         }
         console.log(
           '[MW-Host][ACK] MW_INJECTED_ACK',
@@ -4783,15 +5113,39 @@ export const NativeWebViewBrowser = () => {
       return;
     }
     if (currentView === 'browse' && isNative && webViewState.isOpen) {
-      const reloadUrl = webViewState.currentUrl || currentUrlRef.current || '';
+      // FREEZE-OVERRIDE (lifecycle): P4 refresh recovery (1220acc9) + life1 no-pre-teardown.
+      // Refs alone are not reactive — recoveryNonce re-arms ColdStartDriver after reload.
       resetInjectionReadiness('manual_reload_preflight');
       blurSignalRef.current = { unsafeStreak: 0, safeStreak: 0 };
-      setCentralBlurState(false, 'manual_reload_preflight');
-      await teardownWebViewScheduling('manual_reload_preflight', reloadUrl).catch(() => undefined);
+      setFlashGuardState?.(true, 'manual_reload_preflight');
+      console.log(
+        '[DIAG][LIFECYCLE][HOST]',
+        'action=manual_reload',
+        'recoveryNonce_bump=1',
+        'url=' + toDiagUrl(webViewState.currentUrl || currentUrlRef.current || ''),
+        'navId=' + activeNavIdRef.current,
+      );
       await webViewReload();
+      // After reload document is empty of inject — re-arm heartbeat even if onLoadStart races.
+      injectionDoneRef.current = false;
+      blurReadyRef.current = false;
+      setRecoveryNonce((n) => n + 1);
       return;
     }
-  }, [readerContent, currentView, searchQuery, isNative, webViewState.isOpen, webViewState.currentUrl, handleReaderMode, handleSearch, webViewReload, setCentralBlurState, resetInjectionReadiness, teardownWebViewScheduling]);
+  }, [
+    readerContent,
+    currentView,
+    searchQuery,
+    isNative,
+    webViewState.isOpen,
+    webViewState.currentUrl,
+    handleReaderMode,
+    handleSearch,
+    webViewReload,
+    resetInjectionReadiness,
+    setFlashGuardState,
+    toDiagUrl,
+  ]);
 
   const handleHome = useCallback(async () => {
     teardownWebViewScheduling('home_reset', webViewState.currentUrl).catch(() => undefined);
