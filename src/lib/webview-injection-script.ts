@@ -1902,11 +1902,15 @@ export function generateModerationScript(config: InjectionConfig): string {
         holdMs: 0,
       };
     }
-    const shortsId =
-      getYouTubeAssetVideoId(normalizedSrc) ||
-      extractShortsIdFromUrl(normalizedSrc) ||
-      getCurrentShortsUrlId() ||
-      '';
+    // Prefer URL id over asset id when src is a canvas data: frame (no video id in src).
+    // Still prefer asset id from ytimg/poster when present so shelf thumbs key correctly.
+    const fromAsset = getYouTubeAssetVideoId(normalizedSrc);
+    const fromSrcUrl = extractShortsIdFromUrl(normalizedSrc);
+    const fromLocation = getCurrentShortsUrlId();
+    const isDataFrame = String(normalizedSrc || '').indexOf('data:') === 0;
+    const shortsId = isDataFrame
+      ? (fromLocation || fromAsset || fromSrcUrl || '')
+      : (fromAsset || fromSrcUrl || fromLocation || '');
     if (shortsId) {
       return {
         key: 'shorts:' + shortsId,
@@ -1915,8 +1919,10 @@ export function generateModerationScript(config: InjectionConfig): string {
         holdMs: SHORTS_REVEAL_HOLD_MS,
       };
     }
+    // Last resort: never use a bare data: URL as a global reveal key (too easy to collide
+    // via empty/shared keys). Scope to a per-node ephemeral key if possible.
     return {
-      key: 'src:' + normalizedSrc,
+      key: 'src:' + (normalizedSrc ? normalizedSrc.substring(0, 120) : 'unknown'),
       normalizedSrc: normalizedSrc,
       shortsId: '',
       holdMs: 0,
@@ -1945,28 +1951,96 @@ export function generateModerationScript(config: InjectionConfig): string {
     return { key: scope.key, meta: null, scope: scope };
   }
 
-  function isRevealedForSource(src, element) {
-    const resolved = getRevealMetaForSource(src, element);
-    if (resolved.meta) return true;
-    const scope = resolved.scope;
-    const normalizedSrc = scope.normalizedSrc;
-    if (state.revealed.has(scope.key)) return true;
-    if (normalizedSrc && state.revealed.has(normalizedSrc)) return true;
-    if (element && element.dataset && element.dataset.mwRevealed === 'true') {
-      const elementKey = String(element.dataset.mwRevealKey || '');
-      if (elementKey) {
-        if (getRevealMetaByKey(elementKey)) return true;
-        if (state.revealed.has(elementKey)) return true;
-      } else if (normalizedSrc && state.revealed.has(normalizedSrc)) {
-        return true;
-      }
-      // Stale dataset marker, clear it so expired reveal can re-enter blur flow.
+  function clearStaleRevealDatasetOnElement(element, reason) {
+    if (!element || !element.dataset) return;
+    try {
       element.dataset.mwRevealed = 'false';
       element.dataset.mwRevealKey = '';
       element.dataset.mwRevealedAt = '';
       element.dataset.mwRevealExpiresAt = '';
+      if (DIAG_YT_BLUR || isShortsModeActive()) {
+        console.log(
+          '[DIAG][REVEAL_EVT] stale_reveal_marker_cleared',
+          'reason=' + String(reason || 'unknown'),
+          'node=' + getDiagNodeId(element)
+        );
+      }
+    } catch (e) {}
+  }
+
+  function isRevealedForSource(src, element) {
+    const scope = getRevealScopeForSource(src, element);
+    const normalizedSrc = scope.normalizedSrc;
+
+    // FREEZE-OVERRIDE (Active Shorts MVP): YouTube recycles the same <video> node
+    // across swipes. After revealing short A, the node keeps data-mw-revealed=true
+    // and mwRevealKey=shorts:A. Without a key-match check, short B on that node
+    // was treated as already revealed → positives stopped flagging after one reveal.
+    if (element && element.dataset && element.dataset.mwRevealed === 'true') {
+      const elementKey = String(element.dataset.mwRevealKey || '');
+      if (elementKey && elementKey !== scope.key) {
+        clearStaleRevealDatasetOnElement(element, 'scope_key_mismatch:' + elementKey + '->' + scope.key);
+      } else if (
+        scope.shortsId &&
+        elementKey &&
+        elementKey.indexOf('shorts:') === 0 &&
+        elementKey !== ('shorts:' + scope.shortsId)
+      ) {
+        clearStaleRevealDatasetOnElement(element, 'shorts_id_mismatch');
+      }
+    }
+
+    // Authoritative: reveal key for THIS scope only.
+    if (getRevealMetaByKey(scope.key)) return true;
+    if (state.revealed.has(scope.key)) return true;
+
+    // Legacy src-key only for non-Shorts (or Shorts without a video id).
+    // Never let a data: frame URL or ytimg poster cross-match another Short.
+    if (!scope.shortsId && normalizedSrc && state.revealed.has(normalizedSrc)) {
+      return true;
+    }
+    if (!scope.shortsId && normalizedSrc) {
+      const byLegacy = getRevealMetaByKey(normalizedSrc);
+      if (byLegacy) return true;
+    }
+
+    if (element && element.dataset && element.dataset.mwRevealed === 'true') {
+      const elementKey = String(element.dataset.mwRevealKey || '');
+      // Only honor element marker when it matches current scope key.
+      if (elementKey && elementKey === scope.key) {
+        if (getRevealMetaByKey(elementKey) || state.revealed.has(elementKey)) {
+          return true;
+        }
+      }
+      // Stale or expired marker.
+      clearStaleRevealDatasetOnElement(element, 'expired_or_orphan_marker');
     }
     return false;
+  }
+
+  // Call on Shorts identity change so recycled media cannot carry reveal forever.
+  function clearStaleShortsRevealMarkersOnSwipe(reason) {
+    if (!isShortsModeActive()) return;
+    const currentId = getCurrentShortsUrlId() || '';
+    if (!currentId) return;
+    const expectedKey = 'shorts:' + currentId;
+    try {
+      document.querySelectorAll('[data-mw-revealed="true"], [data-mw-reveal-key]').forEach(function(node) {
+        if (!node || node.nodeType !== 1 || !node.dataset) return;
+        const key = String(node.dataset.mwRevealKey || '');
+        if (!key) return;
+        if (key.indexOf('shorts:') === 0 && key !== expectedKey) {
+          clearStaleRevealDatasetOnElement(node, 'swipe_clear:' + (reason || 'unknown'));
+          // Also drop moderated=revealed if it was only for the previous short.
+          if (String(node.dataset.mwModerated || '') === 'revealed') {
+            try {
+              node.dataset.mwModerated = '';
+              node.dataset.mwPreblurClear = '';
+            } catch (e2) {}
+          }
+        }
+      });
+    } catch (e) {}
   }
 
   function markRevealedForSource(src, element, reason) {
@@ -3608,6 +3682,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       adaptiveShortsWatchState.lastRescanAt = runAt;
       adaptiveShortsWatchState.lastRescanIdentity = liveIdentity;
+      try { clearStaleShortsRevealMarkersOnSwipe('adaptive_rescan:' + (reason || 'unknown')); } catch (eSwipe) {}
       logAdaptiveShortsEvent(
         'targeted_rescan_triggered',
         'reason=' + (reason || 'unknown') +
@@ -4896,21 +4971,29 @@ export function generateModerationScript(config: InjectionConfig): string {
       try {
         const moderatedState = String((media.dataset && media.dataset.mwModerated) || '').toLowerCase();
         const preblurCleared = !!(media.dataset && media.dataset.mwPreblurClear === 'true');
-        if (
-          preblurCleared ||
-          moderatedState === 'safe' ||
-          moderatedState === 'timeout-safe' ||
-          moderatedState === 'revealed'
-        ) {
-          skippedSafeCount += 1;
-          continue;
-        }
         const mediaSrc = String(
           (media.currentSrc && String(media.currentSrc)) ||
           (media.src && String(media.src)) ||
           (media.poster && String(media.poster)) ||
           ((media.dataset && (media.dataset.src || media.dataset.mwSrc || media.dataset.mwOrigSrc || media.dataset.mwOrigPoster)) || '')
         );
+        // FREEZE-OVERRIDE: never trust moderated=revealed alone on recycled media.
+        // Active Shorts reuses the same <video> node; after revealing A, B may still
+        // carry mwModerated=revealed until scope-key checks clear it.
+        if (moderatedState === 'revealed') {
+          if (mediaSrc && isRevealedForSource(mediaSrc, media)) {
+            skippedSafeCount += 1;
+            continue;
+          }
+          // Stale reveal marker for a different identity — fall through and reapply.
+        } else if (
+          preblurCleared ||
+          moderatedState === 'safe' ||
+          moderatedState === 'timeout-safe'
+        ) {
+          skippedSafeCount += 1;
+          continue;
+        }
         // Guard recycled elements: mwModerated may be absent on a new DOM node
         // but the src key is still in state.revealed from the manual reveal tap.
         if (mediaSrc && isRevealedForSource(mediaSrc, media)) {
@@ -13858,6 +13941,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function scanActiveShortsPlayerContainer(reason) {
+    try { clearStaleShortsRevealMarkersOnSwipe('scan_active:' + (reason || 'unknown')); } catch (e) {}
     if (!isVisualModerationActive()) {
       warnProfileOriginShortsDiag(
         'discovery_blocked',

@@ -305,6 +305,15 @@ export interface MWTestProbe {
     clearedPlayerResidue: number;
   };
   repositionAllShortsRevealOverlays: (reason: string) => void;
+  // --- Reveal scope / recycled-node probes (post-reveal Shorts identity) ---
+  isRevealedForSource: (src: string, element: Element | null) => boolean;
+  markRevealedForSource: (
+    src: string,
+    element: Element | null,
+    reason?: string,
+  ) => { key: string; holdMs: number };
+  clearStaleShortsRevealMarkersOnSwipe: (reason: string) => void;
+  getCurrentShortsUrlId: () => string;
 }
 
 export interface InjectionResult {
@@ -391,6 +400,10 @@ export function injectScript(configOverrides?: Partial<InjectionConfig>): Inject
     refreshShortsFreshnessOnReentry: refreshShortsFreshnessOnReentry,
     performShortsExitSurfaceCleanup: performShortsExitSurfaceCleanup,
     repositionAllShortsRevealOverlays: repositionAllShortsRevealOverlays,
+    isRevealedForSource: isRevealedForSource,
+    markRevealedForSource: markRevealedForSource,
+    clearStaleShortsRevealMarkersOnSwipe: clearStaleShortsRevealMarkersOnSwipe,
+    getCurrentShortsUrlId: getCurrentShortsUrlId,
   };
   `;
 
