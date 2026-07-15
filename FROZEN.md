@@ -1,8 +1,9 @@
 # FROZEN — Phase 0 Lifecycle + Blur Stability Lock
 
 **Active freeze tag:** `phase0-mvp-lifecycle-2026-07-15`  
-**Active freeze commit:** `2a6d9c23daddd519db8d8133c2623b0a99c79ed5`  
-**Stack markers:** `nosoft` + `p0off` (on top of orphanfix / partial2 / sacc / rev2 / life2)  
+**Freeze docs tip (tag points here):** `0ad97257`  
+**Behavior tip (nosoft + p0off):** `2a6d9c23daddd519db8d8133c2623b0a99c79ed5`  
+**Stack markers:** `nosoft` + `p0off` + `phase0freeze` (on top of orphanfix / partial2 / sacc / rev2 / life2)  
 **Prior sacred tag (still honored):** `mvp-sacred-2026-06-04`  
 **Prior phase0 tag (superseded for lifecycle tip):** `phase0-behavior-freeze-2026-07-09` @ `7e576a30`
 
@@ -35,12 +36,64 @@ User-facing contracts (do not regress):
 7. **Dial live retune** — host/page dial updates thr and resamples without killing inject (happy path).
 8. **Off → On** — Off cleans blur/reveal; turning protection back on restores scanning (P0 re-arm).
 
-## Explicitly NOT frozen (allowed on new branches)
+## Explicitly NOT frozen (allowed workstreams)
 
-- Classifier **accuracy** thresholds / FP-FN tuning (must not break the contracts above).
-- Flash Shield aesthetic polish (veil timing/identity) — must not break hard blur+reveal or exit.
-- New surfaces outside AGENTS required set.
+Work these on **new branches from `phase0-mvp-lifecycle-2026-07-15`**.  
+Do **not** rewrite exit scrub, nosoft, orphan enter-Shorts scope, or Off→On re-arm to “fix” them.
+
+### A) Dial work (allowed with guardrails)
+
+| Allowed | Frozen (do not rewrite) |
+|---------|-------------------------|
+| Thr **numbers** in `getCategoryThresholds` / `THRESHOLDS` / host thr tables | Off→On re-arm latch + `startManagedTimers` restart |
+| Dial labels / UI in settings panels | `__MW_APPLY_SENSITIVITY__` host push plumbing exists and is called |
+| Shorts dial-only strength bars (e.g. sexy keep 0.72) for FP control | Happy-path: dial change still reevals + resamples without killing inject |
+| Host thr-cache clear reasons | `isVisualModerationActive` / `offModeVisualCleanupActive` semantics |
+| Documenting dial+first-entry Shorts edge cases | Document-wide or exit-path changes “for dial” |
+
+**Rule:** thr tuning is OK; **mode Off→On and inject liveness are not thr work.**
+
+### B) Flash Shield pre-blur toggle + veil (allowed with guardrails)
+
+| Allowed | Frozen (do not rewrite) |
+|---------|-------------------------|
+| Flash Shield **settings toggle** UX / default | Exit must still remove frost overlays + white-screen residue |
+| Veil timing, identity, fade (P1–P4 style) | Never re-enable YouTube **soft** preblur (`shouldSkipSoftPreblur`) |
+| Flash-only scan when main dial is Off (if product wants it) | Hard blur + Reveal pairing contracts on main surfaces |
+| Golden flash-shield tests updates | Enter-Shorts must not strip main-surface Reveals |
+
+**Rule:** Flash is a **pre-paint veil**, not a substitute for hard blur ownership.  
+Do not fix Flash by disabling nosoft or by global overlay sweeps.
+
+### C) Active Shorts accuracy (allowed with guardrails)
+
+| Allowed | Frozen (do not rewrite) |
+|---------|-------------------------|
+| Channel-evidence / sample authority / poster provisional policy **tuning** | `resolveShortsStableBlurTarget` body, reentry freshness contract |
+| Host swimwear / forceUnsafe / empty-frame gates | Reveal-key recycle (rev2) — no sticky reveal across swipe |
+| Frame-retry bounds for accuracy/battery | Exit scrub + host multipass exit hooks |
+| Tests under `active-shorts-accuracy*.test.ts` | Soft ban on YouTube; main-surface orphan fix |
+
+**Rule:** accuracy may change **who** gets hard blur; it must not change **lifecycle** when blur exists (hold + Reveal + exit clean).
+
+### D) Other allowed
+- New surfaces outside AGENTS required set (with tests).
 - UI chrome unrelated to blur ownership.
+
+---
+
+## Agent prompt template (copy into new work)
+
+```text
+Branch from phase0-mvp-lifecycle-2026-07-15 only.
+Read FROZEN.md. Lifecycle + blur stability are FROZEN.
+This task is ONLY: [dial thr | Flash Shield toggle/veil | Active Shorts accuracy].
+Do not modify: shouldSkipSoftPreblur, scrubPartialBlurAfterShortsExit,
+performShortsExitSurfaceCleanup, enter-Shorts overlay scope, Off re-arm latch,
+createRevealOverlay body, host exit multipass.
+If you must touch a frozen file, stop and propose FREEZE-OVERRIDE with matrix.
+Run: npm run check:frozen && npm run test:golden
+```
 
 ---
 
@@ -100,15 +153,15 @@ User-facing contracts (do not regress):
 - `applySoftBlur` early-return path that honors soft ban on YouTube
 - Mode transition overlay sweep scope (Shorts shell / portal mode only — orphanfix)
 
-### Dial / Off re-arm (sacred — P0)
-- `applySensitivityLevel` Off cleanup + On re-arm latch/timer restart
-- `reevaluateStampedNodesForDial` (behavior: host Shorts stamps kept; weak dial-only may release)
-- `window.__MW_APPLY_SENSITIVITY__`
-- `window.__MW_RESUME_AFTER_REINJECT__`
-- `window.__MW_OFF_MODE_CLEANUP__` contract (cleanup + optional teardown)
+### Dial / Off re-arm (sacred — P0 plumbing; thr numbers are NOT frozen)
+- `applySensitivityLevel` **Off cleanup + On re-arm** (latch clear, `teardownDone` reset, timer restart)
+  - Thr table **values** may change; do not remove re-arm or happy-path rescan branches
+- `reevaluateStampedNodesForDial` **structure**: host Shorts stamps kept; revealed skipped
+  - Threshold comparisons / sexy keep bars may be tuned for accuracy
+- `window.__MW_APPLY_SENSITIVITY__` / host dial effect still fires on `blur_dial` change
+- `window.__MW_RESUME_AFTER_REINJECT__` / `window.__MW_OFF_MODE_CLEANUP__` contracts
 - `ensureSensitivityToggle` durability (documentElement re-seat)
 - `isVisualModerationActive` / `offModeVisualCleanupActive` semantics
-- `startManagedTimers` / teardown re-arm (`teardownDone` clear on On only)
 
 ### Blur apply (sacred ownership)
 - `applyBlur` (hard blur + reveal create path)
@@ -173,14 +226,14 @@ Minimum suite that must stay green for lifecycle freeze:
 
 ---
 
-## Known residual risks (do not “fix” by rewriting frozen lifecycle)
+## Known residual risks (planned workstreams — not freeze blockers)
 
-| Residual | Policy |
-|----------|--------|
-| Active Shorts classifier FPs/FNs | **Accuracy branch only** — no exit/nosoft rewrites |
-| Dial change during first-entry Shorts edge glitches | Accuracy/sample branch; preserve reeval host-keep rules |
-| Flash Shield aesthetic / veil timing | Flash branch only; never reintroduce soft partial on main surfaces |
-| Maximum thr aggressive (0.15/0.25) | Optional thr branch after freeze |
+| Residual | Workstream | Frozen constraints |
+|----------|------------|--------------------|
+| Active Shorts FPs/FNs | **C) Accuracy** | No exit/nosoft/orphan rewrites |
+| Dial + first-entry Shorts “frozen short” / glitches | **A) Dial** + **C) Accuracy** | Keep Off re-arm; keep host-stamp keep rules |
+| Flash Shield pre-blur toggle / veil polish | **B) Flash** | No soft preblur on YT; exit still clears frost |
+| Maximum thr aggressive (0.15/0.25) | **A) Dial thr** | Only thr numbers + tests |
 
 ---
 
