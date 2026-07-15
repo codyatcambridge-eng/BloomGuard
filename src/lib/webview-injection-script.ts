@@ -14996,6 +14996,9 @@ export function generateModerationScript(config: InjectionConfig): string {
       try {
         healNonShortsHardPositiveMissingReveals('home_feed_heal:' + tag);
       } catch (e) {}
+      try {
+        enforceMainSurfaceBlurRevealInvariant('home_feed_heal:' + tag);
+      } catch (e) {}
       console.log('[DIAG][HOME_FEED_HEAL]', 'reason=' + tag, 'softSuppressed=' + String(isSoftPreblurSuppressed()), 'url=' + String(window.location.href || '').substring(0, 120));
       return 'OK';
     } catch (e) {
@@ -15100,25 +15103,80 @@ export function generateModerationScript(config: InjectionConfig): string {
   ensureNonShortsReattachListeners();
 
   // SPA navigation detection
+  // FREEZE-OVERRIDE (reveal pairing): only strip overlays that belong to the wrong
+  // surface. Previous code removed EVERY non-portal reveal when entering Shorts —
+  // that orphaned hard-blurred results/home/watch thumbs still in the DOM
+  // (Results → Active Shorts → exit = blur with no reveal).
+  function isRevealOverlayUnderShortsShell(overlay) {
+    if (!overlay || overlay.nodeType !== 1) return false;
+    try {
+      if (typeof overlay.closest === 'function') {
+        if (
+          overlay.closest(
+            '#shorts-player, ytm-reel-video-renderer, ytd-reel-video-renderer,' +
+            'ytm-shorts-player-page, ytd-shorts, #shorts-inner-container, #shorts-container'
+          )
+        ) {
+          return true;
+        }
+      }
+      // Anchor target may sit under the reel even when overlay was reparented.
+      const nodeId = String((overlay.dataset && overlay.dataset.mwNodeId) || '');
+      if (nodeId) {
+        const anchor = document.querySelector('[data-mw-node-id="' + nodeId + '"]');
+        if (anchor && typeof anchor.closest === 'function') {
+          if (
+            anchor.closest(
+              '#shorts-player, ytm-reel-video-renderer, ytd-reel-video-renderer,' +
+              'ytm-shorts-player-page, ytd-shorts, #shorts-inner-container'
+            )
+          ) {
+            return true;
+          }
+        }
+      }
+    } catch (e) {}
+    return false;
+  }
+
   function sweepOrphanedModeOverlays(reason) {
     try {
       const inShortsMode = isShortsModeActive();
       const allOverlays = document.querySelectorAll('.mw-reveal-overlay');
       let removed = 0;
+      let preservedMain = 0;
       for (let i = 0; i < allOverlays.length; i += 1) {
         const ov = allOverlays[i];
         if (!ov || !ov.isConnected) continue;
         const isPortal = !!(ov.parentElement && String(ov.parentElement.id || '') === REVEAL_PORTAL_ID);
+        const portalMode = String((ov.dataset && ov.dataset.mwPortalMode) || '');
         if (inShortsMode && !isPortal) {
+          // Entering Shorts: only strip inline overlays that live under the Shorts shell.
+          // Keep home/results/watch reveals so exit cannot leave orphan blur.
+          if (!isRevealOverlayUnderShortsShell(ov)) {
+            preservedMain += 1;
+            continue;
+          }
           if (ov.parentElement) ov.parentElement.removeChild(ov);
           removed += 1;
         } else if (!inShortsMode && isPortal) {
+          // Leaving Shorts: drop Shorts portal overlays only (never non_shorts portal).
+          if (portalMode === 'non_shorts') {
+            preservedMain += 1;
+            continue;
+          }
           if (ov.parentElement) ov.parentElement.removeChild(ov);
           removed += 1;
         }
       }
-      if (DIAG_YT_BLUR && removed > 0) {
-        console.log('[DIAG][OVERLAY_SWEEP] mode_transition_sweep', 'reason=' + (reason || 'unknown'), 'removed=' + removed, 'shortsMode=' + inShortsMode);
+      if (removed > 0 || preservedMain > 0) {
+        console.log(
+          '[DIAG][OVERLAY_SWEEP] mode_transition_sweep',
+          'reason=' + (reason || 'unknown'),
+          'removed=' + removed,
+          'preservedMain=' + preservedMain,
+          'shortsMode=' + inShortsMode
+        );
       }
     } catch (e) {}
   }
@@ -15221,17 +15279,29 @@ export function generateModerationScript(config: InjectionConfig): string {
         } catch (e) {}
       });
 
-      // 6) Portal reveal overlays must not remain on home (sweep handles mode; force empty).
+      // 6) Portal: clear Shorts portal overlays only (preserve any non_shorts portal kids).
       try {
         const portal = document.getElementById(REVEAL_PORTAL_ID);
         if (portal) {
-          while (portal.firstChild) portal.removeChild(portal.firstChild);
+          const kids = portal.querySelectorAll('.mw-reveal-overlay, .mw-reveal-btn');
+          for (let pi = 0; pi < kids.length; pi += 1) {
+            const kid = kids[pi];
+            if (!kid) continue;
+            const mode = String((kid.dataset && kid.dataset.mwPortalMode) || '');
+            // Empty mode defaults to shorts (historical portal overlays).
+            if (mode === 'non_shorts') continue;
+            try {
+              if (kid.parentElement) kid.parentElement.removeChild(kid);
+            } catch (eKid) {}
+          }
         }
       } catch (e) {}
 
-      // 7) Standard home/results blur↔reveal invariant repair + hard-positive reveals.
+      // 7) Universal main-surface blur↔reveal invariant (home/results/watch/feed/channel).
+      // Must recreate missing reveals on hard positives; clear unauthorized residue.
       repairNonShortsBlurRevealInvariant('shorts_exit_cleanup:' + tag);
       try { healNonShortsHardPositiveMissingReveals('shorts_exit_cleanup:' + tag); } catch (e) {}
+      try { enforceMainSurfaceBlurRevealInvariant('shorts_exit_cleanup:' + tag); } catch (e) {}
       // 8) Final soft sweep — mutation/scan races can re-soft after step 7.
       try { clearMainFeedSoftPreblurResidue('shorts_exit_final:' + tag, true); } catch (e) {}
     } catch (e) {}
@@ -15298,6 +15368,150 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
   }
 
+  // FREEZE-OVERRIDE (reveal pairing): hard positive with blur but no reveal is a
+  // Phase 0 failure. Authoritative hard-blur stamps skip ownership re-check so
+  // Results/Watch recycle cannot leave orphan blur after Shorts exit.
+  function nodeHasHardPositiveBlurStamp(node, src) {
+    if (!node || node.nodeType !== 1) return false;
+    try {
+      if (node.dataset.mwHardBlur === '1') return true;
+      if (typeof isAuthoritativeHardBlur === 'function' && isAuthoritativeHardBlur(node)) return true;
+      const moderated = String(node.dataset.mwModerated || '');
+      const filter = String(node.style.getPropertyValue('filter') || node.style.filter || '').toLowerCase();
+      const hasFilterBlur = filter.includes('blur(');
+      if (moderated === 'blurred' && (node.classList.contains('mw-blurred') || hasFilterBlur) && src) {
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  function canHealHardPositiveReveal(node, src, itemKey, caller) {
+    if (!node || !src) return false;
+    // Authoritative stamp already passed ownership at applyBlur time.
+    if (typeof isAuthoritativeHardBlur === 'function' && isAuthoritativeHardBlur(node)) {
+      return true;
+    }
+    if (node.dataset && node.dataset.mwHardBlur === '1') return true;
+    try {
+      return isMvpBlurAuthorized(node, src, itemKey, 'card_blurred', caller || 'heal_reveal');
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function forceCreateRevealForHardPositive(node, src, reason) {
+    if (!node || !src || !node.isConnected) return false;
+    if (isRevealedForSource(src, node)) return false;
+    if (findRevealOverlayForElement(node, src)) return true;
+    try {
+      const parent = node.parentElement;
+      if (parent && parent.nodeType === 1) {
+        const pos = window.getComputedStyle(parent).position;
+        if (pos === 'static') parent.style.position = 'relative';
+      }
+    } catch (ePos) {}
+    // Ensure moderated + authoritative stamps so createRevealOverlay will attach
+    // (auth gate short-circuits on authoritative hard blur).
+    try {
+      if (String(node.dataset.mwModerated || '') !== 'blurred') {
+        node.dataset.mwModerated = 'blurred';
+      }
+      if (!node.classList.contains('mw-blurred')) node.classList.add('mw-blurred');
+      if (typeof markAuthoritativeHardBlur === 'function') {
+        markAuthoritativeHardBlur(node, src);
+      } else {
+        node.dataset.mwHardBlur = '1';
+        node.dataset.mwHardBlurItemKey = getDiagItemKey(src);
+        node.dataset.mwHardBlurSrc = String(src || '').substring(0, 240);
+      }
+    } catch (e2) {}
+    const itemKey = getDiagItemKey(src);
+    createRevealOverlay(
+      node,
+      src,
+      node.dataset.mwCategory || 'flagged',
+      node.dataset.mwItemId || itemKey,
+      false
+    );
+    if (findRevealOverlayForElement(node, src)) return true;
+    scheduleNonShortsRevealPairingBurst(
+      node,
+      src,
+      node.dataset.mwCategory || 'flagged',
+      node.dataset.mwItemId || itemKey,
+      reason || 'force_create_reveal'
+    );
+    return !!findRevealOverlayForElement(node, src);
+  }
+
+  // Runs on home/results/watch/feed/channel after Shorts exit and lifecycle heals.
+  function enforceMainSurfaceBlurRevealInvariant(reason) {
+    if (isShortsModeActive()) return;
+    if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
+    try {
+      const nodes = document.querySelectorAll(
+        '[data-mw-moderated="blurred"],.mw-blurred,[data-mw-hard-blur="1"]'
+      );
+      let repaired = 0;
+      let cleared = 0;
+      for (let i = 0; i < nodes.length; i += 1) {
+        const node = nodes[i];
+        if (!node || node.nodeType !== 1 || !node.isConnected) continue;
+        // Skip active Shorts shell if still mounted under home.
+        try {
+          if (typeof node.closest === 'function' && node.closest('#shorts-player, ytm-reel-video-renderer[selected]')) {
+            continue;
+          }
+        } catch (eSkip) {}
+        const src = getBloomGuardMarkedNodeSrc(node);
+        if (!src) {
+          if (hasBloomGuardBlurResidue(node)) {
+            try {
+              if (clearAllBlurAndOverlay(node, '', 'enforce_no_src:' + (reason || ''), 'safe')) cleared += 1;
+            } catch (e) {}
+          }
+          continue;
+        }
+        if (isRevealedForSource(src, node)) continue;
+        const itemKey = getDiagItemKey(src);
+        const hard = nodeHasHardPositiveBlurStamp(node, src);
+        if (hard && canHealHardPositiveReveal(node, src, itemKey, 'enforce_main_surface')) {
+          if (!findRevealOverlayForElement(node, src)) {
+            if (forceCreateRevealForHardPositive(node, src, 'enforce:' + (reason || 'unknown'))) {
+              repaired += 1;
+            }
+          }
+          continue;
+        }
+        // Unauthorized / incomplete blur residue → clear (no orphan partial blur).
+        if (hasBloomGuardBlurResidue(node) && !hard) {
+          try {
+            if (clearAllBlurAndOverlay(node, src, 'enforce_clear_orphan:' + (reason || ''), 'safe')) {
+              cleared += 1;
+            }
+          } catch (e) {}
+        } else if (hard && !canHealHardPositiveReveal(node, src, itemKey, 'enforce_deny')) {
+          // Hard stamp but no longer authorized (identity recycle) → clear.
+          try {
+            if (clearAllBlurAndOverlay(node, src, 'enforce_stale_hard:' + (reason || ''), 'safe')) {
+              cleared += 1;
+            }
+          } catch (e) {}
+        }
+      }
+      if (repaired || cleared) {
+        console.log(
+          '[DIAG][LIFECYCLE_REPAIR] enforce_main_surface_blur_reveal',
+          'reason=' + (reason || 'unknown'),
+          'repaired=' + repaired,
+          'cleared=' + cleared,
+          'url=' + String(window.location.href || '').substring(0, 160)
+        );
+      }
+    } catch (e) {}
+  }
+
   // FREEZE-OVERRIDE (reveal pairing): only recreate missing reveals on hard
   // positives. Never clears soft pre-blur (used by cold-start / lifecycle rescan).
   function healNonShortsHardPositiveMissingReveals(reason) {
@@ -15314,30 +15528,11 @@ export function generateModerationScript(config: InjectionConfig): string {
         const src = getBloomGuardMarkedNodeSrc(node);
         if (!src) continue;
         const itemKey = getDiagItemKey(src);
-        const hasHardPositiveStamp =
-          node.dataset.mwHardBlur === '1' ||
-          (node.dataset.mwModerated === 'blurred' && node.classList.contains('mw-blurred'));
-        if (!hasHardPositiveStamp) continue;
-        if (!isMvpBlurAuthorized(node, src, itemKey, 'card_blurred', 'heal_hard_positive_reveal')) continue;
+        if (!nodeHasHardPositiveBlurStamp(node, src)) continue;
+        if (!canHealHardPositiveReveal(node, src, itemKey, 'heal_hard_positive_reveal')) continue;
         if (findRevealOverlayForElement(node, src)) continue;
-        try {
-          const parent = node.parentElement;
-          if (parent && parent.nodeType === 1) {
-            const pos = window.getComputedStyle(parent).position;
-            if (pos === 'static') parent.style.position = 'relative';
-          }
-        } catch (ePos) {}
-        createRevealOverlay(node, src, node.dataset.mwCategory || 'flagged', node.dataset.mwItemId || itemKey);
-        if (findRevealOverlayForElement(node, src)) {
+        if (forceCreateRevealForHardPositive(node, src, 'heal_hard_positive:' + (reason || 'unknown'))) {
           revealRepaired += 1;
-        } else {
-          scheduleNonShortsRevealPairingBurst(
-            node,
-            src,
-            node.dataset.mwCategory || 'flagged',
-            node.dataset.mwItemId || itemKey,
-            'heal_hard_positive_orphan'
-          );
         }
       }
       if (revealRepaired > 0) {
@@ -15368,30 +15563,13 @@ export function generateModerationScript(config: InjectionConfig): string {
 
         const src = getBloomGuardMarkedNodeSrc(node);
         const itemKey = getDiagItemKey(src);
-        const hasHardPositiveStamp =
-          node.dataset.mwHardBlur === '1' ||
-          (node.dataset.mwModerated === 'blurred' && node.classList.contains('mw-blurred') && !!src);
+        const hasHardPositiveStamp = nodeHasHardPositiveBlurStamp(node, src);
 
-        if (hasHardPositiveStamp && src && isMvpBlurAuthorized(node, src, itemKey, 'card_blurred', 'shorts_exit_invariant_repair')) {
+        if (hasHardPositiveStamp && src && canHealHardPositiveReveal(node, src, itemKey, 'shorts_exit_invariant_repair')) {
           if (!findRevealOverlayForElement(node, src)) {
-            try {
-              const parent = node.parentElement;
-              if (parent && parent.nodeType === 1) {
-                const pos = window.getComputedStyle(parent).position;
-                if (pos === 'static') parent.style.position = 'relative';
-              }
-            } catch (ePos) {}
-            createRevealOverlay(node, src, node.dataset.mwCategory || 'flagged', node.dataset.mwItemId || itemKey);
-            if (findRevealOverlayForElement(node, src)) {
+            if (forceCreateRevealForHardPositive(node, src, 'repair_invariant:' + (reason || 'unknown'))) {
               revealRepaired += 1;
             } else {
-              scheduleNonShortsRevealPairingBurst(
-                node,
-                src,
-                node.dataset.mwCategory || 'flagged',
-                node.dataset.mwItemId || itemKey,
-                'repair_invariant_orphan'
-              );
               preserved += 1;
             }
           } else {
@@ -15602,6 +15780,7 @@ export function generateModerationScript(config: InjectionConfig): string {
             try { clearMainFeedSoftPreblurResidue('leave_shorts_2800ms_final', true); } catch (e) {}
             try { healNonShortsHardPositiveMissingReveals('leave_shorts_2800ms'); } catch (e) {}
             try { repairNonShortsBlurRevealInvariant('leave_shorts_2800ms'); } catch (e) {}
+            try { enforceMainSurfaceBlurRevealInvariant('leave_shorts_2800ms'); } catch (e) {}
           }, 2800);
         }
       }

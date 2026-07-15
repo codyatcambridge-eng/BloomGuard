@@ -214,6 +214,16 @@ export function pushShortsUrl(shortsId: string): void {
   window.history.pushState({}, '', `/shorts/${shortsId}`);
 }
 
+/** Navigate jsdom to YouTube search results (main-surface for ownership/reveal). */
+export function pushResultsUrl(query = 'test'): void {
+  window.history.pushState({}, '', `/results?search_query=${encodeURIComponent(query)}`);
+}
+
+/** Navigate jsdom to a watch page (rec thumbs surface). */
+export function pushWatchUrl(videoId: string): void {
+  window.history.pushState({}, '', `/watch?v=${encodeURIComponent(videoId)}`);
+}
+
 /** Restore the default main-feed URL configured by vitest.stability.config.ts. */
 export function restoreMainFeedUrl(): void {
   window.history.pushState({}, '', '/');

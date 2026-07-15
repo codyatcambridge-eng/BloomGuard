@@ -64,6 +64,15 @@ describe('T6: Shorts Contamination Gate', () => {
         injection.probe.isYouTubeMainPageThumbnailSurfaceUrl('https://m.youtube.com/watch?v=dQw4w9WgXcQ'),
       ).toBe(true);
     });
+
+    it('isYouTubeMainPageThumbnailSurfaceUrl returns true for /results (search — AGENTS surface)', () => {
+      injection = injectScript();
+      expect(
+        injection.probe.isYouTubeMainPageThumbnailSurfaceUrl(
+          'https://m.youtube.com/results?search_query=test',
+        ),
+      ).toBe(true);
+    });
   });
 
   describe('Direct Shorts ancestor — quarantine gate', () => {
