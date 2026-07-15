@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 /**
- * Protected-region guard for the MVP freeze (see FROZEN.md).
+ * Protected-region guard for the Phase 0 lifecycle + blur freeze (see FROZEN.md).
+ *
+ * Active freeze tip: phase0-mvp-lifecycle-2026-07-15 @ 2a6d9c23 (nosoft + p0off).
  *
  * Fails (exit 1) if a git diff touches any file listed as frozen in FROZEN.md,
  * UNLESS the latest commit message contains `FREEZE-OVERRIDE:`.
@@ -9,6 +11,7 @@
  *
  *   node scripts/check-frozen.mjs                       # working tree vs HEAD
  *   node scripts/check-frozen.mjs --range A..B          # a commit range
+ *   node scripts/check-frozen.mjs --range phase0-mvp-lifecycle-2026-07-15..HEAD
  *
  * NOTE: this is a coarse FILE-level guard (the frozen functions live in large
  * files). It is intentionally conservative: any change to a frozen file trips it,
@@ -73,9 +76,13 @@ if (hasOverride) {
 console.error('\n[check-frozen] BLOCKED — frozen (sacred) files were modified:');
 touched.forEach(f => console.error('   - ' + f));
 console.error(
-  '\nThese files contain MVP-sacred logic (reveal / positive stability / active Shorts).\n' +
-    'See FROZEN.md. If this change is intentional and reviewed, add a line to your commit\n' +
-    'body:\n\n    FREEZE-OVERRIDE: <why this sacred change is safe>\n\n' +
-    'and ensure the golden suite is green:  npx vitest run --config vitest.stability.config.ts\n',
+  '\nThese files contain Phase 0 frozen logic (reveal / positive stability / Active Shorts /\n' +
+    'exit lifecycle / nosoft soft ban / Off→On re-arm). See FROZEN.md.\n' +
+    'Baseline: phase0-mvp-lifecycle-2026-07-15.\n' +
+    'If this change is intentional and reviewed, add a line to your commit body:\n\n' +
+    '    FREEZE-OVERRIDE: <why this sacred change is safe>\n\n' +
+    'Then re-run:\n' +
+    '    npx vitest run --config vitest.stability.config.ts\n' +
+    '    device lifecycle matrix (refresh, Shorts exit, Off→On, dial)\n',
 );
 process.exit(1);

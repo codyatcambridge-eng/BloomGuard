@@ -10,7 +10,9 @@
     "lint": "eslint",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:golden": "vitest run --config vitest.stability.config.ts",
+    "check:frozen": "node scripts/check-frozen.mjs"
   },
   "dependencies": {
     "@capacitor/cli": "^8.0.2",

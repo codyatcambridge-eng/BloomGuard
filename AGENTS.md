@@ -389,25 +389,27 @@ After accuracy is frozen, future accuracy changes require:
 
 The current protected behavior baseline is:
 
-- tag: `phase0-behavior-freeze-2026-07-09`
-- commit: `7e576a30c64fd06b85ceb5914064ac8a57157a29`
-- source tag: `mvp.333tUOFF`
+- tag: `phase0-mvp-lifecycle-2026-07-15`
+- commit: `2a6d9c23daddd519db8d8133c2623b0a99c79ed5`
+- markers: `nosoft` + `p0off`
+- prior rollback (historical): `phase0-behavior-freeze-2026-07-09` @ `7e576a30` / `mvp.333tUOFF`
+- docs: see `FROZEN.md` (Phase 0 lifecycle + blur stability lock)
 
 This baseline protects:
 
-- thumbnail discovery
-- blur application
-- reveal overlay
-- Flash Shield
-- active Shorts behavior
-- route lifecycle
-- Off mode cleanup
-- settings plumbing
-- stability tests
+- thumbnail discovery and hard blur application
+- reveal overlay pairing (all required surfaces)
+- Active Shorts blur isolation + reveal-key recycle (rev2)
+- route / refresh / Shorts enter-exit lifecycle
+- nosoft YouTube soft-preblur ban + exit partial scrub
+- Off mode cleanup and Off→On re-arm (p0off)
+- host Shorts exit multipass + live dial push
+- stability / golden suite tripwires
 
-Future agents must compare surgical patches against this baseline.
+Future agents must compare surgical patches against `phase0-mvp-lifecycle-2026-07-15`.
 
-This baseline is a protected behavior rollback point, not a claim that every MVP issue is solved.
+This baseline is a protected **blur + lifecycle** rollback point. It is not a claim that
+classifier accuracy or Flash Shield polish are complete — those require separate freezes.
 
 ## 12. Agent Behavior Rules
 
