@@ -56,6 +56,50 @@ describe('Shorts exit blur/reveal invariant repair', () => {
     expect(document.querySelector('.mw-reveal-overlay')).not.toBeNull();
   });
 
+  it('exit cleanup clears top-row soft partial blur and suppresses re-soft on heal scan', () => {
+    // Reproduces: leave Active Shorts → home top thumbs get softblur (8px) without reveal.
+    const { video: top1 } = buildCard('ytm-rich-item-renderer', 'TopSoftExit01');
+    const { video: top2 } = buildCard('ytm-rich-item-renderer', SAFE_ID);
+    injection = injectScript();
+
+    // Simulate soft pre-blur residue from a post-exit rediscovery scan (no reveal).
+    for (const video of [top1, top2]) {
+      video.dataset.mwModerated = 'softblur';
+      video.classList.add('mw-softblur');
+      video.style.setProperty('filter', 'blur(8px)', 'important');
+      video.dataset.mwSrc = video.src;
+    }
+    expect(hasBlurFilter(top1)).toBe(true);
+    expect(document.querySelector('.mw-reveal-btn')).toBeNull();
+
+    injection.probe.performShortsExitSurfaceCleanup('test_exit_partial_soft');
+
+    expect(hasBlurFilter(top1)).toBe(false);
+    expect(hasBlurFilter(top2)).toBe(false);
+    expect(top1.classList.contains('mw-softblur')).toBe(false);
+    expect(top2.classList.contains('mw-softblur')).toBe(false);
+    // No reveal-less partial blur left on the top row.
+    expect(document.querySelector('[data-mw-moderated="softblur"]')).toBeNull();
+  });
+
+  it('home feed heal after exit does not re-paint soft partial blur while suppressed', () => {
+    const { video } = buildCard('ytm-rich-item-renderer', SAFE_ID);
+    injection = injectScript();
+    video.dataset.mwModerated = 'softblur';
+    video.classList.add('mw-softblur');
+    video.style.setProperty('filter', 'blur(8px)', 'important');
+
+    injection.probe.performShortsExitSurfaceCleanup('test_suppress_then_heal');
+    const heal = (window as unknown as { __MW_HOME_FEED_HEAL__?: (r: string) => string })
+      .__MW_HOME_FEED_HEAL__;
+    expect(typeof heal).toBe('function');
+    heal!('test_heal_no_partial');
+
+    // Soft residue must stay gone (suppress window + force clear in heal).
+    expect(hasBlurFilter(video)).toBe(false);
+    expect(video.classList.contains('mw-softblur')).toBe(false);
+  });
+
   it('clears stuck Shorts flash overlay + player residue that white-screen home after exit', () => {
     // Simulate YouTube keeping #shorts-player mounted under home after exit.
     const player = document.createElement('div');

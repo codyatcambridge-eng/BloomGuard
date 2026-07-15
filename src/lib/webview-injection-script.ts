@@ -491,6 +491,100 @@ export function generateModerationScript(config: InjectionConfig): string {
   };
   let offModeVisualCleanupActive = false;
 
+  // FREEZE-OVERRIDE (lifecycle / MVP polish): soft pre-blur is 8px without reveal.
+  // After Active Shorts exit (and briefly on first YouTube entry), home heal re-scans
+  // top thumbs and re-applies softblur → user sees "partial blur" on the top row.
+  // Suppress soft preblur in those windows; hard blur still applies on positive results.
+  let softPreblurSuppressedUntil = 0;
+  const injectBootAt = Date.now();
+  // First ~1.2s after inject: avoid painting the whole top row with reveal-less soft blur
+  // while the host model warms. Positives still hard-blur when results arrive.
+  softPreblurSuppressedUntil = injectBootAt + 1200;
+
+  function suppressSoftPreblur(ms, reason) {
+    const until = Date.now() + Math.max(0, Number(ms) || 0);
+    if (until > softPreblurSuppressedUntil) softPreblurSuppressedUntil = until;
+    console.log(
+      '[DIAG][SOFT_PREBLUR]',
+      'event=suppress',
+      'ms=' + String(ms || 0),
+      'untilIn=' + Math.max(0, softPreblurSuppressedUntil - Date.now()),
+      'reason=' + String(reason || 'unknown')
+    );
+  }
+
+  function isSoftPreblurSuppressed() {
+    return Date.now() < softPreblurSuppressedUntil;
+  }
+
+  function isSrcPendingScan(src) {
+    if (!src) return false;
+    try {
+      const id = state.pendingBySrc.get(src);
+      if (id && state.pending.has(id)) return true;
+      // Also match normalized forms used as keys.
+      const norm = normalizeUrl(src) || src;
+      const id2 = state.pendingBySrc.get(norm);
+      return !!(id2 && state.pending.has(id2));
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /**
+   * Clear reveal-less soft pre-blur on main feed (partial blur Phase 0 failure).
+   * forceAll: drop every softblur (exit window). Otherwise only orphans with no pending.
+   */
+  function clearMainFeedSoftPreblurResidue(reason, forceAll) {
+    if (isShortsModeActive()) return 0;
+    let cleared = 0;
+    try {
+      const nodes = document.querySelectorAll(
+        '[data-mw-moderated="softblur"],.mw-softblur'
+      );
+      for (let i = 0; i < nodes.length; i += 1) {
+        const node = nodes[i];
+        if (!node || node.nodeType !== 1 || !node.isConnected) continue;
+        // Never strip hard positives.
+        if (
+          node.dataset.mwModerated === 'blurred' ||
+          node.dataset.mwHardBlur === '1' ||
+          node.classList.contains('mw-blurred')
+        ) {
+          continue;
+        }
+        const src = getBloomGuardMarkedNodeSrc(node) || String(node.dataset.mwSrc || '');
+        if (!forceAll && isSrcPendingScan(src)) {
+          // Keep brief semantic soft only while a host result is truly pending —
+          // except model_not_ready can stick; still clear if suppress window active.
+          if (!isSoftPreblurSuppressed()) continue;
+        }
+        try {
+          if (clearAllBlurAndOverlay(node, src, 'soft_preblur_clear:' + (reason || 'unknown'), 'safe')) {
+            cleared += 1;
+          } else {
+            node.style.removeProperty('filter');
+            node.style.removeProperty('-webkit-filter');
+            node.classList.remove('mw-softblur');
+            node.dataset.mwModerated = 'safe';
+            node.dataset.mwPreblurClear = 'true';
+            cleared += 1;
+          }
+        } catch (e) {}
+      }
+      if (cleared > 0) {
+        console.log(
+          '[DIAG][SOFT_PREBLUR]',
+          'event=cleared',
+          'count=' + cleared,
+          'forceAll=' + String(!!forceAll),
+          'reason=' + String(reason || 'unknown')
+        );
+      }
+    } catch (e) {}
+    return cleared;
+  }
+
   function isVisualModerationActive() {
     return !offModeVisualCleanupActive && CONFIG.scanEnabled === true && (CONFIG.enabled === true || CONFIG.flashShieldV1 === true);
   }
@@ -9963,6 +10057,16 @@ export function generateModerationScript(config: InjectionConfig): string {
       diagSoftBlurLog('apply_skip', element, src, 'reason=preblur_cleared itemId=' + (itemId || 'none'));
       return; // Already cleared due to prior safe decision
     }
+    // FREEZE-OVERRIDE (MVP polish): no reveal-less soft blur during exit/first-entry windows.
+    if (isSoftPreblurSuppressed() || isShortsModeActive()) {
+      diagSoftBlurLog(
+        'apply_skip',
+        element,
+        src,
+        'reason=soft_preblur_suppressed itemId=' + (itemId || 'none')
+      );
+      return;
+    }
     
     try {
       if (isShortsModeActive()) {
@@ -13315,21 +13419,23 @@ export function generateModerationScript(config: InjectionConfig): string {
     element.dataset.mwSourceType = sourceType || 'unknown';
     
     // On Shorts, avoid pre-blur before verdict to prevent false first-entry blur.
-    // We only blur once moderation returns a positive result.
+    // Also skip soft preblur during post-Shorts-exit / first-entry suppress windows
+    // so top-row thumbs do not show reveal-less "partial blur".
     const shortsMode = isShortsModeActive();
-    if (shortsMode) {
-      removeSoftBlur(element, url);
-      if (CONFIG.debug) {
+    if (shortsMode || isSoftPreblurSuppressed()) {
+      try { removeSoftBlur(element, url); } catch (e) {}
+      if (CONFIG.debug || shortsMode) {
         console.log(
           '[DIAG][SHORTS_PREBLUR]',
           'action=skip_preblur',
           'itemId=' + itemId,
+          'suppressed=' + String(isSoftPreblurSuppressed()),
           'sourceType=' + String(sourceType || 'unknown'),
           'url=' + String(url).substring(0, 180)
         );
       }
     } else {
-      // Non-Shorts keeps pre-blur to minimize flashes.
+      // Non-Shorts keeps pre-blur to minimize flashes (when not suppressed).
       applySoftBlur(element, url, itemId);
     }
     const blurTimer = null;
@@ -14860,9 +14966,8 @@ export function generateModerationScript(config: InjectionConfig): string {
   };
 
   // FREEZE-OVERRIDE (lifecycle): after Active Shorts exit, rehydrate home/results
-  // top-of-feed without leaving void/frost residue.
-    // FREEZE-OVERRIDE (lifecycle): after Active Shorts exit, rehydrate home/results
-  // top-of-feed. Residue cleanup is separate; this pass only re-scans / soft-protects.
+  // top-of-feed. Clear partial soft blur first; re-scan without soft preblur in
+  // the suppress window; repair hard positives' reveals.
   window.__MW_HOME_FEED_HEAL__ = function(reason) {
     try {
       const tag = String(reason || 'home_feed_heal');
@@ -14876,16 +14981,22 @@ export function generateModerationScript(config: InjectionConfig): string {
       try {
         setOverlayEnabled(false, 'home_feed_heal:' + tag);
       } catch (e) {}
+      // Kill reveal-less partial soft blur before and after rediscovery scan.
+      try { clearMainFeedSoftPreblurResidue('heal_before:' + tag, true); } catch (e) {}
       try {
         if (CONFIG.scanEnabled) {
           scanFullPage();
           if (isYouTube()) scanYouTubeThumbnails();
         }
       } catch (e) {}
+      try { clearMainFeedSoftPreblurResidue('heal_after_scan:' + tag, isSoftPreblurSuppressed()); } catch (e) {}
       try {
         repairNonShortsBlurRevealInvariant('home_feed_heal:' + tag);
       } catch (e) {}
-      console.log('[DIAG][HOME_FEED_HEAL]', 'reason=' + tag, 'url=' + String(window.location.href || '').substring(0, 120));
+      try {
+        healNonShortsHardPositiveMissingReveals('home_feed_heal:' + tag);
+      } catch (e) {}
+      console.log('[DIAG][HOME_FEED_HEAL]', 'reason=' + tag, 'softSuppressed=' + String(isSoftPreblurSuppressed()), 'url=' + String(window.location.href || '').substring(0, 120));
       return 'OK';
     } catch (e) {
       return 'ERR';
@@ -15022,6 +15133,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     let clearedVeilMarks = 0;
     let clearedPlayerResidue = 0;
     try {
+      // 0) Suppress soft preblur so exit re-scans do not paint partial blur on home tops.
+      try { suppressSoftPreblur(3200, 'shorts_exit:' + tag); } catch (e) {}
+      try { clearMainFeedSoftPreblurResidue('shorts_exit:' + tag, true); } catch (e) {}
+
       // 1) Never leave the fullscreen inject overlay armed on home/results.
       try {
         setOverlayEnabled(false, 'shorts_exit:' + tag);
@@ -15114,8 +15229,11 @@ export function generateModerationScript(config: InjectionConfig): string {
         }
       } catch (e) {}
 
-      // 7) Standard home/results blur↔reveal invariant repair.
+      // 7) Standard home/results blur↔reveal invariant repair + hard-positive reveals.
       repairNonShortsBlurRevealInvariant('shorts_exit_cleanup:' + tag);
+      try { healNonShortsHardPositiveMissingReveals('shorts_exit_cleanup:' + tag); } catch (e) {}
+      // 8) Final soft sweep — mutation/scan races can re-soft after step 7.
+      try { clearMainFeedSoftPreblurResidue('shorts_exit_final:' + tag, true); } catch (e) {}
     } catch (e) {}
     console.log(
       '[DIAG][SHORTS_EXIT_CLEANUP]',
@@ -15123,6 +15241,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       'removedFlashOverlays=' + removedFlashOverlays,
       'clearedVeilMarks=' + clearedVeilMarks,
       'clearedPlayerResidue=' + clearedPlayerResidue,
+      'softSuppressed=' + String(isSoftPreblurSuppressed()),
       'url=' + String(window.location.href || '').substring(0, 160)
     );
     return {
@@ -15451,12 +15570,15 @@ export function generateModerationScript(config: InjectionConfig): string {
           performShortsExitSurfaceCleanup('leave_shorts_immediate');
           // FREEZE-OVERRIDE (lifecycle): multi-pass home feed heal — YouTube top-row
           // thumbs often paint after 400ms; single cleanup left void/frost residue.
+          // Soft preblur stays suppressed (~3.2s) so heal re-scans do not leave
+          // reveal-less partial blur on the top row.
           scheduleInitTimeout('shortsExitInvariantRepair', function() {
             performShortsExitSurfaceCleanup('leave_shorts_250ms');
             try { if (typeof window.__MW_HOME_FEED_HEAL__ === 'function') window.__MW_HOME_FEED_HEAL__('leave_shorts_250ms'); } catch (e) {}
           }, 250);
           scheduleInitTimeout('shortsExitHomeHeal', function() {
             try { if (typeof window.__MW_HOME_FEED_HEAL__ === 'function') window.__MW_HOME_FEED_HEAL__('leave_shorts_800ms'); } catch (e) {}
+            try { clearMainFeedSoftPreblurResidue('leave_shorts_800ms_sweep', true); } catch (e) {}
           }, 800);
           scheduleInitTimeout('shortsExitInvariantRepair', function() {
             performShortsExitSurfaceCleanup('leave_shorts_1000ms');
@@ -15468,11 +15590,19 @@ export function generateModerationScript(config: InjectionConfig): string {
                 if (isYouTube()) scanYouTubeThumbnails();
               }
             } catch (e) {}
+            try { clearMainFeedSoftPreblurResidue('leave_shorts_1000ms_after_scan', true); } catch (e) {}
             try { if (typeof window.__MW_HOME_FEED_HEAL__ === 'function') window.__MW_HOME_FEED_HEAL__('leave_shorts_1000ms'); } catch (e) {}
           }, 1000);
           scheduleInitTimeout('shortsExitHomeHeal', function() {
             try { if (typeof window.__MW_HOME_FEED_HEAL__ === 'function') window.__MW_HOME_FEED_HEAL__('leave_shorts_1500ms'); } catch (e) {}
+            try { clearMainFeedSoftPreblurResidue('leave_shorts_1500ms_sweep', true); } catch (e) {}
+            try { healNonShortsHardPositiveMissingReveals('leave_shorts_1500ms'); } catch (e) {}
           }, 1500);
+          scheduleInitTimeout('shortsExitHomeHeal', function() {
+            try { clearMainFeedSoftPreblurResidue('leave_shorts_2800ms_final', true); } catch (e) {}
+            try { healNonShortsHardPositiveMissingReveals('leave_shorts_2800ms'); } catch (e) {}
+            try { repairNonShortsBlurRevealInvariant('leave_shorts_2800ms'); } catch (e) {}
+          }, 2800);
         }
       }
       if (previousIsShorts || nextIsShorts) {
