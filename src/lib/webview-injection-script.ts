@@ -12185,13 +12185,36 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       
       clearPendingItem(itemId, 'result');
+      const resultSourceType = String(
+        (pendingItem && pendingItem.sourceType) ||
+        (element && element.dataset && element.dataset.mwSourceType) ||
+        ''
+      );
       // FREEZE-OVERRIDE (lifecycle): model_not_ready / non-final host lag must NOT
       // enter scanned dedupe or clear soft pre-blur — that was cold-start "no blur".
+      // FREEZE-OVERRIDE (accuracy): Active Shorts uncertain/empty frames + provisional
+      // posters are also non-final so a later decoded frame can correct FP/FN.
+      const isUncertainShortsCategory =
+        rawCategory === 'shorts_uncertain_input' ||
+        rawCategory === 'shorts_scan_miss_uncertain' ||
+        rawCategory === 'shorts_scan_error_uncertain' ||
+        normalizedCategory === 'shorts_uncertain_input' ||
+        String(hostDecisionReason || '').indexOf('shorts_uncertain') === 0;
+      const isProvisionalPosterSafe =
+        isShortsModeActive() &&
+        resultSourceType === 'video-poster' &&
+        element &&
+        element.dataset &&
+        element.dataset.mwShortsAwaitingFrame === '1' &&
+        !shouldBlur &&
+        !FORCE_UNSAFE_CATEGORIES.has(rawCategory);
       const isNonFinalPendingResult =
         rawCategory === 'model_not_ready' ||
         normalizedCategory === 'model_not_ready' ||
         hostDecisionReason === 'model_not_ready' ||
-        reason === 'model_not_ready';
+        reason === 'model_not_ready' ||
+        isUncertainShortsCategory ||
+        isProvisionalPosterSafe;
       const shouldCacheScannedSrc = !(
         rawCategory === 'safe_epoch_stale' ||
         rawCategory === 'safe_sovereign_stale' ||
@@ -12204,21 +12227,59 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
 
       if (isNonFinalPendingResult) {
-        // Keep soft pre-blur on main surfaces; do not mark safe; wait for model_ready flush.
         if (element && element.isConnected && !isShortsModeActive()) {
+          // Keep soft pre-blur on main surfaces; do not mark safe; wait for model_ready flush.
           try {
             const pendingSrc = src || getBloomGuardMarkedNodeSrc(element) || '';
             if (pendingSrc) applySoftBlur(element, pendingSrc, itemId);
             element.dataset.mwDecisionReason = 'model_not_ready_pending';
           } catch (e) {}
+          console.log(
+            '[DIAG][COLD_START]',
+            'event=model_not_ready_keep_soft',
+            'itemId=' + String(itemId || 'none'),
+            'src=' + String(src || '').substring(0, 80)
+          );
+          return;
         }
-        console.log(
-          '[DIAG][COLD_START]',
-          'event=model_not_ready_keep_soft',
-          'itemId=' + String(itemId || 'none'),
-          'src=' + String(src || '').substring(0, 80)
-        );
-        return;
+        // Active Shorts: provisional poster-safe or uncertain frame — do not finalize.
+        if (element && element.isConnected && isShortsModeActive()) {
+          try {
+            element.dataset.mwDecisionReason = isUncertainShortsCategory
+              ? 'shorts_uncertain_provisional'
+              : 'shorts_poster_provisional_safe';
+            // Uncertain empty frames: keep Flash veil / soft protect, schedule frame retry.
+            if (isUncertainShortsCategory || isProvisionalPosterSafe) {
+              scheduleActiveShortsFrameRetry(
+                element.tagName && String(element.tagName).toUpperCase() === 'VIDEO'
+                  ? element
+                  : (element.querySelector && element.querySelector('video')) || element,
+                getShortsFrameScanKey(
+                  element.tagName && String(element.tagName).toUpperCase() === 'VIDEO'
+                    ? element
+                    : (element.querySelector && element.querySelector('video')) || element
+                ),
+                isUncertainShortsCategory ? 'uncertain_sample' : 'poster_provisional_safe'
+              );
+            }
+          } catch (e) {}
+          console.log(
+            '[DIAG][SHORTS_ACCURACY]',
+            'event=non_final_sample',
+            'sourceType=' + resultSourceType,
+            'category=' + String(rawCategory || ''),
+            'itemId=' + String(itemId || 'none')
+          );
+          // Uncertain: still apply host fail-closed blur so content is not exposed, but
+          // leave scanned open (above) so a decoded frame can correct.
+          if (isUncertainShortsCategory && shouldBlur) {
+            // Fall through to decision/blur with provisional reason — do not return early.
+          } else {
+            return;
+          }
+        } else {
+          return;
+        }
       }
       
       // Check if result came fast enough to skip blur (semantic delay saved)
@@ -12251,6 +12312,31 @@ export function generateModerationScript(config: InjectionConfig): string {
         (pornScoreN !== null && pornScoreN > Number(thrTable.porn)) ||
         (sexyScoreN !== null && sexyScoreN > Number(thrTable.sexy)) ||
         (hentaiScoreN !== null && hentaiScoreN > Number(thrTable.hentai));
+
+      // FREEZE-OVERRIDE (accuracy): Active Shorts sample authority.
+      // Once a decoded video-frame succeeded, ignore later poster verdicts for this node
+      // (poster FP/FN must not override a real frame). Frame results always apply.
+      if (
+        shortsDecision &&
+        element &&
+        element.dataset &&
+        element.dataset.mwShortsFrameOk === '1' &&
+        resultSourceType === 'video-poster'
+      ) {
+        console.log(
+          '[DIAG][SHORTS_ACCURACY]',
+          'event=ignore_poster_after_frame',
+          'itemId=' + String(itemId || 'none'),
+          'hostShouldBlur=' + String(!!shouldBlur)
+        );
+        return;
+      }
+      if (shortsDecision && resultSourceType === 'video-frame' && element && element.dataset) {
+        try {
+          element.dataset.mwShortsFrameOk = '1';
+          element.dataset.mwShortsAwaitingFrame = '0';
+        } catch (e) {}
+      }
 
       if (shortsDecision) {
         // Protective OR: never drop a host positive on Active Shorts.
@@ -12321,16 +12407,84 @@ export function generateModerationScript(config: InjectionConfig): string {
         decisionReason = policyDecision.reason;
       }
 
-      // Active Shorts FP guard: decision veto OFF (diag only) after FN regression.
-      const shortsFpDecision = applyActiveShortsFalsePositiveGuard(
-        shouldApplyBlur,
-        predictedLabel,
-        unsafeScores,
-        decisionReason
-      );
-      shouldApplyBlur = shortsFpDecision.shouldBlur;
-      if (shortsFpDecision.reason && shortsFpDecision.reason !== decisionReason) {
-        decisionReason = shortsFpDecision.reason;
+      // FREEZE-OVERRIDE (accuracy): Active Shorts FP guard.
+      // - Host positives (shouldBlur): NEVER suppress (protects FNs / zero bags).
+      // - Dial-only hits (!shouldBlur && dialAnyHit): allow mild floor suppress for FPs
+      //   (borderline sexy over dial thr on safe-ish frames).
+      let shortsFpDecision = {
+        shouldBlur: !!shouldApplyBlur,
+        reason: decisionReason || null,
+        wouldSuppress: false,
+        suppressReason: null,
+      };
+      if (shortsDecision && shouldApplyBlur && !shouldBlur && dialAnyHit) {
+        // Inline dial-only floor check (host positives never enter this branch).
+        const floorThr = ACTIVE_SHORTS_FP_FLOOR_DIAG_ONLY;
+        const porn = pornScoreN === null ? 0 : pornScoreN;
+        const sexy = sexyScoreN === null ? 0 : sexyScoreN;
+        const hentai = hentaiScoreN === null ? 0 : hentaiScoreN;
+        const maxExplicit = Math.max(porn, hentai);
+        const label = normalizePolicyCategory(predictedLabel);
+        let dialOnlySuppress = null;
+        if (maxExplicit >= Math.max(floorThr.porn, 0.8) || sexy >= Math.max(floorThr.sexy, 0.85)) {
+          dialOnlySuppress = null;
+        } else if (
+          label === 'sexy' || label === 'thirst' || label === 'swimwear' || label === 'shirtless' ||
+          label === 'shirtless_male' || label === 'bikini' || label === 'sports_bra' || label === 'swim_trunks' ||
+          label === 'suggestive'
+        ) {
+          if (sexy < floorThr.sexy && maxExplicit < floorThr.porn) {
+            dialOnlySuppress = 'shorts_dial_only_fp_guard_weak_suggestive';
+          }
+        } else if (label === 'porn' || label === 'hentai') {
+          if (maxExplicit < floorThr.porn) {
+            dialOnlySuppress = 'shorts_dial_only_fp_guard_weak_explicit';
+          }
+        } else if (maxExplicit < floorThr.porn && sexy < floorThr.sexy) {
+          dialOnlySuppress = 'shorts_dial_only_fp_guard_below_floor';
+        }
+        if (dialOnlySuppress) {
+          shouldApplyBlur = false;
+          decisionReason = dialOnlySuppress;
+          shortsFpDecision = {
+            shouldBlur: false,
+            reason: dialOnlySuppress,
+            wouldSuppress: true,
+            suppressReason: dialOnlySuppress,
+          };
+          console.warn(
+            '[MW-ACTIVE-SHORTS-ACCURACY-DIAG]',
+            'event=dial_only_fp_suppressed',
+            'label=' + label,
+            'porn=' + String(porn),
+            'sexy=' + String(sexy),
+            'hentai=' + String(hentai),
+            'floorThr=' + JSON.stringify(floorThr)
+          );
+        } else {
+          shortsFpDecision = applyActiveShortsFalsePositiveGuard(
+            shouldApplyBlur,
+            predictedLabel,
+            unsafeScores,
+            decisionReason
+          );
+        }
+      } else {
+        shortsFpDecision = applyActiveShortsFalsePositiveGuard(
+          shouldApplyBlur,
+          predictedLabel,
+          unsafeScores,
+          decisionReason
+        );
+        // Host-positive path: never apply decision suppress even if flag flipped later.
+        if (shortsDecision && shouldBlur) {
+          shouldApplyBlur = true;
+        } else {
+          shouldApplyBlur = shortsFpDecision.shouldBlur;
+          if (shortsFpDecision.reason && shortsFpDecision.reason !== decisionReason) {
+            decisionReason = shortsFpDecision.reason;
+          }
+        }
       }
       
       const dialActive = CONFIG.enabled && CONFIG.sensitivity > 0;
