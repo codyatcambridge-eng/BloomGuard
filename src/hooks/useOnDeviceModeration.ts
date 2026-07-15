@@ -1259,10 +1259,18 @@ export const useOnDeviceModeration = () => {
       // ==== SWIMWEAR/SHIRTLESS LOGIC ====
       // FREEZE-OVERRIDE (accuracy): use dial sexy thr (not fixed 0.55) so Relaxed≠Maximum.
       // Still require skin-density + weak clothing so this is not a pure sexy shortcut.
-      const swimwearSexyGate = Math.max(Number(thresholds.sexy) || SWIMWEAR_SEXY_THRESHOLD, 0.15);
+      // Active Shorts video-frames: raise gates — sports/dance skin density FPs were common
+      // because host shouldBlur + inject host-OR always hard-blurred.
+      const isShortsVideoFrame = String(scanContext?.sourceType || '') === 'video-frame';
+      const swimwearSexyGate = isShortsVideoFrame
+        ? Math.max(Number(thresholds.sexy) || SWIMWEAR_SEXY_THRESHOLD, 0.65)
+        : Math.max(Number(thresholds.sexy) || SWIMWEAR_SEXY_THRESHOLD, 0.15);
+      const swimwearSkinMin = isShortsVideoFrame
+        ? Math.max(MIN_SKIN_DENSITY_FOR_SWIMWEAR, 0.48)
+        : MIN_SKIN_DENSITY_FOR_SWIMWEAR;
       const isSwimwearShirtless =
         sexyScore > swimwearSexyGate &&
-        signals.skinDensity >= MIN_SKIN_DENSITY_FOR_SWIMWEAR &&
+        signals.skinDensity >= swimwearSkinMin &&
         !signals.hasClothing;
 
       if (isSwimwearShirtless) {

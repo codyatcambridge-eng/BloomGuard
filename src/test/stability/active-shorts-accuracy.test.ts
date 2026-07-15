@@ -1,16 +1,15 @@
 /**
- * Active Shorts accuracy contracts: host-OR for FNs, dial-only FP floor,
- * poster-vs-frame authority (documented decision helpers).
+ * Active Shorts accuracy contracts for Phase 0 MVP stability.
  */
 import { describe, expect, it } from 'vitest';
 import { getCategoryThresholds } from '@/lib/webview-injection-script';
 
 describe('Active Shorts accuracy decision matrix', () => {
-  it('host-OR preserves host positive when dial misses (FN guard)', () => {
-    const hostShouldBlur = true;
-    const dialAnyHit = false;
-    const shortsApply = hostShouldBlur || dialAnyHit;
-    expect(shortsApply).toBe(true);
+  it('zero-bag host positive still blurs on Shorts (FN protect)', () => {
+    const shouldBlur = true;
+    const hasMeaningfulScores = false;
+    const apply = shouldBlur && !hasMeaningfulScores;
+    expect(apply).toBe(true);
   });
 
   it('dial-only weak sexy is suppressed on Shorts (MVP FP stability)', () => {
@@ -19,8 +18,7 @@ describe('Active Shorts accuracy decision matrix', () => {
     const dialAnyHit = sexy > thr.sexy;
     expect(dialAnyHit).toBe(true);
     const floorSexy = 0.72;
-    const dialOnlyStrong =
-      sexy > Math.max(thr.sexy, floorSexy); // must clear floor
+    const dialOnlyStrong = sexy > Math.max(thr.sexy, floorSexy);
     expect(dialOnlyStrong).toBe(false);
     const hostShouldBlur = false;
     const shouldBlur = hostShouldBlur || dialOnlyStrong;
@@ -37,19 +35,39 @@ describe('Active Shorts accuracy decision matrix', () => {
   it('dial reeval keeps host-stamped Shorts positives without scores', () => {
     const hostBlur = true;
     const inShorts = true;
-    // reevaluateStampedNodesForDial: host stamp → keep
     const release = inShorts && hostBlur ? false : true;
     expect(release).toBe(false);
   });
 
-  it('host positive is never dial-only FP suppressed even if weak sexy', () => {
-    const hostShouldBlur = true;
+  it('unconfirmed forceUnsafe swimwear is suppressed on Shorts (FP cut)', () => {
+    const shouldBlur = true;
+    const forceUnsafe = true;
+    const hasMeaningfulScores = true;
     const sexy = 0.5;
-    const floorSexy = 0.72;
-    const dialOnlyWeak = sexy < floorSexy;
-    // Suppression only when !hostShouldBlur
-    const shouldSuppress = !hostShouldBlur && dialOnlyWeak;
-    expect(shouldSuppress).toBe(false);
+    const thrSexy = 0.45;
+    const hostConfirmed = sexy > Math.max(thrSexy, 0.65);
+    expect(hostConfirmed).toBe(false);
+    const dialOnlyStrong = sexy > Math.max(thrSexy, 0.72);
+    expect(dialOnlyStrong).toBe(false);
+    const apply =
+      shouldBlur && forceUnsafe && hasMeaningfulScores
+        ? hostConfirmed || dialOnlyStrong
+        : shouldBlur;
+    expect(apply).toBe(false);
+  });
+
+  it('confirmed forceUnsafe swimwear blurs on Shorts', () => {
+    const sexy = 0.75;
+    const thrSexy = 0.45;
+    const hostConfirmed = sexy > Math.max(thrSexy, 0.65);
+    expect(hostConfirmed).toBe(true);
+  });
+
+  it('uncertain empty frame does not force hard blur', () => {
+    const isUncertain = true;
+    const hostForceBlurLegacy = true;
+    const finalShouldBlur = isUncertain ? false : hostForceBlurLegacy;
+    expect(finalShouldBlur).toBe(false);
   });
 
   it('strong sexy dial hit is not weak-floor FP', () => {

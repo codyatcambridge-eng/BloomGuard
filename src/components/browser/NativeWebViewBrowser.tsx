@@ -3434,35 +3434,32 @@ export const NativeWebViewBrowser = () => {
           const decisionReason = scanResult.decisionReason || scanResult.reason;
           const isActiveShortsVideoFrame = stickyShortsMode && item.sourceType === 'video-frame';
           const isUnknownInputNoPixels = decisionReason === 'unknown_input_no_pixels' || scanResult.reason === 'unknown_input';
-          const forceShortsUncertainBlur = isActiveShortsVideoFrame && isUnknownInputNoPixels;
+          // FREEZE-OVERRIDE (accuracy): do NOT force-hard-blur empty/uncertain Shorts frames.
+          // That was a major sticky FP source (safe content blurred until swipe-away).
+          // Signal provisional category so inject schedules frame retry without host-OR hard blur.
+          const isShortsUncertainSample = isActiveShortsVideoFrame && isUnknownInputNoPixels;
           const categoryConfidence = Object.entries(scanResult.predictions || {}).reduce((matched, [label, value]) => {
             if (matched >= 0) return matched;
             return label.toLowerCase() === scanResult.category.toLowerCase() ? value : -1;
           }, -1);
           const effectiveConfidence = categoryConfidence >= 0 ? categoryConfidence : scanResult.confidence;
-          const diagnosticsNsfwRisk = typeof scanResult.diagnostics?.nsfwRisk === 'number'
-            ? scanResult.diagnostics.nsfwRisk
-            : null;
-          const uncertainConfidence = diagnosticsNsfwRisk !== null
-            ? Math.max(0.2, Math.min(0.6, diagnosticsNsfwRisk))
-            : 0.35;
-          const finalShouldBlur = forceShortsUncertainBlur ? true : scanResult.shouldBlur;
-          const finalCategory = forceShortsUncertainBlur ? 'shorts_uncertain_input' : scanResult.category;
-          const finalSeverity: ModerationSeverity = forceShortsUncertainBlur
-            ? 'soft'
+          const finalShouldBlur = isShortsUncertainSample ? false : scanResult.shouldBlur;
+          const finalCategory = isShortsUncertainSample ? 'shorts_uncertain_input' : scanResult.category;
+          const finalSeverity: ModerationSeverity = isShortsUncertainSample
+            ? 'safe'
             : (scanResult.severity || mapModerationCategoryToSeverity(scanResult.category));
-          const finalConfidence = forceShortsUncertainBlur ? uncertainConfidence : effectiveConfidence;
-          const finalDecisionReason = forceShortsUncertainBlur
-            ? 'shorts_uncertain_input_force_blur:' + String(decisionReason || 'unknown')
+          const finalConfidence = isShortsUncertainSample ? 0 : effectiveConfidence;
+          const finalDecisionReason = isShortsUncertainSample
+            ? 'shorts_uncertain_no_force_blur:' + String(decisionReason || 'unknown')
             : decisionReason;
 
-          if (forceShortsUncertainBlur) {
+          if (isShortsUncertainSample) {
             console.log(
               '[MW-Host][ShortsUncertain]',
               'itemId=' + item.itemId,
               'sourceType=' + String(item.sourceType || 'unknown'),
               'reason=' + String(decisionReason || 'unknown'),
-              'action=force_blur',
+              'action=no_force_blur_retry',
             );
           }
           results.push({
@@ -3487,28 +3484,29 @@ export const NativeWebViewBrowser = () => {
           });
           console.log('[MW-Host] scan result', item.itemId, ':', finalCategory, 'blur=' + finalShouldBlur, 'conf=' + finalConfidence.toFixed(3));
         } else {
-          const forceShortsUncertainBlur = stickyShortsMode && item.sourceType === 'video-frame';
+          // FREEZE-OVERRIDE (accuracy): Shorts scan miss → fail-open + retry, not force blur FP.
+          const isShortsFrameMiss = stickyShortsMode && item.sourceType === 'video-frame';
           const shouldBlurOnFailure = localSettings.fail_closed === true;
-          const finalShouldBlur = forceShortsUncertainBlur ? true : shouldBlurOnFailure;
-          const finalCategory = forceShortsUncertainBlur
+          const finalShouldBlur = isShortsFrameMiss ? false : shouldBlurOnFailure;
+          const finalCategory = isShortsFrameMiss
             ? 'shorts_scan_miss_uncertain'
             : (shouldBlurOnFailure ? 'error_fail_closed' : 'error');
-          const finalConfidence = forceShortsUncertainBlur
-            ? 0.35
+          const finalConfidence = isShortsFrameMiss
+            ? 0
             : (shouldBlurOnFailure ? 1 : 0);
-          const finalSeverity: ModerationSeverity = forceShortsUncertainBlur
-            ? 'soft'
+          const finalSeverity: ModerationSeverity = isShortsFrameMiss
+            ? 'safe'
             : (shouldBlurOnFailure ? 'hard' : 'safe');
-          const finalDecisionReason = forceShortsUncertainBlur
-            ? 'shorts_uncertain_input_force_blur:no_scan_result'
+          const finalDecisionReason = isShortsFrameMiss
+            ? 'shorts_scan_miss_no_force_blur'
             : undefined;
-          if (forceShortsUncertainBlur) {
+          if (isShortsFrameMiss) {
             console.log(
               '[MW-Host][ShortsUncertain]',
               'itemId=' + item.itemId,
               'sourceType=' + String(item.sourceType || 'unknown'),
               'reason=no_scan_result',
-              'action=force_blur',
+              'action=no_force_blur_retry',
             );
           }
           results.push({
@@ -3527,29 +3525,30 @@ export const NativeWebViewBrowser = () => {
           return;
         }
       } catch (error) {
-        const forceShortsUncertainBlur = stickyShortsMode && item.sourceType === 'video-frame';
+        // FREEZE-OVERRIDE (accuracy): Shorts scan error → fail-open + retry, not force blur FP.
+        const isShortsFrameErr = stickyShortsMode && item.sourceType === 'video-frame';
         const shouldBlurOnFailure = localSettings.fail_closed === true;
-        const finalShouldBlur = forceShortsUncertainBlur ? true : shouldBlurOnFailure;
-        const finalCategory = forceShortsUncertainBlur
+        const finalShouldBlur = isShortsFrameErr ? false : shouldBlurOnFailure;
+        const finalCategory = isShortsFrameErr
           ? 'shorts_scan_error_uncertain'
           : (shouldBlurOnFailure ? 'error_fail_closed' : 'error');
-        const finalConfidence = forceShortsUncertainBlur
-          ? 0.35
+        const finalConfidence = isShortsFrameErr
+          ? 0
           : (shouldBlurOnFailure ? 1 : 0);
-        const finalSeverity: ModerationSeverity = forceShortsUncertainBlur
-          ? 'soft'
+        const finalSeverity: ModerationSeverity = isShortsFrameErr
+          ? 'safe'
           : (shouldBlurOnFailure ? 'hard' : 'safe');
-        const finalDecisionReason = forceShortsUncertainBlur
-          ? 'shorts_uncertain_input_force_blur:scan_error'
+        const finalDecisionReason = isShortsFrameErr
+          ? 'shorts_scan_error_no_force_blur'
           : undefined;
         console.log('[MW-Host] scan error', item.itemId, ':', error);
-        if (forceShortsUncertainBlur) {
+        if (isShortsFrameErr) {
           console.log(
             '[MW-Host][ShortsUncertain]',
             'itemId=' + item.itemId,
             'sourceType=' + String(item.sourceType || 'unknown'),
             'reason=scan_error',
-            'action=force_blur',
+            'action=no_force_blur_retry',
           );
         }
         results.push({

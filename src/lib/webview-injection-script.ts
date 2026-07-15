@@ -12335,13 +12335,9 @@ export function generateModerationScript(config: InjectionConfig): string {
             'category=' + String(rawCategory || ''),
             'itemId=' + String(itemId || 'none')
           );
-          // Uncertain: still apply host fail-closed blur so content is not exposed, but
-          // leave scanned open (above) so a decoded frame can correct.
-          if (isUncertainShortsCategory && shouldBlur) {
-            // Fall through to decision/blur with provisional reason — do not return early.
-          } else {
-            return;
-          }
+          // Uncertain / provisional: never hard-finalize here — frame retry only.
+          // (Host no longer force-blurs empty frames; keep this fail-open for FP stability.)
+          return;
         } else {
           return;
         }
@@ -12404,26 +12400,58 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
 
       if (shortsDecision) {
-        // Protective OR for host positives; dial-only requires STRONGER evidence (FP stability).
-        let dialOnlyStrong = false;
-        if (dialAnyHit && !shouldBlur) {
-          const pornD = pornScoreN === null ? 0 : pornScoreN;
-          const sexyD = sexyScoreN === null ? 0 : sexyScoreN;
-          const hentaiD = hentaiScoreN === null ? 0 : hentaiScoreN;
-          // Explicit channel over thr, or sexy clearly above max(dial, 0.72 FP floor).
-          // Aligns with dial-only floor so weak sexy 0.45–0.72 never hard-blurs on Shorts.
-          dialOnlyStrong =
-            (pornD > Number(thrTable.porn)) ||
-            (hentaiD > Number(thrTable.hentai)) ||
-            (sexyD > Math.max(Number(thrTable.sexy) || 0, 0.72));
-        }
-        if (shouldBlur) {
+        // FREEZE-OVERRIDE (accuracy): Active Shorts MVP decision.
+        // FNs: keep zero-bag host positives (NSFWJS empty scores + host swimwear/thirst).
+        // FPs: do NOT hard-blur on unconfirmed forceUnsafe (weak swimwear) or empty frames;
+        //      dial-only needs strong evidence (explicit thr or sexy>max(dial,0.72)).
+        const pornD = pornScoreN === null ? 0 : pornScoreN;
+        const sexyD = sexyScoreN === null ? 0 : sexyScoreN;
+        const hentaiD = hentaiScoreN === null ? 0 : hentaiScoreN;
+        const thirstD = diagnosticThirstScore === null ? 0 : diagnosticThirstScore;
+        const dialOnlyStrong =
+          (pornD > Number(thrTable.porn)) ||
+          (hentaiD > Number(thrTable.hentai)) ||
+          (sexyD > Math.max(Number(thrTable.sexy) || 0, 0.72));
+        const hostConfirmed =
+          (pornD > Number(thrTable.porn)) ||
+          (hentaiD > Number(thrTable.hentai)) ||
+          (sexyD > Math.max(Number(thrTable.sexy) || 0, 0.65)) ||
+          (thirstD > 0.55);
+        const isUncertainCat =
+          rawCategory === 'shorts_uncertain_input' ||
+          rawCategory === 'shorts_scan_miss_uncertain' ||
+          rawCategory === 'shorts_scan_error_uncertain' ||
+          String(hostDecisionReason || '').indexOf('shorts_uncertain') === 0 ||
+          String(hostDecisionReason || '').indexOf('no_force_blur') !== -1;
+
+        if (isUncertainCat) {
+          // Empty/uncertain sample: never host-OR hard blur (Flash/retry only).
+          shouldApplyBlur = false;
+          decisionReason = 'shorts_uncertain_no_hard_blur';
+        } else if (shouldBlur && !hasMeaningfulScores) {
+          // Zero-bag host positive — preserve (classic FN path).
           shouldApplyBlur = true;
-          decisionReason = dialAnyHit
-            ? (thresholdHit ? (predictedLabel + '>=thr') : 'host_and_dial_hit')
-            : (forceUnsafe
-                ? 'host_force_unsafe_shorts'
-                : (hostDecisionReason || reason || 'host_blur_preserved_shorts'));
+          decisionReason = hostDecisionReason || reason || 'host_blur_zero_bag_shorts';
+        } else if (shouldBlur && forceUnsafe) {
+          // Swimwear/thirst family: require score confirmation on Shorts (FP cut).
+          if (hostConfirmed || dialOnlyStrong) {
+            shouldApplyBlur = true;
+            decisionReason = hostConfirmed
+              ? 'host_force_unsafe_confirmed_shorts'
+              : 'shorts_dial_only_strong';
+          } else {
+            shouldApplyBlur = false;
+            decisionReason = 'shorts_force_unsafe_unconfirmed_fp';
+          }
+        } else if (shouldBlur) {
+          // Host blur without force-unsafe: need confirmed scores or strong dial.
+          if (hostConfirmed || dialOnlyStrong) {
+            shouldApplyBlur = true;
+            decisionReason = hostConfirmed ? 'host_confirmed_shorts' : 'shorts_dial_only_strong';
+          } else {
+            shouldApplyBlur = false;
+            decisionReason = 'shorts_weak_host_suppressed_fp';
+          }
         } else if (dialOnlyStrong) {
           shouldApplyBlur = true;
           decisionReason = 'shorts_dial_only_strong';
