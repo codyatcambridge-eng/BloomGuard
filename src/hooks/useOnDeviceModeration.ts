@@ -1433,12 +1433,25 @@ export const useOnDeviceModeration = () => {
       let reason: ModerationReason = shouldBlur ? 'threshold_hit' : 'threshold_safe';
       let decisionReason = shouldBlur ? 'stage_a_threshold' : 'stage_a_safe';
 
-      if (!shouldBlur && segmentationApplied) {
+      // FREEZE-OVERRIDE (accuracy): Active Shorts video-frames skip stage-B thirst-only
+      // hard blur. Segmentation thirst on sports/dance skin was a sticky FP factory when
+      // paired with inject host-OR. Shorts hard blur needs NSFWJS channel evidence instead.
+      const isShortsVideoFrameForThirst = String(scanContext?.sourceType || '') === 'video-frame';
+      if (!shouldBlur && segmentationApplied && !isShortsVideoFrameForThirst) {
         shouldBlur = true;
         reason = 'thirst_detected';
         dominantClass = 'Thirst';
         confidence = Math.max(segmentationThirstScore, segmentationSkinRatio);
         decisionReason = 'stage_b_thirst_detected';
+      } else if (!shouldBlur && segmentationApplied && isShortsVideoFrameForThirst) {
+        decisionReason = 'stage_b_thirst_skipped_shorts_frame';
+        console.debug(
+          '[OnDeviceAI] thirst skipped on Active Shorts video-frame',
+          'thirst=',
+          segmentationThirstScore.toFixed(2),
+          'skin=',
+          segmentationSkinRatio.toFixed(2),
+        );
       } else if (explicitOverride) {
         shouldBlur = true;
         reason = 'threshold_hit';

@@ -2040,6 +2040,14 @@ export function generateModerationScript(config: InjectionConfig): string {
           }
         }
       });
+      // Battery + accuracy: recycled active player video must re-scan the new short.
+      document.querySelectorAll('#shorts-player video, ytm-reel-video-renderer video, ytd-reel-video-renderer video').forEach(function(node) {
+        if (!node || node.nodeType !== 1 || !node.dataset) return;
+        const settled = String(node.dataset.mwShortsSettledId || '');
+        if (settled && settled !== currentId) {
+          resetActiveShortsScanStateForIdentityChange(node, 'swipe_identity:' + (reason || 'unknown'));
+        }
+      });
     } catch (e) {}
   }
 
@@ -12348,21 +12356,22 @@ export function generateModerationScript(config: InjectionConfig): string {
         rawCategory === 'shorts_scan_error_uncertain' ||
         normalizedCategory === 'shorts_uncertain_input' ||
         String(hostDecisionReason || '').indexOf('shorts_uncertain') === 0;
-      const isProvisionalPosterSafe =
+      // FREEZE-OVERRIDE (accuracy): ALL Active Shorts poster verdicts are provisional
+      // until a decoded video-frame finalizes. Poster hard-blur was a sticky FP source
+      // (sports thumbs / suggestive covers) that never got corrected when frame failed.
+      const isProvisionalPosterPending =
         isShortsModeActive() &&
         resultSourceType === 'video-poster' &&
         element &&
         element.dataset &&
-        element.dataset.mwShortsAwaitingFrame === '1' &&
-        !shouldBlur &&
-        !FORCE_UNSAFE_CATEGORIES.has(rawCategory);
+        String(element.dataset.mwShortsFrameOk || '') !== '1';
       const isNonFinalPendingResult =
         rawCategory === 'model_not_ready' ||
         normalizedCategory === 'model_not_ready' ||
         hostDecisionReason === 'model_not_ready' ||
         reason === 'model_not_ready' ||
         isUncertainShortsCategory ||
-        isProvisionalPosterSafe;
+        isProvisionalPosterPending;
       const shouldCacheScannedSrc = !(
         rawCategory === 'safe_epoch_stale' ||
         rawCategory === 'safe_sovereign_stale' ||
@@ -12390,14 +12399,19 @@ export function generateModerationScript(config: InjectionConfig): string {
           );
           return;
         }
-        // Active Shorts: provisional poster-safe or uncertain frame — do not finalize.
+        // Active Shorts: provisional poster or uncertain frame — do not hard-finalize.
         if (element && element.isConnected && isShortsModeActive()) {
           try {
             element.dataset.mwDecisionReason = isUncertainShortsCategory
               ? 'shorts_uncertain_provisional'
-              : 'shorts_poster_provisional_safe';
-            // Uncertain empty frames: keep Flash veil / soft protect, schedule frame retry.
-            if (isUncertainShortsCategory || isProvisionalPosterSafe) {
+              : (shouldBlur ? 'shorts_poster_provisional_positive' : 'shorts_poster_provisional_safe');
+            // Soft pre-protect only (no hard blur / reveal ownership from poster).
+            if (shouldBlur && isProvisionalPosterPending) {
+              const softSrc = src || getBloomGuardMarkedNodeSrc(element) || '';
+              if (softSrc) applySoftBlur(element, softSrc, itemId);
+            }
+            // Uncertain / pending poster: keep Flash veil path + schedule one frame pipeline.
+            if (isUncertainShortsCategory || isProvisionalPosterPending) {
               scheduleActiveShortsFrameRetry(
                 element.tagName && String(element.tagName).toUpperCase() === 'VIDEO'
                   ? element
@@ -12407,7 +12421,7 @@ export function generateModerationScript(config: InjectionConfig): string {
                     ? element
                     : (element.querySelector && element.querySelector('video')) || element
                 ),
-                isUncertainShortsCategory ? 'uncertain_sample' : 'poster_provisional_safe'
+                isUncertainShortsCategory ? 'uncertain_sample' : 'poster_provisional'
               );
             }
           } catch (e) {}
@@ -12416,10 +12430,10 @@ export function generateModerationScript(config: InjectionConfig): string {
             'event=non_final_sample',
             'sourceType=' + resultSourceType,
             'category=' + String(rawCategory || ''),
+            'hostShouldBlur=' + String(!!shouldBlur),
             'itemId=' + String(itemId || 'none')
           );
-          // Uncertain / provisional: never hard-finalize here — frame retry only.
-          // (Host no longer force-blurs empty frames; keep this fail-open for FP stability.)
+          // Uncertain / provisional: never hard-finalize here — frame authority only.
           return;
         } else {
           return;
@@ -12476,30 +12490,54 @@ export function generateModerationScript(config: InjectionConfig): string {
         return;
       }
       if (shortsDecision && resultSourceType === 'video-frame' && element && element.dataset) {
+        // Final non-uncertain frame result → authority for this short identity.
         try {
-          element.dataset.mwShortsFrameOk = '1';
-          element.dataset.mwShortsAwaitingFrame = '0';
-        } catch (e) {}
+          markActiveShortsFrameSuccess(
+            element.tagName && String(element.tagName).toUpperCase() === 'VIDEO'
+              ? element
+              : (element.querySelector && element.querySelector('video')) || element,
+            getShortsFrameScanKey(
+              element.tagName && String(element.tagName).toUpperCase() === 'VIDEO'
+                ? element
+                : (element.querySelector && element.querySelector('video')) || element
+            )
+          );
+        } catch (e) {
+          try {
+            element.dataset.mwShortsFrameOk = '1';
+            element.dataset.mwShortsAwaitingFrame = '0';
+            const sid = getCurrentShortsUrlId() || '';
+            if (sid) element.dataset.mwShortsSettledId = sid;
+          } catch (e2) {}
+        }
       }
 
       if (shortsDecision) {
-        // FREEZE-OVERRIDE (accuracy): Active Shorts MVP decision.
-        // FNs: keep zero-bag host positives (NSFWJS empty scores + host swimwear/thirst).
-        // FPs: do NOT hard-blur on unconfirmed forceUnsafe (weak swimwear) or empty frames;
-        //      dial-only needs strong evidence (explicit thr or sexy>max(dial,0.72)).
+        // FREEZE-OVERRIDE (accuracy): Active Shorts MVP decision — channel-evidence first.
+        // Consistent rule for every short (battery + accuracy):
+        //   hard blur only when NSFWJS porn/hentai/sexy channels clear a Shorts bar.
+        // FPs cut: unconfirmed swimwear/thirst, thirst-alone, weak sexy, empty frames.
+        // FNs protected: explicit porn/hentai over dial thr; strong sexy; zero-bag
+        //   ONLY for explicit porn/hentai host labels (not swimwear/thirst).
         const pornD = pornScoreN === null ? 0 : pornScoreN;
         const sexyD = sexyScoreN === null ? 0 : sexyScoreN;
         const hentaiD = hentaiScoreN === null ? 0 : hentaiScoreN;
-        const thirstD = diagnosticThirstScore === null ? 0 : diagnosticThirstScore;
+        const sexyFloor = Math.max(Number(thrTable.sexy) || 0, 0.70);
         const dialOnlyStrong =
           (pornD > Number(thrTable.porn)) ||
           (hentaiD > Number(thrTable.hentai)) ||
           (sexyD > Math.max(Number(thrTable.sexy) || 0, 0.72));
+        // Channel confirmation only — thirst/skin alone never hard-blurs Active Shorts.
         const hostConfirmed =
           (pornD > Number(thrTable.porn)) ||
           (hentaiD > Number(thrTable.hentai)) ||
-          (sexyD > Math.max(Number(thrTable.sexy) || 0, 0.65)) ||
-          (thirstD > 0.55);
+          (sexyD > sexyFloor);
+        const rawLabel = normalizePolicyCategory(rawCategory || predictedLabel || '');
+        const isExplicitHostLabel =
+          rawLabel === 'porn' ||
+          rawLabel === 'hentai' ||
+          normalizePolicyCategory(predictedLabel || '') === 'porn' ||
+          normalizePolicyCategory(predictedLabel || '') === 'hentai';
         const isUncertainCat =
           rawCategory === 'shorts_uncertain_input' ||
           rawCategory === 'shorts_scan_miss_uncertain' ||
@@ -12511,12 +12549,15 @@ export function generateModerationScript(config: InjectionConfig): string {
           // Empty/uncertain sample: never host-OR hard blur (Flash/retry only).
           shouldApplyBlur = false;
           decisionReason = 'shorts_uncertain_no_hard_blur';
-        } else if (shouldBlur && !hasMeaningfulScores) {
-          // Zero-bag host positive — preserve (classic FN path).
+        } else if (shouldBlur && !hasMeaningfulScores && isExplicitHostLabel) {
+          // Zero-bag explicit host positive only (not swimwear/thirst zero bags).
           shouldApplyBlur = true;
-          decisionReason = hostDecisionReason || reason || 'host_blur_zero_bag_shorts';
+          decisionReason = hostDecisionReason || reason || 'host_blur_zero_bag_explicit_shorts';
+        } else if (shouldBlur && !hasMeaningfulScores) {
+          shouldApplyBlur = false;
+          decisionReason = 'shorts_zero_bag_non_explicit_suppressed';
         } else if (shouldBlur && forceUnsafe) {
-          // Swimwear/thirst family: require score confirmation on Shorts (FP cut).
+          // Swimwear/thirst family: require NSFWJS channel confirmation.
           if (hostConfirmed || dialOnlyStrong) {
             shouldApplyBlur = true;
             decisionReason = hostConfirmed
@@ -12527,7 +12568,7 @@ export function generateModerationScript(config: InjectionConfig): string {
             decisionReason = 'shorts_force_unsafe_unconfirmed_fp';
           }
         } else if (shouldBlur) {
-          // Host blur without force-unsafe: need confirmed scores or strong dial.
+          // Host blur without force-unsafe: need channel confirmation or strong dial.
           if (hostConfirmed || dialOnlyStrong) {
             shouldApplyBlur = true;
             decisionReason = hostConfirmed ? 'host_confirmed_shorts' : 'shorts_dial_only_strong';
@@ -12669,15 +12710,17 @@ export function generateModerationScript(config: InjectionConfig): string {
           unsafeScores,
           decisionReason
         );
-        // Host-positive path: never apply decision suppress even if flag flipped later.
-        if (shortsDecision && shouldBlur) {
-          shouldApplyBlur = true;
-        } else {
+        // FREEZE-OVERRIDE (accuracy): Do NOT re-force shouldApplyBlur=true on host positives.
+        // That path undid Shorts host-confirm / forceUnsafe FP cuts (swimwear/thirst FPs).
+        // Trust the Active Shorts decision block above; only apply diag-only guard side effects
+        // for non-Shorts (or when the guard itself mutates shouldBlur while decision-enabled).
+        if (!shortsDecision) {
           shouldApplyBlur = shortsFpDecision.shouldBlur;
           if (shortsFpDecision.reason && shortsFpDecision.reason !== decisionReason) {
             decisionReason = shortsFpDecision.reason;
           }
         }
+        // shortsDecision: keep shouldApplyBlur from the Shorts channel-evidence block.
       }
       
       const dialActive = CONFIG.enabled && CONFIG.sensitivity > 0;
@@ -13535,6 +13578,57 @@ export function generateModerationScript(config: InjectionConfig): string {
       video.dataset.mwShortsAwaitingFrame = '0';
       video.dataset.mwShortsFrameOk = '1';
       if (frameKey) video.dataset.mwLastShortsFrameSuccessKey = frameKey;
+      const settledId = getCurrentShortsUrlId() || '';
+      if (settledId) {
+        video.dataset.mwShortsSettledId = settledId;
+      }
+    } catch (e) {}
+  }
+
+  // Battery: each short gets one final frame pipeline. After frameOk+settledId match,
+  // skip re-capture/re-queue unless identity changes or dial forces rescan.
+  function isActiveShortsFrameSettled(video) {
+    if (!video || !video.dataset) return false;
+    if (String(video.dataset.mwShortsFrameOk || '') !== '1') return false;
+    const settledId = String(video.dataset.mwShortsSettledId || '');
+    const liveId = getCurrentShortsUrlId() || '';
+    if (!settledId || !liveId || settledId !== liveId) return false;
+    return true;
+  }
+
+  function resetActiveShortsScanStateForIdentityChange(video, reason) {
+    if (!video || !video.dataset) return;
+    try {
+      clearShortsFrameRetry(video);
+      shortsFrameRetryCounts.delete(video);
+      video.dataset.mwShortsFrameOk = '0';
+      video.dataset.mwShortsAwaitingFrame = '0';
+      video.dataset.mwLastShortsFrameAttemptKey = '';
+      video.dataset.mwLastShortsFrameSuccessKey = '';
+      video.dataset.mwShortsSettledId = '';
+      video.dataset.mwPosterScanned = 'false';
+      video.dataset.mwLastPoster = '';
+      video.dataset.mwScanned = 'false';
+      video.dataset.mwLastScanSrc = '';
+      video.dataset.mwProvisionalUncertain = '0';
+      // Drop prior short's hard/soft ownership so new short is classified cleanly.
+      if (
+        String(video.dataset.mwModerated || '') === 'blurred' ||
+        String(video.dataset.mwModerated || '') === 'softblur' ||
+        String(video.dataset.mwModerated || '') === 'revealed'
+      ) {
+        const srcClear = String(video.dataset.mwSrc || video.poster || video.src || '');
+        try {
+          clearAllBlurAndOverlay(video, srcClear, 'shorts_identity_change:' + (reason || 'unknown'), 'safe');
+        } catch (e2) {}
+      }
+      console.log(
+        '[DIAG][SHORTS_ACCURACY]',
+        'event=identity_scan_reset',
+        'reason=' + String(reason || 'unknown'),
+        'node=' + getDiagNodeId(video),
+        'liveId=' + String(getCurrentShortsUrlId() || 'none')
+      );
     } catch (e) {}
   }
 
@@ -13616,17 +13710,26 @@ export function generateModerationScript(config: InjectionConfig): string {
         ' frameKey=' + String(shortsFrameKey || '').substring(0, 180) +
         ' currentSrc=' + videoCurrentSrc
       );
-      // Reset retry budget when the active Short identity changes.
+      // Reset retry budget + scan markers when the active Short identity changes.
       if (
-        video.dataset.mwLastShortsFrameSuccessKey &&
-        video.dataset.mwLastShortsFrameSuccessKey !== shortsFrameKey
+        (video.dataset.mwLastShortsFrameSuccessKey &&
+          video.dataset.mwLastShortsFrameSuccessKey !== shortsFrameKey) ||
+        (video.dataset.mwShortsSettledId &&
+          getCurrentShortsUrlId() &&
+          video.dataset.mwShortsSettledId !== getCurrentShortsUrlId())
       ) {
-        try {
-          shortsFrameRetryCounts.delete(video);
-          clearShortsFrameRetry(video);
-          video.dataset.mwShortsFrameOk = '0';
-          video.dataset.mwShortsAwaitingFrame = '0';
-        } catch (e) {}
+        resetActiveShortsScanStateForIdentityChange(video, 'frame_key_or_id_changed');
+      }
+      // Battery preserve: one finalized frame verdict per short identity.
+      if (isActiveShortsFrameSettled(video)) {
+        diagScanRunLog(
+          'scanVideoPoster',
+          video,
+          '',
+          false,
+          'reason=frame_settled_battery_skip id=' + String(video.dataset.mwShortsSettledId || '')
+        );
+        return;
       }
       if (video.dataset.mwLastShortsFrameAttemptKey !== shortsFrameKey) {
         video.dataset.mwLastShortsFrameAttemptKey = shortsFrameKey;
@@ -13636,7 +13739,13 @@ export function generateModerationScript(config: InjectionConfig): string {
           try { state.scanned.delete(frameCapture.src); } catch (e) {}
           const queuedFrame = queueForScan(frameCapture.src, video, 'video-frame');
           if (queuedFrame) {
-            markActiveShortsFrameSuccess(video, shortsFrameKey);
+            // FREEZE-OVERRIDE (accuracy+battery): do NOT mark frameOk on queue.
+            // Frame authority only after a final host result (non-uncertain).
+            // Mark pending so we do not re-capture every mutation tick.
+            try {
+              video.dataset.mwShortsAwaitingFrame = '1';
+              clearShortsFrameRetry(video);
+            } catch (e) {}
             diagScanSourceCounters.video_frame_scan_used += 1;
             diagLogScanSource(
               'video_frame_scan_used',
@@ -13683,7 +13792,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       } else if (video.dataset.mwShortsFrameOk === '1') {
         diagScanRunLog('scanVideoPoster', video, '', false, 'reason=frame_already_succeeded_for_active_key');
       } else {
-        // Attempt stamped but no success yet — keep retrying if budget remains.
+        // Attempt stamped but no final frameOk yet — keep retrying if budget remains.
         scheduleActiveShortsFrameRetry(video, shortsFrameKey, 'attempt_stamped_awaiting_success');
         diagScanRunLog('scanVideoPoster', video, '', false, 'reason=frame_attempt_pending_retry');
       }
