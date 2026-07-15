@@ -116,6 +116,26 @@ describe('Phase 0 Off-mode cleanup', () => {
     expect(revealButtonCount()).toBe(1);
   });
 
+  it('P0 same inject: dial re-enable after Off restores moderation + toggle', () => {
+    // Floating Off / sensitivity_off leaves inject alive; dial must re-arm without reinject.
+    const { video } = buildCard('ytm-rich-item-renderer', POSITIVE_ID);
+    injection = injectScript();
+
+    expect(document.getElementById('mw-sensitivity-toggle')).not.toBeNull();
+    injection.probe.offModeCleanup('test_p0_off_latch');
+    expect(injection.probe.isVisualModerationActive()).toBe(false);
+    injection.probe.applyBlur(video, srcFor(POSITIVE_ID), 'porn', 40, POSITIVE_ID, 'classifier_positive');
+    expect(hasBlurFilter(video)).toBe(false);
+
+    injection.probe.applySensitivityLevel(3, 'host_dial_slider');
+    expect(injection.probe.isVisualModerationActive()).toBe(true);
+    expect(document.getElementById('mw-sensitivity-toggle')).not.toBeNull();
+
+    injection.probe.applyBlur(video, srcFor(POSITIVE_ID), 'porn', 40, POSITIVE_ID, 'classifier_positive');
+    expect(video.dataset.mwModerated).toBe('blurred');
+    expect(hasBlurFilter(video)).toBe(true);
+  });
+
   it('Off to On keeps negatives clean', () => {
     const { video } = buildCard('ytm-rich-item-renderer', SAFE_ID);
     injection = injectScript();

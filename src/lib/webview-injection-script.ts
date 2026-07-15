@@ -442,6 +442,17 @@ export function generateModerationScript(config: InjectionConfig): string {
   // Prevent double injection
   if (window.__MW_ACTIVE__) {
     console.log('[MW] Already injected, skipping');
+    // FREEZE-OVERRIDE (P0 Off→On): host reinject after Off must re-arm the live instance.
+    // Happy-path dial/exit/nosoft behavior is unchanged when already active and On.
+    try {
+      if (typeof window.__MW_RESUME_AFTER_REINJECT__ === 'function') {
+        window.__MW_RESUME_AFTER_REINJECT__({
+          sensitivity: ${config.sensitivity},
+          enabled: ${config.enabled === true},
+          flashShieldV1: ${config.flashShieldV1 === true},
+        });
+      }
+    } catch (eResume) {}
     try {
       if (window.__MW_BLUR_OVERLAY_API__ && typeof window.__MW_BLUR_OVERLAY_API__.sendReady === 'function') {
         window.__MW_BLUR_OVERLAY_API__.sendReady('reinject');
@@ -1733,13 +1744,28 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function ensureSensitivityToggle() {
     ensureSensitivityToggleStyle();
-    if (document.getElementById(SENSITIVITY_TOGGLE_ID)) return;
-    const hostRoot = document.body || document.documentElement;
+    // Prefer documentElement so YouTube body SPA swaps do not destroy the control.
+    const hostRoot = document.documentElement || document.body;
     if (!hostRoot) {
       requestAnimationFrame(ensureSensitivityToggle);
       return;
     }
-    const button = document.createElement('button');
+    let button = document.getElementById(SENSITIVITY_TOGGLE_ID);
+    if (button && button.isConnected) {
+      updateSensitivityToggleButton(button);
+      return;
+    }
+    if (button && !button.isConnected) {
+      try {
+        hostRoot.appendChild(button);
+        updateSensitivityToggleButton(button);
+        return;
+      } catch (eRe) {
+        try { button.remove(); } catch (eRm) {}
+        button = null;
+      }
+    }
+    button = document.createElement('button');
     button.type = 'button';
     button.id = SENSITIVITY_TOGGLE_ID;
     button.setAttribute('aria-live', 'polite');
@@ -1898,35 +1924,65 @@ export function generateModerationScript(config: InjectionConfig): string {
           cleanupBloomGuardVisualModeration('sensitivity_off');
         }
       } catch (e) {}
-    } else if (CONFIG.scanEnabled) {
-      // Instant dial retune using stored scores (Shorts-aware).
+      // Keep floating dial visible so Off is not a dead-end UI.
+      try { ensureSensitivityToggle(); } catch (eTog0) {}
+    } else {
+      // FREEZE-OVERRIDE (P0 Off→On): Off cleanup sets offModeVisualCleanupActive=true
+      // and never cleared it. Happy-path dial (already On) only hits this when the
+      // latch is false — reeval/Shorts frame paths below are unchanged.
+      if (offModeVisualCleanupActive) {
+        offModeVisualCleanupActive = false;
+        CONFIG.scanEnabled = true;
+        console.log(
+          '[DIAG][OFF_MODE] reenable_after_cleanup',
+          'level=' + normalized,
+          'reason=' + String(reason || 'toggle')
+        );
+      }
+      CONFIG.scanEnabled = CONFIG.enabled || CONFIG.flashShieldV1 || CONFIG.scanEnabled;
+      // Host Off may have teardownManagedScheduling (teardownDone=true). Allow timers again.
       try {
-        reevaluateStampedNodesForDial(reason || 'toggle');
-      } catch (e) {}
-      if (isShortsModeActive()) {
-        // FREEZE-OVERRIDE (accuracy): dial churn on Active Shorts must re-sample the
-        // live frame — not re-promote stale poster FPs via full feed rediscovery.
+        if (timerState.teardownDone) {
+          timerState.teardownDone = false;
+          timerState.paused = false;
+          window.__MW_ACTIVE__ = true;
+        }
+        startManagedTimers('sensitivity_on:' + (reason || 'toggle'));
+      } catch (eTimers) {}
+      try { ensureSensitivityToggle(); } catch (eTog) {}
+      if (CONFIG.flashShieldV1) {
+        try { startFlashShieldRuntime(); } catch (eFlash) {}
+      }
+      if (CONFIG.scanEnabled) {
+        // Instant dial retune using stored scores (Shorts-aware).
         try {
-          document.querySelectorAll('video').forEach(function(v) {
-            if (!v || v.nodeType !== 1) return;
-            try {
-              if (isActiveVisibleShortsVideo(v)) {
-                v.dataset.mwLastShortsFrameAttemptKey = '';
-                v.dataset.mwShortsFrameOk = '0';
-                v.dataset.mwShortsAwaitingFrame = '1';
-                v.dataset.mwProvisionalUncertain = '0';
-                scheduleActiveShortsFrameRetry(v, getShortsFrameScanKey(v), 'dial_change_rescan');
-              }
-            } catch (e2) {}
-          });
+          reevaluateStampedNodesForDial(reason || 'toggle');
         } catch (e) {}
-        try {
-          scanActiveShortsPlayerContainer('sensitivity_change:' + (reason || 'toggle'));
-        } catch (e) {}
-      } else {
-        scanFullPage();
-        if (isYouTube()) {
-          scanYouTubeThumbnails();
+        if (isShortsModeActive()) {
+          // FREEZE-OVERRIDE (accuracy): dial churn on Active Shorts must re-sample the
+          // live frame — not re-promote stale poster FPs via full feed rediscovery.
+          try {
+            document.querySelectorAll('video').forEach(function(v) {
+              if (!v || v.nodeType !== 1) return;
+              try {
+                if (isActiveVisibleShortsVideo(v)) {
+                  v.dataset.mwLastShortsFrameAttemptKey = '';
+                  v.dataset.mwShortsFrameOk = '0';
+                  v.dataset.mwShortsAwaitingFrame = '1';
+                  v.dataset.mwProvisionalUncertain = '0';
+                  scheduleActiveShortsFrameRetry(v, getShortsFrameScanKey(v), 'dial_change_rescan');
+                }
+              } catch (e2) {}
+            });
+          } catch (e) {}
+          try {
+            scanActiveShortsPlayerContainer('sensitivity_change:' + (reason || 'toggle'));
+          } catch (e) {}
+        } else {
+          scanFullPage();
+          if (isYouTube()) {
+            scanYouTubeThumbnails();
+          }
         }
       }
     }
@@ -15869,10 +15925,14 @@ export function generateModerationScript(config: InjectionConfig): string {
       'clearedNodes=' + clearedNodes,
       'removedOverlays=' + removedOverlays
     );
+    // Recreate floating dial so user can turn protection back on without host UI.
+    try { ensureSensitivityToggle(); } catch (eTogOff) {}
     return 'OK_OFF_MODE_CLEANUP';
   }
 
   const checkUrlChange = () => {
+    // Cheap re-seat if YouTube SPA wiped body-mounted controls.
+    try { ensureSensitivityToggle(); } catch (eTogUrl) {}
     if (window.location.href !== lastUrl) {
       const previousUrl = lastUrl;
       const nextUrl = window.location.href;
@@ -16274,11 +16334,44 @@ export function generateModerationScript(config: InjectionConfig): string {
     try {
       cleanupBloomGuardVisualModeration(reason || 'host_off_mode');
       teardownManagedScheduling(reason || 'host_off_mode');
+      try { ensureSensitivityToggle(); } catch (eT) {}
       return 'OK_OFF_MODE_CLEANUP';
     } catch (e) {
       return 'ERR:' + String(e);
     }
   };
+
+  // Host reinject while instance still marked active (or after Off latch): re-arm
+  // without rebinding every listener (full IIFE already ran once).
+  window.__MW_RESUME_AFTER_REINJECT__ = function(opts) {
+    try {
+      const o = opts || {};
+      const level = Math.min(4, Math.max(0, Math.round(Number(o.sensitivity) || 0)));
+      if (o.flashShieldV1 === true) CONFIG.flashShieldV1 = true;
+      if (o.flashShieldV1 === false) CONFIG.flashShieldV1 = false;
+      offModeVisualCleanupActive = false;
+      if (timerState.teardownDone) {
+        timerState.teardownDone = false;
+        timerState.paused = false;
+      }
+      window.__MW_ACTIVE__ = true;
+      if (level <= 0 && o.enabled !== true) {
+        CONFIG.sensitivity = 0;
+        CONFIG.enabled = false;
+        CONFIG.scanEnabled = !!CONFIG.flashShieldV1;
+        try { ensureSensitivityToggle(); } catch (e0) {}
+        return 'OK_RESUME_OFF';
+      }
+      // Reuse dial On path (reeval + Shorts frame or full scan) without thr table changes.
+      applySensitivityLevel(level > 0 ? level : 2, 'host_reinject_resume');
+      try { startManagedTimers('host_reinject_resume'); } catch (e1) {}
+      try { ensureSensitivityToggle(); } catch (e2) {}
+      return 'OK_RESUME_ON';
+    } catch (e) {
+      return 'ERR:' + String(e && e.message ? e.message : e);
+    }
+  };
+
   window.__MW_FLASH_SHIELD_SET__ = function(enabled) {
     try {
       if (offModeVisualCleanupActive) return 'SKIP_OFF_MODE';

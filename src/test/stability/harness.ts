@@ -255,6 +255,7 @@ export interface MWTestProbe {
   repairNonShortsBlurRevealInvariant: (reason: string) => void;
   offModeCleanup: (reason: string) => string;
   isVisualModerationActive: () => boolean;
+  applySensitivityLevel: (level: number, reason?: string) => void;
   createRevealOverlay: (
     element: Element,
     src: string,
@@ -377,6 +378,7 @@ export function injectScript(configOverrides?: Partial<InjectionConfig>): Inject
     repairNonShortsBlurRevealInvariant: repairNonShortsBlurRevealInvariant,
     offModeCleanup: cleanupBloomGuardVisualModeration,
     isVisualModerationActive: isVisualModerationActive,
+    applySensitivityLevel: applySensitivityLevel,
     createRevealOverlay: createRevealOverlay,
     findAndBlur: findAndBlur,
     queueMutationScan: queueMutationScan,
