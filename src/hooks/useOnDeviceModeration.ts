@@ -1262,9 +1262,11 @@ export const useOnDeviceModeration = () => {
       // Active Shorts video-frames: raise gates — sports/dance skin density FPs were common
       // because host shouldBlur + inject host-OR always hard-blurred.
       const isShortsVideoFrame = String(scanContext?.sourceType || '') === 'video-frame';
+      // FREEZE-OVERRIDE (MVP accuracy): non-Shorts swimwear no longer uses a 0.15 floor
+      // that made Maximum≈always-blur on skin. Align with main-surface mild sexy floor.
       const swimwearSexyGate = isShortsVideoFrame
         ? Math.max(Number(thresholds.sexy) || SWIMWEAR_SEXY_THRESHOLD, 0.65)
-        : Math.max(Number(thresholds.sexy) || SWIMWEAR_SEXY_THRESHOLD, 0.15);
+        : Math.max(Number(thresholds.sexy) || SWIMWEAR_SEXY_THRESHOLD, 0.40);
       const swimwearSkinMin = isShortsVideoFrame
         ? Math.max(MIN_SKIN_DENSITY_FOR_SWIMWEAR, 0.48)
         : MIN_SKIN_DENSITY_FOR_SWIMWEAR;

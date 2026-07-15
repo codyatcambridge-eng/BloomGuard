@@ -202,7 +202,7 @@ export function getThresholdsForSensitivity(level: number): ModerationThresholds
     case 3:
       return { porn: 0.3, sexy: 0.45, hentai: 0.3 }; // Strict
     case 4:
-      return { porn: 0.15, sexy: 0.25, hentai: 0.15 }; // Maximum
+      return { porn: 0.25, sexy: 0.40, hentai: 0.25 }; // Maximum (MVP-capped)
     default:
       return { porn: 0.3, sexy: 0.45, hentai: 0.3 };
   }

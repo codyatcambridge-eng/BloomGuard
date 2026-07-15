@@ -412,7 +412,9 @@ export function getCategoryThresholds(dialLevel: number): { porn: number; sexy: 
     case 1: return { porn: 0.7, sexy: 0.85, hentai: 0.7 };      // Relaxed
     case 2: return { porn: 0.5, sexy: 0.65, hentai: 0.5 };      // Moderate
     case 3: return { porn: 0.3, sexy: 0.45, hentai: 0.3 };      // Strict
-    case 4: return { porn: 0.15, sexy: 0.25, hentai: 0.15 };    // Maximum
+    // FREEZE-OVERRIDE (MVP accuracy): Maximum was nuclear (0.15/0.25) after anatomical
+    // followed dial thr — mid-band sexy FPs flooded home. Cap Max aggressiveness.
+    case 4: return { porn: 0.25, sexy: 0.40, hentai: 0.25 };    // Maximum (MVP-capped)
     default: return { porn: 0.3, sexy: 0.45, hentai: 0.3 };
   }
 }
@@ -762,13 +764,17 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   // Threshold mappings for blur dial levels.
+  // FREEZE-OVERRIDE (MVP accuracy): Maximum capped (was 0.15/0.25 → home FP flood
+  // after anatomical followed dial thr). Mild sexy floor also applied on main surfaces.
   const THRESHOLDS = {
     0: { porn: 1.1, sexy: 1.1, hentai: 1.1 },       // Off
     1: { porn: 0.7, sexy: 0.85, hentai: 0.7 },      // Relaxed
     2: { porn: 0.5, sexy: 0.65, hentai: 0.5 },      // Moderate
     3: { porn: 0.3, sexy: 0.45, hentai: 0.3 },      // Strict
-    4: { porn: 0.15, sexy: 0.25, hentai: 0.15 },    // Maximum
+    4: { porn: 0.25, sexy: 0.40, hentai: 0.25 },    // Maximum (MVP-capped)
   };
+  // Home/results/watch: sexy-only hits need at least this (max with dial thr).
+  const MAIN_SURFACE_SEXY_MILD_FLOOR = 0.40;
   function getThresholdsForLevel(level) {
     return THRESHOLDS[level] || THRESHOLDS[3];
   }
@@ -10980,6 +10986,114 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
   }
 
+  // FREEZE-OVERRIDE (reveal pairing / first-entry MVP): clear same-card residue so
+  // Reveal does not leave partial blur on sibling img/video/yt-image/veil nodes.
+  function clearSameCardRevealResidue(element, src, reason) {
+    if (!element || element.nodeType !== 1) return 0;
+    let cleared = 0;
+    try {
+      const normalizedSrc = normalizeUrl(src) || String(src || '');
+      let residueScope = element;
+      try {
+        if (typeof element.closest === 'function') {
+          const card =
+            element.closest(NON_SHORTS_REATTACH_STRONG_CARD_SELECTOR) ||
+            element.closest(NON_SHORTS_REATTACH_CARD_SELECTOR) ||
+            element.closest(SHORTS_STABLE_CONTAINER_TAG_SELECTOR);
+          if (card && card.nodeType === 1) residueScope = card;
+        }
+      } catch (eScope) {}
+      if (!residueScope) residueScope = element;
+
+      const stampRevealed = function(node, why) {
+        if (!node || node.nodeType !== 1) return;
+        try {
+          node.style.removeProperty('filter');
+          node.style.removeProperty('-webkit-filter');
+          node.style.removeProperty('backdrop-filter');
+          node.style.removeProperty('-webkit-backdrop-filter');
+          node.classList.remove('mw-softblur');
+          node.classList.remove('mw-blurred');
+          if (node.dataset) {
+            node.dataset.mwModerated = 'revealed';
+            node.dataset.mwPreblurClear = 'true';
+            if (node.dataset.mwVeil === '1') node.removeAttribute('data-mw-veil');
+            if (node.dataset.mwFlashFrame === '1') node.removeAttribute('data-mw-flash-frame');
+            if (node.dataset.mwFlashPositive === '1') node.removeAttribute('data-mw-flash-positive');
+          }
+          try { clearAuthoritativeHardBlur(node); } catch (eAuth) {}
+          cleared += 1;
+          console.log(
+            '[DIAG][BLUR] residue_stamp_revealed',
+            'itemKey=' + getDiagItemKey(src),
+            'node=' + getDiagNodeId(node),
+            'reason=' + String(why || reason || 'same_card_residue')
+          );
+        } catch (eStamp) {}
+      };
+
+      // Primary element first.
+      stampRevealed(element, 'removeBlur_primary');
+
+      // Same-src / same-item siblings inside the card (first-entry multi-node blur).
+      const candidates = residueScope.querySelectorAll
+        ? residueScope.querySelectorAll(
+            'img, video, yt-image, yt-img-shadow, [data-mw-moderated], [data-mw-veil="1"], .mw-blurred, .mw-softblur'
+          )
+        : [];
+      for (let i = 0; i < candidates.length; i += 1) {
+        const residue = candidates[i];
+        if (!residue || residue === element || residue.nodeType !== 1) continue;
+        const residueSrc = String(
+          (residue.dataset && (residue.dataset.mwSrc || residue.dataset.mwOrigSrc || residue.dataset.mwOrigPoster)) ||
+          residue.currentSrc ||
+          residue.src ||
+          residue.poster ||
+          ''
+        );
+        const residueNorm = normalizeUrl(residueSrc) || residueSrc;
+        const sameSrc =
+          !!(normalizedSrc && residueNorm && (
+            residueNorm === normalizedSrc ||
+            residueSrc === src ||
+            String((residue.dataset && residue.dataset.mwSrc) || '') === String(src || '')
+          ));
+        const sameItem =
+          !!(src && getDiagItemKey(src) !== 'unknown' &&
+            getDiagItemKey(residueSrc || residueNorm) === getDiagItemKey(src));
+        const hasBlurLook =
+          (residue.dataset && (
+            residue.dataset.mwModerated === 'blurred' ||
+            residue.dataset.mwModerated === 'softblur' ||
+            residue.dataset.mwVeil === '1' ||
+            residue.dataset.mwHardBlur === '1'
+          )) ||
+          residue.classList.contains('mw-blurred') ||
+          residue.classList.contains('mw-softblur') ||
+          (function() {
+            try {
+              const f = String(residue.style.getPropertyValue('filter') || residue.style.filter || '').toLowerCase();
+              return f.includes('blur(');
+            } catch (eF) { return false; }
+          })();
+        if ((sameSrc || sameItem) && hasBlurLook) {
+          stampRevealed(residue, 'removeBlur_same_card_residue');
+        } else if (hasBlurLook && sameSrc) {
+          stampRevealed(residue, 'removeBlur_same_src');
+        }
+      }
+
+      // Clear veil marks in card even without blur class (CSS-only frosted look).
+      try {
+        residueScope.querySelectorAll('[data-mw-veil="1"]').forEach(function(veilNode) {
+          if (!veilNode || veilNode.nodeType !== 1) return;
+          try { veilNode.removeAttribute('data-mw-veil'); } catch (eV) {}
+        });
+      } catch (eVeil) {}
+    } catch (e) {}
+    return cleared;
+  }
+
   function removeBlur(element, src, options) {
     try {
       const keepOverlay = !!(options && options.keepOverlay);
@@ -11024,18 +11138,11 @@ export function generateModerationScript(config: InjectionConfig): string {
         } else {
           clearAllBlurAndOverlay(element, src, 'removeBlur_reveal', 'revealed');
         }
-        // C2c: a reveal must also clear same-src residue stamps on sibling
-        // nodes in the same stable container (e.g. the <video> that first
-        // held blur before ownership migrated to the frame). A leftover
-        // 'blurred' stamp matches the Flash Shield veil CSS
-        // (video:not([data-mw-moderated="safe"]):not(...revealed)...) and can
-        // visually re-blur a Short the user just revealed. Scoped fail-closed:
-        // same container AND identical mwSrc only — different-src nodes keep
-        // their blur untouched.
+        // C2c Shorts shell residue (video↔frame migration).
         try {
           const residueScope = (element.closest && element.closest(SHORTS_STABLE_CONTAINER_TAG_SELECTOR)) || element;
           const residueNodes = residueScope && typeof residueScope.querySelectorAll === 'function'
-            ? residueScope.querySelectorAll('[data-mw-moderated="blurred"]')
+            ? residueScope.querySelectorAll('[data-mw-moderated="blurred"],[data-mw-moderated="softblur"],[data-mw-veil="1"]')
             : [];
           for (let i = 0; i < residueNodes.length; i += 1) {
             const residue = residueNodes[i];
@@ -11049,6 +11156,7 @@ export function generateModerationScript(config: InjectionConfig): string {
             residue.style.removeProperty('-webkit-backdrop-filter');
             residue.classList.remove('mw-softblur');
             residue.classList.remove('mw-blurred');
+            try { residue.removeAttribute('data-mw-veil'); } catch (eVeil) {}
             console.log(
               '[DIAG][BLUR] residue_stamp_revealed',
               'itemKey=' + getDiagItemKey(src),
@@ -11058,16 +11166,26 @@ export function generateModerationScript(config: InjectionConfig): string {
           }
         } catch (e) {}
       } else {
-        element.style.removeProperty('filter');
-        element.style.removeProperty('-webkit-filter');
-        element.style.removeProperty('backdrop-filter');
-        element.style.removeProperty('-webkit-backdrop-filter');
-        element.style.filter = 'none';
-        element.dataset.mwModerated = 'revealed';
-        clearAuthoritativeHardBlur(element);
-        element.dataset.mwPreblurClear = 'true';
-        element.classList.remove('mw-softblur');
-        element.classList.remove('mw-blurred');
+        // FREEZE-OVERRIDE (first-entry MVP): thorough clear — filter !important, siblings, veil.
+        try {
+          clearAllBlurAndOverlay(element, src, 'removeBlur_reveal_main', 'revealed');
+        } catch (eMain) {
+          element.style.removeProperty('filter');
+          element.style.removeProperty('-webkit-filter');
+          element.style.removeProperty('backdrop-filter');
+          element.style.removeProperty('-webkit-backdrop-filter');
+          element.dataset.mwModerated = 'revealed';
+          clearAuthoritativeHardBlur(element);
+          element.dataset.mwPreblurClear = 'true';
+          element.classList.remove('mw-softblur');
+          element.classList.remove('mw-blurred');
+        }
+        try { clearSameCardRevealResidue(element, src, 'removeBlur_main_surface'); } catch (eRes) {}
+        // Ensure primary stays revealed after residue helper.
+        try {
+          element.dataset.mwModerated = 'revealed';
+          element.dataset.mwPreblurClear = 'true';
+        } catch (eStamp) {}
       }
       markRevealedForSource(src, element, 'removeBlur');
       
@@ -12864,14 +12982,27 @@ export function generateModerationScript(config: InjectionConfig): string {
           decisionReason = 'shorts_safe_host_and_dial';
         }
       } else if (hasMeaningfulScores) {
-        // Home: dial thr primary; keep force-unsafe host positives (swimwear family).
-        shouldApplyBlur = !!dialAnyHit || (!!shouldBlur && forceUnsafe);
-        decisionReason = dialAnyHit
-          ? (thresholdHit ? (predictedLabel + '>=thr') : 'dial_any_channel_hit')
+        // Home/results/watch: dial thr primary with mild sexy floor (MVP FP cut at Maximum).
+        // Porn/hentai use raw dial thr; sexy-only requires max(dialSexy, 0.40).
+        const pornHitMain =
+          pornScoreN !== null && pornScoreN > Number(thrTable.porn);
+        const hentaiHitMain =
+          hentaiScoreN !== null && hentaiScoreN > Number(thrTable.hentai);
+        const sexyMildHit =
+          sexyScoreN !== null &&
+          sexyScoreN > Math.max(Number(thrTable.sexy) || 0, MAIN_SURFACE_SEXY_MILD_FLOOR);
+        const dialMainHit = pornHitMain || hentaiHitMain || sexyMildHit;
+        // forceUnsafe with weak sexy scores must not hard-blur; zero-bag handled below.
+        shouldApplyBlur = !!dialMainHit;
+        decisionReason = dialMainHit
+          ? (pornHitMain || hentaiHitMain
+              ? (thresholdHit ? (predictedLabel + '>=thr') : 'dial_explicit_or_mild_sexy')
+              : 'dial_sexy_mild_floor')
           : (shouldBlur && forceUnsafe
-              ? 'forceUnsafeCategory/' + rawCategory
-              : 'dial_all_channels_below');
+              ? 'forceUnsafe_weak_scores_suppressed_main'
+              : 'dial_all_channels_below_mild');
       } else if (forceUnsafe && shouldBlur) {
+        // Zero-bag host force-unsafe (swimwear family) still blurs on main surfaces.
         shouldApplyBlur = true;
         decisionReason = 'forceUnsafeCategory/' + rawCategory;
       } else if (thresholdComparable) {

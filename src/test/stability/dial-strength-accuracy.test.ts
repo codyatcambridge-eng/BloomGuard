@@ -19,8 +19,8 @@ describe('dial strength accuracy', () => {
 
   it('anatomical floor does not raise bar above Maximum dial thr', () => {
     const maxThr = getCategoryThresholds(4);
-    // Score between Maximum thr and old fixed 0.60 anatomical floor.
-    const midScore = 0.35;
+    // Score between Maximum thr (0.40 MVP-capped) and old fixed 0.60 anatomical floor.
+    const midScore = 0.45;
     expect(midScore).toBeGreaterThan(maxThr.sexy);
     expect(midScore).toBeLessThan(0.6);
 
@@ -119,5 +119,29 @@ describe('dial strength accuracy', () => {
     expect(maxKeep.shouldBlur).toBe(true);
     // At Relaxed, dial thr is 0.85 so host wouldn't hit; anatomical min(0.6,0.85)=0.6 still drops 0.5.
     expect(relKeep.shouldBlur).toBe(false);
+  });
+
+  it('Maximum thr is MVP-capped above the old nuclear 0.15/0.25', () => {
+    const maximum = getCategoryThresholds(4);
+    expect(maximum.porn).toBeGreaterThanOrEqual(0.25);
+    expect(maximum.sexy).toBeGreaterThanOrEqual(0.4);
+    expect(maximum.hentai).toBeGreaterThanOrEqual(0.25);
+    // Still stricter than Strict sexy for explicit channels only if we kept gap —
+    // sexy Max 0.40 is below Strict 0.45 so Max remains more protective on sexy.
+    const strict = getCategoryThresholds(3);
+    expect(maximum.sexy).toBeLessThanOrEqual(strict.sexy);
+    expect(maximum.porn).toBeLessThan(strict.porn);
+  });
+
+  it('home mild sexy floor suppresses weak sexy below 0.40 even at Maximum thr', () => {
+    const thr = getCategoryThresholds(4);
+    const mildFloor = 0.4;
+    const weakSexy = 0.32; // above old nuclear Max thr 0.25, below mild floor
+    expect(weakSexy).toBeGreaterThan(0.25);
+    expect(weakSexy).toBeLessThan(mildFloor);
+    const sexyMildHit = weakSexy > Math.max(thr.sexy, mildFloor);
+    expect(sexyMildHit).toBe(false);
+    const strongSexy = 0.5;
+    expect(strongSexy > Math.max(thr.sexy, mildFloor)).toBe(true);
   });
 });

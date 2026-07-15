@@ -261,7 +261,7 @@ export const useLocalSettings = () => {
       case 1: return { porn: 0.7, sexy: 0.85, hentai: 0.7 }; // Relaxed
       case 2: return { porn: 0.5, sexy: 0.65, hentai: 0.5 }; // Moderate
       case 3: return { porn: 0.3, sexy: 0.45, hentai: 0.3 }; // Strict
-      case 4: return { porn: 0.15, sexy: 0.25, hentai: 0.15 }; // Maximum
+      case 4: return { porn: 0.25, sexy: 0.40, hentai: 0.25 }; // Maximum (MVP-capped)
       default: return { porn: 0.3, sexy: 0.45, hentai: 0.3 };
     }
   }, [settings.blur_dial]);
