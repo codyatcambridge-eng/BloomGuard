@@ -2063,6 +2063,46 @@ export const NativeWebViewBrowser = () => {
             })();
           `).catch(() => undefined);
         }, 1500);
+        // FREEZE-OVERRIDE: late partial-blur scrub — top-row soft/filter residue often
+        // reappears after YouTube finishes painting results/home post-Shorts.
+        window.setTimeout(() => {
+          if (!executeScript) return;
+          void executeScript(`
+            (function() {
+              try {
+                var out = {};
+                if (typeof window.__MW_SHORTS_EXIT_CLEANUP__ === 'function') {
+                  out.cleanup = window.__MW_SHORTS_EXIT_CLEANUP__('host_shorts_exit_2500ms') || {};
+                }
+                if (typeof window.__MW_HOME_FEED_HEAL__ === 'function') {
+                  out.heal = window.__MW_HOME_FEED_HEAL__('host_shorts_exit_2500ms');
+                }
+                return JSON.stringify(out);
+              } catch (e) {
+                return 'ERR';
+              }
+            })();
+          `).catch(() => undefined);
+        }, 2500);
+        window.setTimeout(() => {
+          if (!executeScript) return;
+          void executeScript(`
+            (function() {
+              try {
+                var out = {};
+                if (typeof window.__MW_SHORTS_EXIT_CLEANUP__ === 'function') {
+                  out.cleanup = window.__MW_SHORTS_EXIT_CLEANUP__('host_shorts_exit_5000ms') || {};
+                }
+                if (typeof window.__MW_HOME_FEED_HEAL__ === 'function') {
+                  out.heal = window.__MW_HOME_FEED_HEAL__('host_shorts_exit_5000ms');
+                }
+                return JSON.stringify(out);
+              } catch (e) {
+                return 'ERR';
+              }
+            })();
+          `).catch(() => undefined);
+        }, 5000);
       }
     }
   }, [

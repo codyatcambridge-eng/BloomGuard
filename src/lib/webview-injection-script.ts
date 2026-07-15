@@ -531,12 +531,45 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
   }
 
+  function isNodeUnderActiveShortsShell(node) {
+    if (!node || node.nodeType !== 1) return false;
+    try {
+      if (typeof node.closest !== 'function') return false;
+      return !!node.closest(
+        '#shorts-player, ytm-reel-video-renderer, ytd-reel-video-renderer,' +
+        'ytm-shorts-player-page, ytd-shorts, #shorts-inner-container, #shorts-container'
+      );
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function nodeHasInlineBlurFilter(node) {
+    if (!node || node.nodeType !== 1) return false;
+    try {
+      const filter = String(node.style.getPropertyValue('filter') || node.style.filter || '').toLowerCase();
+      const webkit = String(node.style.getPropertyValue('-webkit-filter') || '').toLowerCase();
+      const backdrop = String(node.style.getPropertyValue('backdrop-filter') || '').toLowerCase();
+      const webkitBackdrop = String(node.style.getPropertyValue('-webkit-backdrop-filter') || '').toLowerCase();
+      return (
+        filter.includes('blur(') ||
+        webkit.includes('blur(') ||
+        backdrop.includes('blur(') ||
+        webkitBackdrop.includes('blur(')
+      );
+    } catch (e) {
+      return false;
+    }
+  }
+
   /**
    * Clear reveal-less soft pre-blur on main feed (partial blur Phase 0 failure).
    * forceAll: drop every softblur (exit window). Otherwise only orphans with no pending.
+   * FREEZE-OVERRIDE: forceAll still runs when Shorts mode is flaky so exit cleanup
+   * can clear home/results soft residue while #shorts-player remains mounted.
    */
   function clearMainFeedSoftPreblurResidue(reason, forceAll) {
-    if (isShortsModeActive()) return 0;
+    if (isShortsModeActive() && !forceAll) return 0;
     let cleared = 0;
     try {
       const nodes = document.querySelectorAll(
@@ -553,6 +586,8 @@ export function generateModerationScript(config: InjectionConfig): string {
         ) {
           continue;
         }
+        // Leave true Active Shorts shell alone when still in shorts mode.
+        if (isShortsModeActive() && isNodeUnderActiveShortsShell(node)) continue;
         const src = getBloomGuardMarkedNodeSrc(node) || String(node.dataset.mwSrc || '');
         if (!forceAll && isSrcPendingScan(src)) {
           // Keep brief semantic soft only while a host result is truly pending —
@@ -565,6 +600,8 @@ export function generateModerationScript(config: InjectionConfig): string {
           } else {
             node.style.removeProperty('filter');
             node.style.removeProperty('-webkit-filter');
+            node.style.removeProperty('backdrop-filter');
+            node.style.removeProperty('-webkit-backdrop-filter');
             node.classList.remove('mw-softblur');
             node.dataset.mwModerated = 'safe';
             node.dataset.mwPreblurClear = 'true';
@@ -583,6 +620,114 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
     } catch (e) {}
     return cleared;
+  }
+
+  /**
+   * Nuclear exit partial-blur scrub for main surfaces (home/results/watch/feed).
+   * Clears reveal-less soft/filter blur AND re-pairs hard positives missing reveal.
+   * Does not touch the Active Shorts player shell.
+   */
+  function scrubPartialBlurAfterShortsExit(reason) {
+    const tag = String(reason || 'shorts_exit_partial_scrub');
+    // Long suppress: exit heal re-scans for several seconds; soft must not return.
+    try { suppressSoftPreblur(9000, tag); } catch (e) {}
+    let softCleared = 0;
+    let filterCleared = 0;
+    let revealsRepaired = 0;
+    try {
+      softCleared = clearMainFeedSoftPreblurResidue(tag, true);
+    } catch (e) {}
+    try {
+      // Broad catch: filter blur without softblur class (DOM recycle / partial stamps).
+      const candidates = document.querySelectorAll(
+        'img, video, yt-image, yt-img-shadow, [data-mw-moderated], .mw-softblur, .mw-blurred,' +
+        '[style*="blur"], [data-mw-src]'
+      );
+      for (let i = 0; i < candidates.length; i += 1) {
+        const node = candidates[i];
+        if (!node || node.nodeType !== 1 || !node.isConnected) continue;
+        if (isNodeUnderActiveShortsShell(node)) continue;
+        const src = getBloomGuardMarkedNodeSrc(node) || String((node.dataset && node.dataset.mwSrc) || '');
+        const hard =
+          (node.dataset && node.dataset.mwHardBlur === '1') ||
+          (node.dataset && node.dataset.mwModerated === 'blurred' && node.classList.contains('mw-blurred')) ||
+          (typeof isAuthoritativeHardBlur === 'function' &&
+            isAuthoritativeHardBlur(node) &&
+            String((node.dataset && node.dataset.mwModerated) || '') === 'blurred');
+        const hasSoftMark =
+          (node.dataset && node.dataset.mwModerated === 'softblur') ||
+          node.classList.contains('mw-softblur');
+        const hasFilter = nodeHasInlineBlurFilter(node);
+
+        if (hard) {
+          // Hard positive must have reveal — never leave partial pairing.
+          if (src && !isRevealedForSource(src, node) && !findRevealOverlayForElement(node, src)) {
+            try {
+              if (typeof forceCreateRevealForHardPositive === 'function') {
+                if (forceCreateRevealForHardPositive(node, src, 'exit_scrub:' + tag)) {
+                  revealsRepaired += 1;
+                }
+              } else if (typeof healNonShortsHardPositiveMissingReveals === 'function') {
+                // fall through to batch heal below
+              }
+            } catch (eHeal) {}
+          }
+          continue;
+        }
+
+        // Soft / partial / filter-only without hard stamp → clear (no reveal-less blur).
+        if (hasSoftMark || hasFilter) {
+          try {
+            if (clearAllBlurAndOverlay(node, src, 'exit_partial_filter_clear:' + tag, 'safe')) {
+              filterCleared += 1;
+            } else if (hasFilter || hasSoftMark) {
+              node.style.removeProperty('filter');
+              node.style.removeProperty('-webkit-filter');
+              node.style.removeProperty('backdrop-filter');
+              node.style.removeProperty('-webkit-backdrop-filter');
+              node.classList.remove('mw-softblur');
+              node.classList.remove('mw-blurred');
+              if (node.dataset) {
+                node.dataset.mwModerated = 'safe';
+                node.dataset.mwPreblurClear = 'true';
+              }
+              filterCleared += 1;
+            }
+          } catch (e2) {}
+        }
+      }
+    } catch (e) {}
+    try {
+      if (typeof healNonShortsHardPositiveMissingReveals === 'function') {
+        healNonShortsHardPositiveMissingReveals('exit_scrub:' + tag);
+      }
+    } catch (e) {}
+    try {
+      if (typeof enforceMainSurfaceBlurRevealInvariant === 'function') {
+        enforceMainSurfaceBlurRevealInvariant('exit_scrub:' + tag);
+      }
+    } catch (e) {}
+    try {
+      // Veil marks on main-surface nodes only. Flash overlay DOM nodes are removed
+      // in performShortsExitSurfaceCleanup step 3 (counted for telemetry/tests).
+      document.querySelectorAll('[data-mw-veil="1"]').forEach(function(node) {
+        if (!node || node.nodeType !== 1) return;
+        if (isNodeUnderActiveShortsShell(node)) return;
+        try {
+          node.removeAttribute('data-mw-veil');
+        } catch (e3) {}
+      });
+    } catch (e) {}
+    console.log(
+      '[DIAG][SOFT_PREBLUR]',
+      'event=exit_partial_scrub',
+      'reason=' + tag,
+      'softCleared=' + softCleared,
+      'filterCleared=' + filterCleared,
+      'revealsRepaired=' + revealsRepaired,
+      'suppressed=' + String(isSoftPreblurSuppressed())
+    );
+    return { softCleared: softCleared, filterCleared: filterCleared, revealsRepaired: revealsRepaired };
   }
 
   function isVisualModerationActive() {
@@ -14982,14 +15127,14 @@ export function generateModerationScript(config: InjectionConfig): string {
         setOverlayEnabled(false, 'home_feed_heal:' + tag);
       } catch (e) {}
       // Kill reveal-less partial soft blur before and after rediscovery scan.
-      try { clearMainFeedSoftPreblurResidue('heal_before:' + tag, true); } catch (e) {}
+      try { scrubPartialBlurAfterShortsExit('heal_before:' + tag); } catch (e) {}
       try {
         if (CONFIG.scanEnabled) {
           scanFullPage();
           if (isYouTube()) scanYouTubeThumbnails();
         }
       } catch (e) {}
-      try { clearMainFeedSoftPreblurResidue('heal_after_scan:' + tag, isSoftPreblurSuppressed()); } catch (e) {}
+      try { scrubPartialBlurAfterShortsExit('heal_after_scan:' + tag); } catch (e) {}
       try {
         repairNonShortsBlurRevealInvariant('home_feed_heal:' + tag);
       } catch (e) {}
@@ -15191,9 +15336,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     let clearedVeilMarks = 0;
     let clearedPlayerResidue = 0;
     try {
-      // 0) Suppress soft preblur so exit re-scans do not paint partial blur on home tops.
-      try { suppressSoftPreblur(3200, 'shorts_exit:' + tag); } catch (e) {}
-      try { clearMainFeedSoftPreblurResidue('shorts_exit:' + tag, true); } catch (e) {}
+      // 0) Nuclear partial-blur scrub: soft + filter-only + hard-without-reveal on main surfaces.
+      // Must run even if Shorts mode is still flaky (player mounted under home/results).
+      try { scrubPartialBlurAfterShortsExit('shorts_exit:' + tag); } catch (e) {}
 
       // 1) Never leave the fullscreen inject overlay armed on home/results.
       try {
@@ -15302,8 +15447,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       repairNonShortsBlurRevealInvariant('shorts_exit_cleanup:' + tag);
       try { healNonShortsHardPositiveMissingReveals('shorts_exit_cleanup:' + tag); } catch (e) {}
       try { enforceMainSurfaceBlurRevealInvariant('shorts_exit_cleanup:' + tag); } catch (e) {}
-      // 8) Final soft sweep — mutation/scan races can re-soft after step 7.
-      try { clearMainFeedSoftPreblurResidue('shorts_exit_final:' + tag, true); } catch (e) {}
+      // 8) Final partial scrub — mutation/scan races can re-soft after step 7.
+      try { scrubPartialBlurAfterShortsExit('shorts_exit_final:' + tag); } catch (e) {}
     } catch (e) {}
     console.log(
       '[DIAG][SHORTS_EXIT_CLEANUP]',
@@ -15756,7 +15901,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           }, 250);
           scheduleInitTimeout('shortsExitHomeHeal', function() {
             try { if (typeof window.__MW_HOME_FEED_HEAL__ === 'function') window.__MW_HOME_FEED_HEAL__('leave_shorts_800ms'); } catch (e) {}
-            try { clearMainFeedSoftPreblurResidue('leave_shorts_800ms_sweep', true); } catch (e) {}
+            try { scrubPartialBlurAfterShortsExit('leave_shorts_800ms_sweep'); } catch (e) {}
           }, 800);
           scheduleInitTimeout('shortsExitInvariantRepair', function() {
             performShortsExitSurfaceCleanup('leave_shorts_1000ms');
@@ -15768,20 +15913,25 @@ export function generateModerationScript(config: InjectionConfig): string {
                 if (isYouTube()) scanYouTubeThumbnails();
               }
             } catch (e) {}
-            try { clearMainFeedSoftPreblurResidue('leave_shorts_1000ms_after_scan', true); } catch (e) {}
+            try { scrubPartialBlurAfterShortsExit('leave_shorts_1000ms_after_scan'); } catch (e) {}
             try { if (typeof window.__MW_HOME_FEED_HEAL__ === 'function') window.__MW_HOME_FEED_HEAL__('leave_shorts_1000ms'); } catch (e) {}
           }, 1000);
           scheduleInitTimeout('shortsExitHomeHeal', function() {
             try { if (typeof window.__MW_HOME_FEED_HEAL__ === 'function') window.__MW_HOME_FEED_HEAL__('leave_shorts_1500ms'); } catch (e) {}
-            try { clearMainFeedSoftPreblurResidue('leave_shorts_1500ms_sweep', true); } catch (e) {}
+            try { scrubPartialBlurAfterShortsExit('leave_shorts_1500ms_sweep'); } catch (e) {}
             try { healNonShortsHardPositiveMissingReveals('leave_shorts_1500ms'); } catch (e) {}
           }, 1500);
           scheduleInitTimeout('shortsExitHomeHeal', function() {
-            try { clearMainFeedSoftPreblurResidue('leave_shorts_2800ms_final', true); } catch (e) {}
+            try { scrubPartialBlurAfterShortsExit('leave_shorts_2800ms_final'); } catch (e) {}
             try { healNonShortsHardPositiveMissingReveals('leave_shorts_2800ms'); } catch (e) {}
             try { repairNonShortsBlurRevealInvariant('leave_shorts_2800ms'); } catch (e) {}
             try { enforceMainSurfaceBlurRevealInvariant('leave_shorts_2800ms'); } catch (e) {}
           }, 2800);
+          // Late pass: YouTube often finishes top-row paint after 3s; kill residual partials.
+          scheduleInitTimeout('shortsExitHomeHeal', function() {
+            try { scrubPartialBlurAfterShortsExit('leave_shorts_5000ms_late'); } catch (e) {}
+            try { enforceMainSurfaceBlurRevealInvariant('leave_shorts_5000ms'); } catch (e) {}
+          }, 5000);
         }
       }
       if (previousIsShorts || nextIsShorts) {
