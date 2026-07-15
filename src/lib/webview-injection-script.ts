@@ -3019,10 +3019,14 @@ export function generateModerationScript(config: InjectionConfig): string {
         host === 'm.youtube.com';
       if (!isYouTubeMainHost) return false;
       var path = String(parsed.pathname || '/').toLowerCase();
+      // FREEZE-OVERRIDE (MVP surface): AGENTS.md requires watch-page recommendation
+      // thumbnails. Ownership/reattach/reveal-heal must run on /watch without
+      // enabling Shorts mode (path /shorts is separate).
       return (
         path === '/' ||
         path.indexOf('/feed') === 0 ||
         path.indexOf('/results') === 0 ||
+        path.indexOf('/watch') === 0 ||
         path.indexOf('/@') === 0 ||
         path.indexOf('/channel/') === 0 ||
         path.indexOf('/c/') === 0

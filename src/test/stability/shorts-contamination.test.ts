@@ -56,11 +56,13 @@ describe('T6: Shorts Contamination Gate', () => {
       ).toBe(false);
     });
 
-    it('isYouTubeMainPageThumbnailSurfaceUrl returns false for /watch URL', () => {
+    it('isYouTubeMainPageThumbnailSurfaceUrl returns true for /watch (watch recs — AGENTS surface)', () => {
       injection = injectScript();
+      // Phase 0 requires watch-page recommendation thumbnails to get ownership/reveal heal.
+      // Must remain false for /shorts/ (separate Active Shorts mode).
       expect(
         injection.probe.isYouTubeMainPageThumbnailSurfaceUrl('https://m.youtube.com/watch?v=dQw4w9WgXcQ'),
-      ).toBe(false);
+      ).toBe(true);
     });
   });
 
