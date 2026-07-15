@@ -7642,6 +7642,75 @@ export function generateModerationScript(config: InjectionConfig): string {
   // Does NOT rewrite createRevealOverlay / resolveShortsStableBlurTarget bodies.
   // Refreshes owner context then invokes the frozen createRevealOverlay on the
   // stable (or live) blur target when blur is present but reveal is missing.
+  // FREEZE-OVERRIDE (reveal pairing): home/results first-entry cold load often
+  // hard-blurs the first thumbnail before the card parent is position:relative /
+  // before createRevealOverlay sticks. Shorts already had a pairing burst; main
+  // surfaces only called createRevealOverlay once — first thumb lost reveal.
+  function scheduleNonShortsRevealPairingBurst(targetNode, src, category, itemId, reason) {
+    if (isShortsModeActive()) return;
+    if (!targetNode || targetNode.nodeType !== 1) return;
+    if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
+    if (targetNode.dataset && targetNode.dataset.mwNonShortsPairingBurst === 'true') return;
+    try {
+      if (targetNode.dataset) targetNode.dataset.mwNonShortsPairingBurst = 'true';
+    } catch (e) {}
+    const delays = [0, 80, 220, 500, 1000, 1800];
+    for (let i = 0; i < delays.length; i += 1) {
+      const delayMs = delays[i];
+      setTimeout(function() {
+        try {
+          if (!isVisualModerationActive() || isShortsModeActive()) return;
+          if (!targetNode || !targetNode.isConnected) return;
+          if (String((targetNode.dataset && targetNode.dataset.mwModerated) || '') !== 'blurred') return;
+          if (isRevealedForSource(src, targetNode)) return;
+          if (findRevealOverlayForElement(targetNode, src)) {
+            try {
+              if (targetNode.dataset) targetNode.dataset.mwNonShortsPairingBurst = 'false';
+            } catch (e2) {}
+            return;
+          }
+          // Ensure parent can host absolute overlay (first-row cards often static).
+          try {
+            const parent = targetNode.parentElement;
+            if (parent && parent.nodeType === 1) {
+              const pos = window.getComputedStyle(parent).position;
+              if (pos === 'static') parent.style.position = 'relative';
+            }
+          } catch (e3) {}
+          createRevealOverlay(
+            targetNode,
+            src,
+            category || targetNode.dataset.mwCategory || 'flagged',
+            itemId || targetNode.dataset.mwItemId || '',
+            false
+          );
+          if (findRevealOverlayForElement(targetNode, src)) {
+            try {
+              if (targetNode.dataset) targetNode.dataset.mwNonShortsPairingBurst = 'false';
+            } catch (e4) {}
+            console.log(
+              '[DIAG][REVEAL_UI] non_shorts_pairing_burst_success',
+              'delayMs=' + delayMs,
+              'reason=' + (reason || 'unknown'),
+              'node=' + getDiagNodeId(targetNode),
+              'itemKey=' + getDiagItemKey(src)
+            );
+          } else if (delayMs >= 1800) {
+            console.warn(
+              '[DIAG][REVEAL_UI] non_shorts_pairing_burst_exhausted',
+              'reason=' + (reason || 'unknown'),
+              'node=' + getDiagNodeId(targetNode),
+              'itemKey=' + getDiagItemKey(src)
+            );
+            try {
+              if (targetNode.dataset) targetNode.dataset.mwNonShortsPairingBurst = 'false';
+            } catch (e5) {}
+          }
+        } catch (e6) {}
+      }, delayMs);
+    }
+  }
+
   function healActiveShortsRevealPairing(targetNode, src, category, itemId, reason) {
     if (!isShortsModeActive()) return false;
     if (!isVisualModerationActive()) return false;
@@ -10391,6 +10460,23 @@ export function generateModerationScript(config: InjectionConfig): string {
             'nodeId=' + getDiagNodeId(element),
             'overlayPresent=' + String(!!overlayAfterCreate),
             'itemKey=' + getDiagItemKey(src)
+          );
+        }
+        // FREEZE-OVERRIDE (reveal pairing): first YouTube entry / cold lifecycle
+        // rescan can leave hard blur without reveal on the first feed thumb.
+        if (element.isConnected && !findRevealOverlayForElement(element, src)) {
+          scheduleNonShortsRevealPairingBurst(
+            element,
+            src,
+            category || 'flagged',
+            itemId || '',
+            'applyBlur_post_create_orphan'
+          );
+          console.warn(
+            '[DIAG][REVEAL_UI] non_shorts_blur_without_reveal_after_apply',
+            'itemId=' + (itemId || 'none'),
+            'itemKey=' + getDiagItemKey(src),
+            'nodeId=' + getDiagNodeId(element)
           );
         }
       }
@@ -14239,6 +14325,11 @@ export function generateModerationScript(config: InjectionConfig): string {
           if (isShortsModeActive()) scanActiveShortsPlayerContainer('lifecycle_rescan:' + tag);
         } catch (e) {}
       }
+      // FREEZE-OVERRIDE (reveal pairing): re-pair hard positives only — do NOT
+      // clear soft pre-blur (pending scan) during lifecycle rediscovery.
+      try {
+        if (!isShortsModeActive()) healNonShortsHardPositiveMissingReveals('lifecycle_rescan:' + tag);
+      } catch (e) {}
       console.log(
         '[DIAG][LIFECYCLE_RESCAN]',
         'reason=' + tag,
@@ -14276,6 +14367,9 @@ export function generateModerationScript(config: InjectionConfig): string {
         try { scanFullPage(); } catch (e) {}
         try { if (isYouTube()) scanYouTubeThumbnails(); } catch (e) {}
       }
+      try {
+        if (!isShortsModeActive()) healNonShortsHardPositiveMissingReveals('cold_start_flush:' + tag);
+      } catch (e) {}
       console.log(
         '[DIAG][COLD_START]',
         'event=flush',
@@ -14609,6 +14703,59 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
   }
 
+  // FREEZE-OVERRIDE (reveal pairing): only recreate missing reveals on hard
+  // positives. Never clears soft pre-blur (used by cold-start / lifecycle rescan).
+  function healNonShortsHardPositiveMissingReveals(reason) {
+    if (isShortsModeActive()) return;
+    if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
+    try {
+      const nodes = document.querySelectorAll(
+        '[data-mw-moderated="blurred"],.mw-blurred,[data-mw-hard-blur="1"]'
+      );
+      let revealRepaired = 0;
+      for (let i = 0; i < nodes.length; i += 1) {
+        const node = nodes[i];
+        if (!node || node.nodeType !== 1 || !node.isConnected) continue;
+        const src = getBloomGuardMarkedNodeSrc(node);
+        if (!src) continue;
+        const itemKey = getDiagItemKey(src);
+        const hasHardPositiveStamp =
+          node.dataset.mwHardBlur === '1' ||
+          (node.dataset.mwModerated === 'blurred' && node.classList.contains('mw-blurred'));
+        if (!hasHardPositiveStamp) continue;
+        if (!isMvpBlurAuthorized(node, src, itemKey, 'card_blurred', 'heal_hard_positive_reveal')) continue;
+        if (findRevealOverlayForElement(node, src)) continue;
+        try {
+          const parent = node.parentElement;
+          if (parent && parent.nodeType === 1) {
+            const pos = window.getComputedStyle(parent).position;
+            if (pos === 'static') parent.style.position = 'relative';
+          }
+        } catch (ePos) {}
+        createRevealOverlay(node, src, node.dataset.mwCategory || 'flagged', node.dataset.mwItemId || itemKey);
+        if (findRevealOverlayForElement(node, src)) {
+          revealRepaired += 1;
+        } else {
+          scheduleNonShortsRevealPairingBurst(
+            node,
+            src,
+            node.dataset.mwCategory || 'flagged',
+            node.dataset.mwItemId || itemKey,
+            'heal_hard_positive_orphan'
+          );
+        }
+      }
+      if (revealRepaired > 0) {
+        console.log(
+          '[DIAG][LIFECYCLE_REPAIR] heal_hard_positive_missing_reveals',
+          'reason=' + (reason || 'unknown'),
+          'revealRepaired=' + revealRepaired,
+          'url=' + window.location.href
+        );
+      }
+    } catch (e) {}
+  }
+
   function repairNonShortsBlurRevealInvariant(reason) {
     if (isShortsModeActive()) return;
     if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
@@ -14632,10 +14779,24 @@ export function generateModerationScript(config: InjectionConfig): string {
 
         if (hasHardPositiveStamp && src && isMvpBlurAuthorized(node, src, itemKey, 'card_blurred', 'shorts_exit_invariant_repair')) {
           if (!findRevealOverlayForElement(node, src)) {
+            try {
+              const parent = node.parentElement;
+              if (parent && parent.nodeType === 1) {
+                const pos = window.getComputedStyle(parent).position;
+                if (pos === 'static') parent.style.position = 'relative';
+              }
+            } catch (ePos) {}
             createRevealOverlay(node, src, node.dataset.mwCategory || 'flagged', node.dataset.mwItemId || itemKey);
             if (findRevealOverlayForElement(node, src)) {
               revealRepaired += 1;
             } else {
+              scheduleNonShortsRevealPairingBurst(
+                node,
+                src,
+                node.dataset.mwCategory || 'flagged',
+                node.dataset.mwItemId || itemKey,
+                'repair_invariant_orphan'
+              );
               preserved += 1;
             }
           } else {
