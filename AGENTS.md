@@ -341,25 +341,44 @@ Then the agent must recommend one of:
 - run one final defined QA pass, then freeze
 - hold freeze only because of a named reproducible blocker
 
-### Patch Discipline After Freeze
+### Patch Discipline After Freeze (STRICT)
 
-After a behavior is frozen, future agents must not modify it unless:
+The Positive Blur Stability Core is frozen at:
 
-1. A reproducible bug is found in that exact behavior.
-2. The bug is a true MVP blocker.
-3. The patch is scoped only to that bug.
-4. The patch includes rollback instructions.
-5. The patch compares behavior against the frozen baseline.
-6. The patch reports every sacred file touched.
-7. The patch reruns the required regression checklist.
+- **Behavior tip:** `phase0-behavior-nosoft-p0off-2a6d9c23` / `2a6d9c23`
+- **Strict seal:** `phase0-positive-blur-strict-freeze-2026-07-15` (banners + zero-edit tooling)
+
+**Zero edits** to frozen files listed in `FROZEN.md`:
+
+- `src/lib/webview-injection-script.ts`
+- `src/components/browser/NativeWebViewBrowser.tsx`
+- `src/hooks/useNativeWebView.ts`
+
+**FREEZE-OVERRIDE is not accepted.** `scripts/check-frozen.mjs` fails on any touch to those files.
+
+Future agents must:
+
+1. Branch **from** `phase0-positive-blur-strict-freeze-2026-07-15` only.
+2. Work **one feature** (accuracy thr | dial UI/settings | narrow cold-load host policy outside frozen bodies).
+3. **Not open** frozen files.
+4. Run `npm run check:frozen` and `npm run test:golden`.
+5. Device-test the lane.
+6. **STOP** — do not chain a second feature.
+
+Emergency MVP blocker only:
+
+1. Repro on seal tip.  
+2. Minimal patch on a branch from the seal tag.  
+3. Golden suite + full positive-blur device matrix.  
+4. Human sign-off.  
+5. **New freeze tag** becomes home (do not keep editing the sealed tip in place).
 
 Concrete examples:
 
-- If active Shorts blur/reveal is frozen, do not rewrite active Shorts lifecycle to fix general classifier accuracy.
-- If thumbnail blur/reveal is frozen, do not change reveal overlay creation to tune thresholds.
-- If Flash Shield is frozen, do not rewrite Flash Shield handoff to fix unrelated page accuracy.
-- If home/feed behavior is frozen, do not risk it while fixing profile/channel-origin Shorts.
-- If Off mode cleanup is frozen, do not broadly alter cleanup unless Off mode itself has a reproducible blocker.
+- Do not rewrite Active Shorts blur/reveal lifecycle to fix general classifier accuracy.
+- Do not change reveal overlay creation to tune thresholds.
+- Do not edit inject apply/reveal to polish Flash Shield.
+- Do not risk frozen home/feed ownership while fixing accuracy.
 
 ### Accuracy Freeze Rule
 
@@ -385,29 +404,29 @@ After accuracy is frozen, future accuracy changes require:
 - a report of every protected file touched
 - regression testing against frozen blur/reveal behavior
 
-### Current Protected Behavior Baseline
+### Current Protected Behavior Baseline (STRICT)
 
 The current protected behavior baseline is:
 
-- tag: `phase0-behavior-freeze-2026-07-09`
-- commit: `7e576a30c64fd06b85ceb5914064ac8a57157a29`
-- source tag: `mvp.333tUOFF`
+- behavior tag: `phase0-behavior-nosoft-p0off-2a6d9c23`
+- behavior commit: `2a6d9c23daddd519db8d8133c2623b0a99c79ed5`
+- strict seal tag: `phase0-positive-blur-strict-freeze-2026-07-15`
+- markers: `nosoft` + `p0off`
 
-This baseline protects:
+This baseline freezes the **Positive Blur Stability Core**:
 
-- thumbnail discovery
-- blur application
-- reveal overlay
-- Flash Shield
-- active Shorts behavior
-- route lifecycle
-- Off mode cleanup
-- settings plumbing
-- stability tests
+- hard blur application + CSS ownership / borders
+- reveal overlay + button injection and pairing
+- inject apply path for host-positive classifications
+- nosoft YouTube soft-preblur ban
+- Shorts isolation from main-surface ownership
+- lifecycle that preserves positive hold + reveal (including Off→On re-arm)
+- host inject handshake / load wiring required for the above
 
-Future agents must compare surgical patches against this baseline.
+**Open (not frozen):** classifier accuracy thr/host decision, blur dial UI/settings, narrow initial page-load host policy that does not edit frozen bodies.
 
-This baseline is a protected behavior rollback point, not a claim that every MVP issue is solved.
+This baseline is a **zero-edit** rollback point for blur/reveal stability.  
+It is **not** a claim that cold-open dial, cold-open first-paint cover, exit white-screen polish, accuracy, or Flash polish are complete.
 
 ## 12. Agent Behavior Rules
 
