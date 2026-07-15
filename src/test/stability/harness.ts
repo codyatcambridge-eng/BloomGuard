@@ -324,6 +324,8 @@ export interface MWTestProbe {
   ) => { key: string; holdMs: number };
   clearStaleShortsRevealMarkersOnSwipe: (reason: string) => void;
   getCurrentShortsUrlId: () => string;
+  ensureActiveShortsVisibleBlurHasReveal: (reason: string) => boolean;
+  markFlashShieldShortsCandidate: () => void;
 }
 
 export interface InjectionResult {
@@ -414,6 +416,8 @@ export function injectScript(configOverrides?: Partial<InjectionConfig>): Inject
     markRevealedForSource: markRevealedForSource,
     clearStaleShortsRevealMarkersOnSwipe: clearStaleShortsRevealMarkersOnSwipe,
     getCurrentShortsUrlId: getCurrentShortsUrlId,
+    ensureActiveShortsVisibleBlurHasReveal: ensureActiveShortsVisibleBlurHasReveal,
+    markFlashShieldShortsCandidate: markFlashShieldShortsCandidate,
   };
   `;
 

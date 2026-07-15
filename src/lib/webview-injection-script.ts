@@ -1452,7 +1452,16 @@ export function generateModerationScript(config: InjectionConfig): string {
           media.dataset.mwVeil = '1';
           ensureFlashShieldShortsOverlay(frame, identity);
           armShortsVeilTimeout(identity);
+          // AGENTS §2: veil is visible blur — pair reveal immediately (first-entry).
+          try {
+            ensureActiveShortsVisibleBlurHasReveal('flash_shield_veil_engaged');
+          } catch (ePair) {}
         }
+      } else if (hasResolvedVerdict && mediaVerdict === 'blurred') {
+        // Hard positive already — ensure reveal was not lost (first-entry race).
+        try {
+          ensureActiveShortsVisibleBlurHasReveal('flash_shield_hard_positive');
+        } catch (ePair2) {}
       }
       warnProfileOriginShortsDiag(
         'flash_shield_engaged',
@@ -4389,6 +4398,10 @@ export function generateModerationScript(config: InjectionConfig): string {
         scheduleActiveShortsFrameRetry(mediaForRetry, getShortsFrameScanKey(mediaForRetry), 'first_entry_force_seed');
       }
     } catch (e) {}
+    // FREEZE-OVERRIDE (reveal): first-entry veil must have a Reveal button immediately.
+    try {
+      ensureActiveShortsVisibleBlurHasReveal('first_entry_force_seed');
+    } catch (ePair) {}
     if (queuedCount <= 0) return 'NO_CANDIDATES';
     return 'QUEUED:' + queuedCount;
   }
@@ -8000,6 +8013,259 @@ export function generateModerationScript(config: InjectionConfig): string {
     const container = getActiveShortsPlayerContainer();
     if (!container || container.nodeType !== 1 || !container.isConnected) return;
     runShortsHealthHealForContainer(container, reason || 'interval');
+  }
+
+  /**
+   * FREEZE-OVERRIDE (first-entry Shorts / AGENTS §2): any *visible* Shorts blur
+   * (Flash veil, frosted overlay, or hard moderated blur) must have a reveal path.
+   *
+   * Root cause of regression: sacc3 keeps poster/uncertain non-final (no applyBlur),
+   * while first-entry Flash Shield still CSS-blurs the player. User sees blur with
+   * no Reveal button until a decoded frame finalizes — often many seconds or stuck.
+   * Holistic fix: pair reveal as soon as the veil is engaged, not only after hard finalize.
+   */
+  function ensureActiveShortsVisibleBlurHasReveal(reason) {
+    if (!isShortsModeActive() || !isVisualModerationActive()) return false;
+    try {
+      const frame =
+        (typeof getFlashShieldActiveShortsFrame === 'function' && getFlashShieldActiveShortsFrame()) ||
+        getActiveShortsPlayerContainer();
+      if (!frame || !frame.isConnected) return false;
+      const media =
+        (typeof frame.querySelector === 'function' &&
+          frame.querySelector('video.html5-main-video, video, img')) ||
+        frame;
+      if (!media || media.nodeType !== 1) return false;
+
+      const shortsId = getCurrentShortsUrlId() || '';
+      const src =
+        getBloomGuardMarkedNodeSrc(media) ||
+        String(
+          (media.dataset && media.dataset.mwSrc) ||
+          media.currentSrc ||
+          media.src ||
+          media.poster ||
+          (shortsId ? 'https://i.ytimg.com/vi/' + shortsId + '/oardefault.jpg' : '') ||
+          ''
+        );
+      if (!src) return false;
+
+      const hasFlashOverlay = !!(
+        frame.querySelector &&
+        frame.querySelector(':scope > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS + ':not([data-mw-veil-releasing="1"])')
+      );
+      const hasVeil =
+        String((media.dataset && media.dataset.mwVeil) || '') === '1' ||
+        String((frame.dataset && frame.dataset.mwVeil) || '') === '1' ||
+        hasFlashOverlay;
+      const mediaMod = String((media.dataset && media.dataset.mwModerated) || '');
+      const frameMod = String((frame.dataset && frame.dataset.mwModerated) || '');
+      const hasHard =
+        mediaMod === 'blurred' ||
+        frameMod === 'blurred' ||
+        (media.classList && media.classList.contains('mw-blurred')) ||
+        (frame.classList && frame.classList.contains('mw-blurred')) ||
+        String((media.dataset && media.dataset.mwFlashPositive) || '') === '1' ||
+        String((frame.dataset && frame.dataset.mwFlashPositive) || '') === '1';
+
+      // Safe / revealed / timeout-safe — no orphan-blur obligation.
+      if (
+        mediaMod === 'safe' ||
+        mediaMod === 'revealed' ||
+        mediaMod === 'timeout-safe' ||
+        frameMod === 'safe' ||
+        frameMod === 'revealed' ||
+        frameMod === 'timeout-safe'
+      ) {
+        return false;
+      }
+      if (!hasVeil && !hasHard) return false;
+      if (isRevealedForSource(src, media) || isRevealedForSource(src, frame)) return false;
+
+      // Already paired.
+      if (
+        findRevealOverlayForElement(media, src) ||
+        findRevealOverlayForElement(frame, src)
+      ) {
+        return true;
+      }
+
+      // Prefer the node that already carries hard blur; else media under veil.
+      let target = media;
+      if (frameMod === 'blurred' && mediaMod !== 'blurred') target = frame;
+      if (mediaMod === 'blurred') target = media;
+
+      // createRevealOverlay requires mwModerated === 'blurred'. Stamp provisional
+      // if we only have CSS veil / frosted overlay so far.
+      if (String((target.dataset && target.dataset.mwModerated) || '') !== 'blurred') {
+        try {
+          target.dataset.mwModerated = 'blurred';
+          target.dataset.mwProvisionalVeilBlur = '1';
+          target.dataset.mwSrc = src;
+          target.dataset.mwCategory = target.dataset.mwCategory || 'flagged';
+          target.dataset.mwItemId = target.dataset.mwItemId || shortsId || '';
+          markAuthoritativeHardBlur(target, src);
+          if (target !== frame) {
+            frame.dataset.mwModerated = frame.dataset.mwModerated || 'blurred';
+            frame.dataset.mwProvisionalVeilBlur = '1';
+            frame.dataset.mwSrc = frame.dataset.mwSrc || src;
+          }
+        } catch (eStamp) {}
+      }
+
+      try {
+        setShortsBlurContextForNode(
+          target,
+          src,
+          target.dataset.mwCategory || 'flagged',
+          target.dataset.mwItemId || shortsId || '',
+          null,
+          target.dataset.mwShortsStableSelector || null,
+          'ensure_visible_blur_reveal:' + (reason || 'unknown')
+        );
+      } catch (eCtx) {}
+
+      try {
+        target.dataset.mwOwnerDeferCount = '0';
+        target.dataset.mwOwnerDeferScheduled = 'false';
+        target.dataset.mwOwnerMismatchCount = '0';
+        target.dataset.mwOwnerMismatchRetryScheduled = 'false';
+        target.dataset.mwPairingBurstScheduled = 'false';
+      } catch (eLatch) {}
+
+      createRevealOverlay(
+        target,
+        src,
+        target.dataset.mwCategory || 'flagged',
+        target.dataset.mwItemId || shortsId || '',
+        false
+      );
+
+      let attached =
+        !!findRevealOverlayForElement(target, src) ||
+        !!findRevealOverlayForElement(media, src) ||
+        !!findRevealOverlayForElement(frame, src);
+
+      if (!attached) {
+        scheduleActiveShortsRevealPairingBurst(
+          target,
+          src,
+          target.dataset.mwCategory || 'flagged',
+          target.dataset.mwItemId || shortsId || '',
+          'ensure_visible_blur_reveal:' + (reason || 'unknown')
+        );
+        attached =
+          !!findRevealOverlayForElement(target, src) ||
+          !!findRevealOverlayForElement(media, src);
+      }
+
+      // Fallback: put a real Reveal button on the frosted flash overlay itself.
+      if (!attached && hasFlashOverlay) {
+        try {
+          ensureFlashShieldOverlayRevealButton(frame, media, src, reason || 'flash_overlay_fallback');
+          attached = !!frame.querySelector('.mw-reveal-btn');
+        } catch (eBtn) {}
+      }
+
+      if (attached) {
+        console.log(
+          '[DIAG][REVEAL_UI] shorts_visible_blur_reveal_paired',
+          'reason=' + String(reason || 'unknown'),
+          'node=' + getDiagNodeId(target),
+          'provisional=' + String(target.dataset.mwProvisionalVeilBlur || '0'),
+          'src=' + String(src).substring(0, 120)
+        );
+      } else {
+        console.warn(
+          '[DIAG][REVEAL_UI] shorts_visible_blur_without_reveal',
+          'reason=' + String(reason || 'unknown'),
+          'node=' + getDiagNodeId(target),
+          'hasVeil=' + String(hasVeil),
+          'hasHard=' + String(hasHard)
+        );
+      }
+      return attached;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function ensureFlashShieldOverlayRevealButton(frame, media, src, reason) {
+    if (!frame || !frame.isConnected) return false;
+    const overlay = frame.querySelector(
+      ':scope > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS + ':not([data-mw-veil-releasing="1"])'
+    );
+    if (!overlay) return false;
+    if (overlay.querySelector('.mw-reveal-btn')) return true;
+    try {
+      // Allow tapping the frosted shield.
+      overlay.style.setProperty('pointer-events', 'auto', 'important');
+      overlay.style.setProperty('display', 'flex', 'important');
+      overlay.style.setProperty('align-items', 'center', 'important');
+      overlay.style.setProperty('justify-content', 'center', 'important');
+      const btn = document.createElement('button');
+      btn.className = 'mw-reveal-btn';
+      btn.type = 'button';
+      btn.textContent = 'Reveal';
+      btn.style.cssText = [
+        'pointer-events: auto',
+        'z-index: 2147483646',
+        'background: rgba(255,255,255,0.18)',
+        'backdrop-filter: blur(16px)',
+        '-webkit-backdrop-filter: blur(16px)',
+        'border: 1px solid rgba(255,255,255,0.35)',
+        'border-radius: 20px',
+        'color: #fff',
+        'font-size: 13px',
+        'font-weight: 600',
+        'padding: 8px 20px',
+        'cursor: pointer',
+      ].join(';');
+      btn.addEventListener(
+        'click',
+        function(ev) {
+          try {
+            if (ev && ev.stopPropagation) ev.stopPropagation();
+            if (ev && ev.preventDefault) ev.preventDefault();
+          } catch (e0) {}
+          try {
+            markRevealedForSource(src, media || frame, 'flash_overlay_reveal');
+            if (media && media.dataset) {
+              media.dataset.mwModerated = 'revealed';
+              media.removeAttribute('data-mw-veil');
+              media.dataset.mwProvisionalVeilBlur = '0';
+            }
+            if (frame && frame.dataset) {
+              frame.dataset.mwModerated = 'revealed';
+              frame.dataset.mwProvisionalVeilBlur = '0';
+            }
+            try {
+              if (typeof clearFlashShieldResolution === 'function') {
+                clearFlashShieldResolution(media || frame, 'revealed');
+              }
+            } catch (e1) {}
+            frame.querySelectorAll('.' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS).forEach(function(node) {
+              try {
+                if (node.dataset.mwVeilReleasing !== '1') fadeOutAndRemoveFlashShortsOverlay(node);
+              } catch (e2) {}
+            });
+            try {
+              removeRevealOverlay(media || frame, src, 'flash_overlay_reveal');
+            } catch (e3) {}
+            console.log(
+              '[DIAG][REVEAL_UI] flash_overlay_reveal_tapped',
+              'reason=' + String(reason || 'unknown'),
+              'src=' + String(src || '').substring(0, 120)
+            );
+          } catch (eClick) {}
+        },
+        true
+      );
+      overlay.appendChild(btn);
+      return true;
+    } catch (e) {
+      return false;
+    }
   }
 
   // FREEZE-OVERRIDE: bounded retry burst for intermittent blur-without-reveal.
@@ -12794,13 +13060,14 @@ export function generateModerationScript(config: InjectionConfig): string {
           );
           return;
         }
-        // Active Shorts: provisional poster or uncertain frame — do not hard-finalize.
+        // Active Shorts: provisional poster or uncertain frame — do not hard-finalize
+        // classification, but DO pair reveal while Flash veil is visible (first-entry).
         if (element && element.isConnected && isShortsModeActive()) {
           try {
             element.dataset.mwDecisionReason = isUncertainShortsCategory
               ? 'shorts_uncertain_provisional'
               : (shouldBlur ? 'shorts_poster_provisional_positive' : 'shorts_poster_provisional_safe');
-            // Soft pre-protect only (no hard blur / reveal ownership from poster).
+            // Soft pre-protect only when soft is allowed (YouTube: never after nosoft).
             if (shouldBlur && isProvisionalPosterPending) {
               const softSrc = src || getBloomGuardMarkedNodeSrc(element) || '';
               if (softSrc) applySoftBlur(element, softSrc, itemId);
@@ -12819,6 +13086,12 @@ export function generateModerationScript(config: InjectionConfig): string {
                 isUncertainShortsCategory ? 'uncertain_sample' : 'poster_provisional'
               );
             }
+            // AGENTS §2: veil/CSS blur must never sit without a reveal escape path.
+            try {
+              ensureActiveShortsVisibleBlurHasReveal(
+                isUncertainShortsCategory ? 'non_final_uncertain' : 'non_final_poster'
+              );
+            } catch (ePair) {}
           } catch (e) {}
           console.log(
             '[DIAG][SHORTS_ACCURACY]',
@@ -12828,7 +13101,7 @@ export function generateModerationScript(config: InjectionConfig): string {
             'hostShouldBlur=' + String(!!shouldBlur),
             'itemId=' + String(itemId || 'none')
           );
-          // Uncertain / provisional: never hard-finalize here — frame authority only.
+          // Uncertain / provisional: never hard-finalize accuracy here — frame authority only.
           return;
         } else {
           return;
@@ -13299,15 +13572,41 @@ export function generateModerationScript(config: InjectionConfig): string {
           removeSoftBlur(element, src);
           // FREEZE-OVERRIDE (accuracy): dial-down / thr re-eval must clear HARD blur too.
           // removeSoftBlur alone left hard-blurred positives stuck → dial felt binary.
+          // Also clear first-entry provisional veil-blur stamps when frame is truly safe.
+          const provisionalVeil =
+            String((element.dataset && element.dataset.mwProvisionalVeilBlur) || '') === '1';
           if (
             preDecisionState === 'blurred' ||
             element.classList.contains('mw-blurred') ||
             preDecisionHasBlur ||
-            String(element.dataset.mwModerated || '') === 'blurred'
+            String(element.dataset.mwModerated || '') === 'blurred' ||
+            provisionalVeil
           ) {
             try {
               clearAllBlurAndOverlay(element, src, 'classifier_safe_or_dial_below:' + (decisionReason || 'safe'), 'safe');
             } catch (e) {}
+            try {
+              if (element.dataset) element.dataset.mwProvisionalVeilBlur = '0';
+              element.removeAttribute('data-mw-veil');
+            } catch (eVeil) {}
+            try {
+              if (isShortsModeActive()) {
+                const fr = getFlashShieldActiveShortsFrame() || getActiveShortsPlayerContainer();
+                if (fr && fr.dataset && fr.dataset.mwProvisionalVeilBlur === '1') {
+                  fr.dataset.mwProvisionalVeilBlur = '0';
+                  if (String(fr.dataset.mwModerated || '') === 'blurred') {
+                    fr.dataset.mwModerated = 'safe';
+                  }
+                }
+                if (fr && typeof fr.querySelectorAll === 'function') {
+                  fr.querySelectorAll('.' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS).forEach(function(ov) {
+                    try {
+                      if (ov.dataset.mwVeilReleasing !== '1') fadeOutAndRemoveFlashShortsOverlay(ov);
+                    } catch (eOv) {}
+                  });
+                }
+              }
+            } catch (eFr) {}
           }
           if (mvpMainSurface) {
             const safeCard = getOwnedCardContainerFromNode(element);
@@ -13318,6 +13617,12 @@ export function generateModerationScript(config: InjectionConfig): string {
           if (wasInSoftBlur && !finalBlur) {
             state.stats.semanticDelaySaved++;
           }
+        }
+        // Final positive Shorts blur: guarantee reveal (first-entry race safety).
+        if (finalBlur && isShortsModeActive()) {
+          try {
+            ensureActiveShortsVisibleBlurHasReveal('final_positive_result');
+          } catch (eEns) {}
         }
         const postDecisionOverlay = findRevealOverlayForElement(element, src);
         const postDecisionFilter = element.style.getPropertyValue('filter') || element.style.filter || '';
