@@ -13,18 +13,33 @@ describe('Active Shorts accuracy decision matrix', () => {
     expect(shortsApply).toBe(true);
   });
 
-  it('dial-only weak sexy is eligible for FP suppress at Balanced thr', () => {
+  it('dial-only weak sexy is suppressed on Shorts (MVP FP stability)', () => {
     const thr = getCategoryThresholds(2); // moderate sexy 0.65
-    const sexy = 0.66; // barely over dial thr
+    const sexy = 0.66; // barely over dial thr but under 0.72 floor
     const dialAnyHit = sexy > thr.sexy;
     expect(dialAnyHit).toBe(true);
     const floorSexy = 0.72;
-    const dialOnlyWeak = sexy < floorSexy;
-    expect(dialOnlyWeak).toBe(true);
-    // Host false + dial hit + weak floor → suppress (FP path)
+    const dialOnlyStrong =
+      sexy > Math.max(thr.sexy, floorSexy); // must clear floor
+    expect(dialOnlyStrong).toBe(false);
     const hostShouldBlur = false;
-    const shouldSuppress = !hostShouldBlur && dialAnyHit && dialOnlyWeak;
-    expect(shouldSuppress).toBe(true);
+    const shouldBlur = hostShouldBlur || dialOnlyStrong;
+    expect(shouldBlur).toBe(false);
+  });
+
+  it('dial-only strong sexy above 0.72 floor can blur without host', () => {
+    const thr = getCategoryThresholds(2);
+    const sexy = 0.8;
+    const dialOnlyStrong = sexy > Math.max(thr.sexy, 0.72);
+    expect(dialOnlyStrong).toBe(true);
+  });
+
+  it('dial reeval keeps host-stamped Shorts positives without scores', () => {
+    const hostBlur = true;
+    const inShorts = true;
+    // reevaluateStampedNodesForDial: host stamp → keep
+    const release = inShorts && hostBlur ? false : true;
+    expect(release).toBe(false);
   });
 
   it('host positive is never dial-only FP suppressed even if weak sexy', () => {

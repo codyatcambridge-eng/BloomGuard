@@ -1499,8 +1499,17 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   // FREEZE-OVERRIDE (accuracy): immediately apply dial thr to already-stamped nodes
   // using stored mw*Score datasets so dial-down unblurs without waiting for host.
+  // Active Shorts: host-stamped positives never score-released; provisional uncertain
+  // always released for frame re-sample; dial-only uses a higher sexy keep-bar.
   function reevaluateStampedNodesForDial(reason) {
-    const thr = effectiveThresholds || getThresholdsForLevel(CONFIG.sensitivity || 0);
+    const inShorts = isShortsModeActive();
+    const thr = inShorts
+      ? getActiveShortsThresholds()
+      : (effectiveThresholds || getThresholdsForLevel(CONFIG.sensitivity || 0));
+    // Shorts dial-only keep bar: require stronger sexy than bare dial thr (FP stability).
+    const sexyKeep = inShorts
+      ? Math.max(Number(thr.sexy) || 0, 0.72)
+      : Number(thr.sexy) || 0;
     let released = 0;
     let kept = 0;
     let skipped = 0;
@@ -1511,20 +1520,53 @@ export function generateModerationScript(config: InjectionConfig): string {
       for (let i = 0; i < nodes.length; i += 1) {
         const el = nodes[i];
         if (!el || el.nodeType !== 1 || !el.isConnected) continue;
-        // Never un-do intentional user reveal.
         if (String(el.dataset.mwModerated || '') === 'revealed') continue;
+        const src = String(el.dataset.mwSrc || '');
+        // Provisional empty-frame blurs are not accuracy truth — always release on dial churn.
+        if (el.dataset.mwProvisionalUncertain === '1' || el.dataset.mwDialOnlyBlur === '1') {
+          const pornP = toFiniteNumber(el.dataset.mwPornScore);
+          const sexyP = toFiniteNumber(el.dataset.mwSexyScore);
+          const hentaiP = toFiniteNumber(el.dataset.mwHentaiScore);
+          const strongKeep =
+            (pornP !== null && pornP > Number(thr.porn)) ||
+            (hentaiP !== null && hentaiP > Number(thr.hentai)) ||
+            (sexyP !== null && sexyP > sexyKeep);
+          if (!strongKeep || el.dataset.mwProvisionalUncertain === '1') {
+            try {
+              clearAllBlurAndOverlay(el, src, 'dial_reeval_provisional_or_weak_dial:' + (reason || 'unknown'), 'safe');
+              released += 1;
+            } catch (e) {
+              skipped += 1;
+            }
+            continue;
+          }
+        }
+        // Host-stamped Shorts positives: dial score reeval must not strip them.
+        if (inShorts && (el.dataset.mwHostBlur === '1' || el.dataset.mwForceUnsafe === '1')) {
+          kept += 1;
+          continue;
+        }
         const porn = toFiniteNumber(el.dataset.mwPornScore);
         const sexy = toFiniteNumber(el.dataset.mwSexyScore);
         const hentai = toFiniteNumber(el.dataset.mwHentaiScore);
         if (porn === null && sexy === null && hentai === null) {
-          skipped += 1;
+          // No scores: home may skip; Shorts dial-only without scores → release.
+          if (inShorts && el.dataset.mwHostBlur !== '1') {
+            try {
+              clearAllBlurAndOverlay(el, src, 'dial_reeval_no_scores_shorts:' + (reason || 'unknown'), 'safe');
+              released += 1;
+            } catch (e) {
+              skipped += 1;
+            }
+          } else {
+            skipped += 1;
+          }
           continue;
         }
         const hit =
           (porn !== null && porn > Number(thr.porn)) ||
-          (sexy !== null && sexy > Number(thr.sexy)) ||
-          (hentai !== null && hentai > Number(thr.hentai));
-        const src = String(el.dataset.mwSrc || '');
+          (hentai !== null && hentai > Number(thr.hentai)) ||
+          (sexy !== null && sexy > (inShorts ? sexyKeep : Number(thr.sexy)));
         if (!hit) {
           try {
             clearAllBlurAndOverlay(el, src, 'dial_reeval_safe:' + (reason || 'unknown'), 'safe');
@@ -1540,7 +1582,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     console.log(
       '[MW][DIAL_REEVAL]',
       'reason=' + (reason || 'unknown'),
+      'shorts=' + inShorts,
       'thr=' + JSON.stringify(thr),
+      'sexyKeep=' + sexyKeep,
       'released=' + released,
       'kept=' + kept,
       'skippedNoScores=' + skipped
@@ -1589,18 +1633,35 @@ export function generateModerationScript(config: InjectionConfig): string {
         }
       } catch (e) {}
     } else if (CONFIG.scanEnabled) {
-      // Instant dial-down release using stored scores (home + active Shorts).
+      // Instant dial retune using stored scores (Shorts-aware).
       try {
         reevaluateStampedNodesForDial(reason || 'toggle');
       } catch (e) {}
-      scanFullPage();
-      if (isYouTube()) {
-        scanYouTubeThumbnails();
-      }
       if (isShortsModeActive()) {
+        // FREEZE-OVERRIDE (accuracy): dial churn on Active Shorts must re-sample the
+        // live frame — not re-promote stale poster FPs via full feed rediscovery.
+        try {
+          document.querySelectorAll('video').forEach(function(v) {
+            if (!v || v.nodeType !== 1) return;
+            try {
+              if (isActiveVisibleShortsVideo(v)) {
+                v.dataset.mwLastShortsFrameAttemptKey = '';
+                v.dataset.mwShortsFrameOk = '0';
+                v.dataset.mwShortsAwaitingFrame = '1';
+                v.dataset.mwProvisionalUncertain = '0';
+                scheduleActiveShortsFrameRetry(v, getShortsFrameScanKey(v), 'dial_change_rescan');
+              }
+            } catch (e2) {}
+          });
+        } catch (e) {}
         try {
           scanActiveShortsPlayerContainer('sensitivity_change:' + (reason || 'toggle'));
         } catch (e) {}
+      } else {
+        scanFullPage();
+        if (isYouTube()) {
+          scanYouTubeThumbnails();
+        }
       }
     }
     postToHost({
@@ -12343,17 +12404,34 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
 
       if (shortsDecision) {
-        // Protective OR: never drop a host positive on Active Shorts.
-        shouldApplyBlur = !!shouldBlur || !!dialAnyHit;
-        if (shouldBlur && dialAnyHit) {
-          decisionReason = thresholdHit ? (predictedLabel + '>=thr') : 'host_and_dial_hit';
-        } else if (shouldBlur) {
-          decisionReason = forceUnsafe
-            ? 'host_force_unsafe_shorts'
-            : (hostDecisionReason || reason || 'host_blur_preserved_shorts');
+        // Protective OR for host positives; dial-only requires STRONGER evidence (FP stability).
+        let dialOnlyStrong = false;
+        if (dialAnyHit && !shouldBlur) {
+          const pornD = pornScoreN === null ? 0 : pornScoreN;
+          const sexyD = sexyScoreN === null ? 0 : sexyScoreN;
+          const hentaiD = hentaiScoreN === null ? 0 : hentaiScoreN;
+          // Explicit channel over thr, or sexy clearly above max(dial, 0.72 FP floor).
+          // Aligns with dial-only floor so weak sexy 0.45–0.72 never hard-blurs on Shorts.
+          dialOnlyStrong =
+            (pornD > Number(thrTable.porn)) ||
+            (hentaiD > Number(thrTable.hentai)) ||
+            (sexyD > Math.max(Number(thrTable.sexy) || 0, 0.72));
+        }
+        if (shouldBlur) {
+          shouldApplyBlur = true;
+          decisionReason = dialAnyHit
+            ? (thresholdHit ? (predictedLabel + '>=thr') : 'host_and_dial_hit')
+            : (forceUnsafe
+                ? 'host_force_unsafe_shorts'
+                : (hostDecisionReason || reason || 'host_blur_preserved_shorts'));
+        } else if (dialOnlyStrong) {
+          shouldApplyBlur = true;
+          decisionReason = 'shorts_dial_only_strong';
         } else if (dialAnyHit) {
-          decisionReason = thresholdHit ? (predictedLabel + '>=thr') : 'dial_any_channel_hit';
+          shouldApplyBlur = false;
+          decisionReason = 'shorts_dial_only_weak_suppressed';
         } else {
+          shouldApplyBlur = false;
           decisionReason = 'shorts_safe_host_and_dial';
         }
       } else if (hasMeaningfulScores) {
@@ -12556,6 +12634,25 @@ export function generateModerationScript(config: InjectionConfig): string {
         try {
           element.dataset.mwConfidence = String(toFiniteNumber(confidence) ?? 0);
           element.dataset.mwDecisionReason = String(decisionReason || '');
+          // FREEZE-OVERRIDE (accuracy): stamp blur authority for dial reeval / Shorts FP control.
+          element.dataset.mwHostBlur = shouldBlur ? '1' : '0';
+          element.dataset.mwForceUnsafe = forceUnsafe ? '1' : '0';
+          element.dataset.mwDialOnlyBlur =
+            (!shouldBlur && !!finalBlur && String(decisionReason || '').indexOf('dial_only') !== -1)
+              ? '1'
+              : ((!shouldBlur && !!finalBlur && String(decisionReason || '').indexOf('dial') !== -1) ? '1' : '0');
+          if (String(decisionReason || '').indexOf('shorts_dial_only_strong') === 0) {
+            element.dataset.mwDialOnlyBlur = '1';
+          }
+          if (
+            String(rawCategory || '').indexOf('shorts_uncertain') === 0 ||
+            String(decisionReason || '').indexOf('shorts_uncertain') !== -1 ||
+            String(hostDecisionReason || '').indexOf('shorts_uncertain') !== -1
+          ) {
+            element.dataset.mwProvisionalUncertain = finalBlur ? '1' : '0';
+          } else if (finalBlur && resultSourceType === 'video-frame') {
+            element.dataset.mwProvisionalUncertain = '0';
+          }
           element.dataset.mwModelVersion = String(model_version || '');
           element.dataset.mwNsfwRisk = String(diagnosticNsfwRisk ?? '');
           element.dataset.mwPersonPresent = diagnosticPersonPresent ? '1' : '0';
