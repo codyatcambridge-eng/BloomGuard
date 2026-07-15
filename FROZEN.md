@@ -1,96 +1,219 @@
-# FROZEN — MVP Sacred Systems
+# FROZEN — Positive Blur Stability Core (Strict Zero-Edit)
 
-**Baseline tag:** `mvp-sacred-2026-06-04`
+**Behavior tip (functional home):** `2a6d9c23daddd519db8d8133c2623b0a99c79ed5`  
+**Behavior tag:** `phase0-behavior-nosoft-p0off-2a6d9c23`  
+**Strict freeze seal tag:** `phase0-positive-blur-strict-freeze-2026-07-15`  
+  (this seal commit = behavior tip + FROZEN banners + zero-edit tooling; **no functional runtime change**)  
+**Stack:** nosoft + p0off (soft ban + Off→On re-arm) on prior orphanfix / partial2 / lifecycle base  
 
-These systems are **MVP-ready and working**. They are FROZEN. The default answer to
-"should I edit this?" is **NO — escalate instead.**
+> **STRICT POLICY:** Zero edits forever to frozen files and frozen contracts.  
+> **FREEZE-OVERRIDE is not accepted.**  
+> Any future change that must touch frozen files requires: branch from the **seal tag** → minimal emergency patch → golden suite + device matrix → **new freeze tag**.  
+> Do not keep editing the sealed tip in place.
 
-> Any change to a function/file listed below requires BOTH:
-> 1. a `FREEZE-OVERRIDE: <reason>` line in the commit body, and
-> 2. QA sign-off (the golden suite green + a device pass on the sacred behaviors).
->
-> A change that un-blurs a positive, drops a reveal button, or destabilizes active
-> Shorts is an automatic reject regardless of override.
+This freeze protects **positive blur stability**, not full product Phase 0 completion.  
+Known residuals (cold dial lag, cold raw positives until hard verdict, exit white-screen class, accuracy FP/FN, Flash polish) are **open tickets**, not license to edit frozen core.
 
-## Sacred behaviors (must never regress)
+---
 
-1. **Tap-to-reveal works on all pages** — every blurred thumbnail gets a reveal button;
-   tapping it clears the blur; the button survives DOM recycling (stale-closure guard).
-2. **Positive thumbnail stability** — a classified-positive home-feed thumbnail stays
-   blurred through hover/style mutation, card recycling, and SPA navigation.
-3. **Active Shorts** — blur on the active short is correct through entry/exit, with no
-   cross-contamination from the shelf or main feed.
-
-## Frozen functions — `src/lib/webview-injection-script.ts`
-
-### Reveal (sacred)
-- `createRevealOverlay` — builds `.mw-reveal-overlay` + `.mw-reveal-btn`, binds tap handlers.
-- `ensureRevealTapInterceptor` — document-level geometric tap interceptor.
-- `ensureRevealDocClickCapture` — capture-phase click routing to the button.
-- `enforceRevealOverlayVisibilityGuard` — overlay scope/identity guard + recovery.
-- `setRevealOverlayAnchorTarget` / `resolveRevealOverlayAnchorTarget` — live-anchor tracking.
-- `findRevealOverlayForElement` — overlay lookup by element/src.
-- `positionNonShortsRevealOverlay` / `positionShortsRevealOverlay` — overlay placement.
-- The `.mw-reveal-btn` `click` / `touchstart` / `touchend` handlers and the `liveElement`
-  resolution inside `createRevealOverlay` (the stale-closure guard).
-
-### Positive stability (sacred)
-- `diagNonShortsReattach` — the blur maintenance / heal pipeline for non-Shorts cards.
-- `isMvpBlurAuthorized` — the blur authorization gate (negative-content protection).
-- `getMvpCardHrefItemKey` — card href → item-key resolution.
-- `applyOwnedPositiveCardClass` / `applyOwnedSafeCardClass` — card ownership CSS.
-- `reapplyOwnedContainerBlur` — owned-card blur reapplication.
-- `rememberNonShortsReattachContext` / `findNonShortsReattachContextByItemKey` — reattach ctx.
-- `ensureOwnedCardStyle` — the owned-card stylesheet.
-
-### Active Shorts (sacred)
-- `resolveShortsStableBlurTarget` — stable blur target resolution for Shorts.
-- `maybeReattachShortsBlurForVideoNode` — Shorts blur reattach on node swap.
-- `getSovereignNavToken` — sovereign nav token (stale-request rejection).
-- `refreshShortsFreshnessOnReentry` — Shorts reentry refresh.
-- `forceFirstEntryModerationRequest` — first-entry latch.
-- The Shorts blur-context family + epoch handling + legacy-fallback probes.
-
-## Frozen host contract — `src/components/browser/NativeWebViewBrowser.tsx` / `src/hooks/useNativeWebView.ts`
-- `injectModerationScript` — the epoch/nav host-context handshake.
-- `onLoadStart` / `onLoadEnd` / `onUrlChange` lifecycle wiring.
-- `__MW_SYNC_HOST_CONTEXT__` contract.
-
-> Cold-start injection work (the `cold_start_injection_ensure` effect and the
-> `ColdStartScan` / `ColdStartGuarantee` loops) is **WIP, not frozen** — it may be
-> modified to fix the cold-start bug, but **without** altering the frozen functions above.
-
-## Golden suite (the tripwire)
+## Absolute rule
 
 ```
+A true freeze baseline means NEVER TOUCH the protected code again.
+No refactoring, no small improvements, no moving functions, no renaming,
+no comment-only cleanup inside frozen bodies, no FREEZE-OVERRIDE for convenience.
+New work layers on top or extends through narrow, stable interfaces only.
+```
+
+---
+
+## Frozen files (DO NOT EDIT)
+
+| File | Role |
+|------|------|
+| `src/lib/webview-injection-script.ts` | Inject: hard blur, CSS ownership, reveal overlays/buttons, apply path, nosoft, Shorts isolation, exit ownership safety, Off re-arm contracts |
+| `src/components/browser/NativeWebViewBrowser.tsx` | Host: inject handshake, load/url lifecycle that keeps blur/reveal alive, Shorts exit multipass hooks, ACK/epoch, dial *push plumbing* (not thr numbers) |
+| `src/hooks/useNativeWebView.ts` | Capgo open/load/message bridge inject readiness depends on |
+
+Each file starts with a **FROZEN banner**. Do not remove or weaken those banners.
+
+---
+
+## Frozen user contracts
+
+1. **Positive hard blur holds** until intentional reveal of that content identity.  
+2. **Every hard blur has a reveal path** (button and/or interceptor).  
+3. **Negatives stay clean** (no stale ownership).  
+4. **No soft partial blur on YouTube** (nosoft / `shouldSkipSoftPreblur`).  
+5. **Surfaces:** home, results, watch recs, Shorts shelves, active Shorts — hold + reveal through lifecycle.  
+6. **Active Shorts must not corrupt** home/results ownership/reveal.  
+7. **Off → On re-arm** (p0off) restores scanning without rewriting thr tables.  
+8. **No broad cleanup** that strips valid positive hard blur/reveal.
+
+---
+
+## Frozen function classes (bodies never edit)
+
+### Visual hard blur + CSS ownership
+- `applyBlur`
+- `clearAllBlurAndOverlay` / ownership-safe clear paths
+- `reapplyOwnedContainerBlur` (+ lifecycle reapply that restores owned blur)
+- `applyOwnedPositiveCardClass` / `applyOwnedSafeCardClass`
+- `ensureOwnedCardStyle`
+- `isMvpBlurAuthorized` / `getMvpCardHrefItemKey`
+- `diagNonShortsReattach` / reattach context remember/find
+- Authoritative hard-blur stamps / ownership CSS enforcement
+
+### Reveal system
+- `createRevealOverlay` (entire body, stale-closure guards)
+- `ensureRevealTapInterceptor` / `ensureRevealDocClickCapture`
+- `enforceRevealOverlayVisibilityGuard`
+- `setRevealOverlayAnchorTarget` / `resolveRevealOverlayAnchorTarget`
+- `findRevealOverlayForElement`
+- `positionNonShortsRevealOverlay` / `positionShortsRevealOverlay`
+- Portal placement used by the above for non-Shorts reveals
+
+### Soft ban (nosoft)
+- `shouldSkipSoftPreblur`
+- `applySoftBlur` early-return honoring YouTube ban
+- `scrubPartialBlurAfterShortsExit` core (clear reveal-less soft/filter without killing owned hard positives)
+
+### Decision path: positive → hard blur + reveal
+- Path from classification/host decision into **`applyBlur` + reveal create**
+- Must not be rewritten to “tune accuracy”; thr may only plug in via existing config bags without body rewrites
+
+### Active Shorts isolation
+- `resolveShortsStableBlurTarget`
+- `maybeReattachShortsBlurForVideoNode`
+- Shorts blur-context / epoch / sovereign token machinery
+- Reveal identity key rules (no sticky reveal across swipe)
+
+### Lifecycle that preserves positives (not all product lifecycle)
+- Enter-Shorts: no document-wide strip of main-surface reveals
+- Exit-Shorts: player/Flash residue clear **without** wiping main-surface owned hard positives
+- `performShortsExitSurfaceCleanup` ownership-preserving steps
+- Off re-arm latch semantics (`offModeVisualCleanupActive` clear on On)
+
+### Host inject contracts
+- Epoch/nav handshake used by inject
+- `__MW_SYNC_HOST_CONTEXT__` contract meaning
+- Wiring that inject is required for blur/reveal to exist
+
+---
+
+## Open work (allowed — outside frozen files)
+
+| Lane | Allowed locations | Must not |
+|------|-------------------|----------|
+| **Accuracy** | Host decision / thr tables in **new or existing non-frozen modules** if injectable without editing frozen bodies; settings thr defaults that already flow as config | Edit `applyBlur` / reveal / ownership; re-enable soft preblur |
+| **Blur dial / settings UI** | `useLocalSettings`, settings panels, `BlurShieldOverlay` labels/UX | Rewrite inject apply/reveal for dial |
+| **Narrow initial page load** | Host-only cold-start **policy in non-frozen modules** when possible; if only possible inside frozen host files → **stop** and plan emergency freeze revision | Touch apply/reveal bodies; broad teardown of owned positives |
+| **Flash polish** | Separate Flash helpers/settings if not rewriting frozen apply/reveal | Fix Flash by disabling nosoft or stripping reveals |
+
+### Residual open tickets (track separately)
+1. Cold open missing 🛡 / late inject  
+2. Cold home raw positives until hard verdict  
+3. Shorts exit white/stuck page  
+4. Classifier FP/FN  
+
+One branch per ticket **from this freeze tag**. Prove device. Optional new freeze tag after seal.
+
+---
+
+## Process (agents and humans)
+
+### Default home
+```bash
+git switch --detach phase0-positive-blur-strict-freeze-2026-07-15
+# behavior-only tip (no seal banners/docs):
+git switch --detach phase0-behavior-nosoft-p0off-2a6d9c23
+# branch for work:
+git checkout -B work/from-freeze phase0-positive-blur-strict-freeze-2026-07-15
+```
+
+### Allowed feature work
+```text
+1. Branch FROM phase0-positive-blur-strict-freeze-2026-07-15 only
+2. ONE feature (accuracy thr | dial UI | cold-load host policy outside frozen bodies)
+3. Do NOT open frozen files
+4. Run: npm run check:frozen && npm run test:golden
+5. Device matrix for your lane
+6. STOP — do not chain a second feature
+```
+
+### Emergency MVP blocker (only path that may touch frozen files)
+1. Repro on seal tip.  
+2. Branch from seal tag.  
+3. Minimal patch.  
+4. Golden suite green + full positive-blur device matrix.  
+5. Human sign-off.  
+6. **New freeze tag** becomes home.  
+7. Document rollback to previous tag.
+
+There is **no** `FREEZE-OVERRIDE:` escape hatch in `scripts/check-frozen.mjs`.
+
+---
+
+## Guard commands
+
+```bash
+# Working tree vs HEAD
+node scripts/check-frozen.mjs
+npm run check:frozen
+
+# Any commit after strict freeze seal
+node scripts/check-frozen.mjs --range phase0-positive-blur-strict-freeze-2026-07-15..HEAD
+
+# Golden stability suite
 npx vitest run --config vitest.stability.config.ts
+npm run test:golden
 ```
 
-Locks the sacred behaviors:
-- `src/test/stability/mvp-sacred-reveal.golden.test.ts` — reveal + stale-closure guard.
-- `src/test/stability/positive-continuity.test.ts` — positive stays blurred.
-- `src/test/stability/negative-isolation.test.ts` — negatives not over-blurred.
-- `src/test/stability/shorts-contamination.test.ts` — Shorts isolation.
-- `src/test/stability/stale-href-race.test.ts`, `href-key-extraction.test.ts`,
-  `card-selector-coverage.test.ts` — key-resolution invariants.
+**Red suite or frozen file touch = stop ship.**
 
-**Every PR must keep this suite green.** Red suite = not done.
+---
 
-## Protected-region guard
+## Frozen golden tests (do not weaken)
 
+- `src/test/stability/mvp-sacred-reveal.golden.test.ts`
+- `src/test/stability/positive-continuity.test.ts`
+- `src/test/stability/negative-isolation.test.ts`
+- `src/test/stability/shorts-contamination.test.ts`
+- `src/test/stability/off-mode-cleanup.test.ts`
+- href-key / card-selector / stale-href guards  
+- related orphan / exit soft-clear tests present on this tip
+
+---
+
+## Device matrix (positive blur stability)
+
+- [ ] Home / results / watch recs: positives hold hard blur + reveal  
+- [ ] Negatives clean  
+- [ ] Active Shorts enter / swipe / reveal / exit / re-enter without orphaning main surface  
+- [ ] Exit Shorts: no soft partial fog; no strip of owned main positives  
+- [ ] Off clears; On restores scan/blur path  
+- [ ] Refresh / bg-fg does not permanently drop positives without recovery path  
+
+---
+
+## Rollback
+
+```bash
+git switch --detach phase0-positive-blur-strict-freeze-2026-07-15
+# functional behavior tip only:
+git switch --detach phase0-behavior-nosoft-p0off-2a6d9c23
+# or
+git reset --hard 2a6d9c23daddd519db8d8133c2623b0a99c79ed5
 ```
-node scripts/check-frozen.mjs            # checks staged/working diff vs HEAD
-node scripts/check-frozen.mjs --range mvp-sacred-2026-06-04..HEAD
-```
 
-Exits non-zero if a diff touches a frozen file without `FREEZE-OVERRIDE:` in the latest
-commit message. Recommended wiring (add manually to `package.json` scripts):
+Then rebuild web + iOS artifacts from that tip only.
 
-```json
-"scripts": {
-  "check:frozen": "node scripts/check-frozen.mjs",
-  "test:golden": "vitest run --config vitest.stability.config.ts"
-}
-```
+---
 
-Recommended pre-commit / CI step: run `test:golden` then `check:frozen`.
+## What this freeze is / is not
+
+| Is | Is not |
+|----|--------|
+| Immutable **Positive Blur Stability Core** | Claim that cold open / accuracy / Flash are done |
+| nosoft + p0off behavior tip lock | License for post-freeze inject refactors |
+| Zero-edit policy | Soft FREEZE-OVERRIDE culture |

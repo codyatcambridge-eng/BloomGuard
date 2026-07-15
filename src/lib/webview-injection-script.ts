@@ -1,3 +1,20 @@
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  FROZEN — POSITIVE BLUR STABILITY CORE                                   ║
+// ║  Tag: phase0-behavior-nosoft-p0off-2a6d9c23  Commit: 2a6d9c23            ║
+// ║                                                                          ║
+// ║  DO NOT EDIT ANYTHING IN THIS FILE.                                      ║
+// ║  No refactors. No renames. No "tiny fixes." No moving helpers.           ║
+// ║  No FREEZE-OVERRIDE for convenience.                                     ║
+// ║                                                                          ║
+// ║  Protects: hard blur + CSS ownership, reveal overlays/buttons, inject    ║
+// ║  apply path, nosoft soft ban, Shorts isolation, exit ownership safety,   ║
+// ║  Off→On re-arm contracts.                                                ║
+// ║                                                                          ║
+// ║  If broken: (1) prove reproducible MVP blocker, (2) branch from freeze   ║
+// ║  tag, (3) human + device matrix, (4) new freeze tag after seal.          ║
+// ║  Accuracy/thr/UI dial MUST NOT land here. See FROZEN.md.                 ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+
 /**
  * WebView Injection Script for Image Moderation
  * 

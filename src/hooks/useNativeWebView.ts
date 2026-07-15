@@ -1,3 +1,19 @@
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  FROZEN — POSITIVE BLUR STABILITY CORE (WEBVIEW BRIDGE)                  ║
+// ║  Tag: phase0-behavior-nosoft-p0off-2a6d9c23  Commit: 2a6d9c23            ║
+// ║                                                                          ║
+// ║  DO NOT EDIT ANYTHING IN THIS FILE.                                      ║
+// ║  No refactors. No renames. No "tiny fixes." No moving helpers.           ║
+// ║  No FREEZE-OVERRIDE for convenience.                                     ║
+// ║                                                                          ║
+// ║  Protects: Capgo open/load/message lifecycle hooks that host inject      ║
+// ║  readiness and blur/reveal recovery depend on.                           ║
+// ║                                                                          ║
+// ║  If broken: (1) prove reproducible MVP blocker, (2) branch from freeze   ║
+// ║  tag, (3) human + device matrix, (4) new freeze tag after seal.          ║
+// ║  See FROZEN.md.                                                          ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { Capacitor, type PluginListenerHandle } from '@capacitor/core';
 import { InAppBrowser, OpenWebViewOptions, ToolBarType, BackgroundColor } from '@capgo/inappbrowser';

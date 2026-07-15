@@ -1,3 +1,20 @@
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  FROZEN — POSITIVE BLUR STABILITY CORE (HOST)                            ║
+// ║  Tag: phase0-behavior-nosoft-p0off-2a6d9c23  Commit: 2a6d9c23            ║
+// ║                                                                          ║
+// ║  DO NOT EDIT ANYTHING IN THIS FILE.                                      ║
+// ║  No refactors. No renames. No "tiny fixes." No moving helpers.           ║
+// ║  No FREEZE-OVERRIDE for convenience.                                     ║
+// ║                                                                          ║
+// ║  Protects: inject handshake, load/url lifecycle wiring that keeps blur/  ║
+// ║  reveal alive, Shorts exit multipass hooks, ACK/epoch contracts, dial    ║
+// ║  push plumbing into inject (not thr numbers).                            ║
+// ║                                                                          ║
+// ║  If broken: (1) prove reproducible MVP blocker, (2) branch from freeze   ║
+// ║  tag, (3) human + device matrix, (4) new freeze tag after seal.          ║
+// ║  Accuracy/thr/settings UI MUST NOT land here. See FROZEN.md.             ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+
 import { useState, useCallback, useEffect, useRef } from 'react';
 import type { PluginListenerHandle } from '@capacitor/core';
 import LabelListener from '@/components/browser/LabelListener';
