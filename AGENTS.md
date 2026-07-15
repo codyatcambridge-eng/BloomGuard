@@ -424,6 +424,24 @@ When working on this repo:
 - Keep patches small and explain what invariant they protect.
 - If a change affects lifecycle, explicitly explain refresh, route, Shorts, and foreground behavior.
 - If a change affects model tuning, explicitly explain false-positive and false-negative tradeoffs.
+- Lifecycle/blur stability is frozen at `phase0-mvp-lifecycle-2026-07-15` — see `FROZEN.md`.
+- Active Shorts accuracy baseline already **inside** that freeze includes tags: `sacc-shorts-dial-stable-2026-07-15`, `sacc2-shorts-fp-cut-2026-07-15`, `sacc3-shorts-accuracy` (do not revert behind sacc3 for “accuracy”).
+- Further accuracy / dial thr / Flash Shield work: **new branch from** `phase0-mvp-safe-work-2026-07-15` only.
+
+### End-of-output protocol (required every agent reply)
+
+At the **end of every assistant response** that involves code or product work, the agent MUST include exactly one of these closings:
+
+1. **BRANCH REQUIRED:** `Create/switch branch: work/<topic> from phase0-mvp-safe-work-2026-07-15`  
+   Use when starting or continuing non-frozen work (accuracy, dial thr, Flash, etc.).
+
+2. **STOP — FEATURE COMPLETE:** `Stop editing. Call <feature-name> done. Tag optional: <tag>. Do not open a new patch unless a reproducible MVP blocker appears.`  
+   Use when the scoped goal is met, tests/matrix pass, and more edits would add risk.
+
+3. **STOP — FREEZE HOLD:** `Do not edit frozen lifecycle/blur. Work only on an allowed FROZEN.md workstream branch.`  
+   Use when the user is on freeze tip and asking for lifecycle rewrites.
+
+Never end a session by stacking a second feature onto an unfinished branch without an explicit BRANCH or STOP line.
 
 ## Central Phase 0 Rule
 
