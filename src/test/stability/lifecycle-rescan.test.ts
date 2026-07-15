@@ -25,7 +25,7 @@ describe('Lifecycle rescan (first entry / refresh)', () => {
     expect(String(result)).toMatch(/^OK/);
   });
 
-  it('lifecycle rescan keeps soft pre-blur on main surface nodes', () => {
+  it('lifecycle rescan clears soft partial blur on YouTube main surfaces (MVP no soft)', () => {
     const { video } = buildCard('ytm-rich-item-renderer', 'dQw4w9WgXcQ');
     injection = injectScript();
     const src = srcFor('dQw4w9WgXcQ');
@@ -37,9 +37,11 @@ describe('Lifecycle rescan (first entry / refresh)', () => {
 
     const rescan = (window as unknown as { __MW_LIFECYCLE_RESCAN__?: (r: string) => string })
       .__MW_LIFECYCLE_RESCAN__;
-    rescan!('test_soft_keep');
+    rescan!('test_soft_clear_mvp');
 
-    expect(video.classList.contains('mw-softblur') || hasSoft(video)).toBe(true);
+    // Phase 0: soft is reveal-less partial blur — rescan must clear, not repaint.
+    expect(video.classList.contains('mw-softblur')).toBe(false);
+    expect(hasSoft(video)).toBe(false);
   });
 
   it('cold-start flush still works alongside lifecycle rescan', () => {

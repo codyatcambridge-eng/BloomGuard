@@ -25,14 +25,13 @@ afterEach(() => {
 });
 
 describe('Cold-start model_not_ready + exit home heal', () => {
-  it('model_not_ready legacy result does not finalize as safe or hard-clear soft blur', () => {
+  it('model_not_ready legacy result does not finalize as safe (no hard clear of pending path)', () => {
     const { video } = buildCard('ytm-rich-item-renderer', POSITIVE_ID);
     injection = injectScript();
     const src = srcFor(POSITIVE_ID);
     video.dataset.mwOrigPoster = src;
-    video.dataset.mwModerated = 'softblur';
-    video.classList.add('mw-softblur');
-    video.style.setProperty('filter', 'blur(12px)', 'important');
+    // Phase 0: YouTube no longer paints soft preblur; stamp pending reason only.
+    video.dataset.mwDecisionReason = 'model_not_ready_pending';
 
     window.__GC_SCAN_RESULTS__ = [
       {
@@ -45,10 +44,9 @@ describe('Cold-start model_not_ready + exit home heal', () => {
 
     injection.probe.processLegacyResults();
 
-    // Soft pre-blur must survive non-final pending (not fail-open safe clear).
-    expect(video.dataset.mwModerated).toBe('softblur');
-    expect(hasBlurFilter(video)).toBe(true);
-    expect(video.classList.contains('mw-softblur')).toBe(true);
+    // Must not hard-finalize as safe/hard-blurred from non-final model_not_ready.
+    expect(video.dataset.mwModerated).not.toBe('blurred');
+    expect(document.querySelector('.mw-reveal-btn')).toBeNull();
   });
 
   it('cold-start flush hook clears scanned and returns OK', () => {

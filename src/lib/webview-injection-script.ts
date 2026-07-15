@@ -517,6 +517,33 @@ export function generateModerationScript(config: InjectionConfig): string {
     return Date.now() < softPreblurSuppressedUntil;
   }
 
+  /**
+   * Phase 0 MVP: soft preblur is always reveal-less partial blur.
+   * Never paint it on YouTube (home/results/watch/feed/channel/Shorts exit recovery).
+   * Hard blur + reveal only when the classifier returns positive.
+   */
+  function shouldSkipSoftPreblur() {
+    if (isSoftPreblurSuppressed()) return true;
+    try {
+      if (isShortsModeActive()) return true;
+    } catch (e) {}
+    try {
+      // IS_YOUTUBE is set once at inject; also re-check live host so SPA is covered.
+      const host = String((window.location && window.location.hostname) || '').toLowerCase();
+      if (
+        host.indexOf('youtube.com') !== -1 ||
+        host.indexOf('youtu.be') !== -1 ||
+        host.indexOf('ytimg.com') !== -1
+      ) {
+        return true;
+      }
+    } catch (e2) {}
+    try {
+      if (typeof IS_YOUTUBE !== 'undefined' && IS_YOUTUBE) return true;
+    } catch (e3) {}
+    return false;
+  }
+
   function isSrcPendingScan(src) {
     if (!src) return false;
     try {
@@ -10202,13 +10229,14 @@ export function generateModerationScript(config: InjectionConfig): string {
       diagSoftBlurLog('apply_skip', element, src, 'reason=preblur_cleared itemId=' + (itemId || 'none'));
       return; // Already cleared due to prior safe decision
     }
-    // FREEZE-OVERRIDE (MVP polish): no reveal-less soft blur during exit/first-entry windows.
-    if (isSoftPreblurSuppressed() || isShortsModeActive()) {
+    // FREEZE-OVERRIDE (MVP polish): never soft-preblur on YouTube / Shorts / exit windows.
+    // Soft is reveal-less partial blur — Phase 0 failure on home after first-entry Shorts exit.
+    if (shouldSkipSoftPreblur()) {
       diagSoftBlurLog(
         'apply_skip',
         element,
         src,
-        'reason=soft_preblur_suppressed itemId=' + (itemId || 'none')
+        'reason=soft_preblur_disabled_mvp itemId=' + (itemId || 'none')
       );
       return;
     }
@@ -13563,24 +13591,21 @@ export function generateModerationScript(config: InjectionConfig): string {
     state.elements.set(itemId, element);
     element.dataset.mwSourceType = sourceType || 'unknown';
     
-    // On Shorts, avoid pre-blur before verdict to prevent false first-entry blur.
-    // Also skip soft preblur during post-Shorts-exit / first-entry suppress windows
-    // so top-row thumbs do not show reveal-less "partial blur".
-    const shortsMode = isShortsModeActive();
-    if (shortsMode || isSoftPreblurSuppressed()) {
+    // Phase 0 MVP: never soft-preblur on YouTube. Queue scans without painting
+    // reveal-less partial blur (first-entry Shorts → home was a common failure).
+    if (shouldSkipSoftPreblur()) {
       try { removeSoftBlur(element, url); } catch (e) {}
-      if (CONFIG.debug || shortsMode) {
+      if (CONFIG.debug) {
         console.log(
           '[DIAG][SHORTS_PREBLUR]',
           'action=skip_preblur',
           'itemId=' + itemId,
-          'suppressed=' + String(isSoftPreblurSuppressed()),
+          'reason=mvp_no_soft_youtube',
           'sourceType=' + String(sourceType || 'unknown'),
           'url=' + String(url).substring(0, 180)
         );
       }
     } else {
-      // Non-Shorts keeps pre-blur to minimize flashes (when not suppressed).
       applySoftBlur(element, url, itemId);
     }
     const blurTimer = null;
@@ -15039,8 +15064,9 @@ export function generateModerationScript(config: InjectionConfig): string {
           try {
             clearElementScanDedupeMarkers(node, 'lifecycle_rescan');
             const src = getBloomGuardMarkedNodeSrc(node);
-            if (src && !isShortsModeActive() && CONFIG.scanEnabled) {
-              applySoftBlur(node, src, node.dataset.mwItemId || '');
+            // Phase 0: do not re-paint soft. Clear residual soft if present on YouTube.
+            if (src && shouldSkipSoftPreblur()) {
+              try { clearAllBlurAndOverlay(node, src, 'lifecycle_rescan_clear_soft', 'safe'); } catch (eClr) {}
             }
           } catch (e2) {}
         });
@@ -15052,10 +15078,12 @@ export function generateModerationScript(config: InjectionConfig): string {
           if (isShortsModeActive()) scanActiveShortsPlayerContainer('lifecycle_rescan:' + tag);
         } catch (e) {}
       }
-      // FREEZE-OVERRIDE (reveal pairing): re-pair hard positives only — do NOT
-      // clear soft pre-blur (pending scan) during lifecycle rediscovery.
       try {
-        if (!isShortsModeActive()) healNonShortsHardPositiveMissingReveals('lifecycle_rescan:' + tag);
+        if (!isShortsModeActive()) {
+          try { scrubPartialBlurAfterShortsExit('lifecycle_rescan:' + tag); } catch (eScrub) {}
+          healNonShortsHardPositiveMissingReveals('lifecycle_rescan:' + tag);
+          try { enforceMainSurfaceBlurRevealInvariant('lifecycle_rescan:' + tag); } catch (eEnf) {}
+        }
       } catch (e) {}
       console.log(
         '[DIAG][LIFECYCLE_RESCAN]',
@@ -15086,7 +15114,10 @@ export function generateModerationScript(config: InjectionConfig): string {
           try {
             const src = getBloomGuardMarkedNodeSrc(node);
             clearElementScanDedupeMarkers(node, 'cold_start_flush');
-            if (src && !isShortsModeActive()) applySoftBlur(node, src, node.dataset.mwItemId || '');
+            // Phase 0: clear soft residue; do not re-apply soft while model warms.
+            if (src && shouldSkipSoftPreblur()) {
+              try { clearAllBlurAndOverlay(node, src, 'cold_start_flush_clear_soft', 'safe'); } catch (eClr) {}
+            }
           } catch (e2) {}
         });
       } catch (e) {}
@@ -15095,7 +15126,10 @@ export function generateModerationScript(config: InjectionConfig): string {
         try { if (isYouTube()) scanYouTubeThumbnails(); } catch (e) {}
       }
       try {
-        if (!isShortsModeActive()) healNonShortsHardPositiveMissingReveals('cold_start_flush:' + tag);
+        if (!isShortsModeActive()) {
+          try { scrubPartialBlurAfterShortsExit('cold_start_flush:' + tag); } catch (eScrub) {}
+          healNonShortsHardPositiveMissingReveals('cold_start_flush:' + tag);
+        }
       } catch (e) {}
       console.log(
         '[DIAG][COLD_START]',
@@ -15884,54 +15918,60 @@ export function generateModerationScript(config: InjectionConfig): string {
           'nextUrl=' + nextUrl
         );
       }
-      const previousIsShorts = isYouTubeShortsUrl(previousUrl);
-      const nextIsShorts = isYouTubeShortsUrl(nextUrl);
+      // FREEZE-OVERRIDE: treat pure /shorts/* AND profile/channel shorts routes as
+      // Active Shorts surfaces so first-entry exit always runs full cleanup.
+      const previousIsShorts =
+        isYouTubeShortsUrl(previousUrl) || isProfileOrChannelShortsRoute(previousUrl);
+      const nextIsShorts =
+        isYouTubeShortsUrl(nextUrl) || isProfileOrChannelShortsRoute(nextUrl);
       if (previousIsShorts !== nextIsShorts) {
         sweepOrphanedModeOverlays(nextIsShorts ? 'enter_shorts' : 'leave_shorts');
         if (previousIsShorts && !nextIsShorts) {
-          // Immediate aggressive cleanup (flash overlays + player residue + portal).
+          // Immediate aggressive cleanup (flash overlays + player residue + portal + partials).
           performShortsExitSurfaceCleanup('leave_shorts_immediate');
-          // FREEZE-OVERRIDE (lifecycle): multi-pass home feed heal — YouTube top-row
-          // thumbs often paint after 400ms; single cleanup left void/frost residue.
-          // Soft preblur stays suppressed (~3.2s) so heal re-scans do not leave
-          // reveal-less partial blur on the top row.
+          // FREEZE-OVERRIDE (lifecycle): multi-pass exit polish for first-entry and all exits.
+          // YouTube top-row often paints after 400ms–5s; soft is disabled on YT so re-scan
+          // cannot re-fog, but filter residue + hard-without-reveal still need scrub/heal.
+          const runExitPolishPass = function(passTag) {
+            try { performShortsExitSurfaceCleanup(passTag); } catch (e1) {}
+            try {
+              if (typeof window.__MW_HOME_FEED_HEAL__ === 'function') {
+                window.__MW_HOME_FEED_HEAL__(passTag);
+              }
+            } catch (e2) {}
+            try { scrubPartialBlurAfterShortsExit(passTag); } catch (e3) {}
+            try { healNonShortsHardPositiveMissingReveals(passTag); } catch (e4) {}
+            try { repairNonShortsBlurRevealInvariant(passTag); } catch (e5) {}
+            try { enforceMainSurfaceBlurRevealInvariant(passTag); } catch (e6) {}
+          };
           scheduleInitTimeout('shortsExitInvariantRepair', function() {
-            performShortsExitSurfaceCleanup('leave_shorts_250ms');
-            try { if (typeof window.__MW_HOME_FEED_HEAL__ === 'function') window.__MW_HOME_FEED_HEAL__('leave_shorts_250ms'); } catch (e) {}
+            runExitPolishPass('leave_shorts_250ms');
           }, 250);
           scheduleInitTimeout('shortsExitHomeHeal', function() {
-            try { if (typeof window.__MW_HOME_FEED_HEAL__ === 'function') window.__MW_HOME_FEED_HEAL__('leave_shorts_800ms'); } catch (e) {}
-            try { scrubPartialBlurAfterShortsExit('leave_shorts_800ms_sweep'); } catch (e) {}
+            runExitPolishPass('leave_shorts_800ms');
           }, 800);
           scheduleInitTimeout('shortsExitInvariantRepair', function() {
-            performShortsExitSurfaceCleanup('leave_shorts_1000ms');
             try {
               if (CONFIG.scanEnabled) {
-                // Clear soft-only scanned misses so top thumbs re-queue after exit.
                 try { state.scanned.clear(); } catch (e) {}
                 scanFullPage();
                 if (isYouTube()) scanYouTubeThumbnails();
               }
             } catch (e) {}
-            try { scrubPartialBlurAfterShortsExit('leave_shorts_1000ms_after_scan'); } catch (e) {}
-            try { if (typeof window.__MW_HOME_FEED_HEAL__ === 'function') window.__MW_HOME_FEED_HEAL__('leave_shorts_1000ms'); } catch (e) {}
+            runExitPolishPass('leave_shorts_1000ms');
           }, 1000);
           scheduleInitTimeout('shortsExitHomeHeal', function() {
-            try { if (typeof window.__MW_HOME_FEED_HEAL__ === 'function') window.__MW_HOME_FEED_HEAL__('leave_shorts_1500ms'); } catch (e) {}
-            try { scrubPartialBlurAfterShortsExit('leave_shorts_1500ms_sweep'); } catch (e) {}
-            try { healNonShortsHardPositiveMissingReveals('leave_shorts_1500ms'); } catch (e) {}
+            runExitPolishPass('leave_shorts_1500ms');
           }, 1500);
           scheduleInitTimeout('shortsExitHomeHeal', function() {
-            try { scrubPartialBlurAfterShortsExit('leave_shorts_2800ms_final'); } catch (e) {}
-            try { healNonShortsHardPositiveMissingReveals('leave_shorts_2800ms'); } catch (e) {}
-            try { repairNonShortsBlurRevealInvariant('leave_shorts_2800ms'); } catch (e) {}
-            try { enforceMainSurfaceBlurRevealInvariant('leave_shorts_2800ms'); } catch (e) {}
+            runExitPolishPass('leave_shorts_2800ms');
           }, 2800);
-          // Late pass: YouTube often finishes top-row paint after 3s; kill residual partials.
           scheduleInitTimeout('shortsExitHomeHeal', function() {
-            try { scrubPartialBlurAfterShortsExit('leave_shorts_5000ms_late'); } catch (e) {}
-            try { enforceMainSurfaceBlurRevealInvariant('leave_shorts_5000ms'); } catch (e) {}
+            runExitPolishPass('leave_shorts_5000ms');
           }, 5000);
+          scheduleInitTimeout('shortsExitHomeHeal', function() {
+            runExitPolishPass('leave_shorts_8000ms');
+          }, 8000);
         }
       }
       if (previousIsShorts || nextIsShorts) {
@@ -15946,6 +15986,11 @@ export function generateModerationScript(config: InjectionConfig): string {
         scheduleShortsRevealOverlayReposition('url_change_shorts');
       } else {
         stopAdaptiveShortsOverlayWatch('url_change_non_shorts');
+        // Leaving any Shorts-related surface (including first-entry): always scrub partials
+        // even when previousIsShorts detection missed a transient URL.
+        if (previousIsShorts || isYouTubeShortsUrl(previousUrl)) {
+          try { scrubPartialBlurAfterShortsExit('url_change_non_shorts_guard'); } catch (eG) {}
+        }
       }
       if (observerModeResult.transitioned && observerModeResult.mode) {
         scheduleYouTubeScan('url_change_mode_on');

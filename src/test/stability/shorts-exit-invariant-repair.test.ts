@@ -56,6 +56,24 @@ describe('Shorts exit blur/reveal invariant repair', () => {
     expect(document.querySelector('.mw-reveal-overlay')).not.toBeNull();
   });
 
+  it('first-entry Shorts exit to home leaves no soft or filter partial blur', () => {
+    // Repro: first entry /shorts → back home → top thumbs fogged without reveal.
+    const { video: top } = buildCard('ytm-rich-item-renderer', SAFE_ID);
+    injection = injectScript();
+    // Simulate residual soft + filter from pre-exit home scan / heal race.
+    top.dataset.mwModerated = 'softblur';
+    top.classList.add('mw-softblur');
+    top.style.setProperty('filter', 'blur(8px)', 'important');
+    top.style.setProperty('-webkit-filter', 'blur(8px)', 'important');
+
+    injection.probe.performShortsExitSurfaceCleanup('test_first_entry_exit_home');
+
+    expect(hasBlurFilter(top)).toBe(false);
+    expect(top.classList.contains('mw-softblur')).toBe(false);
+    expect(document.querySelector('[data-mw-moderated="softblur"]')).toBeNull();
+    expect(document.querySelector('.mw-reveal-btn')).toBeNull();
+  });
+
   it('exit cleanup clears filter-only partial blur without softblur class', () => {
     // Repro: exit leaves style filter blur(8px) without mw-softblur (partial stamp).
     const { video } = buildCard('ytm-rich-item-renderer', SAFE_ID);
