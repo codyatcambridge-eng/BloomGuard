@@ -798,6 +798,30 @@ export function generateModerationScript(config: InjectionConfig): string {
         const hasFilter = nodeHasInlineBlurFilter(node);
 
         if (hard) {
+          // EXIT orphan frost: a hard blur on a main-surface VIDEO keyed by an
+          // Active Shorts frame capture (data-URI src / video-frame sourceType)
+          // has no thumbnail identity — no reveal system can own it (the regular
+          // fallback is scope-blocked for shelf videos). Repairing is impossible;
+          // clear it. The img thumbnail path re-covers the Short with a reveal.
+          const isStaleShortsFrameResidue =
+            String(node.tagName || '').toUpperCase() === 'VIDEO' &&
+            (String((node.dataset && node.dataset.mwSourceType) || '') === 'video-frame' ||
+              String(src || '').indexOf('data:') === 0 ||
+              String((node.dataset && node.dataset.mwSrc) || '').indexOf('data:') === 0);
+          if (isStaleShortsFrameResidue) {
+            try {
+              if (clearAllBlurAndOverlay(node, src, 'exit_stale_shorts_frame_clear:' + tag, 'safe')) {
+                filterCleared += 1;
+              } else {
+                node.style.removeProperty('filter');
+                node.style.removeProperty('-webkit-filter');
+                node.classList.remove('mw-blurred');
+                if (node.dataset) node.dataset.mwModerated = 'safe';
+                filterCleared += 1;
+              }
+            } catch (eStale) {}
+            continue;
+          }
           // Hard positive must have reveal — never leave partial pairing.
           if (src && !isRevealedForSource(src, node) && !findRevealOverlayForElement(node, src)) {
             try {
@@ -13191,7 +13215,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         (predictedLabel === 'sexy' && sexyScoreForAction > 0.8);
       const dynamicBlurCandidate = rawCategory === 'swimwear' || (predictedLabel === 'sexy' && sexyScoreForAction < 0.8);
       let finalBlur = CONFIG.forcedBlur || (shouldApplyBlur && dialActive);
-      const flashPositive = CONFIG.flashShieldV1 && shouldApplyBlur;
+      let flashPositive = CONFIG.flashShieldV1 && shouldApplyBlur;
       if (isShortsModeActive()) {
         console.warn(
           '[MW-ACTIVE-SHORTS-ACCURACY-DIAG]',
@@ -13229,6 +13253,31 @@ export function generateModerationScript(config: InjectionConfig): string {
         if (finalBlur) state.stats.blurSkippedByKillSwitch++;
         finalBlur = false;
         decisionReason = 'kill-switch/youtube-domain';
+      }
+      // EXIT orphan frost (MVP blocker): an in-flight Active Shorts video-frame
+      // verdict (data-URI src) that lands after leaving Shorts must not hard-blur
+      // the recycled video node on home/results. No reveal system owns that pairing
+      // (the regular-thumb fallback is scope-blocked for shelf videos), leaving
+      // frosted shelf cards until DOM recycle. Drop the stale apply — the safe
+      // branch below scrubs residue, and the thumbnail img path re-covers the same
+      // Short identity with a working reveal.
+      const staleOffShortsFrameVerdict =
+        resultSourceType === 'video-frame' &&
+        !isShortsModeActive() &&
+        (!element || !isNodeUnderActiveShortsShell(element));
+      if (staleOffShortsFrameVerdict && (finalBlur || flashPositive)) {
+        console.log(
+          '[DIAG][SHORTS_EXIT]',
+          'event=stale_frame_verdict_dropped',
+          'itemId=' + String(itemId || 'none'),
+          'finalBlur=' + String(!!finalBlur),
+          'flashPositive=' + String(!!flashPositive),
+          'decisionReason=' + String(decisionReason || 'none'),
+          'url=' + String(window.location.href || '').substring(0, 120)
+        );
+        finalBlur = false;
+        flashPositive = false;
+        decisionReason = (decisionReason ? decisionReason + '/' : '') + 'stale_off_shorts_frame_dropped';
       }
       if (CONFIG.debug) {
         console.log('[MW][Decision] itemId=' + itemId, 'src=' + (src || '').substring(0, 60), 'finalBlur=' + finalBlur, 'reason=' + decisionReason);

@@ -252,4 +252,41 @@ describe('Shorts exit blur/reveal invariant repair', () => {
     expect(scored.dataset.mwScanned).toBe('true');
     expect(shellImg.dataset.mwScanned).toBe('true');
   });
+
+  it('exit clears stale Shorts frame-capture hard blur on main-surface shelf videos', () => {
+    // Repro: enter positive Short from shelf → reveal → exit. In-flight video-frame
+    // verdict (data-URI src) hard-blurred the recycled shelf preview video on home.
+    // Reveal fallback is scope-blocked for shelf videos → permanent frosted card.
+    // Exit scrub must CLEAR this residue (not attempt reveal repair).
+    const shelfCard = document.createElement('ytm-shorts-lockup-view-model');
+    const shelfVideo = document.createElement('video');
+    shelfVideo.dataset.mwModerated = 'blurred';
+    shelfVideo.classList.add('mw-blurred');
+    shelfVideo.dataset.mwHardBlur = '1';
+    shelfVideo.dataset.mwSourceType = 'video-frame';
+    shelfVideo.dataset.mwSrc = 'data:image/jpeg;base64,/9j/4AAQSkZJRg';
+    shelfVideo.style.setProperty('filter', 'blur(40px)', 'important');
+    shelfCard.appendChild(shelfVideo);
+    document.body.appendChild(shelfCard);
+
+    // Control: a regular hard positive img on home must keep blur (not swept up).
+    const { video: regularPositive } = buildCard('ytm-rich-item-renderer', POSITIVE_ID);
+    injection = injectScript();
+    injection.probe.applyBlur(
+      regularPositive, srcFor(POSITIVE_ID), 'porn', 40, POSITIVE_ID, 'classifier_positive'
+    );
+    expect(regularPositive.dataset.mwModerated).toBe('blurred');
+
+    injection.probe.performShortsExitSurfaceCleanup('test_stale_frame_residue');
+
+    // Shelf frost cleared, marked safe — no reveal repair attempted for it.
+    expect(hasBlurFilter(shelfVideo)).toBe(false);
+    expect(shelfVideo.classList.contains('mw-blurred')).toBe(false);
+    expect(shelfVideo.dataset.mwModerated).toBe('safe');
+
+    // Regular owned positive survives the exit scrub with blur + reveal intact.
+    expect(regularPositive.dataset.mwModerated).toBe('blurred');
+    expect(hasBlurFilter(regularPositive)).toBe(true);
+    expect(document.querySelector('.mw-reveal-overlay')).not.toBeNull();
+  });
 });
