@@ -180,4 +180,76 @@ describe('Shorts exit blur/reveal invariant repair', () => {
     expect(pageOverlay.classList.contains('mw-enabled')).toBe(false);
     expect(portal.querySelector('.mw-reveal-overlay')).toBeNull();
   });
+
+  it('exit clears main-surface feed Flash veils (blank bordered thumbs) without touching Shorts shell', () => {
+    // Repro: leave Active Shorts → home cards have borders but white/empty content
+    // from data-mw-veil + Flash CSS. Shorts player veil must not be stripped mid-session
+    // via shell skip (here we only run cleanup on home URL with residual player).
+    const { video: homeThumb } = buildCard('ytm-rich-item-renderer', SAFE_ID);
+    homeThumb.dataset.mwVeil = '1';
+    homeThumb.removeAttribute('data-mw-moderated');
+
+    const player = document.createElement('div');
+    player.id = 'shorts-player';
+    const frame = document.createElement('ytm-reel-video-renderer');
+    frame.setAttribute('selected', '');
+    const shortsMedia = document.createElement('video');
+    shortsMedia.dataset.mwVeil = '1';
+    frame.appendChild(shortsMedia);
+    player.appendChild(frame);
+    document.body.appendChild(player);
+
+    injection = injectScript();
+    injection.probe.performShortsExitSurfaceCleanup('test_exit_blank_thumbs_veil');
+
+    // Feed thumb veil cleared (blank-thumb fix) — scrub + explicit feed clear.
+    expect(homeThumb.dataset.mwVeil).toBeUndefined();
+
+    // Re-veil (simulates heal restamp race) then exit again — must strip again.
+    homeThumb.dataset.mwVeil = '1';
+    injection.probe.performShortsExitSurfaceCleanup('test_exit_blank_thumbs_veil_2');
+    expect(homeThumb.dataset.mwVeil).toBeUndefined();
+  });
+
+  it('exit clears scan-dedup stamp on verdict-less feed imgs so heal can re-score them', () => {
+    // Release side of blank-thumbs: img stamped mwScanned=true with NO verdict is
+    // skipped forever by scanImgElement dedup, so a re-stamped veil never releases
+    // (white card until manual scroll). Exit must clear the stale dedup stamp.
+    const makeFeedImg = (id: string): HTMLImageElement => {
+      const card = document.createElement('ytm-rich-item-renderer');
+      const img = document.createElement('img');
+      img.src = srcFor(id);
+      card.appendChild(img);
+      document.body.appendChild(card);
+      return img;
+    };
+    const verdictless = makeFeedImg(SAFE_ID);
+    verdictless.dataset.mwScanned = 'true';
+    verdictless.dataset.mwLastScanSrc = srcFor(SAFE_ID);
+
+    // A scored img must keep its dedup stamp (no rescan storm on verdicts).
+    const scored = makeFeedImg(POSITIVE_ID);
+    scored.dataset.mwScanned = 'true';
+    scored.dataset.mwLastScanSrc = srcFor(POSITIVE_ID);
+    scored.dataset.mwModerated = 'safe';
+
+    // Active Shorts shell img must be untouched.
+    const player = document.createElement('div');
+    player.id = 'shorts-player';
+    const frame = document.createElement('ytm-reel-video-renderer');
+    frame.setAttribute('selected', '');
+    const shellImg = document.createElement('img');
+    shellImg.dataset.mwScanned = 'true';
+    frame.appendChild(shellImg);
+    player.appendChild(frame);
+    document.body.appendChild(player);
+
+    injection = injectScript();
+    injection.probe.performShortsExitSurfaceCleanup('test_exit_verdictless_dedup');
+
+    expect(verdictless.dataset.mwScanned).toBeUndefined();
+    expect(verdictless.dataset.mwLastScanSrc).toBeUndefined();
+    expect(scored.dataset.mwScanned).toBe('true');
+    expect(shellImg.dataset.mwScanned).toBe('true');
+  });
 });

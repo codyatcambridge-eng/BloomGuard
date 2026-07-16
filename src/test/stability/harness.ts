@@ -314,6 +314,7 @@ export interface MWTestProbe {
     removedFlashOverlays: number;
     clearedVeilMarks: number;
     clearedPlayerResidue: number;
+    clearedFeedVeils?: number;
   };
   repositionAllShortsRevealOverlays: (reason: string) => void;
   // --- Reveal scope / recycled-node probes (post-reveal Shorts identity) ---

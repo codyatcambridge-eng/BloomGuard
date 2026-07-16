@@ -545,6 +545,89 @@ export function generateModerationScript(config: InjectionConfig): string {
     return Date.now() < softPreblurSuppressedUntil;
   }
 
+  // EXIT blank-thumbs (MVP): after leave Active Shorts, home heal re-scans and
+  // markFlashShieldCandidates re-stamps data-mw-veil on feed imgs → frosted blank
+  // cards (borders, no content) until swipe. Suppress FEED veil re-stamp only.
+  // Does NOT gate markFlashShieldShortsCandidate (Active Shorts stability path).
+  let feedFlashVeilSuppressedUntil = 0;
+
+  function suppressFeedFlashVeil(ms, reason) {
+    const until = Date.now() + Math.max(0, Number(ms) || 0);
+    if (until > feedFlashVeilSuppressedUntil) feedFlashVeilSuppressedUntil = until;
+    console.log(
+      '[DIAG][FLASH_FEED_VEIL]',
+      'event=suppress',
+      'ms=' + String(ms || 0),
+      'untilIn=' + Math.max(0, feedFlashVeilSuppressedUntil - Date.now()),
+      'reason=' + String(reason || 'unknown')
+    );
+  }
+
+  function isFeedFlashVeilSuppressed() {
+    return Date.now() < feedFlashVeilSuppressedUntil;
+  }
+
+  /**
+   * Clear Flash feed veils on main surfaces only. Never touches Active Shorts shell
+   * (isNodeUnderActiveShortsShell). Does not call applyBlur / createRevealOverlay.
+   */
+  function clearMainSurfaceFlashVeils(reason) {
+    let cleared = 0;
+    try {
+      document.querySelectorAll('[data-mw-veil="1"]').forEach(function(node) {
+        if (!node || node.nodeType !== 1) return;
+        try {
+          if (isNodeUnderActiveShortsShell(node)) return;
+        } catch (eShell) {}
+        try {
+          node.removeAttribute('data-mw-veil');
+          node.removeAttribute('data-mw-veil-at');
+          cleared += 1;
+        } catch (e2) {}
+      });
+    } catch (e) {}
+    if (cleared > 0) {
+      console.log(
+        '[DIAG][FLASH_FEED_VEIL]',
+        'event=cleared_main',
+        'count=' + cleared,
+        'reason=' + String(reason || 'unknown')
+      );
+    }
+    return cleared;
+  }
+
+  /**
+   * On leave Shorts only: stop pending Shorts veil timers from re-frosting after cleanup.
+   * Does not stop Flash feed interval (gated by isFeedFlashVeilSuppressed instead).
+   * Does not alter Shorts hard blur / reveal apply paths.
+   */
+  function cancelActiveShortsFlashVeilTimersOnLeave(reason) {
+    let cancelled = 0;
+    try {
+      if (timerState.shortsVeilTimeoutTimer) {
+        clearTimeout(timerState.shortsVeilTimeoutTimer);
+        timerState.shortsVeilTimeoutTimer = null;
+        timerState.shortsVeilTimeoutIdentity = '';
+        cancelled += 1;
+      }
+      if (timerState.flashShieldBurstRafId) {
+        cancelAnimationFrame(timerState.flashShieldBurstRafId);
+        timerState.flashShieldBurstRafId = null;
+        cancelled += 1;
+      }
+    } catch (e) {}
+    if (cancelled > 0) {
+      console.log(
+        '[DIAG][FLASH_FEED_VEIL]',
+        'event=cancel_shorts_timers',
+        'count=' + cancelled,
+        'reason=' + String(reason || 'unknown')
+      );
+    }
+    return cancelled;
+  }
+
   /**
    * Phase 0 MVP: soft preblur is always reveal-less partial blur.
    * Never paint it on YouTube (home/results/watch/feed/channel/Shorts exit recovery).
@@ -772,6 +855,31 @@ export function generateModerationScript(config: InjectionConfig): string {
           node.removeAttribute('data-mw-veil');
         } catch (e3) {}
       });
+    } catch (e) {}
+    try {
+      // EXIT blank-thumbs release side: a veil only releases when a verdict stamps
+      // data-mw-moderated. Recycled feed imgs can carry mwScanned=true with NO verdict
+      // (dedup skip at scanImgElement), so post-exit heal never re-scores them and any
+      // re-stamped veil sticks white until manual scroll. Clear the dedup stamp on
+      // verdict-less main-surface imgs so heal re-queues them and a verdict lands.
+      let dedupCleared = 0;
+      document.querySelectorAll('img[data-mw-scanned="true"]:not([data-mw-moderated])').forEach(function(img) {
+        if (!img || img.nodeType !== 1 || !img.isConnected) return;
+        if (isNodeUnderActiveShortsShell(img)) return;
+        try {
+          delete img.dataset.mwScanned;
+          delete img.dataset.mwLastScanSrc;
+          dedupCleared += 1;
+        } catch (e4) {}
+      });
+      if (dedupCleared > 0) {
+        console.log(
+          '[DIAG][FLASH_FEED_VEIL]',
+          'event=verdictless_dedup_cleared',
+          'count=' + dedupCleared,
+          'reason=' + tag
+        );
+      }
     } catch (e) {}
     console.log(
       '[DIAG][SOFT_PREBLUR]',
@@ -1278,6 +1386,9 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function markFlashShieldCandidates(root) {
     if (!CONFIG.flashShieldV1) return;
+    // EXIT blank-thumbs: do not re-stamp home/results feed veils during post-exit window.
+    // Active Shorts uses markFlashShieldShortsCandidate — intentionally NOT gated here.
+    if (isFeedFlashVeilSuppressed()) return;
     try {
       const scope = root || document;
       const selector = (
@@ -15242,6 +15353,13 @@ export function generateModerationScript(config: InjectionConfig): string {
         }
       } catch (e) {}
       try { scrubPartialBlurAfterShortsExit('heal_after_scan:' + tag); } catch (e) {}
+      // EXIT blank-thumbs: heal re-scan must not leave feed veils (white empty cards).
+      // Active Shorts shell skipped inside clearMainSurfaceFlashVeils.
+      try {
+        if (isFeedFlashVeilSuppressed() || !isShortsModeActive()) {
+          clearMainSurfaceFlashVeils('home_feed_heal:' + tag);
+        }
+      } catch (eVeil) {}
       try {
         repairNonShortsBlurRevealInvariant('home_feed_heal:' + tag);
       } catch (e) {}
@@ -15251,7 +15369,13 @@ export function generateModerationScript(config: InjectionConfig): string {
       try {
         enforceMainSurfaceBlurRevealInvariant('home_feed_heal:' + tag);
       } catch (e) {}
-      console.log('[DIAG][HOME_FEED_HEAL]', 'reason=' + tag, 'softSuppressed=' + String(isSoftPreblurSuppressed()), 'url=' + String(window.location.href || '').substring(0, 120));
+      console.log(
+        '[DIAG][HOME_FEED_HEAL]',
+        'reason=' + tag,
+        'softSuppressed=' + String(isSoftPreblurSuppressed()),
+        'feedVeilSuppressed=' + String(isFeedFlashVeilSuppressed()),
+        'url=' + String(window.location.href || '').substring(0, 120)
+      );
       return 'OK';
     } catch (e) {
       return 'ERR';
@@ -15437,15 +15561,23 @@ export function generateModerationScript(config: InjectionConfig): string {
   // YouTube often keeps #shorts-player mounted under home. Flash shorts overlays
   // (absolute inset 0, z-index huge) + full-page mw-blur-overlay + veil stamps
   // then look like "page not loading" or mass thumbnail blur.
+  // EXIT blank-thumbs: suppress feed Flash veil re-stamp + clear main-surface veils
+  // (borders/empty white cards). Does NOT gate markFlashShieldShortsCandidate.
   function performShortsExitSurfaceCleanup(reason) {
     const tag = String(reason || 'leave_shorts');
     let removedFlashOverlays = 0;
     let clearedVeilMarks = 0;
     let clearedPlayerResidue = 0;
+    let clearedFeedVeils = 0;
     try {
       // 0) Nuclear partial-blur scrub: soft + filter-only + hard-without-reveal on main surfaces.
       // Must run even if Shorts mode is still flaky (player mounted under home/results).
       try { scrubPartialBlurAfterShortsExit('shorts_exit:' + tag); } catch (e) {}
+
+      // 0b) EXIT blank-thumbs: stop home heal / Flash interval from re-veiling feed imgs.
+      try { suppressFeedFlashVeil(5000, 'shorts_exit:' + tag); } catch (eSup) {}
+      try { cancelActiveShortsFlashVeilTimersOnLeave('shorts_exit:' + tag); } catch (eT) {}
+      try { clearedFeedVeils = clearMainSurfaceFlashVeils('shorts_exit:' + tag); } catch (eV) {}
 
       // 1) Never leave the fullscreen inject overlay armed on home/results.
       try {
@@ -15556,6 +15688,10 @@ export function generateModerationScript(config: InjectionConfig): string {
       try { enforceMainSurfaceBlurRevealInvariant('shorts_exit_cleanup:' + tag); } catch (e) {}
       // 8) Final partial scrub — mutation/scan races can re-soft after step 7.
       try { scrubPartialBlurAfterShortsExit('shorts_exit_final:' + tag); } catch (e) {}
+      // 9) Final feed veil clear after heal/repair (heal scan can re-stamp before suppress).
+      try {
+        clearedFeedVeils += clearMainSurfaceFlashVeils('shorts_exit_final:' + tag);
+      } catch (eVeil2) {}
     } catch (e) {}
     console.log(
       '[DIAG][SHORTS_EXIT_CLEANUP]',
@@ -15563,6 +15699,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       'removedFlashOverlays=' + removedFlashOverlays,
       'clearedVeilMarks=' + clearedVeilMarks,
       'clearedPlayerResidue=' + clearedPlayerResidue,
+      'clearedFeedVeils=' + clearedFeedVeils,
+      'feedVeilSuppressed=' + String(isFeedFlashVeilSuppressed()),
       'softSuppressed=' + String(isSoftPreblurSuppressed()),
       'url=' + String(window.location.href || '').substring(0, 160)
     );
@@ -15570,6 +15708,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       removedFlashOverlays: removedFlashOverlays,
       clearedVeilMarks: clearedVeilMarks,
       clearedPlayerResidue: clearedPlayerResidue,
+      clearedFeedVeils: clearedFeedVeils,
     };
   }
 
