@@ -21,6 +21,8 @@ const HomeDashboard = () => {
           <h1 className="font-display text-3xl tracking-wider text-gold">Bloom Guard</h1>
           <p className="text-[10px] text-gold/50 tracking-[0.3em] uppercase mt-0.5">Miracle Worker</p>
           <p className="mt-2 text-silver">Welcome back!</p>
+          <p className="mt-1 text-aqua font-display tracking-wide">claude</p>
+          <p className="mt-1 text-aqua font-display tracking-wide">codex</p>
           <p className="mt-1 text-aqua font-display tracking-wide">Hopee</p>
           <p className="mt-1 text-aqua font-display tracking-wide">science</p>
           <p className="mt-1 text-aqua font-display tracking-wide">trust</p>

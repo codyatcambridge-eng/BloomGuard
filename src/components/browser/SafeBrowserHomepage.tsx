@@ -64,6 +64,7 @@ export const SafeBrowserHomepage = ({ onSearch, isSearching = false }: SafeBrows
           <p className="mt-1 font-display tracking-wide text-aqua">Geese</p>
           <p className="mt-1 font-display tracking-wide text-aqua">DUck Duck</p>
           <p className="mt-1 font-display tracking-wide text-aqua">boyii</p>
+          <p className="mt-1 font-display tracking-wide text-aqua">claude</p>
         </div>
 
         {/* Search Form */}
@@ -146,7 +147,7 @@ export const SafeBrowserHomepage = ({ onSearch, isSearching = false }: SafeBrows
             type="button"
             variant="secondary"
             className="justify-center gap-2"
-            onClick={() => onSearch("https://www.youtube.com")}
+            onClick={() => onSearch("https://m.youtube.com/")}
             disabled={isSearching}
           >
             <Youtube className="w-4 h-4" />

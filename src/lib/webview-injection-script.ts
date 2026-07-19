@@ -43,21 +43,26 @@ export interface InjectionConfig {
  * The full moderation script replaces the bootstrap observer after injection.
  */
 export function generateFlashShieldBootstrap(enabled: boolean): string {
-  if (!enabled) return '';
-
   return `
     (function() {
       'use strict';
       if (window.__MW_FLASH_BOOTSTRAP__ && typeof window.__MW_FLASH_BOOTSTRAP__.setEnabled === 'function') {
-        window.__MW_FLASH_BOOTSTRAP__.setEnabled(true);
+        window.__MW_FLASH_BOOTSTRAP__.setEnabled(${enabled ? 'true' : 'false'});
         return;
       }
       var STYLE_ID = 'mw-flash-shield';
       var ROOT_CLASS = 'mw-flash-shield-on';
       var OVERLAY_CLASS = 'mw-flash-shorts-overlay';
+      var MEDIA_SELECTOR = 'yt-lockup-view-model img, yt-lockup-view-model-wiz img, ytm-rich-item-renderer img, ytm-video-with-context-renderer img, ytm-compact-video-renderer img, ytm-media-item img, ytm-search-result-renderer img, ytm-shorts-lockup-view-model img, ytm-shorts-lockup-view-model-v2 img, ytd-rich-item-renderer img, ytd-video-renderer img, ytd-compact-video-renderer img, ytd-reel-item-renderer img, .yt-core-image, yt-image img, yt-img-shadow img, img[src*="googleusercontent"], img[src*="ytimg.com"], .g-img img';
       var observer = null;
-      var active = true;
+      var active = ${enabled ? 'true' : 'false'};
       var burstRaf = null;
+      var logged = {};
+      function diag(event) {
+        if (!active || logged[event]) return;
+        logged[event] = true;
+        try { console.debug('[MW-Flash]', event); } catch (e) {}
+      }
       function ensureStyle() {
         if (document.getElementById(STYLE_ID)) return;
         var styleHost = document.head || document.documentElement;
@@ -213,11 +218,12 @@ export function generateFlashShieldBootstrap(enabled: boolean): string {
         }
       }
       function startShortsBurst() {
+        if (!active) return;
         if (burstRaf || typeof requestAnimationFrame !== 'function') return;
         var startedAt = Date.now();
         var sweep = function() {
           stampActiveShorts();
-          if (active && Date.now() - startedAt < 190) {
+          if (active && Date.now() - startedAt < 145) {
             burstRaf = requestAnimationFrame(sweep);
           } else {
             burstRaf = null;
@@ -231,13 +237,63 @@ export function generateFlashShieldBootstrap(enabled: boolean): string {
         ensureStyle();
         if (document.documentElement) document.documentElement.classList.add(ROOT_CLASS);
         var scope = root && root.querySelectorAll ? root : document;
-        var media = scope.querySelectorAll(
-          'yt-lockup-view-model img, yt-lockup-view-model-wiz img, ytm-rich-item-renderer img, ytm-media-item img, ytm-shorts-lockup-view-model img, .yt-core-image, yt-image img, img[src*="googleusercontent"], .g-img img'
-        );
+        var media = [];
+        if (scope.nodeType === 1 && typeof scope.matches === 'function' && scope.matches(MEDIA_SELECTOR)) {
+          media.push(scope);
+        }
+        if (typeof scope.querySelectorAll === 'function') {
+          scope.querySelectorAll(MEDIA_SELECTOR).forEach(function(node) { media.push(node); });
+        }
         for (var i = 0; i < media.length; i += 1) {
           if (!media[i].hasAttribute('data-mw-moderated')) media[i].dataset.mwVeil = '1';
         }
         stampActiveShorts();
+      }
+      function cleanup() {
+        if (document.documentElement) document.documentElement.classList.remove(ROOT_CLASS);
+        if (observer) {
+          try { observer.disconnect(); } catch (e) {}
+          observer = null;
+        }
+        if (burstRaf && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(burstRaf);
+        burstRaf = null;
+        document.querySelectorAll('[data-mw-veil="1"]').forEach(function(node) {
+          node.removeAttribute('data-mw-veil');
+          node.removeAttribute('data-mw-veil-at');
+        });
+        document.querySelectorAll('[data-mw-flash-frame="1"],[data-mw-flash-identity],[data-mw-flash-retry]').forEach(function(node) {
+          node.removeAttribute('data-mw-flash-frame');
+          node.removeAttribute('data-mw-flash-identity');
+          node.removeAttribute('data-mw-flash-retry');
+        });
+        document.querySelectorAll('.' + OVERLAY_CLASS).forEach(function(node) {
+          node.remove();
+        });
+        var style = document.getElementById(STYLE_ID);
+        if (style && style.parentElement) style.parentElement.removeChild(style);
+      }
+      function startObserver() {
+        if (observer || typeof MutationObserver === 'undefined') return;
+        observer = new MutationObserver(function(mutations) {
+          if (!active) return;
+          for (var i = 0; i < mutations.length; i += 1) {
+            if (mutations[i].type === 'attributes' && mutations[i].target && mutations[i].target.nodeType === 1) {
+              stamp(mutations[i].target);
+            }
+            for (var j = 0; j < mutations[i].addedNodes.length; j += 1) {
+              var node = mutations[i].addedNodes[j];
+              if (node && node.nodeType === 1) stamp(node);
+            }
+          }
+          stampActiveShorts();
+          startShortsBurst();
+        });
+        observer.observe(document, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: ['src', 'poster', 'aria-hidden', 'selected', 'is-active', 'class', 'style']
+        });
       }
       function setEnabled(next) {
         active = !!next;
@@ -245,39 +301,20 @@ export function generateFlashShieldBootstrap(enabled: boolean): string {
           document.documentElement.classList.toggle(ROOT_CLASS, active);
         }
         if (active) {
+          startObserver();
           stamp(document);
+          [0, 16, 50, 100, 140].forEach(function(delayMs) {
+            setTimeout(function() {
+              if (!active) return;
+              stamp(document);
+              startShortsBurst();
+            }, delayMs);
+          });
+          diag('enabled');
           return;
         }
-        document.querySelectorAll('[data-mw-veil="1"]').forEach(function(node) {
-          node.removeAttribute('data-mw-veil');
-        });
-        document.querySelectorAll('[data-mw-flash-frame="1"]').forEach(function(node) {
-          node.removeAttribute('data-mw-flash-frame');
-        });
-        document.querySelectorAll('.' + OVERLAY_CLASS).forEach(function(node) {
-          node.remove();
-        });
+        cleanup();
       }
-      ensureStyle();
-      setEnabled(true);
-      startShortsBurst();
-      observer = new MutationObserver(function(mutations) {
-        if (!active) return;
-        for (var i = 0; i < mutations.length; i += 1) {
-          for (var j = 0; j < mutations[i].addedNodes.length; j += 1) {
-            var node = mutations[i].addedNodes[j];
-            if (node && node.nodeType === 1) stamp(node);
-          }
-        }
-        stamp(document);
-        startShortsBurst();
-      });
-      observer.observe(document, {
-        childList: true,
-        subtree: true,
-        attributes: true,
-        attributeFilter: ['src', 'poster', 'aria-hidden', 'selected', 'is-active', 'class', 'style']
-      });
       window.__MW_FLASH_BOOTSTRAP__ = {
         setEnabled: setEnabled,
         disconnect: function() {
@@ -287,6 +324,7 @@ export function generateFlashShieldBootstrap(enabled: boolean): string {
           burstRaf = null;
         }
       };
+      setEnabled(active);
     })();
   `;
 }
@@ -540,6 +578,14 @@ export function generateModerationScript(config: InjectionConfig): string {
   const FLASH_SHIELD_SHORTS_OVERLAY_CLASS = 'mw-flash-shorts-overlay';
   const FLASH_SHIELD_SHORTS_VEIL_TIMEOUT_MS = 4000;
   const FLASH_SHIELD_SHORTS_VERDICT_MEMORY_MAX = 50;
+  const FLASH_SHIELD_BURST_MS = [0, 16, 50, 100, 140];
+  const FLASH_SHIELD_MEDIA_SELECTOR = (
+    'yt-lockup-view-model img, yt-lockup-view-model-wiz img, ytm-rich-item-renderer img, ' +
+    'ytm-video-with-context-renderer img, ytm-compact-video-renderer img, ytm-media-item img, ' +
+    'ytm-search-result-renderer img, ytm-shorts-lockup-view-model img, ytm-shorts-lockup-view-model-v2 img, ' +
+    'ytd-rich-item-renderer img, ytd-video-renderer img, ytd-compact-video-renderer img, ytd-reel-item-renderer img, ' +
+    '.yt-core-image, yt-image img, yt-img-shadow img, img[src*="googleusercontent"], img[src*="ytimg.com"], .g-img img'
+  );
   // C1/E1: Session verdict memory (instance-local, safe-class verdicts only):
   // a Short this instance already resolved must never be re-veiled —
   // swipe-backs, recycled frames, and media-node swaps otherwise produce a
@@ -562,6 +608,17 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (oldest.done) break;
       flashShieldShortsVerdictMemory.delete(oldest.value);
     }
+  }
+
+  const flashShieldDiagOnce = {};
+  function diagFlashShield(event, extra) {
+    if (!CONFIG.flashShieldV1) return;
+    const key = String(event || 'event');
+    if (flashShieldDiagOnce[key]) return;
+    flashShieldDiagOnce[key] = true;
+    try {
+      console.debug('[MW-Flash]', key, extra || '');
+    } catch (e) {}
   }
 
   const HEURISTIC_CACHE_KEY = 'mw_heuristic_cache';
@@ -982,30 +1039,43 @@ export function generateModerationScript(config: InjectionConfig): string {
     (document.head || document.documentElement || document.body || document.documentElement).appendChild(style);
   }
 
+  function markFlashShieldCandidateNode(img, allowRetry) {
+    if (!CONFIG.flashShieldV1) return;
+    if (!img || img.nodeType !== 1 || !img.isConnected) return;
+    if (img.dataset.mwVeil === '1') return;
+    if (img.hasAttribute('data-mw-moderated')) return;
+    const rect = img.getBoundingClientRect();
+    if (rect.width >= 120 && rect.height >= 60) {
+      img.removeAttribute('data-mw-flash-retry');
+      img.dataset.mwVeil = '1';
+      return;
+    }
+    if (!allowRetry || img.dataset.mwFlashRetry === '1') return;
+    img.dataset.mwFlashRetry = '1';
+    FLASH_SHIELD_BURST_MS.forEach(function(delayMs) {
+      setTimeout(function() {
+        if (!CONFIG.flashShieldV1 || timerState.teardownDone || !img.isConnected) return;
+        markFlashShieldCandidateNode(img, false);
+        if (delayMs >= 140 && img.dataset.mwVeil !== '1') {
+          img.removeAttribute('data-mw-flash-retry');
+        }
+      }, delayMs);
+    });
+  }
+
   function markFlashShieldCandidates(root) {
     if (!CONFIG.flashShieldV1) return;
     try {
       const scope = root || document;
-      const selector = (
-        'yt-lockup-view-model img, yt-lockup-view-model-wiz img, ytm-rich-item-renderer img, ' +
-        'ytm-media-item img, ytm-shorts-lockup-view-model img, .yt-core-image, yt-image img, ' +
-        'img[src*="googleusercontent"], .g-img img'
-      );
       const imgs = [];
-      if (scope.nodeType === 1 && typeof scope.matches === 'function' && scope.matches(selector)) {
+      if (scope.nodeType === 1 && typeof scope.matches === 'function' && scope.matches(FLASH_SHIELD_MEDIA_SELECTOR)) {
         imgs.push(scope);
       }
       if (typeof scope.querySelectorAll === 'function') {
-        scope.querySelectorAll(selector).forEach(function(img) { imgs.push(img); });
+        scope.querySelectorAll(FLASH_SHIELD_MEDIA_SELECTOR).forEach(function(img) { imgs.push(img); });
       }
       for (let i = 0; i < imgs.length; i += 1) {
-        const img = imgs[i];
-        if (!img || img.dataset.mwVeil === '1') continue;
-        if (img.hasAttribute('data-mw-moderated')) continue;
-        const rect = img.getBoundingClientRect();
-        if (rect.width >= 120 && rect.height >= 60) {
-          img.dataset.mwVeil = '1';
-        }
+        markFlashShieldCandidateNode(imgs[i], true);
       }
     } catch (e) {}
   }
@@ -1251,8 +1321,8 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function scheduleFlashShieldShortsBurst(reason) {
     if (!CONFIG.flashShieldV1 || !isShortsModeActive() || timerState.teardownDone) return;
-    // FREEZE-OVERRIDE: bounded first-paint and node-reuse sweeps, all inside 200ms.
-    [0, 16, 50, 120, 180].forEach(function(delayMs) {
+    // FREEZE-OVERRIDE: bounded first-paint and node-reuse sweeps, all inside 150ms.
+    FLASH_SHIELD_BURST_MS.forEach(function(delayMs) {
       setTimeout(function() {
         if (!CONFIG.flashShieldV1 || timerState.teardownDone || !isShortsModeActive()) return;
         markFlashShieldShortsCandidate();
@@ -1376,6 +1446,7 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function disableFlashShieldRuntime() {
     document.documentElement.classList.remove(FLASH_SHIELD_CLASS);
+    flashShieldShortsVerdictMemory.clear();
     document.querySelectorAll('[data-mw-flash-positive="1"]').forEach(function(node) {
       clearAllBlurAndOverlay(
         node,
@@ -1387,13 +1458,18 @@ export function generateModerationScript(config: InjectionConfig): string {
     });
     document.querySelectorAll('[data-mw-veil="1"]').forEach(function(node) {
       node.removeAttribute('data-mw-veil');
+      node.removeAttribute('data-mw-veil-at');
     });
-    document.querySelectorAll('[data-mw-flash-frame="1"]').forEach(function(node) {
+    document.querySelectorAll('[data-mw-flash-frame="1"],[data-mw-flash-identity],[data-mw-flash-retry]').forEach(function(node) {
       node.removeAttribute('data-mw-flash-frame');
+      node.removeAttribute('data-mw-flash-identity');
+      node.removeAttribute('data-mw-flash-retry');
     });
     document.querySelectorAll('.' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS).forEach(function(node) {
       node.remove();
     });
+    const style = document.getElementById(FLASH_SHIELD_STYLE_ID);
+    if (style && style.parentElement) style.parentElement.removeChild(style);
   }
 
   // FREEZE-OVERRIDE: additive Flash-only positive state. This intentionally does not call
@@ -14628,6 +14704,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       markFlashShieldCandidates(document);
       markFlashShieldShortsCandidate();
       scheduleFlashShieldShortsBurst('runtime_start');
+      diagFlashShield('runtime_start', 'url=' + String(window.location.href || '').substring(0, 120));
 
       if (!timerState.flashShieldInterval) {
         let ticks = 0;
@@ -14677,8 +14754,20 @@ export function generateModerationScript(config: InjectionConfig): string {
             timerState.flashShieldBurstRafId = null;
           }
         };
-        timerState.flashShieldObserver = new MutationObserver(function() {
+        timerState.flashShieldObserver = new MutationObserver(function(mutations) {
           if (!CONFIG.flashShieldV1 || timerState.teardownDone) return;
+          for (let i = 0; i < mutations.length; i += 1) {
+            const mutation = mutations[i];
+            if (mutation.type === 'attributes' && mutation.target && mutation.target.nodeType === 1) {
+              markFlashShieldCandidates(mutation.target);
+            }
+            for (let j = 0; j < mutation.addedNodes.length; j += 1) {
+              const node = mutation.addedNodes[j];
+              if (node && node.nodeType === 1) {
+                markFlashShieldCandidates(node);
+              }
+            }
+          }
           burstUntil = Date.now() + 600;
           markFlashShieldShortsCandidate();
           scheduleFlashShieldShortsBurst('runtime_mutation');
@@ -14690,7 +14779,7 @@ export function generateModerationScript(config: InjectionConfig): string {
           childList: true,
           subtree: true,
           attributes: true,
-          attributeFilter: ['src', 'poster', 'aria-hidden', 'selected', 'is-active'],
+          attributeFilter: ['src', 'poster', 'aria-hidden', 'selected', 'is-active', 'data-video-id', 'data-item-id', 'class'],
         });
       }
     } catch (e) {}

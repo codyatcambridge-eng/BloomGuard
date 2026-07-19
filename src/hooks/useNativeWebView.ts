@@ -869,7 +869,7 @@ export const useNativeWebView = (options: UseNativeWebViewOptions = {}) => {
     try {
       const options: OpenWebViewOptions = {
         url,
-        // Present immediately for reliability; waiting for page load can leave the browser hidden.
+        // Present immediately for reliability; Capgo pre-show documentStart can strand WKWebView on a white page.
         isPresentAfterPageLoad: false,
         preventDeeplink: false,
         closeModal: true,

@@ -200,6 +200,20 @@ const isBootstrapBlankUrl = (value?: string): boolean => {
   return normalized === '' || normalized === 'about:blank' || normalized.startsWith('about:blank');
 };
 
+const normalizeYouTubeLaunchUrl = (value: string): string => {
+  try {
+    const parsed = new URL(value);
+    const host = parsed.hostname.toLowerCase();
+    if (host === 'youtube.com' || host === 'www.youtube.com') {
+      parsed.hostname = 'm.youtube.com';
+      return parsed.toString();
+    }
+  } catch {
+    return value;
+  }
+  return value;
+};
+
 const getYouTubeShortsId = (value?: string): string => {
   if (!value) return 'none';
   try {
@@ -2560,13 +2574,18 @@ export const NativeWebViewBrowser = () => {
             });
             document.querySelectorAll('[data-mw-veil="1"]').forEach(function(node) {
               node.removeAttribute('data-mw-veil');
+              node.removeAttribute('data-mw-veil-at');
             });
-            document.querySelectorAll('[data-mw-flash-frame="1"]').forEach(function(node) {
+            document.querySelectorAll('[data-mw-flash-frame="1"],[data-mw-flash-identity],[data-mw-flash-retry]').forEach(function(node) {
               node.removeAttribute('data-mw-flash-frame');
+              node.removeAttribute('data-mw-flash-identity');
+              node.removeAttribute('data-mw-flash-retry');
             });
             document.querySelectorAll('[data-mw-flash-positive="1"]').forEach(function(node) {
               node.removeAttribute('data-mw-flash-positive');
             });
+            var flashStyle = document.getElementById('mw-flash-shield');
+            if (flashStyle && flashStyle.parentElement) flashStyle.parentElement.removeChild(flashStyle);
             document.querySelectorAll('[data-mw-moderated],.mw-blurred,.mw-softblur,[data-mw-hard-blur="1"],[data-mw-has-overlay="true"]').forEach(function(node) {
               if (!node || node.nodeType !== 1) return;
               try {
@@ -4448,9 +4467,10 @@ export const NativeWebViewBrowser = () => {
     const trimmed = query.trim();
     if (!trimmed) return;
     
-    const targetUrl = isUrlInput(trimmed)
+    const rawTargetUrl = isUrlInput(trimmed)
       ? (trimmed.startsWith('http') ? trimmed : `https://${trimmed}`)
       : `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`;
+    const targetUrl = normalizeYouTubeLaunchUrl(rawTargetUrl);
     console.log('[DIAG][NAV_REQUEST] source=search target=' + toDiagUrl(targetUrl));
     
     console.log('[Browser] Starting navigation:', targetUrl);
@@ -4504,7 +4524,7 @@ export const NativeWebViewBrowser = () => {
     }
 
     // Normalize URL immediately (add https:// if missing)
-    const normalizedUrl = normalizeUrl(urlToNavigate);
+    const normalizedUrl = normalizeYouTubeLaunchUrl(normalizeUrl(urlToNavigate));
     const domain = extractDomain(urlToNavigate);
     console.log('[DIAG][NAV_REQUEST] source=form target=' + toDiagUrl(normalizedUrl));
     setUrlInput(normalizedUrl);
