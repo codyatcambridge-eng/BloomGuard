@@ -2306,6 +2306,7 @@ export function generateModerationScript(config: InjectionConfig): string {
     flashShieldObserver: null,
     shortsVeilTimeoutTimer: null,
     shortsVeilTimeoutIdentity: '',
+    shortsFrameRetryTimers: new Map(),
     initialTimeouts: [],
     paused: document.visibilityState !== 'visible',
     teardownDone: false,
@@ -12977,6 +12978,7 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   const SHORTS_FRAME_CAPTURE_MAX_EDGE = 512;
   const SHORTS_FRAME_CAPTURE_JPEG_QUALITY = 0.72;
+  const SHORTS_FRAME_CAPTURE_RETRY_DELAYS_MS = [80, 180, 350];
 
   function logScanSourceFallback(reason, videoNodeId, videoCurrentSrc, extraDetails) {
     diagScanSourceCounters.scan_source_fallback_reason += 1;
@@ -13084,6 +13086,47 @@ export function generateModerationScript(config: InjectionConfig): string {
     };
   }
 
+  function shouldRetryActiveShortsFrameCapture(reason) {
+    return (
+      reason === 'video_not_ready' ||
+      reason === 'video_dimensions_unavailable' ||
+      reason === 'frame_data_too_small'
+    );
+  }
+
+  function clearActiveShortsFrameRetryState(video) {
+    if (!video || !video.dataset) return;
+    video.removeAttribute('data-mw-shorts-frame-retry-key');
+    video.removeAttribute('data-mw-shorts-frame-retry-count');
+  }
+
+  function scheduleActiveShortsFrameCaptureRetry(video, shortsFrameKey, reason) {
+    if (!video || !video.dataset || !shortsFrameKey) return false;
+    if (!shouldRetryActiveShortsFrameCapture(reason)) return false;
+    if (!isShortsModeActive() || timerState.paused || timerState.teardownDone) return false;
+    if (video.dataset.mwShortsFrameRetryKey !== shortsFrameKey) {
+      video.dataset.mwShortsFrameRetryKey = shortsFrameKey;
+      video.dataset.mwShortsFrameRetryCount = '0';
+    }
+    const retryCount = Math.max(0, Number(video.dataset.mwShortsFrameRetryCount) || 0);
+    if (retryCount >= SHORTS_FRAME_CAPTURE_RETRY_DELAYS_MS.length) return false;
+    const timerKey = getDiagNodeId(video) + '|' + shortsFrameKey;
+    if (timerState.shortsFrameRetryTimers.has(timerKey)) return true;
+    const delayMs = SHORTS_FRAME_CAPTURE_RETRY_DELAYS_MS[retryCount];
+    video.dataset.mwShortsFrameRetryCount = String(retryCount + 1);
+    const timerId = setTimeout(function() {
+      timerState.shortsFrameRetryTimers.delete(timerKey);
+      if (timerState.paused || timerState.teardownDone || !CONFIG.scanEnabled) return;
+      if (!video.isConnected || !isActiveVisibleShortsVideo(video)) return;
+      if (getShortsFrameScanKey(video) !== shortsFrameKey) return;
+      video.removeAttribute('data-mw-last-shorts-frame-attempt-key');
+      scanVideoPoster(video);
+    }, delayMs);
+    timerState.shortsFrameRetryTimers.set(timerKey, timerId);
+    timerLog('start', 'shortsFrameRetry:' + delayMs + 'ms:' + reason);
+    return true;
+  }
+
   function scanVideoPoster(video) {
     const videoNodeId = getDiagNodeId(video);
     const videoCurrentSrc = String((video && video.currentSrc) || (video && video.src) || '').substring(0, 180);
@@ -13104,6 +13147,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         if (frameCapture.ok && frameCapture.src) {
           const queuedFrame = queueForScan(frameCapture.src, video, 'video-frame');
           if (queuedFrame) {
+            clearActiveShortsFrameRetryState(video);
             diagScanSourceCounters.video_frame_scan_used += 1;
             diagLogScanSource(
               'video_frame_scan_used',
@@ -13138,6 +13182,11 @@ export function generateModerationScript(config: InjectionConfig): string {
             videoNodeId,
             videoCurrentSrc,
             'sourceType=video-frame'
+          );
+          scheduleActiveShortsFrameCaptureRetry(
+            video,
+            shortsFrameKey,
+            frameCapture.reason || 'frame_capture_failed'
           );
         }
       } else {
@@ -14532,6 +14581,10 @@ export function generateModerationScript(config: InjectionConfig): string {
         clearTimeout(mutationScanTimer);
         mutationScanTimer = null;
       }
+      timerState.shortsFrameRetryTimers.forEach(function(timerId) {
+        clearTimeout(timerId);
+      });
+      timerState.shortsFrameRetryTimers.clear();
     } catch (e) {}
     console.log(
       '[DIAG][OFF_MODE] visual_cleanup',
@@ -14798,6 +14851,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     clearNamedTimeout('revealOverlayRetryTimeout', reason);
     clearNamedTimeout('shortsVeilTimeoutTimer', reason);
     timerState.shortsVeilTimeoutIdentity = '';
+    timerState.shortsFrameRetryTimers.forEach(function(timerId) {
+      clearTimeout(timerId);
+    });
+    timerState.shortsFrameRetryTimers.clear();
     cancelShortsRevealOverlayReposition(reason || 'stopManagedTimers');
     if (batchTimer) {
       clearTimeout(batchTimer);

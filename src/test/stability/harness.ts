@@ -262,6 +262,7 @@ export interface MWTestProbe {
   queueMutationScan: (node: Element, reason: string) => void;
   processLegacyResults: () => void;
   scanActiveShortsPlayerContainer: (reason: string) => boolean;
+  scanVideoPoster: (video: HTMLVideoElement) => void;
   applyBlur: (
     element: Element,
     src: string,
@@ -295,6 +296,7 @@ export interface MWTestProbe {
   };
   getTimerSnapshot: () => {
     shortsVeilTimeoutTimer: boolean;
+    shortsFrameRetryTimers: number;
   };
   getShortsVerdictMemorySize: () => number;
   reapplyOwnedContainerBlur: (card: Element, reason: string) => void;
@@ -363,6 +365,7 @@ export function injectScript(configOverrides?: Partial<InjectionConfig>): Inject
     queueMutationScan: queueMutationScan,
     processLegacyResults: processLegacyResults,
     scanActiveShortsPlayerContainer: scanActiveShortsPlayerContainer,
+    scanVideoPoster: scanVideoPoster,
     applyBlur: applyBlur,
     isShortsModeActive: isShortsModeActive,
     getActiveShortsPlayerContainer: getActiveShortsPlayerContainer,
@@ -382,6 +385,7 @@ export function injectScript(configOverrides?: Partial<InjectionConfig>): Inject
     getTimerSnapshot: function() {
       return {
         shortsVeilTimeoutTimer: !!timerState.shortsVeilTimeoutTimer,
+        shortsFrameRetryTimers: timerState.shortsFrameRetryTimers.size,
       };
     },
     getShortsVerdictMemorySize: function() {

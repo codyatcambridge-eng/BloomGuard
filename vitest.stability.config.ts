@@ -17,7 +17,14 @@ export default defineConfig({
     },
     globals: true,
     setupFiles: ["./src/test/setup.ts"],
-    include: ["src/test/stability/**/*.test.ts"],
+    include: [
+      "src/test/stability/**/*.test.ts",
+      "src/test/flash-shield.golden.test.ts",
+    ],
+    fileParallelism: false,
+    testTimeout: 15000,
+    hookTimeout: 15000,
+    teardownTimeout: 15000,
   },
   resolve: {
     alias: { "@": path.resolve(__dirname, "./src") },

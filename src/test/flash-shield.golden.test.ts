@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import {
   generateFlashShieldBootstrap,
   generateModerationScript,
@@ -198,7 +199,7 @@ describe('GOLDEN: Flash Shield V1', () => {
 
   it('keeps native browser launch on the sacred immediate-presentation path', () => {
     const hookSource = readFileSync(
-      new URL('../hooks/useNativeWebView.ts', import.meta.url),
+      resolve(process.cwd(), 'src/hooks/useNativeWebView.ts'),
       'utf8',
     );
 
