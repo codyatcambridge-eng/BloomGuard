@@ -13118,7 +13118,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     return (
       reason === 'video_not_ready' ||
       reason === 'video_dimensions_unavailable' ||
-      reason === 'frame_data_too_small'
+      reason === 'frame_data_too_small' ||
+      reason === 'canvas_context_unavailable' ||
+      reason === 'draw_image_failed' ||
+      reason === 'to_data_url_failed'
     );
   }
 
@@ -13211,11 +13214,21 @@ export function generateModerationScript(config: InjectionConfig): string {
             videoCurrentSrc,
             'sourceType=video-frame'
           );
-          scheduleActiveShortsFrameCaptureRetry(
+          const retryScheduled = scheduleActiveShortsFrameCaptureRetry(
             video,
             shortsFrameKey,
             frameCapture.reason || 'frame_capture_failed'
           );
+          if (retryScheduled) {
+            diagScanRunLog(
+              'scanVideoPoster',
+              video,
+              '',
+              false,
+              'reason=active_frame_retry_pending_defer_poster'
+            );
+            return;
+          }
         }
       } else {
         diagScanRunLog('scanVideoPoster', video, '', false, 'reason=frame_attempt_already_done_for_active_key');
