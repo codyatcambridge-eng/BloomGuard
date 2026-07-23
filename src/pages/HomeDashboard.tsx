@@ -23,6 +23,7 @@ const HomeDashboard = () => {
           <p className="mt-2 text-silver">Welcome back!</p>
           <p className="mt-1 text-aqua font-display tracking-wide">claude</p>
           <p className="mt-1 text-aqua font-display tracking-wide">codex</p>
+          <p className="mt-1 text-aqua font-display tracking-wide">Codexx</p>
           <p className="mt-1 text-aqua font-display tracking-wide">grok</p>
           <p className="mt-1 text-aqua font-display tracking-wide">Hopee</p>
           <p className="mt-1 text-aqua font-display tracking-wide">science</p>
