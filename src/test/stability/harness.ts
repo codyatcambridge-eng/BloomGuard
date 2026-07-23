@@ -290,6 +290,12 @@ export interface MWTestProbe {
   getFlashShieldShortsIdentity: (frame: Element | null, media: Element | null) => string;
   markFlashShieldShortsCandidate: () => void;
   clearFlashShieldResolution: (element: Element, nextState: string) => void;
+  applyFlashShieldPositive: (
+    element: Element,
+    src: string,
+    category: string,
+    itemId: string,
+  ) => boolean;
   getFlashReleaseCounters: () => {
     flash_release_fallback_used: number;
     flash_release_missed_disconnected: number;
@@ -376,6 +382,7 @@ export function injectScript(configOverrides?: Partial<InjectionConfig>): Inject
     getFlashShieldShortsIdentity: getFlashShieldShortsIdentity,
     markFlashShieldShortsCandidate: markFlashShieldShortsCandidate,
     clearFlashShieldResolution: clearFlashShieldResolution,
+    applyFlashShieldPositive: applyFlashShieldPositive,
     getFlashReleaseCounters: function() {
       return {
         flash_release_fallback_used: diagFlashReleaseCounters.fallback_used,

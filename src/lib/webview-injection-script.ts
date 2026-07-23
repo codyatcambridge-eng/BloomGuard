@@ -57,6 +57,7 @@ export function generateFlashShieldBootstrap(enabled: boolean): string {
       var observer = null;
       var active = ${enabled ? 'true' : 'false'};
       var burstRaf = null;
+      var burstTimeouts = [];
       var logged = {};
       function diag(event) {
         if (!active || logged[event]) return;
@@ -257,6 +258,8 @@ export function generateFlashShieldBootstrap(enabled: boolean): string {
         }
         if (burstRaf && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(burstRaf);
         burstRaf = null;
+        burstTimeouts.forEach(function(timerId) { clearTimeout(timerId); });
+        burstTimeouts = [];
         document.querySelectorAll('[data-mw-veil="1"]').forEach(function(node) {
           node.removeAttribute('data-mw-veil');
           node.removeAttribute('data-mw-veil-at');
@@ -304,11 +307,14 @@ export function generateFlashShieldBootstrap(enabled: boolean): string {
           startObserver();
           stamp(document);
           [0, 16, 50, 100, 140].forEach(function(delayMs) {
-            setTimeout(function() {
+            var timerId = setTimeout(function() {
+              var idx = burstTimeouts.indexOf(timerId);
+              if (idx >= 0) burstTimeouts.splice(idx, 1);
               if (!active) return;
               stamp(document);
               startShortsBurst();
             }, delayMs);
+            burstTimeouts.push(timerId);
           });
           diag('enabled');
           return;
@@ -322,6 +328,8 @@ export function generateFlashShieldBootstrap(enabled: boolean): string {
           observer = null;
           if (burstRaf && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(burstRaf);
           burstRaf = null;
+          burstTimeouts.forEach(function(timerId) { clearTimeout(timerId); });
+          burstTimeouts = [];
         }
       };
       setEnabled(active);
@@ -1448,12 +1456,32 @@ export function generateModerationScript(config: InjectionConfig): string {
     document.documentElement.classList.remove(FLASH_SHIELD_CLASS);
     flashShieldShortsVerdictMemory.clear();
     document.querySelectorAll('[data-mw-flash-positive="1"]').forEach(function(node) {
-      clearAllBlurAndOverlay(
-        node,
-        String(node.dataset.mwSrc || ''),
-        'flash_shield_disabled',
-        'safe'
-      );
+      const keepFinalPositive =
+        CONFIG.enabled === true && String(node.dataset.mwModerated || '') === 'blurred';
+      if (!keepFinalPositive) {
+        clearAllBlurAndOverlay(
+          node,
+          String(node.dataset.mwSrc || ''),
+          'flash_shield_disabled',
+          'safe'
+        );
+      } else {
+        const src = String(node.dataset.mwSrc || '');
+        const category = String(node.dataset.mwCategory || 'flagged');
+        const itemId = String(node.dataset.mwItemId || '');
+        const blurPx = IS_YOUTUBE ? 40 : Math.min(CONFIG.blurStrength || 30, 20);
+        node.classList.remove('mw-softblur');
+        node.style.setProperty('filter', 'blur(' + blurPx + 'px)', 'important');
+        node.style.setProperty('-webkit-filter', 'blur(' + blurPx + 'px)', 'important');
+        node.style.setProperty('backdrop-filter', 'blur(' + blurPx + 'px)', 'important');
+        node.style.setProperty('-webkit-backdrop-filter', 'blur(' + blurPx + 'px)', 'important');
+        node.style.transition = 'filter 0.3s ease';
+        node.classList.add('mw-blurred');
+        markAuthoritativeHardBlur(node, src);
+        if (src && !findRevealOverlayForElement(node, src)) {
+          createRevealOverlay(node, src, category, itemId, false);
+        }
+      }
       node.removeAttribute('data-mw-flash-positive');
     });
     document.querySelectorAll('[data-mw-veil="1"]').forEach(function(node) {

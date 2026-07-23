@@ -31,6 +31,41 @@ afterEach(() => {
 });
 
 describe('Phase 0 Off-mode cleanup', () => {
+  it('Flash Shield live Off preserves finalized positive blur while removing Flash residue', () => {
+    const { video } = buildCard('ytm-rich-item-renderer', POSITIVE_ID);
+    injection = injectScript({ enabled: true, flashShieldV1: true });
+    const src = srcFor(POSITIVE_ID);
+
+    const applied = injection.probe.applyFlashShieldPositive(video, src, 'porn', POSITIVE_ID);
+    video.dataset.mwVeil = '1';
+    video.dataset.mwFlashFrame = '1';
+    video.dataset.mwFlashIdentity = `${POSITIVE_ID}|home`;
+    video.dataset.mwFlashRetry = '1';
+
+    expect(applied).toBe(true);
+    expect(video.dataset.mwModerated).toBe('blurred');
+    expect(video.dataset.mwHardBlur).toBe('1');
+    expect(revealOverlayCount()).toBe(1);
+    expect(revealButtonCount()).toBe(1);
+
+    const result = (
+      window as unknown as { __MW_FLASH_SHIELD_SET__?: (enabled: boolean) => string }
+    ).__MW_FLASH_SHIELD_SET__?.(false);
+
+    expect(result).toBe('OK');
+    expect(video.dataset.mwFlashPositive).toBeUndefined();
+    expect(video.dataset.mwVeil).toBeUndefined();
+    expect(video.dataset.mwFlashFrame).toBeUndefined();
+    expect(video.dataset.mwFlashIdentity).toBeUndefined();
+    expect(video.dataset.mwFlashRetry).toBeUndefined();
+    expect(video.dataset.mwModerated).toBe('blurred');
+    expect(hasBlurFilter(video)).toBe(true);
+    expect(revealOverlayCount()).toBe(1);
+    expect(revealButtonCount()).toBe(1);
+    expect(document.querySelector('[data-mw-veil="1"]')).toBeNull();
+    expect(document.documentElement.classList.contains('mw-flash-shield-on')).toBe(false);
+  });
+
   it('removes existing blur overlays, reveal buttons, veil artifacts, and partial blur', () => {
     const { video } = buildCard('ytm-rich-item-renderer', POSITIVE_ID);
     injection = injectScript();
