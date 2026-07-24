@@ -1226,6 +1226,72 @@ export function generateModerationScript(config: InjectionConfig): string {
     }
   }
 
+  // FREEZE-OVERRIDE: pre-veil adjacent (not-yet-active) Shorts so a swipe
+  // transition never exposes an unblurred frame while it slides into view —
+  // YouTube pre-renders the prev/next reel item beside the active one, and
+  // it can become visible before its own is-active/selected attribute ever
+  // flips, which is a gap the active-frame-only veil below cannot close.
+  // Additive only: touches ONLY the neighbor's own media data-mw-veil via
+  // the existing generic veil CSS, never data-mw-flash-frame/overlay
+  // ownership (that stays exclusively with the single active frame, per the
+  // sacred invariant enforced a few lines below). Once a neighbor becomes
+  // the active frame, the unchanged logic below takes over ownership of it
+  // normally — this is a pure hand-off, not a second parallel system.
+  function getFlashShieldNeighborShortsFrames(activeFrame) {
+    if (!activeFrame || !activeFrame.parentElement) return [];
+    try {
+      const siblings = Array.prototype.slice.call(activeFrame.parentElement.children);
+      const index = siblings.indexOf(activeFrame);
+      if (index === -1) return [];
+      const tag = activeFrame.tagName;
+      const neighbors = [];
+      if (index > 0) neighbors.push(siblings[index - 1]);
+      if (index < siblings.length - 1) neighbors.push(siblings[index + 1]);
+      return neighbors.filter(function(node) {
+        return node && node.nodeType === 1 && node.tagName === tag;
+      });
+    } catch (e) {
+      return [];
+    }
+  }
+
+  function armFlashShieldNeighborVeilTimeout(media) {
+    if (!CONFIG.flashShieldV1 || !media || media.nodeType !== 1) return;
+    if (media.dataset.mwVeilTimeoutArmed === '1') return;
+    media.dataset.mwVeilTimeoutArmed = '1';
+    setTimeout(function() {
+      if (media.removeAttribute) media.removeAttribute('data-mw-veil-timeout-armed');
+      if (!CONFIG.flashShieldV1 || timerState.teardownDone || !media.isConnected) return;
+      if (media.dataset.mwVeil !== '1') return;
+      const existingVerdict = String(media.dataset.mwModerated || '');
+      if (
+        existingVerdict === 'safe' ||
+        existingVerdict === 'revealed' ||
+        existingVerdict === 'timeout-safe' ||
+        existingVerdict === 'blurred'
+      ) {
+        return;
+      }
+      diagLogVeilLifetime(media, 'neighbor_shorts_timeout_release');
+      media.dataset.mwModerated = 'timeout-safe';
+      console.log('[DIAG][FLASH_SHIELD] neighbor_shorts_veil_timeout_release');
+    }, FLASH_SHIELD_SHORTS_VEIL_TIMEOUT_MS);
+    timerLog('start', 'flashShieldNeighborVeilTimeout');
+  }
+
+  function markFlashShieldNeighborShortsCandidates(activeFrame) {
+    if (!CONFIG.flashShieldV1 || !isShortsModeActive()) return;
+    try {
+      getFlashShieldNeighborShortsFrames(activeFrame).forEach(function(neighborFrame) {
+        if (!neighborFrame || !neighborFrame.isConnected) return;
+        const media = neighborFrame.querySelector('video.html5-main-video, video, img');
+        if (!media || media.hasAttribute('data-mw-moderated') || media.dataset.mwVeil === '1') return;
+        media.dataset.mwVeil = '1';
+        armFlashShieldNeighborVeilTimeout(media);
+      });
+    } catch (e) {}
+  }
+
   function markFlashShieldShortsCandidate() {
     if (!CONFIG.flashShieldV1 || !isShortsModeActive()) {
       warnProfileOriginShortsDiag(
@@ -1305,6 +1371,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         ' mediaNodeId=' + getDiagNodeId(media),
         { throttleMs: 3000 }
       );
+      markFlashShieldNeighborShortsCandidates(frame);
     } catch (e) {}
   }
 
