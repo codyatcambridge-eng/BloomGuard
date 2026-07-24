@@ -585,6 +585,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   const FLASH_SHIELD_CLASS = 'mw-flash-shield-on';
   const FLASH_SHIELD_SHORTS_OVERLAY_CLASS = 'mw-flash-shorts-overlay';
   const FLASH_SHIELD_SHORTS_VEIL_TIMEOUT_MS = 4000;
+  const FLASH_SHIELD_IMAGE_VEIL_TIMEOUT_MS = 4000;
   const FLASH_SHIELD_SHORTS_VERDICT_MEMORY_MAX = 50;
   const FLASH_SHIELD_BURST_MS = [0, 16, 50, 100, 140];
   const FLASH_SHIELD_MEDIA_SELECTOR = (
@@ -1047,6 +1048,30 @@ export function generateModerationScript(config: InjectionConfig): string {
     (document.head || document.documentElement || document.body || document.documentElement).appendChild(style);
   }
 
+  // Bounded stuck-veil escape hatch for non-Shorts media (home feed, results,
+  // etc.) — mirrors armShortsVeilTimeout. If a veiled thumbnail never receives
+  // a moderation verdict (scan skipped by rate-limit/queue-cap/dedup, or main
+  // scanning is off because blur_dial=0 and this particular item never got
+  // classified), stamp timeout-safe so the existing veil CSS releases it.
+  // Fail-open by design — Flash Shield may never produce a permanent blur
+  // with no reveal path (AGENTS.md section 2).
+  function armFlashShieldImageVeilTimeout(img) {
+    if (!CONFIG.flashShieldV1 || !img || img.nodeType !== 1) return;
+    if (img.dataset.mwVeilTimeoutArmed === '1') return;
+    img.dataset.mwVeilTimeoutArmed = '1';
+    setTimeout(function() {
+      if (img.removeAttribute) img.removeAttribute('data-mw-veil-timeout-armed');
+      if (!CONFIG.flashShieldV1 || timerState.teardownDone || !img.isConnected) return;
+      if (img.dataset.mwVeil !== '1') return;
+      if (img.hasAttribute('data-mw-moderated')) return;
+      diagLogVeilLifetime(img, 'image_timeout_release');
+      img.dataset.mwModerated = 'timeout-safe';
+      img.removeAttribute('data-mw-veil');
+      console.log('[DIAG][FLASH_SHIELD] image_veil_timeout_release');
+    }, FLASH_SHIELD_IMAGE_VEIL_TIMEOUT_MS);
+    timerLog('start', 'flashShieldImageVeilTimeout');
+  }
+
   function markFlashShieldCandidateNode(img, allowRetry) {
     if (!CONFIG.flashShieldV1) return;
     if (!img || img.nodeType !== 1 || !img.isConnected) return;
@@ -1055,7 +1080,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     const rect = img.getBoundingClientRect();
     if (rect.width >= 120 && rect.height >= 60) {
       img.removeAttribute('data-mw-flash-retry');
+      if (!img.dataset.mwVeilAt) img.dataset.mwVeilAt = String(Date.now());
       img.dataset.mwVeil = '1';
+      armFlashShieldImageVeilTimeout(img);
       return;
     }
     if (!allowRetry || img.dataset.mwFlashRetry === '1') return;
