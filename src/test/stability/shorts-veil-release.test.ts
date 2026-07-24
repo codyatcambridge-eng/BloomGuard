@@ -211,4 +211,26 @@ describe('P3: bounded veil timeout', () => {
     vi.advanceTimersByTime(4000);
     expect(injection.probe.getTimerSnapshot().shortsVeilTimeoutTimer).toBe(false);
   });
+
+  it('veils and bounded-releases an active Short even with the main blur dial off', () => {
+    // Flash Shield is documented as independent of blur_dial/main moderation.
+    // With enabled:false, sensitivity:0 (dial off), a real classifier verdict
+    // may never arrive for this Short — the veil must still resolve on its
+    // own bounded timeout rather than staying blurred forever.
+    window.history.pushState({}, '', shortsUrl(SHORTS_ID));
+    const { frame, video } = buildActiveShort(SHORTS_ID);
+    vi.useFakeTimers();
+    injection = injectScript({ flashShieldV1: true, enabled: false, sensitivity: 0 });
+
+    injection.probe.markFlashShieldShortsCandidate();
+    expect(video.dataset.mwVeil).toBe('1');
+    expect(video.dataset.mwModerated).toBeUndefined();
+
+    vi.advanceTimersByTime(4000);
+
+    expect(video.dataset.mwModerated).toBe('timeout-safe');
+    expect(frame.dataset.mwModerated).toBe('timeout-safe');
+    expect(video.dataset.mwVeil).toBeUndefined();
+    expect(veilOverlayCount()).toBe(0);
+  });
 });
