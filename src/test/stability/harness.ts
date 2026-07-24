@@ -289,6 +289,7 @@ export interface MWTestProbe {
   findRevealOverlayForElement: (element: Element, src: string) => Element | null;
   getFlashShieldShortsIdentity: (frame: Element | null, media: Element | null) => string;
   markFlashShieldShortsCandidate: () => void;
+  markFlashShieldCandidates: (root?: Element | Document) => void;
   clearFlashShieldResolution: (element: Element, nextState: string) => void;
   applyFlashShieldPositive: (
     element: Element,
@@ -381,6 +382,7 @@ export function injectScript(configOverrides?: Partial<InjectionConfig>): Inject
     findRevealOverlayForElement: findRevealOverlayForElement,
     getFlashShieldShortsIdentity: getFlashShieldShortsIdentity,
     markFlashShieldShortsCandidate: markFlashShieldShortsCandidate,
+    markFlashShieldCandidates: markFlashShieldCandidates,
     clearFlashShieldResolution: clearFlashShieldResolution,
     applyFlashShieldPositive: applyFlashShieldPositive,
     getFlashReleaseCounters: function() {

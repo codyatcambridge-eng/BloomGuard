@@ -1063,7 +1063,18 @@ export function generateModerationScript(config: InjectionConfig): string {
       if (img.removeAttribute) img.removeAttribute('data-mw-veil-timeout-armed');
       if (!CONFIG.flashShieldV1 || timerState.teardownDone || !img.isConnected) return;
       if (img.dataset.mwVeil !== '1') return;
-      if (img.hasAttribute('data-mw-moderated')) return;
+      // 'softblur' is the legacy pre-verdict pipeline's own transient marker,
+      // not a resolved verdict — Flash Shield must still rescue a veil stuck
+      // behind it. Only a genuinely resolved state means don't touch it.
+      const existingVerdict = String(img.dataset.mwModerated || '');
+      if (
+        existingVerdict === 'safe' ||
+        existingVerdict === 'revealed' ||
+        existingVerdict === 'timeout-safe' ||
+        existingVerdict === 'blurred'
+      ) {
+        return;
+      }
       diagLogVeilLifetime(img, 'image_timeout_release');
       img.dataset.mwModerated = 'timeout-safe';
       img.removeAttribute('data-mw-veil');
