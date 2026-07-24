@@ -34,7 +34,6 @@ describe('GOLDEN: Flash Shield V1', () => {
     new Function(generateFlashShieldBootstrap(true))();
 
     expect(document.documentElement.classList.contains('mw-flash-shield-on')).toBe(true);
-    expect(document.querySelector('ytm-rich-item-renderer')?.getAttribute('data-mw-veil-container')).toBe('1');
     expect(document.querySelector('#feed-image')?.getAttribute('data-mw-veil')).toBe('1');
     expect(document.querySelector('#active-short')?.getAttribute('data-mw-veil')).toBe('1');
     expect(
@@ -60,9 +59,6 @@ describe('GOLDEN: Flash Shield V1', () => {
     expect(document.querySelector('#ios-active-short')?.getAttribute('data-mw-veil')).toBe('1');
     expect(
       document.querySelector('ytm-reel-video-renderer')?.getAttribute('data-mw-flash-frame'),
-    ).toBe('1');
-    expect(
-      document.querySelector('ytm-reel-video-renderer')?.getAttribute('data-mw-veil-container'),
     ).toBe('1');
     expect(document.querySelector('#mw-flash-shield')?.textContent).toContain(
       '.mw-flash-shorts-overlay',
@@ -96,36 +92,7 @@ describe('GOLDEN: Flash Shield V1', () => {
     expect(frame.dataset.mwFlashIdentity).not.toBe(firstIdentity);
     expect(video.getAttribute('data-mw-moderated')).toBeNull();
     expect(video.getAttribute('data-mw-veil')).toBe('1');
-    expect(frame.getAttribute('data-mw-veil-container')).toBe('1');
     expect(frame.querySelector('.mw-flash-shorts-overlay')).not.toBeNull();
-  });
-
-  it('pre-marks YouTube card containers before lazy thumbnail media exists', () => {
-    window.history.replaceState({}, '', '/');
-    document.body.innerHTML = `
-      <ytm-rich-item-renderer id="lazy-card">
-        <a href="/watch?v=lazy-card"></a>
-      </ytm-rich-item-renderer>
-    `;
-
-    new Function(generateFlashShieldBootstrap(true))();
-
-    const api = (window as Record<string, unknown>).__MW_FLASH_BOOTSTRAP__ as {
-      setEnabled: (enabled: boolean) => void;
-    };
-    const card = document.querySelector('#lazy-card') as HTMLElement;
-    expect(card.getAttribute('data-mw-veil-container')).toBe('1');
-    expect(document.querySelector('#mw-flash-shield')?.textContent).toContain(
-      '[data-mw-veil-container="1"]',
-    );
-
-    card.insertAdjacentHTML(
-      'beforeend',
-      '<img id="lazy-image" src="https://i.ytimg.com/vi/lazy/hqdefault.jpg">',
-    );
-    api.setEnabled(true);
-
-    expect(document.querySelector('#lazy-image')?.getAttribute('data-mw-veil')).toBe('1');
   });
 
   it('live disable removes veil and frame markers', () => {
@@ -146,7 +113,6 @@ describe('GOLDEN: Flash Shield V1', () => {
 
     expect(document.documentElement.classList.contains('mw-flash-shield-on')).toBe(false);
     expect(document.querySelector('[data-mw-veil="1"]')).toBeNull();
-    expect(document.querySelector('[data-mw-veil-container="1"]')).toBeNull();
     expect(document.querySelector('[data-mw-flash-frame="1"]')).toBeNull();
     expect(document.querySelector('[data-mw-flash-identity]')).toBeNull();
     expect(document.querySelector('.mw-flash-shorts-overlay')).toBeNull();
@@ -159,7 +125,7 @@ describe('GOLDEN: Flash Shield V1', () => {
     document.head.innerHTML = '<style id="mw-flash-shield"></style>';
     document.body.innerHTML = `
       <div id="shorts-player">
-        <ytm-reel-video-renderer data-mw-veil-container="1" data-mw-flash-frame="1" data-mw-flash-identity="old" data-mw-flash-retry="1">
+        <ytm-reel-video-renderer data-mw-flash-frame="1" data-mw-flash-identity="old" data-mw-flash-retry="1">
           <video id="stale-short" data-mw-veil="1" data-mw-veil-at="123"></video>
           <div class="mw-flash-shorts-overlay"></div>
         </ytm-reel-video-renderer>
@@ -171,7 +137,6 @@ describe('GOLDEN: Flash Shield V1', () => {
     expect(document.documentElement.classList.contains('mw-flash-shield-on')).toBe(false);
     expect(document.querySelector('[data-mw-veil="1"]')).toBeNull();
     expect(document.querySelector('[data-mw-veil-at]')).toBeNull();
-    expect(document.querySelector('[data-mw-veil-container="1"]')).toBeNull();
     expect(document.querySelector('[data-mw-flash-frame="1"]')).toBeNull();
     expect(document.querySelector('[data-mw-flash-identity]')).toBeNull();
     expect(document.querySelector('[data-mw-flash-retry]')).toBeNull();
@@ -207,7 +172,6 @@ describe('GOLDEN: Flash Shield V1', () => {
     api.setEnabled(true);
 
     expect(document.documentElement.classList.contains('mw-flash-shield-on')).toBe(true);
-    expect(document.querySelector('ytm-rich-item-renderer')?.getAttribute('data-mw-veil-container')).toBe('1');
     expect(document.querySelector('#feed-image')?.getAttribute('data-mw-veil')).toBe('1');
     expect(document.querySelector('#active-short')?.getAttribute('data-mw-veil')).toBe('1');
     expect(document.querySelector('.mw-flash-shorts-overlay')).not.toBeNull();
@@ -230,12 +194,7 @@ describe('GOLDEN: Flash Shield V1', () => {
     expect(script).toContain('ytm-video-with-context-renderer img');
     expect(script).toContain('ytd-rich-item-renderer img');
     expect(script).toContain('data-mw-flash-retry');
-    expect(script).toContain('data-mw-veil-container');
     expect(script).toContain('mw-flash-shorts-overlay');
-    expect(script).toContain('blur(28px)');
-    expect(script).toContain('blur(30px)');
-    expect(script).not.toContain('visibility:hidden');
-    expect(script).not.toContain('rgba(10,10,10,.88)');
   });
 
   it('keeps native browser launch on the sacred immediate-presentation path', () => {

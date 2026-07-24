@@ -2576,8 +2576,7 @@ export const NativeWebViewBrowser = () => {
               node.removeAttribute('data-mw-veil');
               node.removeAttribute('data-mw-veil-at');
             });
-            document.querySelectorAll('[data-mw-veil-container="1"],[data-mw-flash-frame="1"],[data-mw-flash-identity],[data-mw-flash-retry]').forEach(function(node) {
-              node.removeAttribute('data-mw-veil-container');
+            document.querySelectorAll('[data-mw-flash-frame="1"],[data-mw-flash-identity],[data-mw-flash-retry]').forEach(function(node) {
               node.removeAttribute('data-mw-flash-frame');
               node.removeAttribute('data-mw-flash-identity');
               node.removeAttribute('data-mw-flash-retry');
