@@ -105,10 +105,14 @@ describe('P2: disconnected-verdict live-frame fallback release', () => {
   it('an already-resolved live frame is left alone by the fallback', () => {
     window.history.pushState({}, '', shortsUrl(SHORTS_ID));
     const { frame, video } = buildActiveShort(SHORTS_ID);
+    vi.useFakeTimers();
     injection = injectScript({ flashShieldV1: true });
 
     injection.probe.markFlashShieldShortsCandidate();
     injection.probe.clearFlashShieldResolution(video, 'safe');
+    // The first resolution is deferred (min-visible-veil hold) — let it land
+    // before the fallback is attempted, matching "first resolution wins".
+    vi.advanceTimersByTime(300);
     const identity = injection.probe.getFlashShieldShortsIdentity(frame, video);
 
     const dead = makeDeadClassifiedNode(identity);
@@ -140,6 +144,8 @@ describe('P4: smooth veil release', () => {
     injection.probe.markFlashShieldShortsCandidate();
     const firstOverlay = document.querySelector('.mw-flash-shorts-overlay') as HTMLElement;
     injection.probe.clearFlashShieldResolution(video, 'safe');
+    // Resolution is deferred by the min-visible-veil hold before it fades.
+    vi.advanceTimersByTime(300);
 
     // Old overlay is fading, not instantly gone.
     expect(firstOverlay.dataset.mwVeilReleasing).toBe('1');

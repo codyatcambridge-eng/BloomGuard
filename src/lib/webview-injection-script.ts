@@ -586,6 +586,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   const FLASH_SHIELD_SHORTS_OVERLAY_CLASS = 'mw-flash-shorts-overlay';
   const FLASH_SHIELD_SHORTS_VEIL_TIMEOUT_MS = 4000;
   const FLASH_SHIELD_IMAGE_VEIL_TIMEOUT_MS = 4000;
+  const FLASH_SHIELD_MIN_VISIBLE_VEIL_MS = 300;
   const FLASH_SHIELD_SHORTS_VERDICT_MEMORY_MAX = 50;
   const FLASH_SHIELD_BURST_MS = [0, 16, 50, 100, 140];
   const FLASH_SHIELD_MEDIA_SELECTOR = (
@@ -1509,6 +1510,26 @@ export function generateModerationScript(config: InjectionConfig): string {
   function clearFlashShieldResolution(element, nextState) {
     if (!CONFIG.flashShieldV1 || !element || element.nodeType !== 1) return;
     try {
+      // C1: guarantee the preblur is perceptible. A verdict that resolves in
+      // a handful of milliseconds (fast classification, or an
+      // already-known-safe remembered verdict) must not release the veil
+      // before a human has any chance to register it appeared at all —
+      // that reads identically to "no preblur ever happened." Defer only
+      // the release; this never blocks or delays removeSoftBlur or any
+      // other caller's own logic, since it re-invokes itself later rather
+      // than making the caller wait.
+      const veiledAt = Number(element.dataset && element.dataset.mwVeilAt);
+      if (Number.isFinite(veiledAt) && veiledAt > 0) {
+        const elapsed = Date.now() - veiledAt;
+        if (elapsed < FLASH_SHIELD_MIN_VISIBLE_VEIL_MS) {
+          const remaining = FLASH_SHIELD_MIN_VISIBLE_VEIL_MS - elapsed;
+          setTimeout(function() {
+            if (!CONFIG.flashShieldV1 || timerState.teardownDone) return;
+            clearFlashShieldResolution(element, nextState);
+          }, remaining);
+          return;
+        }
+      }
       const resolved = isShortsModeActive() ? resolveShortsStableBlurTarget(element, element.dataset.mwSrc || '') : null;
       const target = resolved && resolved.target && resolved.target.isConnected ? resolved.target : element;
       target.dataset.mwModerated = nextState;

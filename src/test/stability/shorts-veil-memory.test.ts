@@ -7,7 +7,7 @@
  * content. Positives are deliberately NOT remembered — a known-positive
  * revisit keeps its entry veil until hard blur re-establishes.
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { injectScript, type InjectionResult } from './harness';
 
 const SHORT_A = 'sRt5xYw12Ab';
@@ -55,23 +55,37 @@ let injection: InjectionResult | null = null;
 afterEach(() => {
   injection?.cleanup();
   injection = null;
+  vi.useRealTimers();
   window.history.pushState({}, '', 'https://m.youtube.com/');
 });
+
+/** clearFlashShieldResolution now defers its release until the veil has been
+ * visible for FLASH_SHIELD_MIN_VISIBLE_VEIL_MS (300ms) — call under fake
+ * timers and advance past it before asserting on the release effects. */
+function resolveAndSettle(
+  injection: InjectionResult,
+  element: Element,
+  nextState: string,
+): void {
+  injection.probe.clearFlashShieldResolution(element, nextState);
+  vi.advanceTimersByTime(300);
+}
 
 describe('E1: session verdict memory prevents re-veil of known Shorts', () => {
   it('swiping back to a resolved-safe Short does not re-veil it', () => {
     window.history.pushState({}, '', shortsUrl(SHORT_A));
     const fixture = buildActiveShort(SHORT_A);
+    vi.useFakeTimers();
     injection = injectScript({ flashShieldV1: true });
 
     injection.probe.markFlashShieldShortsCandidate();
-    injection.probe.clearFlashShieldResolution(fixture.video, 'safe');
+    resolveAndSettle(injection, fixture.video, 'safe');
     expect(veilOverlayCount()).toBe(0);
 
     // Swipe away (B gets its own entry veil — correct)…
     swipeTo(fixture, injection, SHORT_B);
     expect(fixture.video.dataset.mwVeil).toBe('1');
-    injection.probe.clearFlashShieldResolution(fixture.video, 'safe');
+    resolveAndSettle(injection, fixture.video, 'safe');
 
     // …and back to A: known content, must NOT be visibly re-veiled. (A stale
     // data-mw-veil attr may persist on the recycled node — it is CSS-inert
@@ -84,10 +98,11 @@ describe('E1: session verdict memory prevents re-veil of known Shorts', () => {
   it('a media-node swap within a resolved Short does not re-veil it', () => {
     window.history.pushState({}, '', shortsUrl(SHORT_A));
     const fixture = buildActiveShort(SHORT_A);
+    vi.useFakeTimers();
     injection = injectScript({ flashShieldV1: true });
 
     injection.probe.markFlashShieldShortsCandidate();
-    injection.probe.clearFlashShieldResolution(fixture.video, 'safe');
+    resolveAndSettle(injection, fixture.video, 'safe');
 
     // YouTube swaps the media node (poster img -> attaching video).
     fixture.video.remove();
@@ -140,10 +155,11 @@ describe('E1: session verdict memory prevents re-veil of known Shorts', () => {
   it('Off-mode cleanup clears the memory', () => {
     window.history.pushState({}, '', shortsUrl(SHORT_A));
     const fixture = buildActiveShort(SHORT_A);
+    vi.useFakeTimers();
     injection = injectScript({ flashShieldV1: true });
 
     injection.probe.markFlashShieldShortsCandidate();
-    injection.probe.clearFlashShieldResolution(fixture.video, 'safe');
+    resolveAndSettle(injection, fixture.video, 'safe');
     expect(injection.probe.getShortsVerdictMemorySize()).toBe(1);
 
     injection.probe.offModeCleanup('test_off');

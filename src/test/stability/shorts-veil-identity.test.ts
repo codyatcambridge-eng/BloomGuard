@@ -9,7 +9,7 @@
  * Verdict wipes are only legitimate when the Shorts URL id actually changed
  * (a real swipe), and an already-resolved Short must never be re-covered.
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { injectScript, type InjectionResult } from './harness';
 
 const SHORTS_ID = 'sRt5xYw12Ab';
@@ -50,6 +50,7 @@ let injection: InjectionResult | null = null;
 afterEach(() => {
   injection?.cleanup();
   injection = null;
+  vi.useRealTimers();
   window.history.pushState({}, '', 'https://m.youtube.com/');
 });
 
@@ -73,12 +74,14 @@ describe('P1: active Shorts veil identity stability', () => {
   it('a resolved safe verdict survives source churn — no verdict wipe, no re-veil', () => {
     window.history.pushState({}, '', shortsUrl(SHORTS_ID));
     const { frame, video } = buildActiveShort(SHORTS_ID);
+    vi.useFakeTimers();
     injection = injectScript({ flashShieldV1: true });
 
     injection.probe.markFlashShieldShortsCandidate();
     expect(video.dataset.mwVeil).toBe('1');
 
     injection.probe.clearFlashShieldResolution(video, 'safe');
+    vi.advanceTimersByTime(300);
     expect(String(video.dataset.mwModerated || frame.dataset.mwModerated || '')).toBe('safe');
     expect(veilOverlayCount()).toBe(0);
 
