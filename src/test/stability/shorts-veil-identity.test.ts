@@ -81,7 +81,7 @@ describe('P1: active Shorts veil identity stability', () => {
     expect(video.dataset.mwVeil).toBe('1');
 
     injection.probe.clearFlashShieldResolution(video, 'safe');
-    vi.advanceTimersByTime(300);
+    vi.advanceTimersByTime(900);
     expect(String(video.dataset.mwModerated || frame.dataset.mwModerated || '')).toBe('safe');
     expect(veilOverlayCount()).toBe(0);
 

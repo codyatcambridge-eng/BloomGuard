@@ -39,6 +39,30 @@ function buildActiveShort(videoId: string): ShortsFixture {
   return { player, frame, video };
 }
 
+function buildBareActiveShortVideo(videoId: string): { host: HTMLElement; video: HTMLVideoElement } {
+  const host = document.createElement('div');
+  const video = document.createElement('video');
+  video.className = 'html5-main-video';
+  video.setAttribute('poster', `https://i.ytimg.com/vi/${videoId}/oar2.jpg`);
+  host.appendChild(video);
+  document.body.appendChild(host);
+  return { host, video };
+}
+
+function buildAriaCurrentLockupShort(videoId: string): { player: HTMLElement; frame: HTMLElement; video: HTMLVideoElement } {
+  const player = document.createElement('div');
+  player.id = 'shorts-player';
+  const frame = document.createElement('ytm-shorts-lockup-view-model-v2');
+  frame.setAttribute('aria-current', 'true');
+  frame.setAttribute('data-video-id', videoId);
+  const video = document.createElement('video');
+  video.setAttribute('poster', `https://i.ytimg.com/vi/${videoId}/oar2.jpg`);
+  frame.appendChild(video);
+  player.appendChild(frame);
+  document.body.appendChild(player);
+  return { player, frame, video };
+}
+
 function veilOverlayCount(): number {
   // Overlays mid-fade (data-mw-veil-releasing) are visually released.
   return document.querySelectorAll(
@@ -112,7 +136,7 @@ describe('P2: disconnected-verdict live-frame fallback release', () => {
     injection.probe.clearFlashShieldResolution(video, 'safe');
     // The first resolution is deferred (min-visible-veil hold) — let it land
     // before the fallback is attempted, matching "first resolution wins".
-    vi.advanceTimersByTime(300);
+    vi.advanceTimersByTime(901);
     const identity = injection.probe.getFlashShieldShortsIdentity(frame, video);
 
     const dead = makeDeadClassifiedNode(identity);
@@ -135,6 +159,51 @@ describe('P4: smooth veil release', () => {
     expect(styleText).not.toContain('display: none !important');
   });
 
+  it('active Shorts overlay is a visible viewport dampener before the AI verdict', () => {
+    window.history.pushState({}, '', shortsUrl(SHORTS_ID));
+    const { video } = buildActiveShort(SHORTS_ID);
+    injection = injectScript({ flashShieldV1: true, enabled: false, sensitivity: 0 });
+
+    injection.probe.markFlashShieldShortsCandidate();
+
+    const overlay = document.querySelector('.mw-flash-shorts-overlay') as HTMLElement | null;
+    const styleText = document.getElementById('mw-flash-shield')?.textContent || '';
+    expect(video.dataset.mwVeil).toBe('1');
+    expect(overlay).not.toBeNull();
+    expect(overlay?.dataset.mwActiveDampener).toBe('1');
+    expect(styleText).toContain('[data-mw-active-dampener="1"]');
+    expect(styleText).toContain('position: fixed !important');
+    expect(styleText).toContain('height: 100vh !important');
+  });
+
+  it('active Shorts dampener attaches when YouTube exposes only the live main video', () => {
+    window.history.pushState({}, '', shortsUrl(SHORTS_ID));
+    const { host, video } = buildBareActiveShortVideo(SHORTS_ID);
+    injection = injectScript({ flashShieldV1: true, enabled: false, sensitivity: 0 });
+
+    injection.probe.markFlashShieldShortsCandidate();
+
+    const overlay = host.querySelector('.mw-flash-shorts-overlay') as HTMLElement | null;
+    expect(video.dataset.mwVeil).toBe('1');
+    expect(host.dataset.mwFlashFrame).toBe('1');
+    expect(overlay).not.toBeNull();
+    expect(overlay?.dataset.mwActiveDampener).toBe('1');
+  });
+
+  it('active Shorts dampener recognizes current lockup selector variants', () => {
+    window.history.pushState({}, '', shortsUrl(SHORTS_ID));
+    const { frame, video } = buildAriaCurrentLockupShort(SHORTS_ID);
+    injection = injectScript({ flashShieldV1: true, enabled: false, sensitivity: 0 });
+
+    injection.probe.markFlashShieldShortsCandidate();
+
+    const overlay = frame.querySelector('.mw-flash-shorts-overlay') as HTMLElement | null;
+    expect(video.dataset.mwVeil).toBe('1');
+    expect(frame.dataset.mwFlashFrame).toBe('1');
+    expect(overlay).not.toBeNull();
+    expect(overlay?.dataset.mwActiveDampener).toBe('1');
+  });
+
   it('released overlay fades then is removed; next Short gets a FRESH overlay', () => {
     window.history.pushState({}, '', shortsUrl(SHORTS_ID));
     const { frame, video } = buildActiveShort(SHORTS_ID);
@@ -145,7 +214,7 @@ describe('P4: smooth veil release', () => {
     const firstOverlay = document.querySelector('.mw-flash-shorts-overlay') as HTMLElement;
     injection.probe.clearFlashShieldResolution(video, 'safe');
     // Resolution is deferred by the min-visible-veil hold before it fades.
-    vi.advanceTimersByTime(300);
+    vi.advanceTimersByTime(901);
 
     // Old overlay is fading, not instantly gone.
     expect(firstOverlay.dataset.mwVeilReleasing).toBe('1');
@@ -184,7 +253,7 @@ describe('P3: bounded veil timeout', () => {
     expect(video.dataset.mwVeil).toBe('1');
     expect(injection.probe.getTimerSnapshot().shortsVeilTimeoutTimer).toBe(true);
 
-    vi.advanceTimersByTime(4000);
+    vi.advanceTimersByTime(2200);
 
     expect(video.dataset.mwModerated).toBe('timeout-safe');
     expect(frame.dataset.mwModerated).toBe('timeout-safe');
@@ -214,7 +283,7 @@ describe('P3: bounded veil timeout', () => {
 
     for (let i = 0; i < 25; i += 1) injection.probe.markFlashShieldShortsCandidate();
     expect(injection.probe.getTimerSnapshot().shortsVeilTimeoutTimer).toBe(true);
-    vi.advanceTimersByTime(4000);
+    vi.advanceTimersByTime(2200);
     expect(injection.probe.getTimerSnapshot().shortsVeilTimeoutTimer).toBe(false);
   });
 
@@ -232,11 +301,130 @@ describe('P3: bounded veil timeout', () => {
     expect(video.dataset.mwVeil).toBe('1');
     expect(video.dataset.mwModerated).toBeUndefined();
 
-    vi.advanceTimersByTime(4000);
+    vi.advanceTimersByTime(2200);
 
     expect(video.dataset.mwModerated).toBe('timeout-safe');
     expect(frame.dataset.mwModerated).toBe('timeout-safe');
     expect(video.dataset.mwVeil).toBeUndefined();
     expect(veilOverlayCount()).toBe(0);
+  });
+
+  it('safe verdict holds the active dampener for the polished minimum window', () => {
+    window.history.pushState({}, '', shortsUrl(SHORTS_ID));
+    const { frame, video } = buildActiveShort(SHORTS_ID);
+    vi.useFakeTimers();
+    injection = injectScript({ flashShieldV1: true });
+
+    injection.probe.markFlashShieldShortsCandidate();
+    injection.probe.clearFlashShieldResolution(video, 'safe');
+    vi.advanceTimersByTime(899);
+
+    expect(video.dataset.mwVeil).toBe('1');
+    expect(frame.dataset.mwModerated).toBeUndefined();
+    expect(veilOverlayCount()).toBe(1);
+
+    vi.advanceTimersByTime(1);
+
+    expect(String(video.dataset.mwModerated || frame.dataset.mwModerated || '')).toBe('safe');
+    expect(veilOverlayCount()).toBe(0);
+  });
+
+  it('a recycled safe frame still gets a fresh active feed dampener before safe release', () => {
+    window.history.pushState({}, '', shortsUrl(SHORTS_ID));
+    const { frame, video } = buildActiveShort(SHORTS_ID);
+    vi.useFakeTimers();
+    injection = injectScript({ flashShieldV1: true });
+
+    injection.probe.markFlashShieldShortsCandidate();
+    injection.probe.clearFlashShieldResolution(video, 'safe');
+    vi.advanceTimersByTime(901);
+    expect(veilOverlayCount()).toBe(0);
+
+    const nextId = 'nExTsHoRt99';
+    window.history.pushState({}, '', shortsUrl(nextId));
+    frame.setAttribute('data-video-id', nextId);
+    video.dataset.mwModerated = 'safe';
+    frame.dataset.mwModerated = 'safe';
+    injection.probe.markFlashShieldShortsCandidate();
+
+    expect(video.dataset.mwVeil).toBe('1');
+    expect(String(video.dataset.mwModerated || frame.dataset.mwModerated || '')).toBe('');
+    expect(veilOverlayCount()).toBe(1);
+
+    vi.advanceTimersByTime(899);
+    expect(veilOverlayCount()).toBe(1);
+
+    vi.advanceTimersByTime(1);
+    expect(String(video.dataset.mwModerated || frame.dataset.mwModerated || '')).toBe('safe');
+    expect(veilOverlayCount()).toBe(0);
+  });
+
+  it('poster-swapped active Shorts get a fresh dampener even when URL/data identity is stale', () => {
+    window.history.pushState({}, '', shortsUrl(SHORTS_ID));
+    const { host, video } = buildBareActiveShortVideo(SHORTS_ID);
+    vi.useFakeTimers();
+    injection = injectScript({ flashShieldV1: true });
+
+    injection.probe.markFlashShieldShortsCandidate();
+    injection.probe.clearFlashShieldResolution(video, 'safe');
+    vi.advanceTimersByTime(901);
+
+    expect(String(video.dataset.mwModerated || host.dataset.mwModerated || '')).toBe('safe');
+    expect(veilOverlayCount()).toBe(0);
+
+    video.setAttribute('poster', 'https://i.ytimg.com/vi/nextShortNoUrlYet/oar2.jpg');
+    injection.probe.markFlashShieldShortsCandidate();
+
+    expect(video.dataset.mwModerated).toBeUndefined();
+    expect(video.dataset.mwVeil).toBe('1');
+    expect(host.dataset.mwFlashFrame).toBe('1');
+    expect(veilOverlayCount()).toBe(1);
+  });
+
+  it('poster-swapped weak-identity dampener gets its own full bounded timeout', () => {
+    window.history.pushState({}, '', shortsUrl(SHORTS_ID));
+    const { host, video } = buildBareActiveShortVideo(SHORTS_ID);
+    vi.useFakeTimers();
+    injection = injectScript({ flashShieldV1: true });
+
+    injection.probe.markFlashShieldShortsCandidate();
+    vi.advanceTimersByTime(1000);
+
+    video.setAttribute('poster', 'https://i.ytimg.com/vi/nextShortNoUrlYet/oar2.jpg');
+    injection.probe.markFlashShieldShortsCandidate();
+
+    vi.advanceTimersByTime(2199);
+    expect(video.dataset.mwVeil).toBe('1');
+    expect(String(video.dataset.mwModerated || host.dataset.mwModerated || '')).toBe('');
+
+    vi.advanceTimersByTime(1);
+    expect(video.dataset.mwModerated).toBe('timeout-safe');
+    expect(host.dataset.mwModerated).toBe('timeout-safe');
+    expect(video.dataset.mwVeil).toBeUndefined();
+    expect(veilOverlayCount()).toBe(0);
+  });
+
+  it('positive hard blur handoff drops the Flash Shield dampener', () => {
+    window.history.pushState({}, '', shortsUrl(SHORTS_ID));
+    const { frame, video } = buildActiveShort(SHORTS_ID);
+    injection = injectScript({ flashShieldV1: true });
+
+    injection.probe.markFlashShieldShortsCandidate();
+    expect(video.dataset.mwVeil).toBe('1');
+    expect(veilOverlayCount()).toBe(1);
+
+    const applied = injection.probe.applyFlashShieldPositive(
+      video,
+      `https://i.ytimg.com/vi/${SHORTS_ID}/oar2.jpg`,
+      'porn',
+      SHORTS_ID,
+    );
+
+    expect(applied).toBe(true);
+    expect(frame.dataset.mwModerated).toBe('blurred');
+    expect(video.dataset.mwVeil).toBeUndefined();
+    expect(frame.dataset.mwNeighborVeil).toBeUndefined();
+    expect(veilOverlayCount()).toBe(0);
+    expect(injection.probe.findRevealOverlayForElement(frame, `https://i.ytimg.com/vi/${SHORTS_ID}/oar2.jpg`)).not.toBeNull();
   });
 });

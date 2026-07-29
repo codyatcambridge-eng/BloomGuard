@@ -2576,10 +2576,14 @@ export const NativeWebViewBrowser = () => {
               node.removeAttribute('data-mw-veil');
               node.removeAttribute('data-mw-veil-at');
             });
-            document.querySelectorAll('[data-mw-flash-frame="1"],[data-mw-flash-identity],[data-mw-flash-retry]').forEach(function(node) {
+            document.querySelectorAll('[data-mw-flash-frame="1"],[data-mw-flash-identity],[data-mw-flash-retry],[data-mw-active-dampened-identity],[data-mw-neighbor-veil],[data-mw-neighbor-veil-timeout-armed]').forEach(function(node) {
               node.removeAttribute('data-mw-flash-frame');
               node.removeAttribute('data-mw-flash-identity');
               node.removeAttribute('data-mw-flash-retry');
+              node.removeAttribute('data-mw-active-dampened-identity');
+              node.removeAttribute('data-mw-neighbor-veil');
+              node.removeAttribute('data-mw-neighbor-veil-at');
+              node.removeAttribute('data-mw-neighbor-veil-timeout-armed');
             });
             document.querySelectorAll('[data-mw-flash-positive="1"]').forEach(function(node) {
               node.removeAttribute('data-mw-flash-positive');

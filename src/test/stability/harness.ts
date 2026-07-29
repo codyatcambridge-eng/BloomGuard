@@ -287,7 +287,10 @@ export interface MWTestProbe {
   ) => boolean;
   runShortsHealthHealForContainer: (container: Element, reason: string) => void;
   findRevealOverlayForElement: (element: Element, src: string) => Element | null;
+  getFlashShieldActiveShortsFrame: () => Element | null;
   getFlashShieldShortsIdentity: (frame: Element | null, media: Element | null) => string;
+  getFlashShieldNeighborShortsFrames: (activeFrame: Element | null) => Element[];
+  markFlashShieldNeighborShortsCandidates: (activeFrame: Element | null) => void;
   markFlashShieldShortsCandidate: () => void;
   markFlashShieldCandidates: (root?: Element | Document) => void;
   clearFlashShieldResolution: (element: Element, nextState: string) => void;
@@ -380,7 +383,10 @@ export function injectScript(configOverrides?: Partial<InjectionConfig>): Inject
     healActiveShortsRevealPairing: healActiveShortsRevealPairing,
     runShortsHealthHealForContainer: runShortsHealthHealForContainer,
     findRevealOverlayForElement: findRevealOverlayForElement,
+    getFlashShieldActiveShortsFrame: getFlashShieldActiveShortsFrame,
     getFlashShieldShortsIdentity: getFlashShieldShortsIdentity,
+    getFlashShieldNeighborShortsFrames: getFlashShieldNeighborShortsFrames,
+    markFlashShieldNeighborShortsCandidates: markFlashShieldNeighborShortsCandidates,
     markFlashShieldShortsCandidate: markFlashShieldShortsCandidate,
     markFlashShieldCandidates: markFlashShieldCandidates,
     clearFlashShieldResolution: clearFlashShieldResolution,

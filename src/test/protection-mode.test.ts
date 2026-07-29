@@ -7,11 +7,24 @@ import {
 } from '@/lib/protection-mode';
 
 describe('protection mode host policy', () => {
-  it('Off wins over Flash Shield and blocks injection', () => {
+  it('dial Off still allows Flash Shield-only dampening when its toggle is on', () => {
     const state = {
       effectiveShieldEnabled: true,
       blurDial: 0,
       flashShieldEnabled: true,
+    };
+
+    expect(isProtectionOffState(state)).toBe(false);
+    expect(shouldRunRuntimeModeration(state)).toBe(false);
+    expect(shouldRunFlashShield(state)).toBe(true);
+    expect(shouldInjectForProtection(state)).toBe(true);
+  });
+
+  it('dial Off with Flash Shield disabled blocks injection', () => {
+    const state = {
+      effectiveShieldEnabled: true,
+      blurDial: 0,
+      flashShieldEnabled: false,
     };
 
     expect(isProtectionOffState(state)).toBe(true);

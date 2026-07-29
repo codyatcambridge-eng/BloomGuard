@@ -59,20 +59,20 @@ afterEach(() => {
   window.history.pushState({}, '', 'https://m.youtube.com/');
 });
 
-/** clearFlashShieldResolution now defers its release until the veil has been
- * visible for FLASH_SHIELD_MIN_VISIBLE_VEIL_MS (300ms) — call under fake
- * timers and advance past it before asserting on the release effects. */
+/** clearFlashShieldResolution now defers active Shorts release until the
+ * polished dampener window has elapsed — call under fake timers and advance
+ * past it before asserting on the release effects. */
 function resolveAndSettle(
   injection: InjectionResult,
   element: Element,
   nextState: string,
 ): void {
   injection.probe.clearFlashShieldResolution(element, nextState);
-  vi.advanceTimersByTime(300);
+  vi.advanceTimersByTime(900);
 }
 
-describe('E1: session verdict memory prevents re-veil of known Shorts', () => {
-  it('swiping back to a resolved-safe Short does not re-veil it', () => {
+describe('E1: session verdict memory resolves known Shorts after the feed dampener', () => {
+  it('swiping back to a resolved-safe Short still gets a fresh 900ms feed dampener, then releases safe', () => {
     window.history.pushState({}, '', shortsUrl(SHORT_A));
     const fixture = buildActiveShort(SHORT_A);
     vi.useFakeTimers();
@@ -87,11 +87,19 @@ describe('E1: session verdict memory prevents re-veil of known Shorts', () => {
     expect(fixture.video.dataset.mwVeil).toBe('1');
     resolveAndSettle(injection, fixture.video, 'safe');
 
-    // …and back to A: known content, must NOT be visibly re-veiled. (A stale
-    // data-mw-veil attr may persist on the recycled node — it is CSS-inert
-    // once the verdict is stamped; the visible layers are verdict + overlay.)
+    // …and back to A: every active Short transition gets the same feed
+    // dampener. The remembered safe verdict only controls the release after
+    // the 900ms minimum window.
     swipeTo(fixture, injection, SHORT_A);
-    expect(String(fixture.video.dataset.mwModerated || '')).toBe('safe');
+    expect(fixture.video.dataset.mwVeil).toBe('1');
+    expect(String(fixture.video.dataset.mwModerated || fixture.frame.dataset.mwModerated || '')).toBe('');
+    expect(veilOverlayCount()).toBe(1);
+
+    vi.advanceTimersByTime(899);
+    expect(veilOverlayCount()).toBe(1);
+
+    vi.advanceTimersByTime(1);
+    expect(String(fixture.video.dataset.mwModerated || fixture.frame.dataset.mwModerated || '')).toBe('safe');
     expect(veilOverlayCount()).toBe(0);
   });
 
