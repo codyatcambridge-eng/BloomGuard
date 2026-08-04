@@ -1336,7 +1336,12 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function isFlashShieldStrongShortsIdentity(identity) {
-    return !/(^none\\||\\|none$)/.test(String(identity || ''));
+    // A real /shorts/{id} URL is stable enough to keep a resolved Flash Shield
+    // verdict down through normal active-player poster/src churn. Requiring a
+    // second data-video-id made bare active-player nodes look weak and allowed
+    // safe verdicts to be wiped/re-veiled during the same Short.
+    const parts = String(identity || '').split('|');
+    return !!parts[0] && parts[0] !== 'none';
   }
 
   function getFlashShieldActiveDampenerIdentity(frame, media, stableIdentity) {

@@ -309,6 +309,33 @@ describe('P3: bounded veil timeout', () => {
     expect(veilOverlayCount()).toBe(0);
   });
 
+  it('live Flash Shield toggle removes and restores governed active Shorts dampening', () => {
+    window.history.pushState({}, '', shortsUrl(SHORTS_ID));
+    const { frame, video } = buildActiveShort(SHORTS_ID);
+    vi.useFakeTimers();
+    injection = injectScript({ flashShieldV1: true, enabled: false, sensitivity: 0 });
+
+    injection.probe.markFlashShieldShortsCandidate();
+    expect(video.dataset.mwVeil).toBe('1');
+    expect(veilOverlayCount()).toBe(1);
+
+    const setFlashShield = (window as unknown as {
+      __MW_FLASH_SHIELD_SET__: (enabled: boolean) => string;
+    }).__MW_FLASH_SHIELD_SET__;
+    expect(setFlashShield(false)).toBe('OK');
+    expect(video.dataset.mwVeil).toBeUndefined();
+    expect(frame.dataset.mwFlashFrame).toBeUndefined();
+    expect(veilOverlayCount()).toBe(0);
+
+    injection.probe.markFlashShieldShortsCandidate();
+    expect(video.dataset.mwVeil).toBeUndefined();
+    expect(veilOverlayCount()).toBe(0);
+
+    expect(setFlashShield(true)).toBe('OK');
+    expect(video.dataset.mwVeil).toBe('1');
+    expect(veilOverlayCount()).toBe(1);
+  });
+
   it('safe verdict holds the active dampener for the polished minimum window', () => {
     window.history.pushState({}, '', shortsUrl(SHORTS_ID));
     const { frame, video } = buildActiveShort(SHORTS_ID);
@@ -359,7 +386,7 @@ describe('P3: bounded veil timeout', () => {
     expect(veilOverlayCount()).toBe(0);
   });
 
-  it('poster-swapped active Shorts get a fresh dampener even when URL/data identity is stale', () => {
+  it('same-URL poster churn after safe release does not re-veil active Shorts', () => {
     window.history.pushState({}, '', shortsUrl(SHORTS_ID));
     const { host, video } = buildBareActiveShortVideo(SHORTS_ID);
     vi.useFakeTimers();
@@ -375,14 +402,13 @@ describe('P3: bounded veil timeout', () => {
     video.setAttribute('poster', 'https://i.ytimg.com/vi/nextShortNoUrlYet/oar2.jpg');
     injection.probe.markFlashShieldShortsCandidate();
 
-    expect(video.dataset.mwModerated).toBeUndefined();
-    expect(video.dataset.mwVeil).toBe('1');
-    expect(host.dataset.mwFlashFrame).toBe('1');
-    expect(veilOverlayCount()).toBe(1);
+    expect(String(video.dataset.mwModerated || host.dataset.mwModerated || '')).toBe('safe');
+    expect(video.dataset.mwVeil).toBeUndefined();
+    expect(veilOverlayCount()).toBe(0);
   });
 
-  it('poster-swapped weak-identity dampener gets its own full bounded timeout', () => {
-    window.history.pushState({}, '', shortsUrl(SHORTS_ID));
+  it('unknown-URL poster swap still gets a fresh bounded dampener', () => {
+    window.history.pushState({}, '', 'https://m.youtube.com/shorts/');
     const { host, video } = buildBareActiveShortVideo(SHORTS_ID);
     vi.useFakeTimers();
     injection = injectScript({ flashShieldV1: true });
