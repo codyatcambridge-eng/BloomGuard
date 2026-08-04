@@ -155,3 +155,51 @@ After every successful update, append:
 - simulator/manual QA result
 - new sacred tag if created
 - remaining MVP risks
+
+## Update: 2026-08-04 Active Shorts Early Bootstrap Arm
+
+Branch/worktree:
+
+- `/Users/codygroves/cleanrooms/mw1111-phase0-feed-dampener-mvp-audit-20260803`
+- `work/phase0-feed-dampener-mvp-audit-20260803`
+
+Behavior changed:
+
+- Pushed the previous sacred stable build to GitHub before patching:
+  - branch: `origin/work/phase0-feed-dampener-mvp-audit-20260803`
+  - tag: `sacred-phase0-flashshield-active-shorts-stable-2026-08-04`
+- Added an active-Shorts-only host bootstrap arm so Flash Shield can preveil the active Shorts player earlier on existing host lifecycle events:
+  - `onLoadStart`
+  - pure `/shorts/...` URL change
+  - pure `/shorts/...` first-entry/open recovery
+  - Flash Shield live toggle On while already in pure active Shorts
+- Mirrored the runtime Shorts identity rule into the bootstrap copy: a real `/shorts/{id}` URL identity remains strong even when YouTube has not populated node ids.
+
+Files touched:
+
+- `src/components/browser/NativeWebViewBrowser.tsx`
+- `src/lib/webview-injection-script.ts`
+- `src/test/flash-shield.golden.test.ts`
+- `context.md`
+
+Tests run:
+
+- Focused Flash Shield/Shorts suite:
+  - `./node_modules/.bin/vitest run --config vitest.stability.config.ts src/test/flash-shield.golden.test.ts src/test/stability/shorts-veil-release.test.ts src/test/stability/shorts-veil-memory.test.ts src/test/stability/shorts-veil-identity.test.ts`
+  - passed: `4` files, `38` tests
+- Full golden suite:
+  - `npm run test:golden`
+  - passed: `23` files, `160` tests
+- Production build:
+  - `npm run build`
+  - passed; emitted existing large-chunk/Browserslist warnings only.
+
+Simulator/manual QA:
+
+- Not yet rerun after this timing patch.
+
+Remaining MVP risks:
+
+- This patch improves active Shorts timing inside the existing host injection architecture, but it is not true native document-start prepaint protection.
+- The active bootstrap arm is intentionally limited to pure `/shorts/...` routes. Profile/channel-origin Shorts should be handled in a separate measured patch if manual QA shows flashes there.
+- Need fresh simulator install and active Shorts manual QA for freeze eligibility.

@@ -95,6 +95,37 @@ describe('GOLDEN: Flash Shield V1', () => {
     expect(frame.querySelector('.mw-flash-shorts-overlay')).not.toBeNull();
   });
 
+  it('keeps the bootstrap dampener down during same-Short media source churn', () => {
+    window.history.replaceState({}, '', '/shorts/same-item');
+    document.body.innerHTML = `
+      <div id="shorts-player">
+        <ytm-reel-video-renderer is-active>
+          <video id="reused-short" src="blob:first-src"></video>
+        </ytm-reel-video-renderer>
+      </div>
+    `;
+    new Function(generateFlashShieldBootstrap(true))();
+
+    const frame = document.querySelector('ytm-reel-video-renderer') as HTMLElement;
+    const video = document.querySelector('#reused-short') as HTMLElement;
+    const firstIdentity = frame.dataset.mwFlashIdentity;
+    frame.dataset.mwActiveDampenedIdentity = String(firstIdentity || '');
+    video.setAttribute('data-mw-moderated', 'safe');
+    video.removeAttribute('data-mw-veil');
+    document.querySelector('.mw-flash-shorts-overlay')?.remove();
+
+    video.setAttribute('src', 'blob:second-src');
+    const api = (window as Record<string, unknown>).__MW_FLASH_BOOTSTRAP__ as {
+      setEnabled: (enabled: boolean) => void;
+    };
+    api.setEnabled(true);
+
+    expect(frame.dataset.mwFlashIdentity).toBe(firstIdentity);
+    expect(video.getAttribute('data-mw-moderated')).toBe('safe');
+    expect(video.getAttribute('data-mw-veil')).toBeNull();
+    expect(frame.querySelector('.mw-flash-shorts-overlay')).toBeNull();
+  });
+
   it('live disable removes veil and frame markers', () => {
     window.history.replaceState({}, '', '/shorts/live-disable');
     document.body.innerHTML = `
@@ -207,5 +238,19 @@ describe('GOLDEN: Flash Shield V1', () => {
     expect(hookSource).toContain("ensureBrowserPresented('open_success', url)");
     expect(hookSource).not.toContain('preShowScriptInjectionTime');
     expect(hookSource).not.toContain('options.preShowScript');
+  });
+
+  it('arms the Flash Shield bootstrap only from active Shorts host paths', () => {
+    const browserSource = readFileSync(
+      resolve(process.cwd(), 'src/components/browser/NativeWebViewBrowser.tsx'),
+      'utf8',
+    );
+
+    expect(browserSource).toContain('generateFlashShieldBootstrap');
+    expect(browserSource).toContain('armActiveShortsFlashShieldBootstrap');
+    expect(browserSource).toContain("if (!isYouTubeShortsUrl(targetUrl)) return 'SKIP_NOT_PURE_SHORTS'");
+    expect(browserSource).toContain("'onLoadStart'");
+    expect(browserSource).toContain("'onUrlChange_active_shorts'");
+    expect(browserSource).toContain("'flash_shield_live_enable_bootstrap'");
   });
 });

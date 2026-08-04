@@ -201,7 +201,12 @@ export function generateFlashShieldBootstrap(enabled: boolean): string {
         return [shortsId, nodeId || 'none'].join('|');
       }
       function isStrongShortsIdentity(identity) {
-        return !/(^none\\||\\|none$)/.test(String(identity || ''));
+        var value = String(identity || '');
+        if (!value || /^none\\|/.test(value)) return false;
+        // A real /shorts/{id} URL is the stable identity for the active player.
+        // YouTube often leaves node ids unset while swapping poster/src on the
+        // same Short; treating that as weak reintroduces Flash Shield oscillation.
+        return true;
       }
       function getActiveDampenerIdentity(frame, media, stableIdentity) {
         if (isStrongShortsIdentity(stableIdentity)) return stableIdentity;
