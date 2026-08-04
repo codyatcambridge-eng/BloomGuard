@@ -196,7 +196,14 @@ Tests run:
 
 Simulator/manual QA:
 
-- Not yet rerun after this timing patch.
+- Built from fresh derived data path: `build/sim-dd-flashshield-bootstrap`.
+- Synced Capacitor iOS assets.
+- Uninstalled existing simulator app, installed the newly built app, and launched fresh on:
+  - device: `iPhone 17 Pro Max`
+  - UDID: `FBE187B0-097D-4F4C-BA99-121888E1FC10`
+  - bundle id: `bet.goodcreation.miracleworker`
+- Launch screenshot captured at `/private/tmp/mw-flashshield-bootstrap-launch.png`.
+- Result: app rendered the BloomGuard home screen after fresh install; no launch freeze observed.
 
 Remaining MVP risks:
 
