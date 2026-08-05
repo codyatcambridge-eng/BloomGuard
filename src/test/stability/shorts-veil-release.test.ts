@@ -176,6 +176,33 @@ describe('P4: smooth veil release', () => {
     expect(styleText).toContain('height: 100vh !important');
   });
 
+  it('CSS preblurs unresolved active Shorts media before JS stamps the veil attribute', () => {
+    window.history.pushState({}, '', shortsUrl(SHORTS_ID));
+    buildActiveShort(SHORTS_ID);
+    injection = injectScript({ flashShieldV1: true, enabled: false, sensitivity: 0 });
+
+    const styleText = document.getElementById('mw-flash-shield')?.textContent || '';
+
+    expect(styleText).toContain('#shorts-player ytm-reel-video-renderer[selected]');
+    expect(styleText).toContain('#shorts-player ytm-reel-video-renderer[aria-hidden="false"]');
+    expect(styleText).toContain('#shorts-player ytm-shorts-lockup-view-model-v2[is-active]');
+    expect(styleText).toContain('#shorts-player ytm-shorts-lockup-view-model-v2[aria-hidden="false"]');
+    expect(styleText).toContain('#shorts-player ytm-shorts-lockup-view-model[aria-hidden="false"]');
+    expect(styleText).toContain('#shorts-player ytd-reel-video-renderer[aria-hidden="false"]');
+    expect(styleText).toContain(':not([data-mw-moderated="safe"]):not([data-mw-moderated="revealed"]):not([data-mw-moderated="timeout-safe"]):not([data-mw-moderated="blurred"]) video');
+    expect(styleText).toContain('filter: blur(24px) saturate(0.72) brightness(0.92) !important');
+  });
+
+  it('CSS active Shorts preblur excludes resolved frame and media verdicts', () => {
+    window.history.pushState({}, '', shortsUrl(SHORTS_ID));
+    buildActiveShort(SHORTS_ID);
+    injection = injectScript({ flashShieldV1: true, enabled: false, sensitivity: 0 });
+
+    const styleText = document.getElementById('mw-flash-shield')?.textContent || '';
+
+    expect(styleText).toContain(':not([data-mw-moderated="safe"]):not([data-mw-moderated="revealed"]):not([data-mw-moderated="timeout-safe"]):not([data-mw-moderated="blurred"]) video:not([data-mw-moderated="safe"]):not([data-mw-moderated="revealed"]):not([data-mw-moderated="timeout-safe"]):not([data-mw-moderated="blurred"])');
+  });
+
   it('active Shorts dampener attaches when YouTube exposes only the live main video', () => {
     window.history.pushState({}, '', shortsUrl(SHORTS_ID));
     const { host, video } = buildBareActiveShortVideo(SHORTS_ID);

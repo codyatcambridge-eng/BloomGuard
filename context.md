@@ -306,3 +306,51 @@ Remaining risk:
 - Simulator active Shorts manual QA is still required for real swipe timing, especially rapid next/previous swipes after lingering on a Short.
 - This does not claim true native document-start prepaint coverage; it is a runtime-only active Shorts neighbor coverage patch.
 - Do not alter host-side Shorts route injection for this issue unless this runtime fix fails manual QA.
+
+## Update: 2026-08-05 Active Shorts Loading-Phase Preblur Gap
+
+Branch/worktree:
+
+- `/Users/codygroves/cleanrooms/mw1111-phase0-feed-dampener-mvp-audit-20260803`
+- `work/phase0-feed-dampener-mvp-audit-20260803`
+
+Problem:
+
+- User reported a visible active Shorts content flash during the loading phase before Flash Shield preblur lands, before the eventual positive hard blur + reveal handoff.
+
+Root cause / patch decision:
+
+- Active Shorts full-runtime preblur was primarily attribute-driven: media needed `data-mw-veil="1"` before the CSS blur applied.
+- On Shorts entry/recycle, YouTube can paint a `video` under the selected/is-active/aria-visible reel container before the mutation callback stamps `data-mw-veil`.
+- Host-side/pre-show document-start arming is still avoided because the previous host bootstrap path caused active Shorts entry freezing.
+
+Behavior changed:
+
+- Added active-Shorts-only CSS selectors to the Flash Shield runtime stylesheet that blur unresolved `video` media inside selected/is-active/aria-visible Shorts frames as soon as `html.mw-flash-shield-on` and the stylesheet exist.
+- The selector excludes frame and media verdicts of `safe`, `revealed`, `timeout-safe`, and `blurred`, preserving release, reveal, and hard-blur handoff behavior.
+- No changes to host WebView injection, classifier thresholds, reveal logic, or active Shorts scan ownership.
+
+Files touched:
+
+- `src/lib/webview-injection-script.ts`
+- `src/test/stability/shorts-veil-release.test.ts`
+- `context.md`
+
+Validation:
+
+- Focused active Shorts / Flash Shield suite passed:
+  - `3` files, `40` tests
+- Full golden suite passed:
+  - `23` files, `164` tests
+- Frozen guard passed:
+  - `node scripts/check-frozen.mjs`
+  - frozen file touched: `src/lib/webview-injection-script.ts`
+- Production build passed:
+  - `npm run build`
+  - existing Browserslist and chunk-size warnings only.
+
+Remaining risk:
+
+- This closes the gap after the Flash Shield runtime stylesheet is present but before per-node `data-mw-veil` is stamped.
+- If the remaining flash occurs before any injected runtime/style reaches the WebView, the only lower layer is native/document-start/presentation control, which previously caused a Shorts entry freeze and needs a separate measured design.
+- Manual simulator QA still required on active Shorts entry, rapid swipe, and positive hard-blur/reveal handoff.
