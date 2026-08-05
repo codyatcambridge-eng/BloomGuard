@@ -16,10 +16,7 @@ import { useCapacitor } from '@/hooks/useCapacitor';
 import { useModerationBridge } from '@/hooks/useModerationBridge';
 import { useGateRuntime } from '@/hooks/useGateRuntime';
 import { supabase } from '@/integrations/supabase/client';
-import {
-  generateFlashShieldBootstrap,
-  generateModerationScript,
-} from '@/lib/webview-injection-script';
+import { generateModerationScript } from '@/lib/webview-injection-script';
 import { getInjectionReadinessVerdict } from '@/lib/injection-readiness';
 import {
   isProtectionOffState,
@@ -1470,45 +1467,6 @@ export const NativeWebViewBrowser = () => {
     }
   }, [ENABLE_SIGNAL_PIPELINE, settingsLoaded, isRuntimeModerationEnabled, shouldInjectModeration, getModerationConfig, localSettings.diag_youtube_shorts, exitPendingReinject]);
 
-  const armActiveShortsFlashShieldBootstrap = useCallback(async (
-    scriptExecutor: (script: string) => Promise<string | null>,
-    reason: string,
-    urlHint?: string,
-  ): Promise<string> => {
-    if (!ENABLE_SIGNAL_PIPELINE) return 'SKIP_PIPELINE';
-    if (!settingsLoaded) return 'SKIP_SETTINGS';
-    if (!isFlashShieldEnabled) return 'SKIP_FLASH_OFF';
-    const targetUrl = urlHint || currentUrlRef.current || '';
-    if (isBootstrapBlankUrl(targetUrl)) return 'SKIP_BLANK';
-    if (!isYouTubeShortsUrl(targetUrl)) return 'SKIP_NOT_PURE_SHORTS';
-    try {
-      const result = await scriptExecutor(generateFlashShieldBootstrap(true));
-      const resultToken = result === null || typeof result === 'undefined'
-        ? 'null'
-        : String(result);
-      console.log(
-        '[DIAG][FLASH_BOOTSTRAP][HOST]',
-        'action=armed',
-        'reason=' + reason,
-        'navId=' + activeNavIdRef.current,
-        'pageEpoch=' + webViewPageEpochRef.current,
-        'url=' + toDiagUrl(targetUrl),
-        'result=' + resultToken,
-      );
-      return resultToken;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.warn(
-        '[DIAG][FLASH_BOOTSTRAP][HOST]',
-        'action=arm_error',
-        'reason=' + reason,
-        'url=' + toDiagUrl(targetUrl),
-        'message=' + message,
-      );
-      return 'ERR:' + message;
-    }
-  }, [ENABLE_SIGNAL_PIPELINE, settingsLoaded, isFlashShieldEnabled, toDiagUrl]);
-
   const getWebViewListenerDiagContext = useCallback(() => {
     return {
       navId: activeNavIdRef.current || null,
@@ -1606,7 +1564,6 @@ export const NativeWebViewBrowser = () => {
       // Teardown first, then inject to avoid __MW_ACTIVE__ races.
       if (!skipBootstrapLoadStart && executeScript) {
         void (async () => {
-          await armActiveShortsFlashShieldBootstrap(executeScript, 'onLoadStart', url);
           await clearStaleOwnershipAtBoundary(executeScript, 'onLoadStart', url);
           await teardownWebViewScheduling('navigation_start', url).catch(() => undefined);
           await injectModerationScript(executeScript, 'onLoadStart', url);
@@ -1722,13 +1679,6 @@ export const NativeWebViewBrowser = () => {
         `).catch(() => undefined);
       }
       if (isHostActiveShortsLifecycleUrl(url)) {
-        if (executeScript && isYouTubeShortsUrl(url)) {
-          void armActiveShortsFlashShieldBootstrap(
-            executeScript,
-            'onUrlChange_active_shorts',
-            url,
-          ).catch(() => undefined);
-        }
         const sinceLastReq = Date.now() - shortsLegacyFallbackRef.current.lastReqSentAt;
         if (sinceLastReq > SHORTS_LEGACY_FALLBACK_REQ_GRACE_MS || shortsIdChanged) {
           armShortsLegacyFallbackProbe(
@@ -1928,13 +1878,6 @@ export const NativeWebViewBrowser = () => {
         );
       }
       armShortsFirstEntryLatch(entryReason, activeUrl);
-      if (executeScript && isYouTubeShortsUrl(activeUrl)) {
-        void armActiveShortsFlashShieldBootstrap(
-          executeScript,
-          entryReason + '_bootstrap',
-          activeUrl,
-        ).catch(() => undefined);
-      }
       const sinceLastReq = Date.now() - shortsLegacyFallbackRef.current.lastReqSentAt;
       if (sinceLastReq > SHORTS_LEGACY_FALLBACK_REQ_GRACE_MS) {
         armShortsLegacyFallbackProbe('shorts_entry_uncertain', SHORTS_LEGACY_FALLBACK_ENTRY_PROBE_MS);
@@ -2008,7 +1951,6 @@ export const NativeWebViewBrowser = () => {
     markShortsFirstEntryForceRequested,
     requestShortsReentryRefresh,
     forceFirstEntryShortsRequest,
-    armActiveShortsFlashShieldBootstrap,
     toDiagUrl,
     executeScript,
   ]);
@@ -2021,13 +1963,6 @@ export const NativeWebViewBrowser = () => {
       ? 'webview_open_shorts_profile_origin'
       : 'webview_open_shorts';
     armShortsFirstEntryLatch(openReason, activeUrl);
-    if (executeScript && isYouTubeShortsUrl(activeUrl)) {
-      void armActiveShortsFlashShieldBootstrap(
-        executeScript,
-        openReason + '_bootstrap',
-        activeUrl,
-      ).catch(() => undefined);
-    }
     if (markShortsFirstEntryReentryRequested(openReason, activeUrl)) {
       void requestShortsReentryRefresh(openReason, activeUrl, false)
         .then((resultToken) => {
@@ -2047,13 +1982,11 @@ export const NativeWebViewBrowser = () => {
   }, [
     webViewState.isOpen,
     webViewState.currentUrl,
-    executeScript,
     armShortsFirstEntryLatch,
     markShortsFirstEntryReentryRequested,
     markShortsFirstEntryForceRequested,
     requestShortsReentryRefresh,
     forceFirstEntryShortsRequest,
-    armActiveShortsFlashShieldBootstrap,
   ]);
 
   useEffect(() => {
@@ -2709,14 +2642,6 @@ export const NativeWebViewBrowser = () => {
     if (!settingsLoaded || !isNative || !webViewState.isOpen || !executeScript) return;
     const enabled = isFlashShieldEnabled;
     void (async () => {
-      const activeUrl = webViewState.currentUrl || currentUrlRef.current || '';
-      if (enabled && isYouTubeShortsUrl(activeUrl)) {
-        await armActiveShortsFlashShieldBootstrap(
-          executeScript,
-          'flash_shield_live_enable_bootstrap',
-          activeUrl,
-        );
-      }
       const result = await executeScript(`
         (function() {
           try {
@@ -2749,7 +2674,6 @@ export const NativeWebViewBrowser = () => {
     executeScript,
     injectModerationScript,
     isFlashShieldEnabled,
-    armActiveShortsFlashShieldBootstrap,
   ]);
 
   useEffect(() => {

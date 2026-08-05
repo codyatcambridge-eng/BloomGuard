@@ -210,3 +210,41 @@ Remaining MVP risks:
 - This patch improves active Shorts timing inside the existing host injection architecture, but it is not true native document-start prepaint protection.
 - The active bootstrap arm is intentionally limited to pure `/shorts/...` routes. Profile/channel-origin Shorts should be handled in a separate measured patch if manual QA shows flashes there.
 - Need fresh simulator install and active Shorts manual QA for freeze eligibility.
+
+## Update: 2026-08-05 Critical Active Shorts Entry Recovery
+
+Branch/worktree:
+
+- `/Users/codygroves/cleanrooms/mw1111-phase0-feed-dampener-mvp-audit-20260803`
+- `work/phase0-feed-dampener-mvp-audit-20260803`
+
+Problem:
+
+- User reported that active Shorts could no longer open; tapping a Shorts thumbnail froze the system.
+
+Root cause / recovery decision:
+
+- The only active-Shorts-entry functional delta after the sacred tag `sacred-phase0-flashshield-active-shorts-stable-2026-08-04` was host-side execution of `generateFlashShieldBootstrap(true)` during Shorts navigation events.
+- That extra host `executeScript` work ran before/around the existing teardown and full moderation injection path, creating a high-risk route-entry race.
+- Recovery removes the host-side bootstrap arming and restores `NativeWebViewBrowser.tsx` to the sacred active Shorts entry flow.
+
+Files touched:
+
+- `src/components/browser/NativeWebViewBrowser.tsx`
+- `src/test/flash-shield.golden.test.ts`
+- `context.md`
+
+Validation:
+
+- Focused active Shorts recovery suite passed:
+  - `4` files, `43` tests
+- Full golden suite passed:
+  - `23` files, `160` tests
+- Production build passed:
+  - `npm run build`
+  - existing Browserslist and chunk-size warnings only.
+
+Remaining risk:
+
+- Simulator active Shorts manual QA still required after installing the recovered build.
+- Do not reintroduce host-side document-start/bootstrap arming on Shorts route handlers unless there is a measured implementation that cannot freeze the WebView.

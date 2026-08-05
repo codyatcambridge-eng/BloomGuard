@@ -240,17 +240,13 @@ describe('GOLDEN: Flash Shield V1', () => {
     expect(hookSource).not.toContain('options.preShowScript');
   });
 
-  it('arms the Flash Shield bootstrap only from active Shorts host paths', () => {
+  it('does not arm the document-start bootstrap from host route handlers', () => {
     const browserSource = readFileSync(
       resolve(process.cwd(), 'src/components/browser/NativeWebViewBrowser.tsx'),
       'utf8',
     );
 
-    expect(browserSource).toContain('generateFlashShieldBootstrap');
-    expect(browserSource).toContain('armActiveShortsFlashShieldBootstrap');
-    expect(browserSource).toContain("if (!isYouTubeShortsUrl(targetUrl)) return 'SKIP_NOT_PURE_SHORTS'");
-    expect(browserSource).toContain("'onLoadStart'");
-    expect(browserSource).toContain("'onUrlChange_active_shorts'");
-    expect(browserSource).toContain("'flash_shield_live_enable_bootstrap'");
+    expect(browserSource).not.toContain('generateFlashShieldBootstrap');
+    expect(browserSource).not.toContain('armActiveShortsFlashShieldBootstrap');
   });
 });
