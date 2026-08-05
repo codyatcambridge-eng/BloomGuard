@@ -1145,6 +1145,11 @@ export function generateModerationScript(config: InjectionConfig): string {
       '  filter: blur(24px) saturate(0.72) brightness(0.92) !important;',
       '  -webkit-filter: blur(24px) saturate(0.72) brightness(0.92) !important;',
       '}',
+      'html.' + FLASH_SHIELD_CLASS + ' [data-mw-neighbor-veil="1"] video:not([data-mw-moderated="safe"]):not([data-mw-moderated="revealed"]):not([data-mw-moderated="timeout-safe"]),',
+      'html.' + FLASH_SHIELD_CLASS + ' [data-mw-neighbor-veil="1"] img:not([data-mw-moderated="safe"]):not([data-mw-moderated="revealed"]):not([data-mw-moderated="timeout-safe"]) {',
+      '  filter: blur(24px) saturate(0.72) brightness(0.92) !important;',
+      '  -webkit-filter: blur(24px) saturate(0.72) brightness(0.92) !important;',
+      '}',
       'html.' + FLASH_SHIELD_CLASS + ' [data-mw-flash-frame="1"] {',
       '  position: relative !important;',
       '  isolation: isolate !important;',
@@ -1544,10 +1549,14 @@ export function generateModerationScript(config: InjectionConfig): string {
           (neighborFrame.dataset && neighborFrame.dataset.mwModerated) ||
           ''
         );
+        if (existingVerdict === 'timeout-safe') {
+          neighborFrame.removeAttribute('data-mw-moderated');
+          if (media && media.removeAttribute) media.removeAttribute('data-mw-moderated');
+          neighborFrame.removeAttribute('data-mw-neighbor-veil-at');
+        }
         if (
           existingVerdict === 'safe' ||
           existingVerdict === 'revealed' ||
-          existingVerdict === 'timeout-safe' ||
           existingVerdict === 'blurred'
         ) {
           return;

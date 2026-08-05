@@ -116,7 +116,7 @@ describe('Active Shorts: adjacent-frame pre-veil', () => {
     expect((next.querySelector('.mw-flash-shorts-overlay') as HTMLElement | null)?.dataset.mwActiveDampener).toBeUndefined();
   });
 
-  it('pre-veils neighbor frames before their media pixels exist', () => {
+  it('keeps neighbor frames covered when their bounded timeout fires before media pixels exist', () => {
     window.history.pushState({}, '', shortsUrl('active-item'));
     const { next } = buildReelWithNeighbors('active-item', 'prev-item', 'next-item', {
       nextMedia: false,
@@ -133,12 +133,12 @@ describe('Active Shorts: adjacent-frame pre-veil', () => {
 
     vi.advanceTimersByTime(1200);
 
-    expect(next.dataset.mwModerated).toBe('timeout-safe');
-    expect(next.dataset.mwNeighborVeil).toBeUndefined();
-    expect(overlay?.dataset.mwVeilReleasing).toBe('1');
+    expect(next.dataset.mwModerated).toBeUndefined();
+    expect(next.dataset.mwNeighborVeil).toBe('1');
+    expect(next.querySelector('.mw-flash-shorts-overlay:not([data-mw-veil-releasing="1"])')).not.toBeNull();
   });
 
-  it('an unresolved neighbor veil bounded-releases to timeout-safe', () => {
+  it('re-covers an unresolved neighbor when the bounded timeout and active pass share a tick', () => {
     window.history.pushState({}, '', shortsUrl('active-item'));
     const { nextVideo } = buildReelWithNeighbors('active-item', 'prev-item', 'next-item');
     vi.useFakeTimers();
@@ -152,8 +152,10 @@ describe('Active Shorts: adjacent-frame pre-veil', () => {
 
     vi.advanceTimersByTime(1200);
 
-    expect(nextVideo?.dataset.mwModerated).toBe('timeout-safe');
+    expect(nextVideo?.dataset.mwModerated).toBeUndefined();
+    expect(nextVideo?.dataset.mwVeil).toBe('1');
     expect(overlay?.dataset.mwVeilReleasing).toBe('1');
+    expect(document.querySelector('.mw-flash-shorts-overlay[data-mw-neighbor-dampener="1"]:not([data-mw-veil-releasing="1"])')).not.toBeNull();
   });
 
   it('works with the main blur dial disabled (Flash Shield independent of moderation)', () => {
@@ -166,7 +168,8 @@ describe('Active Shorts: adjacent-frame pre-veil', () => {
     expect(nextVideo?.dataset.mwVeil).toBe('1');
 
     vi.advanceTimersByTime(1200);
-    expect(nextVideo?.dataset.mwModerated).toBe('timeout-safe');
+    expect(nextVideo?.dataset.mwModerated).toBeUndefined();
+    expect(nextVideo?.dataset.mwVeil).toBe('1');
   });
 
   it('swiping onto a still-veiled neighbor hands off to full active-frame ownership', () => {
@@ -201,7 +204,8 @@ describe('Active Shorts: adjacent-frame pre-veil', () => {
 
     injection.probe.markFlashShieldShortsCandidate();
     vi.advanceTimersByTime(1200);
-    expect(nextVideo?.dataset.mwModerated).toBe('timeout-safe');
+    expect(nextVideo?.dataset.mwModerated).toBeUndefined();
+    expect(nextVideo?.dataset.mwVeil).toBe('1');
 
     window.history.pushState({}, '', shortsUrl('next-item'));
     document.querySelector('[selected]')?.removeAttribute('selected');
@@ -216,6 +220,39 @@ describe('Active Shorts: adjacent-frame pre-veil', () => {
       (overlay) => (overlay as HTMLElement).dataset.mwVeilReleasing !== '1',
     ) as HTMLElement | undefined;
     expect(activeOverlay?.dataset.mwActiveDampener).toBe('1');
+  });
+
+  it('re-arms a timeout-safe adjacent Short while it is still the next swipe candidate', () => {
+    window.history.pushState({}, '', shortsUrl('active-item'));
+    const { next, nextVideo } = buildReelWithNeighbors('active-item', 'prev-item', 'next-item');
+    vi.useFakeTimers();
+    injection = injectScript({ flashShieldV1: true });
+
+    next.dataset.mwModerated = 'timeout-safe';
+    nextVideo.dataset.mwModerated = 'timeout-safe';
+    nextVideo.removeAttribute('data-mw-veil');
+
+    expect(nextVideo?.dataset.mwVeil).toBeUndefined();
+
+    injection.probe.markFlashShieldShortsCandidate();
+
+    expect(next.dataset.mwModerated).toBeUndefined();
+    expect(nextVideo?.dataset.mwModerated).toBeUndefined();
+    expect(next.dataset.mwNeighborVeil).toBe('1');
+    expect(nextVideo?.dataset.mwVeil).toBe('1');
+    expect((next.querySelector('.mw-flash-shorts-overlay:not([data-mw-veil-releasing="1"])') as HTMLElement | null)?.dataset.mwNeighborDampener).toBe('1');
+  });
+
+  it('keeps neighbor descendant media covered by CSS while a frame pre-veil is active', () => {
+    window.history.pushState({}, '', shortsUrl('active-item'));
+    buildReelWithNeighbors('active-item', 'prev-item', 'next-item');
+    injection = injectScript({ flashShieldV1: true });
+
+    injection.probe.markFlashShieldShortsCandidate();
+
+    const style = document.getElementById('mw-flash-shield')?.textContent || '';
+    expect(style).toContain('[data-mw-neighbor-veil="1"] video');
+    expect(style).toContain('[data-mw-neighbor-veil="1"] img');
   });
 
   it('Flash Shield disabled never pre-veils neighbors', () => {

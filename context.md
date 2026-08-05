@@ -248,3 +248,52 @@ Remaining risk:
 
 - Simulator active Shorts manual QA still required after installing the recovered build.
 - Do not reintroduce host-side document-start/bootstrap arming on Shorts route handlers unless there is a measured implementation that cannot freeze the WebView.
+
+## Update: 2026-08-05 Active Shorts Neighbor Preblur Timing
+
+Branch/worktree:
+
+- `/Users/codygroves/cleanrooms/mw1111-phase0-feed-dampener-mvp-audit-20260803`
+- `work/phase0-feed-dampener-mvp-audit-20260803`
+
+Problem:
+
+- User confirmed active Shorts entry is working again, but the next Short can briefly flash visible during swipe because adjacent/preloaded Shorts are not always covered by preblur in time.
+
+Root cause / patch decision:
+
+- The active Shorts neighbor veil was allowed to mark an unresolved adjacent Short as `timeout-safe` after its bounded timeout.
+- A `timeout-safe` neighbor is not a classifier-safe or user-revealed verdict; it is only a fail-open release.
+- If the user lingered on the current Short, the next preloaded Short could become visually clean before it slid into view, creating the reported flash.
+- The host/WebView bootstrap path remains untouched because it caused the prior active Shorts entry freeze.
+
+Behavior changed:
+
+- `markFlashShieldNeighborShortsCandidates` now treats `timeout-safe` adjacent Shorts as re-armable while they are still previous/next swipe candidates.
+- Real `safe`, `revealed`, and `blurred` verdicts still block neighbor re-veiling.
+- The Flash Shield stylesheet now also blurs descendant `video` and `img` inside `[data-mw-neighbor-veil="1"]` frames, so frame-level neighbor coverage is backed by direct media blur if an overlay clips or misses during YouTube swipe layout.
+
+Files touched:
+
+- `src/lib/webview-injection-script.ts`
+- `src/test/stability/shorts-neighbor-preveil.test.ts`
+- `context.md`
+
+Validation:
+
+- Focused active Shorts / Flash Shield suite passed:
+  - `3` files, `38` tests
+- Full golden suite passed:
+  - `23` files, `162` tests
+- Frozen guard passed:
+  - `node scripts/check-frozen.mjs`
+  - frozen file touched: `src/lib/webview-injection-script.ts`
+- Production build passed:
+  - `npm run build`
+  - existing Browserslist and chunk-size warnings only.
+
+Remaining risk:
+
+- Simulator active Shorts manual QA is still required for real swipe timing, especially rapid next/previous swipes after lingering on a Short.
+- This does not claim true native document-start prepaint coverage; it is a runtime-only active Shorts neighbor coverage patch.
+- Do not alter host-side Shorts route injection for this issue unless this runtime fix fails manual QA.
