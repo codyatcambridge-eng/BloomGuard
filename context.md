@@ -291,6 +291,15 @@ Validation:
 - Production build passed:
   - `npm run build`
   - existing Browserslist and chunk-size warnings only.
+- Simulator:
+  - Synced Capacitor iOS assets after production build.
+  - Built from fresh derived data path: `build/sim-dd-active-shorts-neighbor-preblur`.
+  - Uninstalled existing simulator app, installed the newly built app, and launched fresh on:
+    - device: `iPhone 17 Pro Max`
+    - UDID: `FBE187B0-097D-4F4C-BA99-121888E1FC10`
+    - bundle id: `bet.goodcreation.miracleworker`
+  - Launch screenshot captured at `/private/tmp/mw-active-shorts-neighbor-preblur-launch.png`.
+  - Result: BloomGuard home screen rendered after fresh install; no launch freeze observed.
 
 Remaining risk:
 
