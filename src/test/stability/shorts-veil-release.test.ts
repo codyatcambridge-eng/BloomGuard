@@ -193,6 +193,26 @@ describe('P4: smooth veil release', () => {
     expect(styleText).toContain('filter: blur(24px) saturate(0.72) brightness(0.92) !important');
   });
 
+  it('CSS preblurs bare loading-phase Shorts video before active frame attributes settle', () => {
+    window.history.pushState({}, '', shortsUrl(SHORTS_ID));
+    const player = document.createElement('div');
+    player.id = 'shorts-player';
+    const loadingFrame = document.createElement('ytm-reel-video-renderer');
+    const video = document.createElement('video');
+    video.setAttribute('poster', `https://i.ytimg.com/vi/${SHORTS_ID}/loading.jpg`);
+    loadingFrame.appendChild(video);
+    player.appendChild(loadingFrame);
+    document.body.appendChild(player);
+    injection = injectScript({ flashShieldV1: true, enabled: false, sensitivity: 0 });
+
+    const styleText = document.getElementById('mw-flash-shield')?.textContent || '';
+
+    expect(loadingFrame.hasAttribute('selected')).toBe(false);
+    expect(loadingFrame.hasAttribute('is-active')).toBe(false);
+    expect(loadingFrame.getAttribute('aria-hidden')).not.toBe('false');
+    expect(styleText).toContain('#shorts-player video:not([data-mw-moderated="safe"]):not([data-mw-moderated="revealed"]):not([data-mw-moderated="timeout-safe"]):not([data-mw-moderated="blurred"])');
+  });
+
   it('CSS active Shorts preblur excludes resolved frame and media verdicts', () => {
     window.history.pushState({}, '', shortsUrl(SHORTS_ID));
     buildActiveShort(SHORTS_ID);

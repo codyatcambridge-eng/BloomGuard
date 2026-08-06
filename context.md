@@ -354,3 +354,58 @@ Remaining risk:
 - This closes the gap after the Flash Shield runtime stylesheet is present but before per-node `data-mw-veil` is stamped.
 - If the remaining flash occurs before any injected runtime/style reaches the WebView, the only lower layer is native/document-start/presentation control, which previously caused a Shorts entry freeze and needs a separate measured design.
 - Manual simulator QA still required on active Shorts entry, rapid swipe, and positive hard-blur/reveal handoff.
+
+## Update: 2026-08-05 Active Shorts Bare Loading Video Guard
+
+Branch/worktree:
+
+- `/Users/codygroves/cleanrooms/mw1111-phase0-feed-dampener-mvp-audit-20260803`
+- `work/phase0-feed-dampener-mvp-audit-20260803`
+
+Problem:
+
+- User reported the active Shorts gap still exists specifically during the loading phase: loading content can visibly flash before the preblur/Flash Shield layer appears, then the main positive blur lands.
+
+Root cause / patch decision:
+
+- The previous loading-phase CSS guard still depended on YouTube frame readiness signals such as `selected`, `is-active`, `aria-hidden="false"`, or `aria-current="true"`.
+- During the earliest active Shorts loading frame, YouTube can expose a `video` under `#shorts-player` before those frame attributes settle.
+- Host-side active Shorts bootstrap remains off-limits for this issue because it previously caused active Shorts entry freeze.
+
+Behavior changed:
+
+- Added an active-Shorts-only root video CSS guard: when Flash Shield is on, unresolved `#shorts-player video` media is blurred even before the reel frame receives active/visible attributes or JS stamps `data-mw-veil`.
+- Mirrored the selector in both the bootstrap stylesheet copy and the full runtime stylesheet.
+- The selector excludes media already stamped `safe`, `revealed`, `timeout-safe`, or `blurred`, preserving Flash Shield release, tap-to-reveal, and hard-blur handoff.
+
+Files touched:
+
+- `src/lib/webview-injection-script.ts`
+- `src/test/stability/shorts-veil-release.test.ts`
+- `context.md`
+
+Validation:
+
+- Focused active Shorts / Flash Shield suite passed:
+  - `3` files, `41` tests
+- Full golden suite passed:
+  - `23` files, `165` tests
+- Frozen guard passed:
+  - `node scripts/check-frozen.mjs`
+  - frozen file touched: `src/lib/webview-injection-script.ts`
+- Production build passed:
+  - `npm run build`
+  - existing Browserslist and chunk-size warnings only.
+- Simulator:
+  - Synced Capacitor iOS assets after production build.
+  - Built from fresh derived data path: `build/sim-dd-active-shorts-bare-loading-guard`.
+  - Uninstalled existing simulator app, installed the newly built app, and launched fresh on:
+    - device: `iPhone 17 Pro Max`
+    - UDID: `FBE187B0-097D-4F4C-BA99-121888E1FC10`
+    - bundle id: `bet.goodcreation.miracleworker`
+  - Launch succeeded with PID `19235`.
+
+Remaining risk:
+
+- This seals the gap after the Flash Shield stylesheet/root class exists but before YouTube frame attributes settle.
+- If the user still sees a flash before this CSS exists in the WebView, the remaining gap is below runtime CSS and would need a carefully measured native/document-start approach without reintroducing the prior Shorts entry freeze.
