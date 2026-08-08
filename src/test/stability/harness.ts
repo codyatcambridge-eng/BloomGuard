@@ -292,6 +292,8 @@ export interface MWTestProbe {
   getFlashShieldNeighborShortsFrames: (activeFrame: Element | null) => Element[];
   markFlashShieldNeighborShortsCandidates: (activeFrame: Element | null) => void;
   markFlashShieldShortsCandidate: () => void;
+  armFlashShieldShortsTransitionVeil: (reason: string) => boolean;
+  releaseFlashShieldShortsTransitionVeil: (reason: string) => void;
   markFlashShieldCandidates: (root?: Element | Document) => void;
   clearFlashShieldResolution: (element: Element, nextState: string) => void;
   applyFlashShieldPositive: (
@@ -306,6 +308,8 @@ export interface MWTestProbe {
   };
   getTimerSnapshot: () => {
     shortsVeilTimeoutTimer: boolean;
+    shortsTransitionVeilTimer: boolean;
+    shortsTransitionVeilListenersAttached: boolean;
     shortsFrameRetryTimers: number;
   };
   getShortsVerdictMemorySize: () => number;
@@ -388,6 +392,8 @@ export function injectScript(configOverrides?: Partial<InjectionConfig>): Inject
     getFlashShieldNeighborShortsFrames: getFlashShieldNeighborShortsFrames,
     markFlashShieldNeighborShortsCandidates: markFlashShieldNeighborShortsCandidates,
     markFlashShieldShortsCandidate: markFlashShieldShortsCandidate,
+    armFlashShieldShortsTransitionVeil: armFlashShieldShortsTransitionVeil,
+    releaseFlashShieldShortsTransitionVeil: releaseFlashShieldShortsTransitionVeil,
     markFlashShieldCandidates: markFlashShieldCandidates,
     clearFlashShieldResolution: clearFlashShieldResolution,
     applyFlashShieldPositive: applyFlashShieldPositive,
@@ -400,6 +406,8 @@ export function injectScript(configOverrides?: Partial<InjectionConfig>): Inject
     getTimerSnapshot: function() {
       return {
         shortsVeilTimeoutTimer: !!timerState.shortsVeilTimeoutTimer,
+        shortsTransitionVeilTimer: !!timerState.shortsTransitionVeilTimer,
+        shortsTransitionVeilListenersAttached: !!timerState.shortsTransitionVeilListenersAttached,
         shortsFrameRetryTimers: timerState.shortsFrameRetryTimers.size,
       };
     },

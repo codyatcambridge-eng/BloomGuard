@@ -708,8 +708,10 @@ export function generateModerationScript(config: InjectionConfig): string {
   const FLASH_SHIELD_STYLE_ID = 'mw-flash-shield';
   const FLASH_SHIELD_CLASS = 'mw-flash-shield-on';
   const FLASH_SHIELD_SHORTS_OVERLAY_CLASS = 'mw-flash-shorts-overlay';
+  const FLASH_SHIELD_SHORTS_TRANSITION_OVERLAY_CLASS = 'mw-flash-shorts-transition-overlay';
   const FLASH_SHIELD_ACTIVE_SHORTS_VEIL_TIMEOUT_MS = 2200;
   const FLASH_SHIELD_NEIGHBOR_SHORTS_VEIL_TIMEOUT_MS = 1200;
+  const FLASH_SHIELD_SHORTS_TRANSITION_VEIL_TIMEOUT_MS = 2600;
   const FLASH_SHIELD_IMAGE_VEIL_TIMEOUT_MS = 4000;
   const FLASH_SHIELD_MIN_VISIBLE_VEIL_MS = 300;
   const FLASH_SHIELD_ACTIVE_SHORTS_MIN_VISIBLE_VEIL_MS = 900;
@@ -1166,6 +1168,23 @@ export function generateModerationScript(config: InjectionConfig): string {
       '  backdrop-filter: blur(26px) saturate(0.74) brightness(0.88) !important;',
       '  -webkit-backdrop-filter: blur(26px) saturate(0.74) brightness(0.88) !important;',
       '}',
+      'html.' + FLASH_SHIELD_CLASS + ' .' + FLASH_SHIELD_SHORTS_TRANSITION_OVERLAY_CLASS + ' {',
+      '  position: fixed !important;',
+      '  inset: 0 !important;',
+      '  width: 100vw !important;',
+      '  height: 100vh !important;',
+      '  z-index: 2147483642 !important;',
+      '  display: block !important;',
+      '  opacity: 0 !important;',
+      '  pointer-events: none !important;',
+      '  background: rgba(8,8,10,0.30) !important;',
+      '  backdrop-filter: blur(30px) saturate(0.72) brightness(0.86) !important;',
+      '  -webkit-backdrop-filter: blur(30px) saturate(0.72) brightness(0.86) !important;',
+      '  transition: opacity 80ms linear !important;',
+      '}',
+      'html.' + FLASH_SHIELD_CLASS + ' .' + FLASH_SHIELD_SHORTS_TRANSITION_OVERLAY_CLASS + '[data-mw-active="1"] {',
+      '  opacity: 1 !important;',
+      '}',
       'html.' + FLASH_SHIELD_CLASS + ' [data-mw-moderated="blurred"] > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS + ',',
       'html.' + FLASH_SHIELD_CLASS + ' [data-mw-moderated="safe"] > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS + ',',
       'html.' + FLASH_SHIELD_CLASS + ' [data-mw-moderated="revealed"] > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS + ',',
@@ -1406,6 +1425,126 @@ export function generateModerationScript(config: InjectionConfig): string {
     } catch (e) {
       try { overlay.remove(); } catch (e2) {}
     }
+  }
+
+  // FREEZE-OVERRIDE: close the active-Shorts swipe/load timing gap before
+  // YouTube mutates the next active frame. The regular media/frame veil is
+  // still authoritative; this viewport veil is only a bounded pre-handoff
+  // layer, Flash-Shield-gated, pointer-events:none, and removed on release,
+  // toggle-off, Shorts exit, and teardown.
+  function ensureFlashShieldShortsTransitionOverlay() {
+    if (!CONFIG.flashShieldV1 || !isShortsModeActive() || timerState.teardownDone) return null;
+    try {
+      ensureFlashShieldStyle();
+      document.documentElement.classList.add(FLASH_SHIELD_CLASS);
+      let overlay = document.querySelector('.' + FLASH_SHIELD_SHORTS_TRANSITION_OVERLAY_CLASS);
+      if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.className = FLASH_SHIELD_SHORTS_TRANSITION_OVERLAY_CLASS;
+        overlay.setAttribute('aria-hidden', 'true');
+        (document.body || document.documentElement).appendChild(overlay);
+      }
+      return overlay;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function releaseFlashShieldShortsTransitionVeil(reason) {
+    try {
+      if (timerState.shortsTransitionVeilTimer) {
+        clearTimeout(timerState.shortsTransitionVeilTimer);
+        timerState.shortsTransitionVeilTimer = null;
+      }
+      const overlay = document.querySelector('.' + FLASH_SHIELD_SHORTS_TRANSITION_OVERLAY_CLASS);
+      if (!overlay) return;
+      overlay.removeAttribute('data-mw-active');
+      overlay.dataset.mwReleaseReason = String(reason || 'release');
+      setTimeout(function() {
+        try {
+          if (overlay && overlay.parentElement && overlay.getAttribute('data-mw-active') !== '1') {
+            overlay.parentElement.removeChild(overlay);
+          }
+        } catch (e) {}
+      }, 140);
+    } catch (e) {}
+  }
+
+  function armFlashShieldShortsTransitionVeil(reason) {
+    if (!CONFIG.flashShieldV1 || !isShortsModeActive() || timerState.teardownDone) return false;
+    try {
+      const overlay = ensureFlashShieldShortsTransitionOverlay();
+      if (!overlay) return false;
+      overlay.dataset.mwActive = '1';
+      overlay.dataset.mwReason = String(reason || 'unknown');
+      overlay.dataset.mwArmedAt = String(Date.now());
+      markFlashShieldShortsCandidate();
+      scheduleFlashShieldShortsBurst('transition_veil:' + String(reason || 'unknown'));
+      if (timerState.shortsTransitionVeilTimer) {
+        clearTimeout(timerState.shortsTransitionVeilTimer);
+      }
+      timerState.shortsTransitionVeilTimer = setTimeout(function() {
+        timerState.shortsTransitionVeilTimer = null;
+        releaseFlashShieldShortsTransitionVeil('transition_timeout');
+      }, FLASH_SHIELD_SHORTS_TRANSITION_VEIL_TIMEOUT_MS);
+      timerLog('start', 'shortsTransitionVeilTimer');
+      return true;
+    } catch (e) {
+      if (window.__MW_TEST_PROBE__) throw e;
+      return false;
+    }
+  }
+
+  function isFlashShieldShortsUiInteraction(event) {
+    try {
+      const target = event && event.target && event.target.nodeType === 1 ? event.target : null;
+      if (!target || typeof target.closest !== 'function') return false;
+      return !!target.closest(
+        '.mw-reveal-overlay,.mw-reveal-btn,#' + REVEAL_PORTAL_ID + ',' +
+        'button,a,input,textarea,select,[role="button"],[contenteditable="true"]'
+      );
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function onFlashShieldShortsTransitionIntent(event) {
+    if (!CONFIG.flashShieldV1 || timerState.teardownDone || !isShortsModeActive()) return;
+    if (isFlashShieldShortsUiInteraction(event)) return;
+    if (event && event.type === 'keydown') {
+      const key = String(event.key || '');
+      if (!/^(ArrowUp|ArrowDown|PageUp|PageDown|Space| )$/.test(key)) return;
+    }
+    armFlashShieldShortsTransitionVeil('intent_' + String((event && event.type) || 'unknown'));
+  }
+
+  function startFlashShieldShortsTransitionListeners(reason) {
+    if (timerState.shortsTransitionVeilListenersAttached || timerState.teardownDone) return;
+    try {
+      timerState.shortsTransitionVeilHandler = onFlashShieldShortsTransitionIntent;
+      timerState.shortsTransitionKeyHandler = onFlashShieldShortsTransitionIntent;
+      document.addEventListener('touchmove', timerState.shortsTransitionVeilHandler, { capture: true, passive: true });
+      document.addEventListener('wheel', timerState.shortsTransitionVeilHandler, { capture: true, passive: true });
+      document.addEventListener('keydown', timerState.shortsTransitionKeyHandler, true);
+      timerState.shortsTransitionVeilListenersAttached = true;
+      timerLog('start', 'shortsTransitionVeilListeners:' + (reason || 'unknown'));
+    } catch (e) {}
+  }
+
+  function stopFlashShieldShortsTransitionListeners(reason) {
+    try {
+      if (timerState.shortsTransitionVeilHandler) {
+        document.removeEventListener('touchmove', timerState.shortsTransitionVeilHandler, true);
+        document.removeEventListener('wheel', timerState.shortsTransitionVeilHandler, true);
+      }
+      if (timerState.shortsTransitionKeyHandler) {
+        document.removeEventListener('keydown', timerState.shortsTransitionKeyHandler, true);
+      }
+      timerState.shortsTransitionVeilHandler = null;
+      timerState.shortsTransitionKeyHandler = null;
+      timerState.shortsTransitionVeilListenersAttached = false;
+      releaseFlashShieldShortsTransitionVeil(reason || 'stop');
+    } catch (e) {}
   }
 
   // FREEZE-OVERRIDE: pre-veil adjacent (not-yet-active) Shorts so a swipe
@@ -1982,10 +2121,14 @@ export function generateModerationScript(config: InjectionConfig): string {
       ) {
         maybeReleaseFlashShieldVeilForLiveFrame(element, nextState);
       }
+      if (isShortsModeActive()) {
+        releaseFlashShieldShortsTransitionVeil('resolution_' + nextState);
+      }
     } catch (e) {}
   }
 
   function disableFlashShieldRuntime() {
+    stopFlashShieldShortsTransitionListeners('flash_shield_disabled');
     document.documentElement.classList.remove(FLASH_SHIELD_CLASS);
     flashShieldShortsVerdictMemory.clear();
     document.querySelectorAll('[data-mw-flash-positive="1"]').forEach(function(node) {
@@ -2033,6 +2176,9 @@ export function generateModerationScript(config: InjectionConfig): string {
     document.querySelectorAll('.' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS).forEach(function(node) {
       node.remove();
     });
+    document.querySelectorAll('.' + FLASH_SHIELD_SHORTS_TRANSITION_OVERLAY_CLASS).forEach(function(node) {
+      node.remove();
+    });
     const style = document.getElementById(FLASH_SHIELD_STYLE_ID);
     if (style && style.parentElement) style.parentElement.removeChild(style);
   }
@@ -2061,6 +2207,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       markAuthoritativeHardBlur(target, src);
       if (isShortsModeActive()) {
         target.dataset.mwFlashFrame = '1';
+        releaseFlashShieldShortsTransitionVeil('positive_handoff');
         target.removeAttribute('data-mw-neighbor-veil');
         target.removeAttribute('data-mw-neighbor-veil-at');
         target.removeAttribute('data-mw-neighbor-veil-timeout-armed');
@@ -2883,6 +3030,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     flashShieldRafId: null,
     flashShieldBurstRafId: null,
     flashShieldObserver: null,
+    shortsTransitionVeilTimer: null,
+    shortsTransitionVeilHandler: null,
+    shortsTransitionKeyHandler: null,
+    shortsTransitionVeilListenersAttached: false,
     shortsVeilTimeoutTimer: null,
     shortsVeilTimeoutIdentity: '',
     shortsVeilTimeoutDampenerIdentity: '',
@@ -14889,9 +15040,12 @@ export function generateModerationScript(config: InjectionConfig): string {
       try {
         stopShortsHealthHealInterval('shorts_exit:' + tag);
       } catch (e) {}
+      try {
+        releaseFlashShieldShortsTransitionVeil('shorts_exit:' + tag);
+      } catch (e) {}
 
       // 3) Remove frosted Shorts player overlays (these are the white-screen culprit).
-      document.querySelectorAll('.' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS).forEach(function(node) {
+      document.querySelectorAll('.' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS + ',.' + FLASH_SHIELD_SHORTS_TRANSITION_OVERLAY_CLASS).forEach(function(node) {
         if (node && node.parentElement) {
           try {
             node.parentElement.removeChild(node);
@@ -15316,6 +15470,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function stopFlashShieldRuntime() {
+    stopFlashShieldShortsTransitionListeners('stop_flash_shield_runtime');
     if (timerState.shortsVeilTimeoutTimer) {
       clearTimeout(timerState.shortsVeilTimeoutTimer);
       timerState.shortsVeilTimeoutTimer = null;
@@ -15348,6 +15503,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       }
       ensureFlashShieldStyle();
       document.documentElement.classList.add(FLASH_SHIELD_CLASS);
+      startFlashShieldShortsTransitionListeners('flash_shield_runtime');
       markFlashShieldCandidates(document);
       markFlashShieldShortsCandidate();
       scheduleFlashShieldShortsBurst('runtime_start');
@@ -15444,8 +15600,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     clearNamedTimeout('youtubeMutationScanTimeout', reason);
     clearNamedTimeout('revealOverlayRetryTimeout', reason);
     clearNamedTimeout('shortsVeilTimeoutTimer', reason);
+    clearNamedTimeout('shortsTransitionVeilTimer', reason);
     timerState.shortsVeilTimeoutIdentity = '';
     timerState.shortsVeilTimeoutDampenerIdentity = '';
+    stopFlashShieldShortsTransitionListeners('stopManagedTimers:' + (reason || 'unknown'));
     timerState.shortsFrameRetryTimers.forEach(function(timerId) {
       clearTimeout(timerId);
     });

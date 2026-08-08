@@ -70,6 +70,10 @@ function veilOverlayCount(): number {
   ).length;
 }
 
+function transitionOverlay(): HTMLElement | null {
+  return document.querySelector('.mw-flash-shorts-transition-overlay') as HTMLElement | null;
+}
+
 /** A classified node YouTube already swapped out of the reel (disconnected). */
 function makeDeadClassifiedNode(identity: string): HTMLVideoElement {
   const dead = document.createElement('video');
@@ -426,5 +430,68 @@ describe('P3: bounded veil timeout', () => {
     expect(frame.dataset.mwNeighborVeil).toBeUndefined();
     expect(veilOverlayCount()).toBe(0);
     expect(injection.probe.findRevealOverlayForElement(frame, `https://i.ytimg.com/vi/${SHORTS_ID}/oar2.jpg`)).not.toBeNull();
+  });
+});
+
+describe('Active Shorts transition veil', () => {
+  it('arms a full-viewport pre-handoff veil on active Shorts transition intent', () => {
+    window.history.pushState({}, '', shortsUrl(SHORTS_ID));
+    const { video } = buildActiveShort(SHORTS_ID);
+    vi.useFakeTimers();
+    injection = injectScript({ flashShieldV1: true, enabled: false, sensitivity: 0 });
+
+    const armed = injection.probe.armFlashShieldShortsTransitionVeil('test_swipe');
+    const overlay = transitionOverlay();
+
+    expect(armed).toBe(true);
+    expect(overlay).not.toBeNull();
+    expect(overlay?.dataset.mwActive).toBe('1');
+    expect(video.dataset.mwVeil).toBe('1');
+    expect(injection.probe.getTimerSnapshot().shortsTransitionVeilTimer).toBe(true);
+    expect(injection.probe.getTimerSnapshot().shortsTransitionVeilListenersAttached).toBe(true);
+
+    vi.advanceTimersByTime(2600);
+    expect(transitionOverlay()?.dataset.mwActive).toBeUndefined();
+  });
+
+  it('does not arm when Flash Shield is disabled', () => {
+    window.history.pushState({}, '', shortsUrl(SHORTS_ID));
+    buildActiveShort(SHORTS_ID);
+    injection = injectScript({ flashShieldV1: false });
+
+    expect(injection.probe.armFlashShieldShortsTransitionVeil('disabled')).toBe(false);
+    expect(transitionOverlay()).toBeNull();
+  });
+
+  it('safe resolution releases the transition veil and active Shorts veil together', () => {
+    window.history.pushState({}, '', shortsUrl(SHORTS_ID));
+    const { video } = buildActiveShort(SHORTS_ID);
+    vi.useFakeTimers();
+    injection = injectScript({ flashShieldV1: true });
+
+    injection.probe.armFlashShieldShortsTransitionVeil('test_swipe');
+    expect(transitionOverlay()?.dataset.mwActive).toBe('1');
+
+    injection.probe.clearFlashShieldResolution(video, 'safe');
+    vi.advanceTimersByTime(901);
+
+    expect(video.dataset.mwModerated).toBe('safe');
+    expect(veilOverlayCount()).toBe(0);
+    expect(transitionOverlay()?.dataset.mwActive).toBeUndefined();
+    expect(injection.probe.getTimerSnapshot().shortsTransitionVeilTimer).toBe(false);
+  });
+
+  it('Shorts exit cleanup removes transition veil residue', () => {
+    window.history.pushState({}, '', shortsUrl(SHORTS_ID));
+    buildActiveShort(SHORTS_ID);
+    injection = injectScript({ flashShieldV1: true });
+
+    injection.probe.armFlashShieldShortsTransitionVeil('test_swipe');
+    expect(transitionOverlay()).not.toBeNull();
+
+    window.history.pushState({}, '', 'https://m.youtube.com/');
+    injection.probe.performShortsExitSurfaceCleanup('test_exit');
+
+    expect(transitionOverlay()).toBeNull();
   });
 });
