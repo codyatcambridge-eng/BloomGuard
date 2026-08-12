@@ -535,21 +535,115 @@ Diagnostics must:
 
 ---
 
-# 15. RELATIONSHIP WITH FUTURE PHASE 0 FREEZE
+# 15. CURRENT PHASE 0 PROTECTED BASELINE
 
-The behaviors in this file are the current protected baseline.
+The intentional Phase 0 protected tag is:
 
-When Phase 0 fully passes the `AGENTS.md` Phase 0 Test Gate:
+`freezeMVP0`
 
-1. issue the `FREEZE SIGNAL`
-2. identify the exact tested surfaces
-3. record evidence
-4. identify remaining risks
-5. identify protected functions/files
-6. create an intentional current baseline tag/branch
-7. update this file narrowly to reflect the newly validated Phase 0 freeze
+This tag freezes the proven Phase 0 core behavior and its authoritative control
+plumbing. It remains a rollback point, not a claim that unfinished Phase 1
+features or final whole-product MVP validation are complete.
 
-Do not prematurely convert this file into a claim that Phase 0 has passed.
+## Protected Phase 0 behavior
+
+Protect the currently proven:
+
+* Main Blur positive continuity
+* negative isolation
+* reveal integrity and exact-item ownership
+* content-identity authorization and stale-node rejection
+* Active Shorts Main Blur ownership and isolation
+* Main Dial Off/On behavior and sensitivity propagation
+* Main Dial persistence through the established host/injected synchronization path
+* Flash Shield independence from the Main Dial
+* Flash Shield first-paint bootstrap behavior
+* Active Shorts Flash Shield transition, terminal safe release, and positive handoff
+* bounded Off cleanup and late-work rejection
+* nav/epoch synchronization and truthful readiness safeguards already protected above
+
+## Main Dial and Flash Shield control freeze
+
+The Main Dial and Flash Shield toggle are independent authoritative controls.
+Future work must preserve all of the following:
+
+* `blur_dial` remains the single local Main Blur intensity value.
+* `flash_shield_enabled` remains the single local Flash Shield toggle value.
+* The shared persisted settings key remains the authority across pages and reinjection.
+* Main Dial changes affect Main Blur sensitivity only.
+* Main Dial Off does not change the selected Flash Shield value.
+* Flash Shield Off removes Flash-owned pre-protection only.
+* Flash Shield changes do not change Main Blur state or intensity.
+* Active Shorts consumes the same Main Dial and Flash Shield values as other browser surfaces.
+* Reinjection and lifecycle recovery reapply the selected values; they do not replace them with defaults.
+* UI controls must use the host's current settings instance rather than creating a competing authority.
+
+Protect the behavior of the following control boundaries:
+
+### `src/hooks/useLocalSettings.ts`
+
+* persisted `SETTINGS_KEY` behavior
+* `blur_dial` and `flash_shield_enabled` hydration
+* `saveSettings`
+* `updateSetting`
+* `getModerationConfig` mapping of Main Dial and Flash Shield state
+* `isModerationEnabled` Main Blur semantics
+
+### `src/lib/protection-mode.ts`
+
+* `isProtectionOffState`
+* `shouldRunRuntimeModeration`
+* `shouldRunFlashShield`
+* `shouldInjectForProtection`
+
+### Browser/settings controls
+
+Protect the single-authority behavior of:
+
+* `BlurShieldOverlay` controlled settings props and callbacks
+* Main Dial controls in `Settings.tsx`
+* Flash Shield controls in `Settings.tsx` and `ModerationSettingsPanel.tsx`
+* the Main Dial live-apply effect in `NativeWebViewBrowser.tsx`
+* host handling of sensitivity updates from the injected page
+
+### Injected control behavior
+
+Protect:
+
+* `window.__MW_APPLY_SENSITIVITY__`
+* live Main Dial Off cleanup
+* live Flash Shield enable/disable behavior
+* independent `CONFIG.enabled`, `CONFIG.scanEnabled`, and `CONFIG.flashShieldV1` semantics
+* Flash bootstrap/runtime enable-state synchronization
+
+## Freeze evidence
+
+The freeze is supported by:
+
+* the complete golden stability suite
+* focused Main Dial, Flash Shield, Off cleanup, Active Shorts, positive continuity,
+  negative isolation, reveal, content-identity, and readiness tests
+* successful production and native simulator builds
+* fresh-install simulator validation of the current Active Shorts Flash Shield behavior
+* the preceding protected rollback tag `sacred-active-shorts-flash-handoff-2026-08-12`
+
+Tests are regression evidence. Real-device behavior remains authoritative. A
+new reproducible device failure may justify a surgical protected change under
+the change policy in this file.
+
+## Remaining unfrozen work
+
+Do not interpret `freezeMVP0` as freezing or completing:
+
+* exhaustive global Flash Shield device validation
+* YouTube video-player protection
+* High-Velocity Scanning or its dial
+* Progressive Tunnel Vision
+* final classifier/accuracy tuning
+* unresolved cold-start, background/foreground, inactivity, or new YouTube DOM compatibility bugs
+* final whole-product MVP acceptance
+
+These systems must integrate around the protected Phase 0 core and controls.
 
 ---
 
