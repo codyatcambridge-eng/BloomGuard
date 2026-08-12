@@ -5056,7 +5056,15 @@ export const NativeWebViewBrowser = () => {
           TOP {diagTopLayerLabel}
         </div>
       )}
-      {isNative && currentView === 'browse' && <BlurShieldOverlay executeScript={executeScript} />}
+      {isNative && currentView === 'browse' && (
+        <BlurShieldOverlay
+          executeScript={executeScript}
+          settings={localSettings}
+          onBlurDialChange={(level) => updateSetting('blur_dial', level)}
+          onEnhancedVisibilityChange={(enabled) => updateSetting('isEnhancedVisibility', enabled)}
+          onBlurStrengthChange={(strength) => updateSetting('blur_strength_px', strength)}
+        />
+      )}
       <BrowserHeader
         currentView={currentView}
         displayUrl={displayUrl}

@@ -1,10 +1,10 @@
 import { Shield, DollarSign, AlertTriangle, Eye, EyeOff, Coffee, Clock, Lock } from "lucide-react";
-import { useSettings, BlurLevel } from "@/hooks/useSettings";
+import { useSettings } from "@/hooks/useSettings";
 import { toast } from "sonner";
 import { UTILITY_PASS_DURATIONS, UTILITY_PASS_REASONS } from "@/logic/utilityPass";
 import { useNavigate } from "react-router-dom";
 import { useGateRuntime } from "@/hooks/useGateRuntime";
-import { useLocalSettings } from "@/hooks/useLocalSettings";
+import { BlurDialLevel, useLocalSettings } from "@/hooks/useLocalSettings";
 import { Switch } from "@/components/ui/switch";
 
 const Settings = () => {
@@ -30,11 +30,17 @@ const Settings = () => {
     toast.success('Shield activated!');
   };
 
-  const blurLevels: BlurLevel[] = ['OFF', 'LOW', 'HIGH'];
+  const blurLevels: Array<{ level: BlurDialLevel; label: string; description: string }> = [
+    { level: 0, label: 'OFF', description: 'Main Blur is off' },
+    { level: 1, label: 'RELAXED', description: 'Blurs clearly explicit content' },
+    { level: 2, label: 'MODERATE', description: 'Balanced recommended protection' },
+    { level: 3, label: 'STRICT', description: 'Stronger protection for borderline content' },
+    { level: 4, label: 'MAXIMUM', description: 'Most aggressive protection' },
+  ];
 
-  const handleBlurChange = (level: BlurLevel) => {
-    updateSetting('blur_sensitivity', level);
-    toast.success(`Blur level set to ${level}`);
+  const handleBlurChange = (level: BlurDialLevel, label: string) => {
+    updateLocalSetting('blur_dial', level);
+    toast.success(`Main Blur set to ${label}`);
   };
 
   if (isLoading) {
@@ -117,13 +123,14 @@ const Settings = () => {
             </div>
           </div>
 
-          <div className="flex gap-2">
-            {blurLevels.map((level) => (
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+            {blurLevels.map(({ level, label }) => (
               <button
                 key={level}
-                onClick={() => handleBlurChange(level)}
+                onClick={() => handleBlurChange(level, label)}
+                disabled={!localSettingsLoaded}
                 className={`flex-1 py-4 flex flex-col items-center gap-2 transition-all ${
-                  settings.blur_sensitivity === level
+                  localSettings.blur_dial === level
                     ? 'bg-gold text-cathedral-midnight'
                     : 'border border-silver/30 text-silver hover:border-silver/60'
                 }`}
@@ -133,15 +140,13 @@ const Settings = () => {
                 ) : (
                   <Eye className="w-5 h-5" />
                 )}
-                <span className="font-display text-xs tracking-wider">{level}</span>
+                <span className="font-display text-xs tracking-wider">{label}</span>
               </button>
             ))}
           </div>
 
           <div className="mt-4 text-xs text-muted-foreground">
-            {settings.blur_sensitivity === 'OFF' && 'No image blurring applied'}
-            {settings.blur_sensitivity === 'LOW' && 'Blurs explicit content only'}
-            {settings.blur_sensitivity === 'HIGH' && 'Blurs suggestive and explicit content'}
+            {blurLevels.find(({ level }) => level === localSettings.blur_dial)?.description}
           </div>
         </section>
 

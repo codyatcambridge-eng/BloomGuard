@@ -205,15 +205,17 @@ export function generateFlashShieldBootstrap(enabled: boolean): string {
       }
       function getActiveDampenerIdentity(frame, media, stableIdentity) {
         if (isStrongShortsIdentity(stableIdentity)) return stableIdentity;
-        var visualId = '';
-        if (media && media.getAttribute) {
-          visualId = media.getAttribute('poster') || media.getAttribute('data-poster') || media.getAttribute('src') || '';
+        // Bootstrap runs before the runtime transition listener exists. Keep
+        // one weak activation stable for this frame instead of treating
+        // poster/src churn during normal playback as a new Short. The runtime
+        // upgrades this to a gesture-scoped token when a real swipe begins.
+        if (frame && frame.dataset) {
+          if (!frame.dataset.mwFlashWeakActivation) {
+            frame.dataset.mwFlashWeakActivation = String(Date.now()) + ':' + String(Math.random()).slice(2, 9);
+          }
+          return [stableIdentity, frame.dataset.mwFlashWeakActivation].join('|activation:');
         }
-        if (!visualId && frame && frame.getAttribute) {
-          visualId = frame.getAttribute('data-index') || frame.getAttribute('aria-posinset') || '';
-        }
-        if (!visualId) return stableIdentity;
-        return [stableIdentity, visualId].join('|visual:');
+        return stableIdentity;
       }
       function ensureShortsOverlay(frame, identity) {
         var overlay = null;
@@ -1360,25 +1362,26 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function getFlashShieldActiveDampenerIdentity(frame, media, stableIdentity) {
     if (isFlashShieldStrongShortsIdentity(stableIdentity)) return stableIdentity;
-    let visualId = '';
+    // A weak Shorts identity still needs one stable activation owner. Mutable
+    // media attributes (poster/src/blob/quality) are playback events, not
+    // content identity. A physical swipe's already-bounded transition veil
+    // supplies a fresh token; otherwise retain one token for this active frame.
     try {
-      if (media && media.getAttribute) {
-        visualId = String(
-          media.getAttribute('poster') ||
-          media.getAttribute('data-poster') ||
-          media.getAttribute('src') ||
-          ''
-        );
+      const transitionOverlay = document.getElementById(FLASH_SHIELD_SHORTS_TRANSITION_OVERLAY_ID);
+      const transitionToken = transitionOverlay && transitionOverlay.dataset.mwActive === '1'
+        ? String(transitionOverlay.dataset.mwArmedAt || '')
+        : '';
+      if (transitionToken) {
+        return [stableIdentity, transitionToken].join('|activation:');
       }
-      if (!visualId && frame && frame.getAttribute) {
-        visualId = String(frame.getAttribute('data-index') || frame.getAttribute('aria-posinset') || '');
-      }
-      if (visualId) {
-        visualId = normalizeUrl(visualId) || visualId;
+      if (frame && frame.dataset) {
+        if (!frame.dataset.mwFlashWeakActivation) {
+          frame.dataset.mwFlashWeakActivation = String(Date.now()) + ':' + String(Math.random()).slice(2, 9);
+        }
+        return [stableIdentity, frame.dataset.mwFlashWeakActivation].join('|activation:');
       }
     } catch (e) {}
-    if (!visualId) return stableIdentity;
-    return [stableIdentity, visualId].join('|visual:');
+    return stableIdentity;
   }
 
   function ensureFlashShieldShortsOverlay(frame, identity) {
@@ -1475,6 +1478,12 @@ export function generateModerationScript(config: InjectionConfig): string {
     try {
       const overlay = ensureFlashShieldShortsTransitionOverlay();
       if (!overlay) return false;
+      // FREEZE-OVERRIDE: one physical transition intent owns one bounded veil.
+      // Repeated touchmove/wheel events from that same intent must not restart
+      // the deadline or enqueue duplicate discovery bursts.
+      if (overlay.dataset.mwActive === '1' && timerState.shortsTransitionVeilTimer) {
+        return true;
+      }
       overlay.dataset.mwActive = '1';
       overlay.dataset.mwReason = String(reason || 'unknown');
       overlay.dataset.mwArmedAt = String(Date.now());
@@ -1510,12 +1519,32 @@ export function generateModerationScript(config: InjectionConfig): string {
 
   function onFlashShieldShortsTransitionIntent(event) {
     if (!CONFIG.flashShieldV1 || timerState.teardownDone || !isShortsModeActive()) return;
+    const eventType = String((event && event.type) || 'unknown');
+    if (eventType === 'touchstart') {
+      timerState.shortsTransitionTouchGestureActive = true;
+      timerState.shortsTransitionTouchGestureConsumed = isFlashShieldShortsUiInteraction(event);
+      return;
+    }
+    if (eventType === 'touchend' || eventType === 'touchcancel') {
+      timerState.shortsTransitionTouchGestureActive = false;
+      timerState.shortsTransitionTouchGestureConsumed = false;
+      return;
+    }
     if (isFlashShieldShortsUiInteraction(event)) return;
+    if (eventType === 'touchmove') {
+      // iOS emits many touchmove events for one swipe. Consume only the first;
+      // the veil itself remains until verdict handoff or its original timeout.
+      if (!timerState.shortsTransitionTouchGestureActive) {
+        timerState.shortsTransitionTouchGestureActive = true;
+      }
+      if (timerState.shortsTransitionTouchGestureConsumed) return;
+      timerState.shortsTransitionTouchGestureConsumed = true;
+    }
     if (event && event.type === 'keydown') {
       const key = String(event.key || '');
       if (!/^(ArrowUp|ArrowDown|PageUp|PageDown|Space| )$/.test(key)) return;
     }
-    armFlashShieldShortsTransitionVeil('intent_' + String((event && event.type) || 'unknown'));
+    armFlashShieldShortsTransitionVeil('intent_' + eventType);
   }
 
   function startFlashShieldShortsTransitionListeners(reason) {
@@ -1523,7 +1552,10 @@ export function generateModerationScript(config: InjectionConfig): string {
     try {
       timerState.shortsTransitionVeilHandler = onFlashShieldShortsTransitionIntent;
       timerState.shortsTransitionKeyHandler = onFlashShieldShortsTransitionIntent;
+      document.addEventListener('touchstart', timerState.shortsTransitionVeilHandler, { capture: true, passive: true });
       document.addEventListener('touchmove', timerState.shortsTransitionVeilHandler, { capture: true, passive: true });
+      document.addEventListener('touchend', timerState.shortsTransitionVeilHandler, { capture: true, passive: true });
+      document.addEventListener('touchcancel', timerState.shortsTransitionVeilHandler, { capture: true, passive: true });
       document.addEventListener('wheel', timerState.shortsTransitionVeilHandler, { capture: true, passive: true });
       document.addEventListener('keydown', timerState.shortsTransitionKeyHandler, true);
       timerState.shortsTransitionVeilListenersAttached = true;
@@ -1534,7 +1566,10 @@ export function generateModerationScript(config: InjectionConfig): string {
   function stopFlashShieldShortsTransitionListeners(reason) {
     try {
       if (timerState.shortsTransitionVeilHandler) {
+        document.removeEventListener('touchstart', timerState.shortsTransitionVeilHandler, true);
         document.removeEventListener('touchmove', timerState.shortsTransitionVeilHandler, true);
+        document.removeEventListener('touchend', timerState.shortsTransitionVeilHandler, true);
+        document.removeEventListener('touchcancel', timerState.shortsTransitionVeilHandler, true);
         document.removeEventListener('wheel', timerState.shortsTransitionVeilHandler, true);
       }
       if (timerState.shortsTransitionKeyHandler) {
@@ -1543,6 +1578,8 @@ export function generateModerationScript(config: InjectionConfig): string {
       timerState.shortsTransitionVeilHandler = null;
       timerState.shortsTransitionKeyHandler = null;
       timerState.shortsTransitionVeilListenersAttached = false;
+      timerState.shortsTransitionTouchGestureActive = false;
+      timerState.shortsTransitionTouchGestureConsumed = false;
       releaseFlashShieldShortsTransitionVeil(reason || 'stop');
     } catch (e) {}
   }
@@ -1771,7 +1808,6 @@ export function generateModerationScript(config: InjectionConfig): string {
       const previousActiveDampenedIdentity = String(frame.dataset.mwActiveDampenedIdentity || '');
       const activeDampenerIdentity = getFlashShieldActiveDampenerIdentity(frame, media, identity);
       const needsActiveDampener = previousActiveDampenedIdentity !== activeDampenerIdentity;
-      const stableIdentityIsStrong = isFlashShieldStrongShortsIdentity(identity);
       const mediaVerdict = String(media.dataset.mwModerated || frame.dataset.mwModerated || '');
       const activeOverlayPresent =
         !!(frame.querySelector && frame.querySelector(':scope > .' + FLASH_SHIELD_SHORTS_OVERLAY_CLASS + '[data-mw-active-dampener="1"]:not([data-mw-veil-releasing="1"])'));
@@ -1800,7 +1836,7 @@ export function generateModerationScript(config: InjectionConfig): string {
       const hasResolvedVerdict =
         mediaVerdict === 'blurred' ||
         (!activeFeedDampenerPresent && !needsActiveDampener && mediaVerdict === 'revealed') ||
-        (!activeFeedDampenerPresent && !needsActiveDampener && mediaVerdict === 'safe' && stableIdentityIsStrong) ||
+        (!activeFeedDampenerPresent && !needsActiveDampener && mediaVerdict === 'safe') ||
         (!activeFeedDampenerPresent && !needsActiveDampener && mediaVerdict === 'timeout-safe');
       if (hasResolvedVerdict) {
         media.removeAttribute('data-mw-veil');
@@ -1814,7 +1850,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         // the first moment it became active.
         const rememberedVerdict = flashShieldShortsVerdictMemory.get(currentShortsId);
         if (!activeFeedDampenerPresent && !needsActiveDampener && (
-          (rememberedVerdict === 'safe' && stableIdentityIsStrong) ||
+          rememberedVerdict === 'safe' ||
           rememberedVerdict === 'timeout-safe'
         )) {
           media.dataset.mwModerated = rememberedVerdict;
@@ -3034,6 +3070,8 @@ export function generateModerationScript(config: InjectionConfig): string {
     shortsTransitionVeilHandler: null,
     shortsTransitionKeyHandler: null,
     shortsTransitionVeilListenersAttached: false,
+    shortsTransitionTouchGestureActive: false,
+    shortsTransitionTouchGestureConsumed: false,
     shortsVeilTimeoutTimer: null,
     shortsVeilTimeoutIdentity: '',
     shortsVeilTimeoutDampenerIdentity: '',

@@ -363,7 +363,7 @@ describe('P3: bounded veil timeout', () => {
     expect(veilOverlayCount()).toBe(0);
   });
 
-  it('poster-swapped active Shorts get a fresh dampener even when URL/data identity is stale', () => {
+  it('poster/source churn within one weak-identity activation does not re-arm a resolved dampener', () => {
     window.history.pushState({}, '', shortsUrl(SHORTS_ID));
     const { host, video } = buildBareActiveShortVideo(SHORTS_ID);
     vi.useFakeTimers();
@@ -379,13 +379,15 @@ describe('P3: bounded veil timeout', () => {
     video.setAttribute('poster', 'https://i.ytimg.com/vi/nextShortNoUrlYet/oar2.jpg');
     injection.probe.markFlashShieldShortsCandidate();
 
-    expect(video.dataset.mwModerated).toBeUndefined();
-    expect(video.dataset.mwVeil).toBe('1');
-    expect(host.dataset.mwFlashFrame).toBe('1');
-    expect(veilOverlayCount()).toBe(1);
+    video.setAttribute('src', 'blob:https://m.youtube.com/next-stream-segment');
+    injection.probe.markFlashShieldShortsCandidate();
+
+    expect(String(video.dataset.mwModerated || host.dataset.mwModerated || '')).toBe('safe');
+    expect(video.dataset.mwVeil).toBeUndefined();
+    expect(veilOverlayCount()).toBe(0);
   });
 
-  it('poster-swapped weak-identity dampener gets its own full bounded timeout', () => {
+  it('poster/source churn cannot postpone the bounded timeout for one weak activation', () => {
     window.history.pushState({}, '', shortsUrl(SHORTS_ID));
     const { host, video } = buildBareActiveShortVideo(SHORTS_ID);
     vi.useFakeTimers();
@@ -396,8 +398,10 @@ describe('P3: bounded veil timeout', () => {
 
     video.setAttribute('poster', 'https://i.ytimg.com/vi/nextShortNoUrlYet/oar2.jpg');
     injection.probe.markFlashShieldShortsCandidate();
+    video.setAttribute('src', 'blob:https://m.youtube.com/next-stream-segment');
+    injection.probe.markFlashShieldShortsCandidate();
 
-    vi.advanceTimersByTime(2199);
+    vi.advanceTimersByTime(1199);
     expect(video.dataset.mwVeil).toBe('1');
     expect(String(video.dataset.mwModerated || host.dataset.mwModerated || '')).toBe('');
 
@@ -434,6 +438,43 @@ describe('P3: bounded veil timeout', () => {
 });
 
 describe('Active Shorts transition veil', () => {
+  it('consumes one transition veil per touch gesture without extending its bounded deadline', () => {
+    window.history.pushState({}, '', shortsUrl(SHORTS_ID));
+    buildActiveShort(SHORTS_ID);
+    vi.useFakeTimers();
+    injection = injectScript({ flashShieldV1: true, enabled: false, sensitivity: 0 });
+
+    document.dispatchEvent(new Event('touchstart', { bubbles: true }));
+    document.dispatchEvent(new Event('touchmove', { bubbles: true }));
+    const firstArmedAt = transitionOverlay()?.dataset.mwArmedAt;
+    expect(firstArmedAt).toBeTruthy();
+
+    vi.advanceTimersByTime(500);
+    for (let i = 0; i < 20; i += 1) {
+      document.dispatchEvent(new Event('touchmove', { bubbles: true }));
+    }
+    expect(transitionOverlay()?.dataset.mwArmedAt).toBe(firstArmedAt);
+
+    vi.advanceTimersByTime(2100);
+    expect(transitionOverlay()?.dataset.mwActive).toBeUndefined();
+  });
+
+  it('does not re-arm after safe release from later movement in the same gesture', () => {
+    window.history.pushState({}, '', shortsUrl(SHORTS_ID));
+    const { video } = buildActiveShort(SHORTS_ID);
+    vi.useFakeTimers();
+    injection = injectScript({ flashShieldV1: true });
+
+    document.dispatchEvent(new Event('touchstart', { bubbles: true }));
+    document.dispatchEvent(new Event('touchmove', { bubbles: true }));
+    injection.probe.clearFlashShieldResolution(video, 'safe');
+    vi.advanceTimersByTime(901);
+    expect(transitionOverlay()?.dataset.mwActive).toBeUndefined();
+
+    document.dispatchEvent(new Event('touchmove', { bubbles: true }));
+    expect(transitionOverlay()?.dataset.mwActive).toBeUndefined();
+  });
+
   it('arms a full-viewport pre-handoff veil on active Shorts transition intent', () => {
     window.history.pushState({}, '', shortsUrl(SHORTS_ID));
     const { video } = buildActiveShort(SHORTS_ID);

@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useState } from 'react';
 import { Shield, X } from 'lucide-react';
 import { Slider } from '@/components/ui/slider';
-import { useLocalSettings, BlurDialLevel } from '@/hooks/useLocalSettings';
+import type { BlurDialLevel, LocalProtectionSettings } from '@/hooks/useLocalSettings';
 
 const DIAL_PRESETS: Record<BlurDialLevel, { name: string; description: string; focus: string[] }> = {
   0: {
@@ -33,11 +33,20 @@ const DIAL_PRESETS: Record<BlurDialLevel, { name: string; description: string; f
 
 interface BlurShieldOverlayProps {
   executeScript?: (script: string) => Promise<unknown>;
+  settings: LocalProtectionSettings;
+  onBlurDialChange: (level: BlurDialLevel) => void;
+  onEnhancedVisibilityChange: (enabled: boolean) => void;
+  onBlurStrengthChange: (strength: number) => void;
 }
 
-export const BlurShieldOverlay = ({ executeScript }: BlurShieldOverlayProps) => {
+export const BlurShieldOverlay = ({
+  executeScript,
+  settings,
+  onBlurDialChange,
+  onEnhancedVisibilityChange,
+  onBlurStrengthChange,
+}: BlurShieldOverlayProps) => {
   const [open, setOpen] = useState(false);
-  const { settings, updateSetting } = useLocalSettings();
   const preset = useMemo(() => DIAL_PRESETS[settings.blur_dial] || DIAL_PRESETS[2], [settings.blur_dial]);
   const actionsDisabled = !settings.shield_active || !executeScript;
   const isLargeText = settings.isEnhancedVisibility === true;
@@ -77,7 +86,7 @@ export const BlurShieldOverlay = ({ executeScript }: BlurShieldOverlayProps) => 
 
             <Slider
               value={[settings.blur_dial]}
-              onValueChange={([value]) => updateSetting('blur_dial', value as BlurDialLevel)}
+              onValueChange={([value]) => onBlurDialChange(value as BlurDialLevel)}
               min={0}
               max={4}
               step={1}
@@ -88,7 +97,7 @@ export const BlurShieldOverlay = ({ executeScript }: BlurShieldOverlayProps) => 
               <span className="text-xs uppercase tracking-[0.16em] text-[#E0E0E0]/75">Enhanced Visibility</span>
               <button
                 type="button"
-                onClick={() => updateSetting('isEnhancedVisibility', !settings.isEnhancedVisibility)}
+                onClick={() => onEnhancedVisibilityChange(!settings.isEnhancedVisibility)}
                 className={`rounded-full px-3 py-1 text-xs font-semibold transition ${
                   settings.isEnhancedVisibility
                     ? 'bg-[#76937C] text-[#1A1B1E]'
@@ -152,7 +161,7 @@ export const BlurShieldOverlay = ({ executeScript }: BlurShieldOverlayProps) => 
               </div>
               <Slider
                 value={[settings.blur_strength_px]}
-                onValueChange={([value]) => updateSetting('blur_strength_px', value)}
+                onValueChange={([value]) => onBlurStrengthChange(value)}
                 min={0}
                 max={50}
                 step={2}
