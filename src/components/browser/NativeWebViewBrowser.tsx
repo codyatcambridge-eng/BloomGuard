@@ -1,8 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import type { PluginListenerHandle } from '@capacitor/core';
-import LabelListener from '@/components/browser/LabelListener';
 import {
-  Shield,
   AlertTriangle,
   Loader2,
   Globe,
@@ -54,8 +52,6 @@ import { YouTubePreviewView } from './YouTubePreviewView';
 import { SocialPreviewView, SocialPlatform } from './SocialPreviewView';
 import { ExternalLinkWarning } from './ExternalLinkWarning';
 import { AIStatusBar } from './AIStatusBar';
-import { BlurShieldOverlay } from './BlurShieldOverlay';
-import { toast } from 'sonner';
 
 const YOUTUBE_HOST_PATTERNS = ['youtube.com', 'youtu.be', 'ytimg.com'];
 const isYouTubeUrl = (value?: string) => {
@@ -719,19 +715,9 @@ export const NativeWebViewBrowser = () => {
     },
     onImageBlurred: (_src, result) => {
       console.debug('[Browser] Image blurred:', result.category);
-      if (localSettings.show_scan_notifications) {
-        toast.info(`Image blurred: ${result.category}`, {
-          duration: 2000,
-        });
-      }
     },
     onScanComplete: (stats) => {
       console.log('[Browser] Scan complete:', stats);
-      if (localSettings.show_scan_notifications && stats.blurred > 0) {
-        toast.success(`Scanned ${stats.total} images, ${stats.blurred} blurred`, {
-          duration: 3000,
-        });
-      }
     },
   });
   
@@ -1280,11 +1266,37 @@ export const NativeWebViewBrowser = () => {
       epochContextCurrentRef.current = true;
       relaxedEpochBypassHookStableRef.current =
         nonBootstrapAckObservedRef.current && epochContextCurrentRef.current;
+      const controlSyncResult = await scriptExecutor(`
+        (function() {
+          try {
+            var sensitivityResult = 'NO_SENSITIVITY_HOOK';
+            var flashResult = 'NO_FLASH_HOOK';
+            if (typeof window.__MW_APPLY_SENSITIVITY__ === 'function') {
+              sensitivityResult = window.__MW_APPLY_SENSITIVITY__(
+                ${localSettings.blur_dial},
+                'host_context_sync'
+              );
+            }
+            if (typeof window.__MW_FLASH_SHIELD_SET__ === 'function') {
+              flashResult = window.__MW_FLASH_SHIELD_SET__(
+                ${isFlashShieldEnabled ? 'true' : 'false'}
+              );
+            }
+            return JSON.stringify({
+              sensitivityResult: String(sensitivityResult || 'null'),
+              flashResult: String(flashResult || 'null')
+            });
+          } catch (e) {
+            return JSON.stringify({ controlSync: 'ERR', error: String(e) });
+          }
+        })();
+      `);
       console.log(
         '[DIAG][EPOCH_SYNC][HOST]',
-        'action=sync_applied_awaiting_readiness',
+        'action=sync_applied_controls_reasserted',
         'reason=' + reason,
         'syncResult=' + syncResult,
+        'controlSyncResult=' + String(controlSyncResult || 'null'),
         'navId=' + navId,
         'pageEpoch=' + webViewPageEpochRef.current,
         'url=' + (targetUrl || 'unknown'),
@@ -1465,7 +1477,7 @@ export const NativeWebViewBrowser = () => {
     } finally {
       injectionInFlightRef.current = false;
     }
-  }, [ENABLE_SIGNAL_PIPELINE, settingsLoaded, isRuntimeModerationEnabled, shouldInjectModeration, getModerationConfig, localSettings.diag_youtube_shorts, exitPendingReinject]);
+  }, [ENABLE_SIGNAL_PIPELINE, settingsLoaded, isRuntimeModerationEnabled, shouldInjectModeration, getModerationConfig, localSettings.blur_dial, localSettings.diag_youtube_shorts, isFlashShieldEnabled, exitPendingReinject]);
 
   const getWebViewListenerDiagContext = useCallback(() => {
     return {
@@ -5049,21 +5061,10 @@ export const NativeWebViewBrowser = () => {
   // Main browser view
   return (
     <div className="min-h-screen bg-background flex flex-col">
-      {/* Global label listener for prototype mode */}
-      <LabelListener />
       {showDiagLayerBadge && (
         <div className="fixed right-2 top-2 z-[70] rounded bg-black/80 px-2 py-1 text-[10px] text-white pointer-events-none">
           TOP {diagTopLayerLabel}
         </div>
-      )}
-      {isNative && currentView === 'browse' && (
-        <BlurShieldOverlay
-          executeScript={executeScript}
-          settings={localSettings}
-          onBlurDialChange={(level) => updateSetting('blur_dial', level)}
-          onEnhancedVisibilityChange={(enabled) => updateSetting('isEnhancedVisibility', enabled)}
-          onBlurStrengthChange={(strength) => updateSetting('blur_strength_px', strength)}
-        />
       )}
       <BrowserHeader
         currentView={currentView}
@@ -5178,7 +5179,7 @@ export const NativeWebViewBrowser = () => {
         {isLoading && currentView === 'home' && (
           <div className="absolute inset-0 bg-background/80 flex items-center justify-center">
             <div className="text-center">
-              <Shield className="w-12 h-12 mx-auto mb-3 text-aqua animate-pulse" />
+              <Loader2 className="w-12 h-12 mx-auto mb-3 text-aqua animate-spin" />
               <p className="text-sm text-muted-foreground font-display tracking-wider">LOADING...</p>
             </div>
           </div>

@@ -4,7 +4,6 @@ import {
   ArrowRight, 
   RotateCcw, 
   Home, 
-  Shield, 
   Lock, 
   Search, 
   Globe, 
@@ -60,7 +59,6 @@ export const BrowserHeader = ({
     <header className="sticky top-0 z-50 px-3 pt-6 pb-3 border-b border-border bg-card">
       {/* Title Bar */}
       <div className="flex items-center gap-2 mb-3">
-        <Shield className="w-6 h-6 text-aqua" />
         <h1 className="font-display text-lg tracking-wider">GoodCreation.net</h1>
         {isProtected && (
           <div className="ml-auto flex items-center gap-1 text-aqua">

@@ -1,5 +1,15 @@
 import { useState } from "react";
-import { Search, Shield, Sparkles, Instagram, Youtube, Link } from "lucide-react";
+import {
+  AtSign,
+  Ghost,
+  Instagram,
+  MessageCircle,
+  Music2,
+  Search,
+  Sparkles,
+  Users,
+  Youtube,
+} from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 
@@ -10,6 +20,16 @@ interface SafeBrowserHomepageProps {
 
 export const SafeBrowserHomepage = ({ onSearch, isSearching = false }: SafeBrowserHomepageProps) => {
   const [query, setQuery] = useState("");
+
+  const socialLaunches = [
+    { label: "YouTube", url: "https://m.youtube.com/", icon: Youtube },
+    { label: "Instagram", url: "https://www.instagram.com", icon: Instagram },
+    { label: "TikTok", url: "https://www.tiktok.com", icon: Music2 },
+    { label: "Snapchat", url: "https://www.snapchat.com", icon: Ghost },
+    { label: "Facebook", url: "https://m.facebook.com", icon: Users },
+    { label: "X", url: "https://x.com", icon: AtSign },
+    { label: "Reddit", url: "https://www.reddit.com", icon: MessageCircle },
+  ] as const;
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -46,27 +66,12 @@ export const SafeBrowserHomepage = ({ onSearch, isSearching = false }: SafeBrows
       <div className="flex-1 flex flex-col items-center justify-center px-6">
         {/* Logo */}
         <div className="mb-10 text-center">
-          <div className="inline-flex items-center justify-center gap-4 mb-3">
-            <Shield className="w-16 h-16 text-aqua" />
-          </div>
           <h1 className="font-display text-5xl tracking-wider text-foreground mb-2">
             Focus Browser
           </h1>
-          <p className="mt-1 font-display tracking-widest text-aqua">
-            FUN HOME MARKER 2026-05-29
-          </p>
-          <p className="mt-1 font-display tracking-widest text-aqua">try</p>
           <p className="italic" style={{ fontSize: '14px', color: '#E0E0E0' }}>
             Algorithms are noisy, real life is quiet where Focus Browser is.
           </p>
-          <p className="mt-1 text-sm text-muted-foreground">fun</p>
-          <p className="mt-1 font-display tracking-wide text-aqua">BOY</p>
-          <p className="mt-1 font-display tracking-wide text-aqua">Geese</p>
-          <p className="mt-1 font-display tracking-wide text-aqua">DUck Duck</p>
-          <p className="mt-1 font-display tracking-wide text-aqua">boyii</p>
-          <p className="mt-1 font-display tracking-wide text-aqua">claude</p>
-          <p className="mt-1 font-display tracking-wide text-aqua">grok</p>
-          <p className="mt-1 font-display tracking-wide text-aqua">Jax</p>
         </div>
 
         {/* Search Form */}
@@ -124,43 +129,31 @@ export const SafeBrowserHomepage = ({ onSearch, isSearching = false }: SafeBrows
         </div>
 
         {/* Quick social launches */}
-        <div className="mt-8 grid grid-cols-1 sm:grid-cols-3 gap-3 w-full max-w-2xl">
-          <Button
-            type="button"
-            variant="secondary"
-            className="justify-center gap-2"
-            onClick={() => onSearch("https://www.snapchat.com")}
-            disabled={isSearching}
-          >
-            <Link className="w-4 h-4" />
-            Snapchat
-          </Button>
-          <Button
-            type="button"
-            variant="secondary"
-            className="justify-center gap-2"
-            onClick={() => onSearch("https://www.instagram.com")}
-            disabled={isSearching}
-          >
-            <Instagram className="w-4 h-4" />
-            Instagram
-          </Button>
-          <Button
-            type="button"
-            variant="secondary"
-            className="justify-center gap-2"
-            onClick={() => onSearch("https://m.youtube.com/")}
-            disabled={isSearching}
-          >
-            <Youtube className="w-4 h-4" />
-            YouTube
-          </Button>
+        <div className="mt-8 w-full max-w-2xl">
+          <p className="mb-3 text-center text-[11px] font-display tracking-[0.18em] text-muted-foreground">
+            QUICK LAUNCH
+          </p>
+          <div className="flex gap-2 overflow-x-auto pb-2 sm:grid sm:grid-cols-4">
+            {socialLaunches.map(({ label, url, icon: Icon }) => (
+              <Button
+                key={label}
+                type="button"
+                variant="secondary"
+                className="min-w-[112px] justify-center gap-2 sm:min-w-0"
+                onClick={() => onSearch(url)}
+                disabled={isSearching}
+                aria-label={`Open ${label}`}
+              >
+                <Icon className="w-4 h-4" />
+                {label}
+              </Button>
+            ))}
+          </div>
         </div>
 
         {/* Protection Badge */}
         <div className="mt-12 text-center">
           <div className="inline-flex items-center gap-2 px-5 py-2.5 bg-aqua/10 border border-aqua/30 rounded-full">
-            <Shield className="w-4 h-4 text-aqua" />
             <span className="text-xs font-display text-aqua tracking-wider">
               ALL IMAGES MODERATED ON-DEVICE
             </span>
