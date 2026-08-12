@@ -2225,6 +2225,10 @@ export function generateModerationScript(config: InjectionConfig): string {
   function applyFlashShieldPositive(element, src, category, itemId) {
     if (!isVisualModerationActive()) return false;
     if (!CONFIG.flashShieldV1 || !element || element.nodeType !== 1) return false;
+    // Main Dial owns all item-level positive blur and reveal behavior. Flash Shield
+    // may keep temporary pre-protection alive while the dial is Off, but it must
+    // never become an independent hard-blur/reveal engine.
+    if (!CONFIG.enabled || CONFIG.sensitivity <= 0) return false;
     try {
       let target = element;
       let stableSelector = '';
@@ -2421,11 +2425,27 @@ export function generateModerationScript(config: InjectionConfig): string {
       'reason=' + (reason || 'toggle')
     );
     if (normalized === 0) {
+      const preserveIndependentFlashShield = CONFIG.flashShieldV1 === true;
       try {
         if (typeof cleanupBloomGuardVisualModeration === 'function') {
           cleanupBloomGuardVisualModeration('sensitivity_off');
         }
       } catch (e) {}
+      // Main Dial Off removes Main Blur/reveal ownership, but Flash Shield is an
+      // independent user setting. The shared cleanup is intentionally broad, so
+      // restore only Flash-owned discovery/pre-protection after it has finished.
+      if (preserveIndependentFlashShield) {
+        offModeVisualCleanupActive = false;
+        CONFIG.enabled = false;
+        CONFIG.flashShieldV1 = true;
+        CONFIG.scanEnabled = true;
+        try {
+          if (window.__MW_FLASH_BOOTSTRAP__ && typeof window.__MW_FLASH_BOOTSTRAP__.setEnabled === 'function') {
+            window.__MW_FLASH_BOOTSTRAP__.setEnabled(true);
+          }
+          startFlashShieldRuntime();
+        } catch (e) {}
+      }
     } else if (CONFIG.scanEnabled) {
       // Instant dial-down release using stored scores (home + active Shorts).
       try {
@@ -13051,7 +13071,7 @@ export function generateModerationScript(config: InjectionConfig): string {
         (predictedLabel === 'sexy' && sexyScoreForAction > 0.8);
       const dynamicBlurCandidate = rawCategory === 'swimwear' || (predictedLabel === 'sexy' && sexyScoreForAction < 0.8);
       let finalBlur = CONFIG.forcedBlur || (shouldApplyBlur && dialActive);
-      const flashPositive = CONFIG.flashShieldV1 && shouldApplyBlur;
+      const flashPositive = CONFIG.flashShieldV1 && dialActive && shouldApplyBlur;
       if (isShortsModeActive()) {
         console.warn(
           '[MW-ACTIVE-SHORTS-ACCURACY-DIAG]',
@@ -13358,7 +13378,7 @@ export function generateModerationScript(config: InjectionConfig): string {
   }
 
   function findAndApplyFlashShieldPositive(src, category, itemId) {
-    if (!CONFIG.flashShieldV1 || isRevealedForSource(src, null)) return;
+    if (!CONFIG.flashShieldV1 || !CONFIG.enabled || CONFIG.sensitivity <= 0 || isRevealedForSource(src, null)) return;
     try {
       document.querySelectorAll('img, video, [data-mw-bg-src]').forEach(function(node) {
         const matches = (

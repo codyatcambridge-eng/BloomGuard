@@ -31,6 +31,75 @@ afterEach(() => {
 });
 
 describe('Phase 0 Off-mode cleanup', () => {
+  it('Main Dial Off prevents Flash-only positives from creating feed blur or reveal', () => {
+    const { video } = buildCard('ytm-rich-item-renderer', POSITIVE_ID);
+    injection = injectScript({ enabled: false, sensitivity: 0, flashShieldV1: true });
+    const src = srcFor(POSITIVE_ID);
+
+    const applied = injection.probe.applyFlashShieldPositive(video, src, 'porn', POSITIVE_ID);
+
+    expect(applied).toBe(false);
+    expect(video.dataset.mwModerated || '').not.toBe('blurred');
+    expect(video.dataset.mwHardBlur).not.toBe('1');
+    expect(hasBlurFilter(video)).toBe(false);
+    expect(revealOverlayCount()).toBe(0);
+    expect(revealButtonCount()).toBe(0);
+  });
+
+  it('Main Dial Off prevents Flash-only positives from creating Active Shorts blur or reveal', () => {
+    window.history.pushState({}, '', 'https://m.youtube.com/shorts/dQw4w9WgXcQ');
+    const player = document.createElement('div');
+    player.id = 'shorts-player';
+    const frame = document.createElement('ytm-reel-video-renderer');
+    frame.setAttribute('selected', '');
+    frame.setAttribute('data-video-id', POSITIVE_ID);
+    const video = document.createElement('video');
+    video.setAttribute('data-video-id', POSITIVE_ID);
+    frame.appendChild(video);
+    player.appendChild(frame);
+    document.body.appendChild(player);
+    injection = injectScript({ enabled: false, sensitivity: 0, flashShieldV1: true });
+    const src = srcFor(POSITIVE_ID);
+
+    const applied = injection.probe.applyFlashShieldPositive(video, src, 'porn', POSITIVE_ID);
+
+    expect(applied).toBe(false);
+    expect(frame.dataset.mwModerated || '').not.toBe('blurred');
+    expect(frame.dataset.mwHardBlur).not.toBe('1');
+    expect(hasBlurFilter(frame)).toBe(false);
+    expect(revealOverlayCount()).toBe(0);
+    expect(revealButtonCount()).toBe(0);
+  });
+
+  it('live Main Dial Off preserves the independent Flash Shield runtime', () => {
+    const { video } = buildCard('ytm-rich-item-renderer', POSITIVE_ID);
+    injection = injectScript({ enabled: true, sensitivity: 3, flashShieldV1: true });
+    injection.probe.applyBlur(video, srcFor(POSITIVE_ID), 'porn', 40, POSITIVE_ID, 'classifier_positive');
+
+    const applySensitivity = (
+      window as unknown as { __MW_APPLY_SENSITIVITY__?: (level: number, reason: string) => string }
+    ).__MW_APPLY_SENSITIVITY__;
+    const setFlash = (
+      window as unknown as { __MW_FLASH_SHIELD_SET__?: (enabled: boolean) => string }
+    ).__MW_FLASH_SHIELD_SET__;
+
+    expect(applySensitivity?.(0, 'host_dial_slider')).toBe('OK:0');
+    expect(hasBlurFilter(video)).toBe(false);
+    expect(revealOverlayCount()).toBe(0);
+    expect(setFlash?.(true)).toBe('OK');
+
+    const freshCard = document.createElement('ytm-rich-item-renderer');
+    const fresh = document.createElement('img');
+    fresh.src = srcFor(SAFE_ID);
+    Object.defineProperty(fresh, 'getBoundingClientRect', {
+      value: () => ({ width: 200, height: 120, top: 0, left: 0, right: 200, bottom: 120 }),
+    });
+    freshCard.appendChild(fresh);
+    document.body.appendChild(freshCard);
+    injection.probe.markFlashShieldCandidates(fresh);
+    expect(fresh.dataset.mwVeil).toBe('1');
+  });
+
   it('Flash Shield live Off preserves finalized positive blur while removing Flash residue', () => {
     const { video } = buildCard('ytm-rich-item-renderer', POSITIVE_ID);
     injection = injectScript({ enabled: true, flashShieldV1: true });
