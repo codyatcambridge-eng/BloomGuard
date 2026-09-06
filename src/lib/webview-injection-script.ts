@@ -14848,26 +14848,68 @@ export function generateModerationScript(config: InjectionConfig): string {
   ensureRevealOverlayPositionListeners();
   ensureNonShortsReattachListeners();
 
+  // July 15 Phase 0 ownership boundary: an inline reveal belongs to Shorts
+  // only when it or its live anchor is inside the Shorts shell.
+  function isRevealOverlayUnderShortsShell(overlay) {
+    if (!overlay || overlay.nodeType !== 1) return false;
+    try {
+      if (
+        typeof overlay.closest === 'function' &&
+        overlay.closest(
+          '#shorts-player, ytm-reel-video-renderer, ytd-reel-video-renderer,' +
+          'ytm-shorts-player-page, ytd-shorts, #shorts-inner-container, #shorts-container'
+        )
+      ) {
+        return true;
+      }
+      const nodeId = String((overlay.dataset && overlay.dataset.mwNodeId) || '');
+      if (nodeId) {
+        const anchor = document.querySelector('[data-mw-node-id="' + nodeId + '"]');
+        if (
+          anchor &&
+          typeof anchor.closest === 'function' &&
+          anchor.closest(
+            '#shorts-player, ytm-reel-video-renderer, ytd-reel-video-renderer,' +
+            'ytm-shorts-player-page, ytd-shorts, #shorts-inner-container'
+          )
+        ) {
+          return true;
+        }
+      }
+    } catch (e) {}
+    return false;
+  }
+
   // SPA navigation detection
   function sweepOrphanedModeOverlays(reason) {
     try {
       const inShortsMode = isShortsModeActive();
       const allOverlays = document.querySelectorAll('.mw-reveal-overlay');
       let removed = 0;
+      let preservedMain = 0;
       for (let i = 0; i < allOverlays.length; i += 1) {
         const ov = allOverlays[i];
         if (!ov || !ov.isConnected) continue;
         const isPortal = !!(ov.parentElement && String(ov.parentElement.id || '') === REVEAL_PORTAL_ID);
+        const portalMode = String((ov.dataset && ov.dataset.mwPortalMode) || '');
         if (inShortsMode && !isPortal) {
+          if (!isRevealOverlayUnderShortsShell(ov)) {
+            preservedMain += 1;
+            continue;
+          }
           if (ov.parentElement) ov.parentElement.removeChild(ov);
           removed += 1;
         } else if (!inShortsMode && isPortal) {
+          if (portalMode === 'non_shorts') {
+            preservedMain += 1;
+            continue;
+          }
           if (ov.parentElement) ov.parentElement.removeChild(ov);
           removed += 1;
         }
       }
-      if (DIAG_YT_BLUR && removed > 0) {
-        console.log('[DIAG][OVERLAY_SWEEP] mode_transition_sweep', 'reason=' + (reason || 'unknown'), 'removed=' + removed, 'shortsMode=' + inShortsMode);
+      if (DIAG_YT_BLUR && (removed > 0 || preservedMain > 0)) {
+        console.log('[DIAG][OVERLAY_SWEEP] mode_transition_sweep', 'reason=' + (reason || 'unknown'), 'removed=' + removed, 'preservedMain=' + preservedMain, 'shortsMode=' + inShortsMode);
       }
     } catch (e) {}
   }
@@ -14966,11 +15008,21 @@ export function generateModerationScript(config: InjectionConfig): string {
         } catch (e) {}
       });
 
-      // 6) Portal reveal overlays must not remain on home (sweep handles mode; force empty).
+      // 6) Remove Shorts-owned portal reveals only. Main-feed portal reveals
+      // remain paired with their still-blurred media across the transition.
       try {
         const portal = document.getElementById(REVEAL_PORTAL_ID);
         if (portal) {
-          while (portal.firstChild) portal.removeChild(portal.firstChild);
+          const kids = portal.querySelectorAll('.mw-reveal-overlay, .mw-reveal-btn');
+          for (let pi = 0; pi < kids.length; pi += 1) {
+            const kid = kids[pi];
+            if (!kid) continue;
+            const mode = String((kid.dataset && kid.dataset.mwPortalMode) || '');
+            if (mode === 'non_shorts') continue;
+            try {
+              if (kid.parentElement) kid.parentElement.removeChild(kid);
+            } catch (e) {}
+          }
         }
       } catch (e) {}
 
