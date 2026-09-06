@@ -613,6 +613,15 @@ export function generateModerationScript(config: InjectionConfig): string {
   if (window.__MW_ACTIVE__) {
     console.log('[MW] Already injected, skipping');
     try {
+      if (typeof window.__MW_RESUME_AFTER_REINJECT__ === 'function') {
+        window.__MW_RESUME_AFTER_REINJECT__({
+          sensitivity: ${config.sensitivity},
+          enabled: ${config.enabled === true},
+          flashShieldV1: ${config.flashShieldV1 === true},
+        });
+      }
+    } catch (e) {}
+    try {
       if (window.__MW_BLUR_OVERLAY_API__ && typeof window.__MW_BLUR_OVERLAY_API__.sendReady === 'function') {
         window.__MW_BLUR_OVERLAY_API__.sendReady('reinject');
       }
@@ -2243,7 +2252,26 @@ export function generateModerationScript(config: InjectionConfig): string {
           cleanupBloomGuardVisualModeration('sensitivity_off');
         }
       } catch (e) {}
-    } else if (CONFIG.scanEnabled) {
+    } else {
+      // July 15 P0 re-arm: Off cleanup is product state cleanup, not a
+      // permanent lifecycle teardown. Restore the existing bounded runtime.
+      if (offModeVisualCleanupActive) {
+        offModeVisualCleanupActive = false;
+        CONFIG.scanEnabled = true;
+      }
+      CONFIG.scanEnabled = CONFIG.enabled || CONFIG.flashShieldV1 || CONFIG.scanEnabled;
+      try {
+        if (timerState.teardownDone) {
+          timerState.teardownDone = false;
+          timerState.paused = false;
+          window.__MW_ACTIVE__ = true;
+        }
+        startManagedTimers('sensitivity_on:' + (reason || 'toggle'));
+      } catch (e) {}
+      if (CONFIG.flashShieldV1) {
+        try { startFlashShieldRuntime(); } catch (e) {}
+      }
+      if (!CONFIG.scanEnabled) return;
       // Instant dial-down release using stored scores (home + active Shorts).
       try {
         reevaluateStampedNodesForDial(reason || 'toggle');
@@ -15740,6 +15768,31 @@ export function generateModerationScript(config: InjectionConfig): string {
       return 'OK_OFF_MODE_CLEANUP';
     } catch (e) {
       return 'ERR:' + String(e);
+    }
+  };
+  window.__MW_RESUME_AFTER_REINJECT__ = function(opts) {
+    try {
+      const o = opts || {};
+      const level = Math.min(4, Math.max(0, Math.round(Number(o.sensitivity) || 0)));
+      if (o.flashShieldV1 === true) CONFIG.flashShieldV1 = true;
+      if (o.flashShieldV1 === false) CONFIG.flashShieldV1 = false;
+      offModeVisualCleanupActive = false;
+      if (timerState.teardownDone) {
+        timerState.teardownDone = false;
+        timerState.paused = false;
+      }
+      window.__MW_ACTIVE__ = true;
+      if (level <= 0 && o.enabled !== true) {
+        CONFIG.sensitivity = 0;
+        CONFIG.enabled = false;
+        CONFIG.scanEnabled = !!CONFIG.flashShieldV1;
+        return 'OK_RESUME_OFF';
+      }
+      applySensitivityLevel(level > 0 ? level : 2, 'host_reinject_resume');
+      try { startManagedTimers('host_reinject_resume'); } catch (e) {}
+      return 'OK_RESUME_ON';
+    } catch (e) {
+      return 'ERR:' + String(e && e.message ? e.message : e);
     }
   };
   window.__MW_FLASH_SHIELD_SET__ = function(enabled) {

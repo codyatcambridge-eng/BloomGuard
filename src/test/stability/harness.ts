@@ -265,6 +265,7 @@ export interface MWTestProbe {
   scanVideoPoster: (video: HTMLVideoElement) => void;
   scanYouTubeThumbnails: () => void;
   sweepOrphanedModeOverlays: (reason: string) => void;
+  applySensitivityLevel: (level: number, reason: string) => void;
   applyBlur: (
     element: Element,
     src: string,
@@ -380,6 +381,7 @@ export function injectScript(configOverrides?: Partial<InjectionConfig>): Inject
     scanVideoPoster: scanVideoPoster,
     scanYouTubeThumbnails: scanYouTubeThumbnails,
     sweepOrphanedModeOverlays: sweepOrphanedModeOverlays,
+    applySensitivityLevel: applySensitivityLevel,
     applyBlur: applyBlur,
     isShortsModeActive: isShortsModeActive,
     getActiveShortsPlayerContainer: getActiveShortsPlayerContainer,
