@@ -1,4 +1,64 @@
-# FROZEN — MVP Sacred Systems
+# FROZEN — SACRED100 Governance
+
+## Current governing baseline (2026-09-06)
+
+- Immutable annotated tag: `SACRED100`
+- Required dereferenced commit: `9986d613cc1e797d12d509d30fe652331c1c51fd`
+- Preservation branch: `sacred/SACRED100` at the same commit
+- Controlled development branch: a descendant integration branch, currently
+  `integration/flash-active-from-SACRED100`
+
+Never move, recreate, retag, delete, reset, rebase, or develop on SACRED100 or
+`sacred/SACRED100`. New work must adapt to the control on a descendant branch.
+
+### SACRED100-protected behavior
+
+The current freeze protects accepted positive-thumbnail stability, negative
+cleanliness, exact reveal pairing/healing, content ownership isolation, Main Dial
+authority, OFF persistence, OFF-to-ON rearming, lifecycle recovery, responsive
+scrolling, and bounded scanning/observers/timers. Active Shorts, Flash Shield, and
+Watch-player behavior present in the tree remain protected from incidental change,
+but are not declared finished merely because code or historical tests exist.
+
+### Current protected surface
+
+The frozen function families listed in the historical inventory below remain
+protected where they exist at SACRED100. The automated guard also protects:
+
+- `src/lib/webview-injection-script.ts`
+- `src/components/browser/NativeWebViewBrowser.tsx`
+- `src/hooks/useNativeWebView.ts`
+- `src/lib/injection-readiness.ts`
+- `src/lib/protection-mode.ts`
+- `src/hooks/useSettings.ts`
+- `src/hooks/useLocalSettings.ts`
+- all existing files under `src/test/stability/` from deletion or weakening
+
+An intentional change requires a reproducible Phase 0 blocker, Cody's explicit
+freeze-break approval, a per-commit `FREEZE-OVERRIDE: <reason>` trailer, surgical
+scope, rollback instructions, protected-file disclosure, green automated tests,
+and physical-device regression QA. A trailer is not approval by itself.
+
+### Current guard commands
+
+```sh
+npm run check:frozen
+node scripts/check-frozen.mjs
+node scripts/check-frozen.mjs --range SACRED100..HEAD
+```
+
+The guard first verifies the immutable tag and preservation branch, verifies HEAD
+descends from SACRED100, then rejects uncommitted protected-file changes and any
+commit in the selected range that touches a protected file without its own
+`FREEZE-OVERRIDE:` trailer.
+
+## Historical freeze record (preserved; not the current governing baseline)
+
+The following June-era record is retained for ancestry and function-level context.
+Its baseline name, readiness claims, and example range are historical. Where it
+conflicts with the current section above, SACRED100 governs.
+
+# Historical title: FROZEN — MVP Sacred Systems
 
 **Baseline tag:** `mvp-sacred-2026-06-04`
 

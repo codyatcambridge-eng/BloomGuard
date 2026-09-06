@@ -1,5 +1,33 @@
 # BloomGuard / Miracle Worker Agent Guidance
 
+## SACRED100 Control (authoritative as of 2026-09-06)
+
+The immutable behavioral control is annotated tag `SACRED100`, dereferenced commit
+`9986d613cc1e797d12d509d30fe652331c1c51fd`, preserved by branch
+`sacred/SACRED100`. Development must occur on a branch created from that commit;
+the controlled acquisition branch is `integration/flash-active-from-SACRED100`.
+
+- Never edit, move, delete, force-update, reset, rebase, or develop on the tag or
+  preservation branch.
+- Never merge a later July/August branch wholesale. Later lines are donor
+  libraries only; compare each donor against SACRED100 and port one subsystem at
+  a time.
+- Do not modify a frozen function incidentally. A reproducible Phase 0 blocker,
+  Cody's explicit freeze-break approval, a surgical patch, rollback instructions,
+  protected-file disclosure, and the full regression gate are all required.
+- New features must adapt to SACRED100. SACRED100 must not be changed to
+  accommodate them.
+- Green automated tests are necessary but never sufficient. Device QA must cover
+  the affected surfaces, routes, lifecycle transitions, Main Dial OFF/ON behavior,
+  and performance before acceptance.
+- Do not stack feature acquisitions. Integrate, test, device-validate, and freeze
+  Flash Shield before Active Shorts; freeze Active Shorts before player work.
+
+`SACRED100_MVP_DIRECTIVE.md` is the concise operating contract. Where the older
+baseline names in this file or `FROZEN.md` conflict with it, the SACRED100
+directive controls. Historical freeze documents remain evidence and do not grant
+permission to treat their later product implementations as the new baseline.
+
 This file defines what a true Phase 0 MVP system means for BloomGuard and gives future agents strict rules for preserving the core blur system.
 
 ## Phase 0 MVP Definition
