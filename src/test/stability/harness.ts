@@ -263,6 +263,7 @@ export interface MWTestProbe {
   processLegacyResults: () => void;
   scanActiveShortsPlayerContainer: (reason: string) => boolean;
   scanVideoPoster: (video: HTMLVideoElement) => void;
+  scanYouTubeThumbnails: () => void;
   applyBlur: (
     element: Element,
     src: string,
@@ -376,6 +377,7 @@ export function injectScript(configOverrides?: Partial<InjectionConfig>): Inject
     processLegacyResults: processLegacyResults,
     scanActiveShortsPlayerContainer: scanActiveShortsPlayerContainer,
     scanVideoPoster: scanVideoPoster,
+    scanYouTubeThumbnails: scanYouTubeThumbnails,
     applyBlur: applyBlur,
     isShortsModeActive: isShortsModeActive,
     getActiveShortsPlayerContainer: getActiveShortsPlayerContainer,

@@ -14030,6 +14030,11 @@ export function generateModerationScript(config: InjectionConfig): string {
         });
       } catch (e) {}
     });
+
+    // July 15 Phase 0 invariant: ordinary feed churn can remove a Reveal while
+    // leaving its authoritative hard blur in place. Repair that pairing from
+    // the existing scan path without touching Flash Shield veils or soft blur.
+    enforceMainSurfaceBlurRevealInvariant('youtube_thumbnail_scan');
   }
 
   function scanActiveShortsPlayerContainer(reason) {
@@ -15084,6 +15089,116 @@ export function generateModerationScript(config: InjectionConfig): string {
           'revealRepaired=' + revealRepaired,
           'preserved=' + preserved,
           'url=' + window.location.href
+        );
+      }
+    } catch (e) {}
+  }
+
+  // Ported surgically from 367a398 / the 2a6d9c23 Phase 0 lifecycle line.
+  // Unlike repairNonShortsBlurRevealInvariant, this selects hard-blur residue
+  // only, so it is safe to run during ordinary scans while Flash Shield owns
+  // unresolved media.
+  let mainSurfaceInvariantAt = 0;
+
+  function nodeHasHardPositiveBlurStamp(node, src) {
+    if (!node || node.nodeType !== 1) return false;
+    try {
+      if (node.dataset.mwHardBlur === '1') return true;
+      if (typeof isAuthoritativeHardBlur === 'function' && isAuthoritativeHardBlur(node)) return true;
+      const moderated = String(node.dataset.mwModerated || '');
+      const filter = String(node.style.getPropertyValue('filter') || node.style.filter || '').toLowerCase();
+      return moderated === 'blurred' && (node.classList.contains('mw-blurred') || filter.includes('blur(')) && !!src;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function canHealHardPositiveReveal(node, src, itemKey, caller) {
+    if (!node || !src) return false;
+    if (typeof isAuthoritativeHardBlur === 'function' && isAuthoritativeHardBlur(node)) return true;
+    if (node.dataset && node.dataset.mwHardBlur === '1') return true;
+    try {
+      return isMvpBlurAuthorized(node, src, itemKey, 'card_blurred', caller || 'heal_reveal');
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function forceCreateRevealForHardPositive(node, src, reason) {
+    if (!node || !src || !node.isConnected) return false;
+    if (isRevealedForSource(src, node)) return false;
+    if (findRevealOverlayForElement(node, src)) return true;
+    try {
+      const parent = node.parentElement;
+      if (parent && parent.nodeType === 1 && window.getComputedStyle(parent).position === 'static') {
+        parent.style.position = 'relative';
+      }
+      if (String(node.dataset.mwModerated || '') !== 'blurred') node.dataset.mwModerated = 'blurred';
+      if (!node.classList.contains('mw-blurred')) node.classList.add('mw-blurred');
+      if (typeof markAuthoritativeHardBlur === 'function') {
+        markAuthoritativeHardBlur(node, src);
+      } else {
+        node.dataset.mwHardBlur = '1';
+        node.dataset.mwHardBlurItemKey = getDiagItemKey(src);
+        node.dataset.mwHardBlurSrc = String(src || '').substring(0, 240);
+      }
+    } catch (e) {}
+    const itemKey = getDiagItemKey(src);
+    createRevealOverlay(
+      node,
+      src,
+      node.dataset.mwCategory || 'flagged',
+      node.dataset.mwItemId || itemKey,
+      false
+    );
+    return !!findRevealOverlayForElement(node, src);
+  }
+
+  function enforceMainSurfaceBlurRevealInvariant(reason) {
+    if (isShortsModeActive()) return;
+    if (!isYouTubeMainPageThumbnailSurfaceUrl(window.location.href)) return;
+    try {
+      const nodes = document.querySelectorAll(
+        '[data-mw-moderated="blurred"],.mw-blurred,[data-mw-hard-blur="1"]'
+      );
+      if (!nodes.length) return;
+      const now = Date.now();
+      if (now - mainSurfaceInvariantAt < 400) return;
+      mainSurfaceInvariantAt = now;
+      let repaired = 0;
+      let cleared = 0;
+      for (let i = 0; i < nodes.length; i += 1) {
+        const node = nodes[i];
+        if (!node || node.nodeType !== 1 || !node.isConnected) continue;
+        try {
+          if (typeof node.closest === 'function' && node.closest('#shorts-player, ytm-reel-video-renderer[selected]')) continue;
+        } catch (e) {}
+        const src = getBloomGuardMarkedNodeSrc(node);
+        if (!src) continue;
+        if (isRevealedForSource(src, node)) continue;
+        const itemKey = getDiagItemKey(src);
+        const hard = nodeHasHardPositiveBlurStamp(node, src);
+        if (hard && canHealHardPositiveReveal(node, src, itemKey, 'enforce_main_surface')) {
+          if (!findRevealOverlayForElement(node, src) && forceCreateRevealForHardPositive(node, src, reason)) repaired += 1;
+          continue;
+        }
+        if (hasBloomGuardBlurResidue(node) && !hard) {
+          try {
+            if (clearAllBlurAndOverlay(node, src, 'enforce_clear_orphan:' + (reason || ''), 'safe')) cleared += 1;
+          } catch (e) {}
+        } else if (hard && !canHealHardPositiveReveal(node, src, itemKey, 'enforce_deny')) {
+          try {
+            if (clearAllBlurAndOverlay(node, src, 'enforce_stale_hard:' + (reason || ''), 'safe')) cleared += 1;
+          } catch (e) {}
+        }
+      }
+      if (repaired || cleared) {
+        console.log(
+          '[DIAG][LIFECYCLE_REPAIR] enforce_main_surface_blur_reveal',
+          'reason=' + (reason || 'unknown'),
+          'repaired=' + repaired,
+          'cleared=' + cleared,
+          'url=' + String(window.location.href || '').substring(0, 160)
         );
       }
     } catch (e) {}
