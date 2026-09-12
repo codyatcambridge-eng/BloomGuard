@@ -1,0 +1,135 @@
+{
+  "schema_version": "1.0",
+  "baseline_id": "SAVE-THIS7-FULL-20260912-5AED6E0",
+  "status": "ARTIFACT_CAPTURED",
+  "created_at": "2026-09-12T17:54:11.878548+00:00",
+  "source": {
+    "repo": "/private/tmp/bloomguard-clean-5aed6e0-control-20260909",
+    "branch": "DETACHED",
+    "head": "5aed6e03f016710b4dc3e4e7a4529cf4c3f20a08",
+    "tree": "51108c7ece1d1f749a33e02cc189db20c996c113",
+    "dirty": true,
+    "status_porcelain": [],
+    "required_untracked": [],
+    "tracked_diff_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "worktree": "/private/tmp/bloomguard-clean-5aed6e0-control-20260909",
+    "untracked_policy": "DerivedData was present but excluded as build cache; no product untracked files were classified as required.",
+    "artifact_snapshot": "source/ extracted from HEAD; DerivedData excluded as cache"
+  },
+  "dependencies": {},
+  "build": {
+    "provenance_status": "CAPTURED",
+    "app_path": "baselines/SAVE-THIS7-FULL-20260912/app/App.app",
+    "native_executable_sha256": "8476cb2a45663c6be030f085d5543bc7100000d633ec287e3027663344037b76",
+    "web_bundle": "index-BN8xWB7M.js",
+    "web_bundle_path": "baselines/SAVE-THIS7-FULL-20260912/app/App.app/public/assets/index-BN8xWB7M.js",
+    "web_bundle_sha256": "c7e851a492025acf46f2400a505ea53d39dbee79388dddb59054ff4352af6bbc",
+    "artifact_source": "installed App.app copied read-only",
+    "package_lock_sha256": "897003e4f2c034b2f9b4cf2e1239339845379ee065c0f2128d661bf98a8e98a3"
+  },
+  "install": {
+    "provenance_status": "MACHINE_VERIFIED",
+    "platform": "iOS Simulator",
+    "target_name": "BloomGuard-RestoreTest-SACRED-5AED6E0-20260911",
+    "udid": "C5222CC8-0269-449D-8D97-A9C89C0A8157",
+    "bundle_id": "bet.goodcreation.miracleworker",
+    "installed_executable_sha256": "8476cb2a45663c6be030f085d5543bc7100000d633ec287e3027663344037b76"
+  },
+  "runtime": {
+    "provenance_status": "CAPTURED_FOR_RESTORE",
+    "settings_source": "runtime/settings-manifest.json; settings include original database path and must be remapped during restore",
+    "settings": {
+      "shield_active": true,
+      "isEnhancedVisibility": false,
+      "blur_level": "HIGH",
+      "ai_sensitivity": "moderate",
+      "block_adult_sites": true,
+      "block_social_media": false,
+      "auto_scan_images": true,
+      "show_scan_notifications": true,
+      "blur_dial": 0,
+      "blur_strength_px": 24,
+      "fail_closed": false,
+      "debug_mode": false,
+      "diag_youtube_shorts": false,
+      "blocking_mode": "mvp",
+      "prototype_mode": false,
+      "hard_overlay_confidence_threshold": 0.85,
+      "soft_overlay_ratio_threshold": 0.5,
+      "soft_overlay_min_hits": 4,
+      "blur_mode": "balanced",
+      "enableSegmentationSignal": false,
+      "segmentationGrayZoneOnly": true,
+      "segmentationThrottleMs": 800,
+      "segmentationMaxInputPx": 256,
+      "segmentationCacheTtlMs": 20000,
+      "segmentationSkinRatioRelaxed": 0.28,
+      "segmentationSkinRatioMedium": 0.22,
+      "segmentationSkinRatioStrict": 0.16,
+      "flash_shield_enabled": true
+    },
+    "semantic_settings": {
+      "blur_dial": {
+        "raw_value": 0,
+        "effective_value": 0,
+        "meaning": "Main moderation OFF in 5aed6e0",
+        "authoritative": true,
+        "source_location": "5aed6e0 runtime chain",
+        "contradiction": "User claims target behavior; requires explicit behavioral acceptance"
+      }
+    },
+    "captured_files": [
+      "runtime/observed-runtime.txt",
+      "runtime/settings-manifest.json"
+    ],
+    "container_path": "baselines/SAVE-THIS7-FULL-20260912/runtime/simulator-device/app-container",
+    "portability_note": "Simulator container is preserved for replay on the same iOS simulator family; physical-device behavior is not claimed."
+  },
+  "behavior_contract": {
+    "claims": [
+      {
+        "surface": "browser",
+        "claim": "The currently visible BloomGuard app is the desired target specimen.",
+        "evidence_class": "USER_ASSERTED",
+        "source_image": "Screenshot 2026-09-12 at 1.47.48 PM"
+      },
+      {
+        "surface": "home",
+        "claim": "The visible YouTube-style Home view, protected cards, Reveal controls, and Maximum shield presentation are part of the target state.",
+        "evidence_class": "SIMULATOR_SCREENSHOT",
+        "source_image": "Screenshot 2026-09-12 at 1.47.48 PM"
+      }
+    ],
+    "acceptance_steps": [
+      "User must test the exact currently running specimen before promotion.",
+      "Do not infer Active Shorts behavior from this screenshot alone.",
+      "Record known good, known bad, and unknown behavior separately."
+    ],
+    "known_defects": [],
+    "unknowns": [
+      "Active Shorts behavior is not proven by the supplied screenshot.",
+      "Runtime/session state beyond the captured simulator container is not yet independently backed up."
+    ]
+  },
+  "evidence": {
+    "original_user_pass": null,
+    "restore_user_pass": null,
+    "automated": [],
+    "simulator": [],
+    "physical_device": []
+  },
+  "restore": {
+    "verified": false,
+    "restore_target": null,
+    "artifact_hash_match": false,
+    "settings_match": false
+  },
+  "preservation": {
+    "package_root": "baselines/SAVE-THIS7-FULL-20260912",
+    "source_snapshot": "source/",
+    "exact_app": "app/App.app",
+    "runtime_container": "runtime/simulator-device/app-container",
+    "usb_copy": null,
+    "off_machine_copy": null
+  }
+}

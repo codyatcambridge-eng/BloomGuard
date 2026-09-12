@@ -1,0 +1,6 @@
+simulator_name=BloomGuard-RestoreTest-SACRED-5AED6E0-20260911
+simulator_udid=C5222CC8-0269-449D-8D97-A9C89C0A8157
+bundle_id=bet.goodcreation.miracleworker
+installed_app=/Users/cody/Library/Developer/CoreSimulator/Devices/C5222CC8-0269-449D-8D97-A9C89C0A8157/data/Containers/Bundle/Application/A048ABBC-88EC-461F-8EB2-D36E029A7A45/App.app
+installed_executable_sha256=8476cb2a45663c6be030f085d5543bc7100000d633ec287e3027663344037b76
+evidence_class=SIMULATOR_SCREENSHOT_AND_MACHINE_PROCESS

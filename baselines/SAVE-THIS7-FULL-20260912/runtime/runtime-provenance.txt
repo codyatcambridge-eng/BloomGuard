@@ -1,0 +1,7 @@
+source_worktree=/private/tmp/bloomguard-clean-5aed6e0-control-20260909
+source_commit=5aed6e03f016710b4dc3e4e7a4529cf4c3f20a08
+source_tree=51108c7ece1d1f749a33e02cc189db20c996c113
+simulator_name=BloomGuard-RestoreTest-SACRED-5AED6E0-20260911
+simulator_udid=C5222CC8-0269-449D-8D97-A9C89C0A8157
+app_container_source=/Users/cody/Library/Developer/CoreSimulator/Devices/C5222CC8-0269-449D-8D97-A9C89C0A8157/data/Containers/Data/Application/8B4C4BCC-53D0-442D-ABBD-9F56DB143B6F
+app_container_class=simulator app data container; not portable to physical device

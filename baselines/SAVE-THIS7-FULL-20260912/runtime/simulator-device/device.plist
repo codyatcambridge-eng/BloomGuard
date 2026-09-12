@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>UDID</key>
+	<string>C5222CC8-0269-449D-8D97-A9C89C0A8157</string>
+	<key>deviceType</key>
+	<string>com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro</string>
+	<key>isDeleted</key>
+	<false/>
+	<key>isEphemeral</key>
+	<false/>
+	<key>lastBootedAt</key>
+	<date>2026-09-12T17:59:21Z</date>
+	<key>name</key>
+	<string>BloomGuard-RestoreTest-SACRED-5AED6E0-20260911</string>
+	<key>runtime</key>
+	<string>com.apple.CoreSimulator.SimRuntime.iOS-26-5</string>
+	<key>runtimePolicy</key>
+	<string>System</string>
+	<key>state</key>
+	<integer>3</integer>
+</dict>
+</plist>
